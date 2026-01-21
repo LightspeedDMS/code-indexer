@@ -464,6 +464,24 @@ header.admin-header {
 .job-status.status-running {
     background-color: rgba(59, 130, 246, 0.1);
     color: #3b82f6;
+    /* Code Review Finding #4: Add animated pulse for running jobs */
+    animation: pulse-running 1.5s ease-in-out infinite;
+}
+
+/* Code Review Finding #3: Add styling for pending jobs (yellow/amber) */
+.job-status.status-pending {
+    background-color: rgba(245, 158, 11, 0.1);
+    color: #f59e0b;
+}
+
+/* Code Review Finding #4: Pulse animation for running jobs */
+@keyframes pulse-running {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.6;
+    }
 }
 
 .no-activity {
@@ -691,6 +709,41 @@ button.danger, .button.danger {
 .add-index-form .form-actions {
     display: flex;
     gap: 0.5rem;
+}
+
+/* Index type checkboxes - use traditional checkbox appearance */
+.index-checkboxes {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+.index-checkboxes .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+    padding: 0.25rem 0;
+}
+
+.index-checkboxes input[type="checkbox"] {
+    /* Override Pico CSS - show native checkbox appearance */
+    -webkit-appearance: checkbox;
+    -moz-appearance: checkbox;
+    appearance: checkbox;
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    cursor: pointer;
+    accent-color: #3b82f6;
+}
+
+.index-checkboxes .rebuild-label {
+    font-size: 0.75rem;
+    color: var(--pico-muted-color);
+    font-style: italic;
 }
 
 .all-indexes-present {

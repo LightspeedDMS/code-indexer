@@ -144,10 +144,10 @@ COMMAND_COMPATIBILITY: Dict[str, Dict[str, bool]] = {
         "proxy": False,
         "uninitialized": False,
     },  # List collections with metadata
-    # SCIP code intelligence commands - local only since they generate and query local SCIP indexes
+    # SCIP code intelligence commands - local for generation, remote for server-side queries
     "scip": {
         "local": True,
-        "remote": False,
+        "remote": True,
         "proxy": False,
         "uninitialized": False,
     },  # SCIP index generation and code navigation
@@ -184,6 +184,56 @@ COMMAND_COMPATIBILITY: Dict[str, Dict[str, bool]] = {
         "proxy": False,
         "uninitialized": False,
     },  # Stop watch mode in daemon
+    # Story #735: Remote command groups for CLI-REST-MCP parity
+    # Git history and branch operations - remote only (server manages repository state)
+    "git": {
+        "local": False,
+        "remote": True,
+        "proxy": False,
+        "uninitialized": False,
+    },  # Git history search and branch operations
+    # File browsing and content retrieval - remote only (server manages indexed content)
+    "files": {
+        "local": False,
+        "remote": True,
+        "proxy": False,
+        "uninitialized": False,
+    },  # File listing and content retrieval
+    # CI/CD pipeline management - remote only (server manages pipelines)
+    "cicd": {
+        "local": False,
+        "remote": True,
+        "proxy": False,
+        "uninitialized": False,
+    },  # CI/CD pipeline status and triggers
+    # Group access management - remote only (server manages access control)
+    "groups": {
+        "local": False,
+        "remote": True,
+        "proxy": False,
+        "uninitialized": False,
+    },  # User group and access control management
+    # MCP credentials management - remote only (server manages credential storage)
+    "credentials": {
+        "local": False,
+        "remote": True,
+        "proxy": False,
+        "uninitialized": False,
+    },  # MCP credential storage and retrieval
+    # Story #656: SSH key management - remote only (server manages SSH keys)
+    "keys": {
+        "local": False,
+        "remote": True,
+        "proxy": False,
+        "uninitialized": False,
+    },  # SSH key management for private repositories
+    # Story #656: Remote index management - remote only (server manages indexing)
+    "remote-index": {
+        "local": False,
+        "remote": True,
+        "proxy": False,
+        "uninitialized": False,
+    },  # Remote index trigger, status, and type management
 }
 
 # Command alternatives mapping for helpful error messages

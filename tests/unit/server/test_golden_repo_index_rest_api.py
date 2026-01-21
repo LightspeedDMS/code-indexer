@@ -117,9 +117,9 @@ def test_get_index_status_success(
     structured JSON showing presence of all index types.
     """
 
-    # Arrange - mock _index_exists to return True for semantic_fts only
+    # Arrange - mock _index_exists to return True for semantic only
     def mock_index_exists(golden_repo, index_type):
-        if index_type == "semantic_fts":
+        if index_type == "semantic":
             return True
         return False
 
@@ -136,10 +136,12 @@ def test_get_index_status_success(
     data = response.json()
     assert data["alias"] == "test-repo"
     assert "indexes" in data
-    assert "semantic_fts" in data["indexes"]
+    assert "semantic" in data["indexes"]
+    assert "fts" in data["indexes"]
     assert "temporal" in data["indexes"]
     assert "scip" in data["indexes"]
-    assert data["indexes"]["semantic_fts"]["present"] is True
+    assert data["indexes"]["semantic"]["present"] is True
+    assert data["indexes"]["fts"]["present"] is False
     assert data["indexes"]["temporal"]["present"] is False
     assert data["indexes"]["scip"]["present"] is False
 
@@ -182,7 +184,7 @@ def test_post_invalid_index_type_returns_400(
     """
     # Arrange
     mock_golden_repo_manager.add_index_to_golden_repo.side_effect = ValueError(
-        "Invalid index_type: invalid. Must be one of: semantic_fts, temporal, scip"
+        "Invalid index_type: invalid. Must be one of: semantic, fts, temporal, scip"
     )
 
     with patch("code_indexer.server.app.golden_repo_manager", mock_golden_repo_manager):
@@ -199,31 +201,31 @@ def test_post_invalid_index_type_returns_400(
     assert "detail" in data
 
 
-def test_post_existing_index_returns_409(
+def test_post_rebuild_existing_index_succeeds(
     test_client, mock_golden_repo_manager, mock_auth_admin
 ):
     """
-    AC5: POST for existing index returns 409 Conflict.
+    AC5: POST for existing index succeeds (rebuilds are now allowed).
 
-    Test that attempting to add an existing index type returns 409 Conflict.
+    Test that attempting to add an existing index type succeeds and returns 202.
+    The backend now allows rebuilding existing indexes.
     """
-    # Arrange
-    mock_golden_repo_manager.add_index_to_golden_repo.side_effect = ValueError(
-        "Index type 'semantic_fts' already exists for golden repo 'test-repo'"
-    )
+    # Arrange - rebuilding succeeds
+    mock_golden_repo_manager.add_index_to_golden_repo.return_value = "job-rebuild-123"
 
     with patch("code_indexer.server.app.golden_repo_manager", mock_golden_repo_manager):
         # Act
         response = test_client.post(
             "/api/admin/golden-repos/test-repo/indexes",
-            json={"index_type": "semantic_fts"},
+            json={"index_type": "semantic"},
             headers=mock_auth_admin,
         )
 
-    # Assert
-    assert response.status_code == 409
+    # Assert - should succeed with 202
+    assert response.status_code == 202
     data = response.json()
-    assert "detail" in data
+    assert "job_id" in data
+    assert data["job_id"] == "job-rebuild-123"
 
 
 def test_post_without_auth_returns_401(test_client, mock_golden_repo_manager):

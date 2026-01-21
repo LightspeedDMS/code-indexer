@@ -137,9 +137,19 @@
                         <h4>Indexes Management</h4>
                         <div class="indexes-status-grid">
                             <div class="index-status-item">
-                                <label>Semantic + FTS:</label>
-                                <span class="index-status" data-index-type="semantic_fts" data-repo-alias="{{ repo.alias }}">
-                                    {% if repo.has_semantic and repo.has_fts %}
+                                <label>Semantic:</label>
+                                <span class="index-status" data-index-type="semantic" data-repo-alias="{{ repo.alias }}">
+                                    {% if repo.has_semantic %}
+                                    <span class="status-icon present">✓</span> <span class="status-text">Present</span>
+                                    {% else %}
+                                    <span class="status-icon not-present">-</span> <span class="status-text">Not Present</span>
+                                    {% endif %}
+                                </span>
+                            </div>
+                            <div class="index-status-item">
+                                <label>FTS (Full-Text Search):</label>
+                                <span class="index-status" data-index-type="fts" data-repo-alias="{{ repo.alias }}">
+                                    {% if repo.has_fts %}
                                     <span class="status-icon present">✓</span> <span class="status-text">Present</span>
                                     {% else %}
                                     <span class="status-icon not-present">-</span> <span class="status-text">Not Present</span>
@@ -170,30 +180,33 @@
 
                         <!-- Add Index Button and Form -->
                         <div class="add-index-container" id="add-index-container-{{ repo.alias }}">
-                            {% if not (repo.has_semantic and repo.has_fts and repo.has_temporal and repo.has_scip) %}
-                            <button class="outline small" onclick="showAddIndexForm('{{ repo.alias }}')">Add Index</button>
+                            <button class="outline small" onclick="showAddIndexForm('{{ repo.alias }}')">Add/Rebuild Index</button>
 
                             <div id="add-index-form-{{ repo.alias }}" class="add-index-form" style="display: none;">
-                                <label for="index-type-{{ repo.alias }}">Select Index Type:</label>
-                                <select id="index-type-{{ repo.alias }}" name="index_type">
-                                    {% if not (repo.has_semantic and repo.has_fts) %}
-                                    <option value="semantic_fts">Semantic + FTS</option>
-                                    {% endif %}
-                                    {% if not repo.has_temporal %}
-                                    <option value="temporal">Temporal (Git History)</option>
-                                    {% endif %}
-                                    {% if not repo.has_scip %}
-                                    <option value="scip">SCIP (Code Intelligence)</option>
-                                    {% endif %}
-                                </select>
+                                <label>Select Index Type(s):</label>
+                                <div class="index-checkboxes" id="index-checkboxes-{{ repo.alias }}">
+                                    <label class="checkbox-label">
+                                        <input type="checkbox" name="index-types-{{ repo.alias }}" id="index-type-semantic-{{ repo.alias }}" value="semantic">
+                                        Semantic{% if repo.has_semantic %} <span class="rebuild-label">(rebuild)</span>{% endif %}
+                                    </label>
+                                    <label class="checkbox-label">
+                                        <input type="checkbox" name="index-types-{{ repo.alias }}" id="index-type-fts-{{ repo.alias }}" value="fts">
+                                        FTS{% if repo.has_fts %} <span class="rebuild-label">(rebuild)</span>{% endif %}
+                                    </label>
+                                    <label class="checkbox-label">
+                                        <input type="checkbox" name="index-types-{{ repo.alias }}" id="index-type-temporal-{{ repo.alias }}" value="temporal">
+                                        Temporal{% if repo.has_temporal %} <span class="rebuild-label">(rebuild)</span>{% endif %}
+                                    </label>
+                                    <label class="checkbox-label">
+                                        <input type="checkbox" name="index-types-{{ repo.alias }}" id="index-type-scip-{{ repo.alias }}" value="scip">
+                                        SCIP{% if repo.has_scip %} <span class="rebuild-label">(rebuild)</span>{% endif %}
+                                    </label>
+                                </div>
                                 <div class="form-actions">
                                     <button class="small" onclick="submitAddIndex('{{ repo.alias }}')">Submit</button>
                                     <button class="outline small" onclick="hideAddIndexForm('{{ repo.alias }}')">Cancel</button>
                                 </div>
                             </div>
-                            {% else %}
-                            <p class="all-indexes-present"><em>All index types are present</em></p>
-                            {% endif %}
                         </div>
 
                         <!-- Job Progress Container -->
@@ -299,5 +312,27 @@
 }
 .no-global {
     color: #999;
+}
+.index-checkboxes {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin: 0.5rem 0;
+}
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+.checkbox-label input[type="checkbox"] {
+    width: auto;
+    margin: 0;
+}
+.rebuild-label {
+    color: #ff9800;
+    font-size: 0.8rem;
+    font-style: italic;
 }
 </style>

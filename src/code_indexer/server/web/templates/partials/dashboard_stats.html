@@ -90,6 +90,51 @@
     </article>
 </div>
 
+<!-- API Activity Section (Story #4 AC3) -->
+<h2>API Activity</h2>
+
+<div class="stats-grid">
+    <article class="stat-card">
+        <header>
+            <h3>Semantic Searches</h3>
+        </header>
+        <div class="stat-value">{{ api_metrics.semantic_searches if api_metrics else 0 }}</div>
+        <footer>
+            <small>search_code (semantic)</small>
+        </footer>
+    </article>
+
+    <article class="stat-card">
+        <header>
+            <h3>Other Index Searches</h3>
+        </header>
+        <div class="stat-value">{{ api_metrics.other_index_searches if api_metrics else 0 }}</div>
+        <footer>
+            <small>FTS, temporal, hybrid</small>
+        </footer>
+    </article>
+
+    <article class="stat-card">
+        <header>
+            <h3>Regex Searches</h3>
+        </header>
+        <div class="stat-value">{{ api_metrics.regex_searches if api_metrics else 0 }}</div>
+        <footer>
+            <small>regex_search calls</small>
+        </footer>
+    </article>
+
+    <article class="stat-card">
+        <header>
+            <h3>Other API Calls</h3>
+        </header>
+        <div class="stat-value">{{ api_metrics.other_api_calls if api_metrics else 0 }}</div>
+        <footer>
+            <small>All other endpoints</small>
+        </footer>
+    </article>
+</div>
+
 <!-- Recent Activity Section -->
 <div style="display: flex; justify-content: space-between; align-items: center;">
     <h2>Recent Activity</h2>

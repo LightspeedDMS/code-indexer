@@ -86,5 +86,5 @@ class TestRootOAuthProtectedResource:
             "resource_documentation" in data
         ), "Missing optional field: resource_documentation"
         assert (
-            data["resource_documentation"] == "https://github.com/jsbattig/code-indexer"
+            data["resource_documentation"] == "https://github.com/LightspeedDMS/code-indexer"
         ), "resource_documentation should point to GitHub repository"

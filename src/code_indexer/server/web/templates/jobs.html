@@ -142,6 +142,9 @@
 </div>
 
 <script>
+// Track open details rows (Bug #751: state tracking to prevent auto-close)
+let openDetailsSet = new Set();
+
 function clearFilters() {
     document.getElementById('status_filter').value = '';
     document.getElementById('job_type').value = '';
@@ -159,7 +162,26 @@ function confirmCancel(jobId, jobType) {
 function toggleDetails(jobId) {
     const details = document.getElementById('details-' + jobId);
     if (details) {
-        details.style.display = details.style.display === 'none' ? 'table-row' : 'none';
+        const isHidden = details.style.display === 'none';
+        details.style.display = isHidden ? 'table-row' : 'none';
+        // Track open/closed state (Bug #751)
+        if (isHidden) {
+            openDetailsSet.add(jobId);
+        } else {
+            openDetailsSet.delete(jobId);
+        }
+    }
+}
+
+function restoreOpenDetails() {
+    // Restore previously open details rows after content refresh (Bug #751)
+    if (openDetailsSet.size > 0) {
+        openDetailsSet.forEach(jobId => {
+            const details = document.getElementById('details-' + jobId);
+            if (details) {
+                details.style.display = 'table-row';
+            }
+        });
     }
 }
 
@@ -177,7 +199,18 @@ function checkForActiveJobs() {
 // Check on page load
 document.addEventListener('DOMContentLoaded', checkForActiveJobs);
 
-// Check after htmx swaps
-document.body.addEventListener('htmx:afterSwap', checkForActiveJobs);
+// Check after htmx swaps and restore open details (Bug #751)
+document.body.addEventListener('htmx:afterSettle', function(event) {
+    const target = event.detail.target;
+    if (target && target.id === 'jobs-list-section') {
+        checkForActiveJobs();
+        // Use requestAnimationFrame to ensure DOM is fully ready
+        requestAnimationFrame(() => {
+            restoreOpenDetails();
+        });
+    } else {
+        checkForActiveJobs();
+    }
+});
 </script>
 {% endblock %}

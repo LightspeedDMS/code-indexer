@@ -78,7 +78,7 @@ See [Server Deployment Guide](../server-deployment.md) for server setup.
 **Via pip** (recommended):
 ```bash
 # Clone repository
-git clone https://github.com/jsbattig/code-indexer.git
+git clone https://github.com/LightspeedDMS/code-indexer.git
 cd code-indexer
 
 # Install with pip
@@ -90,7 +90,7 @@ python3 -m code_indexer.mcpb --version
 
 **Via pipx** (isolated environment):
 ```bash
-pipx install git+https://github.com/jsbattig/code-indexer.git@v8.0.0
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.0.0
 python3 -m code_indexer.mcpb --version
 ```
 

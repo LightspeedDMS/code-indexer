@@ -142,8 +142,9 @@
 </div>
 
 <script>
-// Track open details rows
+// Track open details rows and add-index forms
 let openDetailsSet = new Set();
+let openAddIndexForms = new Set();
 
 function toggleAddForm() {
     const form = document.getElementById('add-repo-form');
@@ -204,6 +205,22 @@ function restoreOpenDetails() {
     }
 }
 
+function restoreOpenAddIndexForms() {
+    // Restore previously open add-index forms after content refresh
+    console.log('[CIDX] restoreOpenAddIndexForms() called');
+    console.log('[CIDX] openAddIndexForms size:', openAddIndexForms.size);
+
+    if (openAddIndexForms.size > 0) {
+        openAddIndexForms.forEach(alias => {
+            const form = document.getElementById('add-index-form-' + alias);
+            if (form) {
+                form.style.display = 'block';
+                console.log('[CIDX] Restored add-index form for:', alias);
+            }
+        });
+    }
+}
+
 // Load index management functions
 (function() {
     const script = document.createElement('script');
@@ -240,7 +257,7 @@ function checkForIndexing() {
 // Check on page load
 document.addEventListener('DOMContentLoaded', checkForIndexing);
 
-// Check after htmx swaps and restore open details
+// Check after htmx swaps and restore open details and forms
 document.body.addEventListener('htmx:afterSettle', function(event) {
     // Only restore for repos list swaps
     const target = event.detail.target;
@@ -249,6 +266,7 @@ document.body.addEventListener('htmx:afterSettle', function(event) {
         // Use requestAnimationFrame to ensure DOM is fully ready
         requestAnimationFrame(() => {
             restoreOpenDetails();
+            restoreOpenAddIndexForms();
         });
     } else {
         // Still check for indexing on other swaps

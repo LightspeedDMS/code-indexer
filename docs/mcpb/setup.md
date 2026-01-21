@@ -53,7 +53,7 @@ optional arguments:
 Clone repository and install in development mode:
 
 ```bash
-git clone https://github.com/jsbattig/code-indexer.git
+git clone https://github.com/LightspeedDMS/code-indexer.git
 cd code-indexer
 python3 -m pip install --break-system-packages -e .
 ```

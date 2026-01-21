@@ -21,11 +21,11 @@ class TestGitHubActionsE2E:
     """
     E2E tests using real GitHub API.
 
-    Tests against jsbattig/code-indexer repository.
+    Tests against LightspeedDMS/code-indexer repository.
     Validates complete tool chain: handlers -> client -> GitHub API.
     """
 
-    TEST_REPOSITORY = "jsbattig/code-indexer"
+    TEST_REPOSITORY = "LightspeedDMS/code-indexer"
 
     @pytest.fixture
     def mock_user(self):
@@ -303,7 +303,7 @@ class TestGitHubActionsE2EWriteOperations:
     Only run when explicitly intended.
     """
 
-    TEST_REPOSITORY = "jsbattig/code-indexer"
+    TEST_REPOSITORY = "LightspeedDMS/code-indexer"
 
     @pytest.fixture
     def mock_user(self):

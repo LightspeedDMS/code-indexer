@@ -5,7 +5,222 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [8.4.46] - 2025-12-28
+## [8.6.0] - 2026-01-20
+
+### Added
+
+#### Comprehensive Documentation Overhaul
+
+**Feature**: Complete documentation audit and new feature documentation.
+
+- **Version consistency** - All documentation updated to v8.6.0 across README, installation guides, and examples
+- **Fact-checked query-guide.md** - All 23 query parameters verified against implementation
+- **New feature documentation** - Claude Delegation, OTEL Telemetry, Group Security, Auto-Discovery
+
+#### Feature Documentation
+
+Added comprehensive documentation for 8.5.x features:
+
+- **Claude Delegation System** - AI-powered code analysis workflows on protected repositories
+- **OTEL Telemetry** - OpenTelemetry integration for server observability
+- **Group-Based Security** - Fine-grained access control with group membership
+- **Auto-Discovery** - Automatic repository discovery from configured sources
+
+### Fixed
+
+- Documentation version inconsistencies (8.4.46 references updated)
+- RELEASE_NOTES.md now redirects to CHANGELOG.md for versions 7.0.0+
+- MCP version in architecture.md updated to current version
+
+---
+
+## [8.5.3] - 2026-01-17
+
+### Added
+
+#### Claude Delegation System (Epic #717)
+
+**Feature**: Complete Claude Delegation framework enabling AI-powered code analysis workflows on protected repositories.
+
+- **Callback-based job completion** (Story #720) - Efficient polling mechanism for delegation jobs
+- **Graceful drain mode** (Story #734) - Job-aware auto-update prevents interrupting running jobs
+- **Server stability improvements** (Epic #733) - Technical debt cleanup and reliability enhancements
+
+### Fixed
+
+- Hybrid auth support for golden repo index and job status endpoints
+- CSRF token handling in auto-discovery HTMX partials
+- Session cookie management in hybrid authentication
+
+---
+
+## [8.5.2] - 2026-01-12
+
+### Enhanced
+
+#### Dashboard Refinements (Story #712)
+
+- Honeycomb visualization improvements
+- Multi-volume disk metrics with percentage-based thresholds
+- Repository count fixes and tooltip path improvements
+
+### Performance
+
+- SCIP performance benchmark tests marked as slow to prevent CI hangs
+
+---
+
+## [8.5.1] - 2026-01-12
+
+### Added
+
+#### OTEL Telemetry System (Epic #694)
+
+**Feature**: Complete OpenTelemetry integration for CIDX server observability.
+
+- Distributed tracing across all server operations
+- Metrics collection for performance monitoring
+- Correlation ID tracking for log queries
+
+#### Group-Based Security Model (Epic #704)
+
+**Feature**: Fine-grained access control through group membership.
+
+- Repository access tied to group membership
+- Role-based permissions within groups
+- Admin dashboard for group management
+
+#### Auto-Discovery System (Stories #689-693)
+
+**Feature**: Automatic repository discovery from GitHub and GitLab organizations.
+
+- **GitLab Auto-Discovery** (Story #689) - Scan GitLab groups for repositories
+- **GitHub Auto-Discovery** (Story #690) - Scan GitHub organizations for repositories
+- **Search and Filter** (Story #691) - Filter discovered repositories
+- **Batch Creation** (Story #692) - Add multiple repositories at once
+- **Job Queue Verification** (Story #693) - Track batch creation progress
+
+#### SQLite Storage Migration (Story #702)
+
+**Feature**: Complete migration from JSON file storage to SQLite backend.
+
+- All entity managers now use SQLite
+- Background job persistence in database
+- Improved concurrent access handling
+
+### Fixed
+
+- CSRF race condition with HTMX polling (#715)
+- CSRF validation auto-recovery instead of 403 error (#714)
+- RefreshScheduler refactored to use BackgroundJobManager (#703)
+- Various dashboard and UI fixes
+
+---
+
+## [8.5.0] - 2026-01-07
+
+### Added
+
+#### Multi-Repository Search (Epic #673)
+
+**Feature**: Search across multiple repositories simultaneously with unified results.
+
+- Query multiple repositories with comma-separated aliases or array syntax
+- Aggregation modes: `global` (best matches) and `per_repo` (balanced distribution)
+- Response formats: `flat` (single array) and `grouped` (by repository)
+- Support in search_code, regex_search, git_log, git_search_commits, list_files
+
+**Example**:
+```bash
+cidx query "authentication" --repos "backend,frontend,shared"
+```
+
+#### Payload Size Control with Server-Side Caching (Epic #678)
+
+**Feature**: Token-aware pagination and caching for large search results.
+
+- Automatic content truncation based on token budget (5000 tokens default)
+- Cache handles for retrieving full content page-by-page
+- `get_cached_content` tool for pagination through large results
+
+#### SSH Key Management
+
+**Feature**: Complete SSH key lifecycle management integrated into CIDX.
+
+- Create/delete SSH keys (Ed25519 and RSA)
+- Assign keys to hostnames in SSH config
+- Web UI for key management
+- CLI and MCP tool support
+
+#### OIDC/SSO Authentication
+
+**Feature**: Enterprise single sign-on support via OpenID Connect.
+
+- Integration with identity providers (Okta, Azure AD, etc.)
+- JIT (Just-In-Time) user provisioning
+- Email verification enforcement
+- Hot reload for OIDC configuration changes
+
+#### MCP Credential Management (Stories #614-617)
+
+**Feature**: Secure credential storage for MCP client authentication.
+
+- Client credentials grant for Claude Desktop
+- Admin credential management interface
+- Token lifecycle management
+
+#### CI/CD Integration (Stories #633-635)
+
+**Feature**: GitHub Actions and GitLab CI monitoring and API key management.
+
+- List workflow runs and pipeline status
+- Search logs for error patterns
+- Retry failed workflows
+- CI/CD API key configuration
+
+#### Auto-Update Service (Story #657)
+
+**Feature**: Automatic server updates with zero-downtime deployments.
+
+- Git-based update detection
+- Graceful service restart via systemd
+- Dynamic repository path detection
+
+#### Golden Repository Index Management (Stories #593-597)
+
+**Feature**: Incremental index addition to golden repositories.
+
+- Backend service for adding index types (semantic_fts, temporal, scip)
+- REST API endpoints for index management
+- CLI commands: `cidx server add-index`, `cidx server list-indexes`
+- MCP tools: `add_golden_repo_index`, `get_golden_repo_indexes`
+- Web UI for visual index management
+
+### Enhanced
+
+#### SCIP Code Intelligence
+
+- C# and Go indexer support
+- Call chain tracing improvements
+- Self-loop and simple-name filtering fixes
+- Interface-to-implementation edges for complete call chains
+
+#### MCP Tool Documentation
+
+- All 53 MCP tools enhanced with TL;DR format documentation
+- Quick start examples, use cases, troubleshooting guides
+- Consistent format across all tools
+
+### Fixed
+
+- Thread-safe concurrency controls for multi-user MCP operations (#620)
+- OAuth DCR public client support for claude.ai web (#619)
+- Browse directory path pattern handling
+- Multiple FTS and temporal search bugs in multi-repo mode
+
+---
+
+## [8.4.44] - 2025-12-28
 
 ### Enhanced
 
@@ -39,121 +254,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Verification**: 52/52 tools detected with comprehensive TL;DR format, 0 tools with inadequate descriptions, 100% completion rate.
 
-## [8.6.0] - 2025-12-16
-
-### Added
-
-#### Backend Index Addition Service
-
-**Feature**: Implemented `GoldenRepoManager.add_index_to_golden_repo()` method that enables incremental addition of index types to existing golden repositories without full repository rebuilds.
-
-**Supported Index Types**:
-- `semantic_fts`: Semantic search and full-text search indexes
-- `temporal`: Git history temporal indexes with configurable options
-- `scip`: SCIP code intelligence indexes
-
-**Key Capabilities**:
-- Asynchronous background job execution with BackgroundJobManager integration
-- Idempotent validation prevents duplicate index creation
-- Comprehensive stdout/stderr capture for debugging
-- 5-minute timeout protection on all subprocess calls
-- Temporal indexing defaults to `--time-range-all` for complete history
-- Improved index detection validates actual index files, not just directories
-
-**Usage**:
-```python
-job_id = manager.add_index_to_golden_repo(
-    alias="my-repo",
-    index_type="temporal",
-    submitter_username="admin"
-)
-```
-
-**Foundation**: This backend service provides the core capability for REST API, CLI, MCP, and Web UI interfaces to add indexes incrementally.
-
-#### REST API for Golden Repo Index Management (Story #594)
-
-**Feature**: Added REST API endpoints for managing golden repository indexes, enabling HTTP-based administration and automation.
-
-**Endpoints**:
-- `POST /api/admin/golden-repos/{alias}/indexes` - Add index type to repository
-- `GET /api/admin/golden-repos/{alias}/indexes` - Query index status
-
-**Request/Response**:
-```json
-POST body: {"index_type": "temporal"}
-Response: {"job_id": "abc-123", "status": "pending"}
-
-GET response: {
-  "alias": "my-repo",
-  "indexes": {
-    "semantic_fts": {"present": true},
-    "temporal": {"present": false},
-    "scip": {"present": true}
-  }
-}
-```
-
-**Error Handling**: 404 (unknown alias), 400 (invalid type), 409 (already exists), 401 (unauthorized)
-
-#### CLI Server Mode Commands for Index Management (Story #595)
-
-**Feature**: Added CLI commands for adding and querying index types on golden repositories via server mode.
-
-**Commands**:
-- `cidx server add-index <alias> <index_type>` - Add index type (semantic_fts, temporal, scip)
-- `cidx server list-indexes <alias>` - Query index status
-
-**Features**:
-- `--wait` flag polls until job completes (2-second intervals)
-- `--timeout` flag for configurable polling timeout (default 1800s)
-- `--quiet` flag for minimal output (scripting-friendly)
-- `--json` flag for machine-readable output (list-indexes)
-- Exit codes: 0 (success), 1 (error), 2 (timeout)
-
-**Usage**:
-```bash
-cidx server add-index my-repo temporal --wait --timeout 3600
-cidx server list-indexes my-repo --json
-```
-
-#### MCP Tools for Index Management (Story #596)
-
-**Feature**: Added MCP (Model Context Protocol) tools for AI agents to manage golden repository indexes programmatically.
-
-**Tools**:
-- `add_golden_repo_index` - Submit background job to add index type
-- `get_golden_repo_indexes` - Query current index status for all three index types
-
-**Integration**:
-- Returns job_id for tracking via get_job_statistics tool
-- Full enum validation for index_type ["semantic_fts", "temporal", "scip"]
-- Comprehensive error handling (unknown alias, invalid type, already exists)
-- Required permissions: manage_golden_repos (add), query_repos (get)
-
-**Agent Usage**: AI agents can now respond to natural language requests like "add temporal search to my-repo repository" by calling MCP tools directly.
-
-#### Web UI for Index Management (Story #597)
-
-**Feature**: Added visual interface for managing golden repository indexes through the admin Web UI.
-
-**Capabilities**:
-- View index status (Semantic+FTS, Temporal, SCIP) with visual indicators on Golden Repos detail page
-- Add missing indexes via dropdown form with confirmation dialog
-- Real-time job progress tracking with 5-second polling
-- Success/failure notifications with auto-refresh on completion
-- Empty state handling when all indexes present
-
-**Implementation**:
-- `golden_repo_indexes.js` (~270 lines) - Frontend logic for form submission, job polling, progress display
-- `golden_repos_list.html` - Indexes Management section in details row
-- `admin.css` - Styling for index status grid, forms, job progress, spinner animations
-
-**User Experience**: Administrators can now add indexes without CLI/API knowledge, with clear visual feedback throughout the async operation.
-
-**Epic #592 Complete**: All 5 stories shipped - Backend service (#593), REST API (#594), CLI commands (#595), MCP tools (#596), and Web UI (#597) all implemented. Golden repositories now support incremental index addition across all interface layers.
-
-## [8.5.0] - 2025-12-14
+## [8.4.45] - 2025-12-14
 
 ### Changed
 
@@ -560,10 +661,10 @@ See [Migration Guide](docs/migration-to-v8.md) for complete instructions.
 
 ### Links
 
-- [GitHub Repository](https://github.com/jsbattig/code-indexer)
+- [GitHub Repository](https://github.com/LightspeedDMS/code-indexer)
 - [Migration Guide](docs/migration-to-v8.md)
-- [Documentation](https://github.com/jsbattig/code-indexer/blob/master/README.md)
-- [Issue Tracker](https://github.com/jsbattig/code-indexer/issues)
+- [Documentation](https://github.com/LightspeedDMS/code-indexer/blob/master/README.md)
+- [Issue Tracker](https://github.com/LightspeedDMS/code-indexer/issues)
 
 ---
 
@@ -930,9 +1031,9 @@ Watch Mode:       < 50ms per file
 - Claude (AI Assistant) <noreply@anthropic.com>
 
 ### Links
-- [GitHub Repository](https://github.com/jsbattig/code-indexer)
-- [Documentation](https://github.com/jsbattig/code-indexer/blob/master/README.md)
-- [Issue Tracker](https://github.com/jsbattig/code-indexer/issues)
+- [GitHub Repository](https://github.com/LightspeedDMS/code-indexer)
+- [Documentation](https://github.com/LightspeedDMS/code-indexer/blob/master/README.md)
+- [Issue Tracker](https://github.com/LightspeedDMS/code-indexer/issues)
 
 ## [7.1.0] - 2025-10-29
 
@@ -1411,9 +1512,9 @@ results = store.search(
 - Claude (AI Assistant) <noreply@anthropic.com>
 
 ### Links
-- [GitHub Repository](https://github.com/jsbattig/code-indexer)
-- [Documentation](https://github.com/jsbattig/code-indexer/blob/master/README.md)
-- [Issue Tracker](https://github.com/jsbattig/code-indexer/issues)
+- [GitHub Repository](https://github.com/LightspeedDMS/code-indexer)
+- [Documentation](https://github.com/LightspeedDMS/code-indexer/blob/master/README.md)
+- [Issue Tracker](https://github.com/LightspeedDMS/code-indexer/issues)
 
 ---
 

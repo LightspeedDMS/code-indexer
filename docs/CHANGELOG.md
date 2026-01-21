@@ -502,7 +502,7 @@ code-indexer init --qdrant-segment-size 200
 - **Comprehensive Help**: Detailed documentation explaining command purpose, requirements, and usage
 
 #### **Installation Workflow Improvement**
-- **Step 1**: Install package: `pipx install git+https://github.com/jsbattig/code-indexer.git`
+- **Step 1**: Install package: `pipx install git+https://github.com/LightspeedDMS/code-indexer.git`
 - **Step 2**: Setup system registry: `sudo cidx setup-global-registry`
 - **Step 3**: Initialize projects: `cidx init` (per project as needed)
 
@@ -1375,17 +1375,17 @@ stats = smart_indexer.smart_index(clear_existing=True)
 
 ### Using pipx (Recommended)
 ```bash
-pipx install https://github.com/jsbattig/code-indexer/releases/download/v1.0.0.7/code_indexer-1.0.0.7-py3-none-any.whl
+pipx install https://github.com/LightspeedDMS/code-indexer/releases/download/v1.0.0.7/code_indexer-1.0.0.7-py3-none-any.whl
 ```
 
 ### Using pip
 ```bash
-pip install https://github.com/jsbattig/code-indexer/releases/download/v1.0.0.7/code_indexer-1.0.0.7-py3-none-any.whl
+pip install https://github.com/LightspeedDMS/code-indexer/releases/download/v1.0.0.7/code_indexer-1.0.0.7-py3-none-any.whl
 ```
 
 ### From Source
 ```bash
-pip install git+https://github.com/jsbattig/code-indexer.git
+pip install git+https://github.com/LightspeedDMS/code-indexer.git
 ```
 
 ## Getting Started

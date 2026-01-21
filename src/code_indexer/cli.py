@@ -30,6 +30,12 @@ from .mode_detection.command_mode_detector import CommandModeDetector, find_proj
 from .disabled_commands import require_mode
 from . import __version__
 from .cli_scip import scip_group
+from .cli_git import git_group
+from .cli_files import files_group
+from .cli_cicd import cicd_group
+from .cli_help import help_group
+from .cli_keys import keys_group
+from .cli_index import index_remote_group
 
 # Module-level imports for test mocking (noqa: F401 = intentionally unused for test patching)
 from .api_clients.admin_client import AdminAPIClient  # noqa: F401
@@ -89,6 +95,63 @@ def run_async(coro):
     except RuntimeError:
         # No event loop running, we can use asyncio.run()
         return asyncio.run(coro)
+
+
+def _get_credential_client_and_config(json_output: bool = False):
+    """Get CredentialAPIClient with standard setup and error handling.
+
+    Args:
+        json_output: If True, errors are printed as JSON
+
+    Returns:
+        Tuple of (client, project_root) if successful
+
+    Raises:
+        SystemExit: If configuration or credentials are missing
+    """
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.credential_client import CredentialAPIClient
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = CredentialAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+        return client, project_root
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
 
 
 # MultiThreadedProgressManager imported locally where needed
@@ -1752,6 +1815,51 @@ def cli(
 
 # Register SCIP commands
 cli.add_command(scip_group)
+
+# Register Git commands (Story #737)
+cli.add_command(git_group)
+
+# Register File commands (Story #738)
+cli.add_command(files_group)
+
+
+# Story #746: Register CI/CD commands (implemented in cli_cicd.py)
+cli.add_command(cicd_group)
+
+# Story #749: Register Help commands (implemented in cli_help.py)
+cli.add_command(help_group)
+
+# Story #656: Register SSH key management commands (implemented in cli_keys.py)
+cli.add_command(keys_group)
+
+# Story #656: Register Remote index management commands (implemented in cli_index.py)
+cli.add_command(index_remote_group)
+
+
+@cli.group("groups")
+@require_mode("remote")
+def groups_group():
+    """User group and access control management (remote mode only).
+
+    Provides management of user groups, permissions, and access control
+    for repositories on the CIDX server.
+
+    Subcommands will be implemented in subsequent stories.
+    """
+    pass
+
+
+@cli.group("credentials")
+@require_mode("remote")
+def credentials_group():
+    """MCP credential storage and retrieval (remote mode only).
+
+    Provides secure storage and retrieval of MCP credentials
+    for AI tool integration on the CIDX server.
+
+    Subcommands will be implemented in subsequent stories.
+    """
+    pass
 
 
 @cli.command()
@@ -9671,7 +9779,9 @@ def server_restart(ctx, server_dir: Optional[str]):
 
 @server_group.command("add-index")
 @click.argument("alias")
-@click.argument("index_type", type=click.Choice(["semantic_fts", "temporal", "scip"]))
+@click.argument(
+    "index_type", type=click.Choice(["semantic", "fts", "temporal", "scip"])
+)
 @click.option("--quiet", is_flag=True, help="Minimal output for scripting")
 @click.option("--wait", is_flag=True, help="Wait for job completion")
 @click.option(
@@ -9684,7 +9794,7 @@ def server_add_index(
     """Add an index type to a golden repository.
 
     ALIAS is the golden repository alias.
-    INDEX_TYPE is one of: semantic_fts, temporal, scip
+    INDEX_TYPE is one of: semantic, fts, temporal, scip
     """
     try:
         from .api_clients.admin_client import AdminAPIClient
@@ -9832,7 +9942,7 @@ def server_list_indexes(ctx, alias: str, json_output: bool):
             console.print(f"\nIndex Status for '{result['alias']}':", style="cyan bold")
             console.print()
             indexes = result.get("indexes", {})
-            for index_type in ["semantic_fts", "temporal", "scip"]:
+            for index_type in ["semantic", "fts", "temporal", "scip"]:
                 index_info = indexes.get(index_type, {})
                 present = index_info.get("present", False)
                 status = "present" if present else "not present"
@@ -13205,9 +13315,17 @@ def admin_users_group(ctx):
     type=click.Choice(["admin", "power_user", "normal_user"]),
     help="Role for the new user (default: normal_user)",
 )
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
 @click.pass_context
 def admin_users_create(
-    ctx, username: str, email: Optional[str], password: Optional[str], role: str
+    ctx,
+    username: str,
+    email: Optional[str],
+    password: Optional[str],
+    role: str,
+    json_output: bool,
 ):
     """Create a new user account with specified role.
 
@@ -13326,6 +13444,28 @@ def admin_users_create(
                 )
             )
 
+        # Close the client
+        run_async(admin_client.close())
+
+        # Handle JSON output
+        if json_output:
+            import json
+
+            user_data: dict = {
+                "username": username,
+                "role": role,
+                "email": email,
+            }
+            if "user" in user_response and isinstance(user_response["user"], dict):
+                user_data.update(user_response["user"])
+            result = {
+                "success": True,
+                "message": f"Successfully created user: {username}",
+                "user": user_data,
+            }
+            print(json.dumps(result, indent=2))
+            return
+
         console.print(f"✅ Successfully created user: {username}", style="green")
         console.print(f"👤 Role: {role}", style="cyan")
         if email:
@@ -13338,9 +13478,6 @@ def admin_users_create(
                 console.print(f"🆔 Username: {user_info['username']}", style="dim")
             if "created_at" in user_info:
                 console.print(f"📅 Created: {user_info['created_at']}", style="dim")
-
-        # Close the client
-        run_async(admin_client.close())
 
     except Exception as e:
         console.print(f"❌ User creation failed: {e}", style="red")
@@ -13382,8 +13519,11 @@ def admin_users_create(
     type=int,
     help="Number of users to skip for pagination (default: 0)",
 )
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
 @click.pass_context
-def admin_users_list(ctx, limit: int, offset: int):
+def admin_users_list(ctx, limit: int, offset: int, json_output: bool):
     """List all users in the system.
 
     Lists all user accounts registered on the CIDX server with their
@@ -13460,19 +13600,37 @@ def admin_users_list(ctx, limit: int, offset: int):
                 admin_client.list_users(limit=limit, offset=offset)
             )
 
-        # Display users in a table
-        table = Table(title="CIDX Server Users")
-        table.add_column("Username", style="cyan")
-        table.add_column("Role", style="green")
-        table.add_column("Created", style="dim")
+        # Close the client
+        run_async(admin_client.close())
 
         users = users_response.get("users", [])
+        total = users_response.get("total", len(users))
+
+        # Handle JSON output
+        if json_output:
+            import json
+
+            result = {
+                "success": True,
+                "users": users,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
+            print(json.dumps(result, indent=2))
+            return
+
+        # Rich table output
+        table = Table(title="Users")
+        table.add_column("Username", style="cyan", no_wrap=True)
+        table.add_column("Role", style="green")
+        table.add_column("Created", style="dim")
 
         if not users:
             console.print("ℹ️ No users found", style="yellow")
         else:
             for user in users:
-                username = user.get("username", "unknown")
+                user_name = user.get("username", "unknown")
                 role = user.get("role", "unknown")
                 created_at = user.get("created_at", "unknown")
 
@@ -13486,12 +13644,11 @@ def admin_users_list(ctx, limit: int, offset: int):
                 else:
                     created_display = "unknown"
 
-                table.add_row(username, role, created_display)
+                table.add_row(user_name, role, created_display)
 
             console.print(table)
 
             # Show pagination info
-            total = users_response.get("total", len(users))
             if total > limit:
                 showing_start = offset + 1
                 showing_end = min(offset + limit, total)
@@ -13499,9 +13656,6 @@ def admin_users_list(ctx, limit: int, offset: int):
                     f"\nShowing {showing_start}-{showing_end} of {total} users",
                     style="dim",
                 )
-
-        # Close the client
-        run_async(admin_client.close())
 
     except Exception as e:
         console.print(f"❌ Failed to list users: {e}", style="red")
@@ -13547,8 +13701,11 @@ def _validate_username(username: str) -> bool:
 
 @admin_users_group.command("show")
 @click.argument("username", required=True)
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
 @click.pass_context
-def admin_users_show(ctx, username: str):
+def admin_users_show(ctx, username: str, json_output: bool):
     """Show detailed information for a specific user.
 
     Displays detailed information for the specified user including
@@ -13628,8 +13785,22 @@ def admin_users_show(ctx, username: str):
         with console.status(f"👤 Retrieving user '{username}'..."):
             user_response = run_async(admin_client.get_user(username))
 
-        # Display user details
+        # Close the client
+        run_async(admin_client.close())
+
+        # Get user details
         user = user_response.get("user", {})
+
+        # Handle JSON output
+        if json_output:
+            import json
+
+            result = {
+                "success": True,
+                "user": user,
+            }
+            print(json.dumps(result, indent=2))
+            return
 
         # Create a simple details display
         console.print(f"\n[bold cyan]User Details: {username}[/bold cyan]")
@@ -13646,9 +13817,6 @@ def admin_users_show(ctx, username: str):
         else:
             created_display = "unknown"
         console.print(f"Created: [dim]{created_display}[/dim]")
-
-        # Close the client
-        run_async(admin_client.close())
 
     except Exception as e:
         console.print(f"❌ Failed to show user: {e}", style="red")
@@ -13685,8 +13853,11 @@ def admin_users_show(ctx, username: str):
     type=click.Choice(["admin", "power_user", "normal_user"]),
     help="New role for the user",
 )
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
 @click.pass_context
-def admin_users_update(ctx, username: str, role: str):
+def admin_users_update(ctx, username: str, role: str, json_output: bool):
     """Update a user's role.
 
     Updates the role of an existing user. Requires admin privileges.
@@ -13800,12 +13971,27 @@ def admin_users_update(ctx, username: str, role: str):
         with console.status(f"🔄 Updating user '{username}' role to '{role}'..."):
             run_async(admin_client.update_user(username, role))
 
+        # Close the client
+        run_async(admin_client.close())
+
+        # Handle JSON output
+        if json_output:
+            import json
+
+            result = {
+                "success": True,
+                "message": f"Successfully updated user '{username}' role to '{role}'",
+                "user": {
+                    "username": username,
+                    "role": role,
+                },
+            }
+            print(json.dumps(result, indent=2))
+            return
+
         console.print(
             f"✅ Successfully updated user '{username}' role to '{role}'", style="green"
         )
-
-        # Close the client
-        run_async(admin_client.close())
 
     except Exception as e:
         console.print(f"❌ Failed to update user: {e}", style="red")
@@ -13839,8 +14025,11 @@ def admin_users_update(ctx, username: str, role: str):
     is_flag=True,
     help="Skip confirmation prompt",
 )
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
 @click.pass_context
-def admin_users_delete(ctx, username: str, force: bool):
+def admin_users_delete(ctx, username: str, force: bool, json_output: bool):
     """Delete a user account.
 
     Deletes the specified user account from the server. This action
@@ -13966,10 +14155,22 @@ def admin_users_delete(ctx, username: str, force: bool):
         with console.status(f"🗑️  Deleting user '{username}'..."):
             run_async(admin_client.delete_user(username))
 
-        console.print(f"✅ Successfully deleted user '{username}'", style="green")
-
         # Close the client
         run_async(admin_client.close())
+
+        # Handle JSON output
+        if json_output:
+            import json
+
+            result = {
+                "success": True,
+                "message": f"Successfully deleted user '{username}'",
+                "deleted_user": username,
+            }
+            print(json.dumps(result, indent=2))
+            return
+
+        console.print(f"✅ Successfully deleted user '{username}'", style="green")
 
     except Exception as e:
         console.print(f"❌ Failed to delete user: {e}", style="red")
@@ -14009,8 +14210,13 @@ def admin_users_delete(ctx, username: str, force: bool):
     is_flag=True,
     help="Skip confirmation prompt",
 )
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
 @click.pass_context
-def admin_users_change_password(ctx, username: str, password: str, force: bool):
+def admin_users_change_password(
+    ctx, username: str, password: str, force: bool, json_output: bool
+):
     """Change a user's password (admin only).
 
     Changes the password for the specified user account. This operation
@@ -14139,10 +14345,24 @@ def admin_users_change_password(ctx, username: str, password: str, force: bool):
             # Change the password
             run_async(admin_client.change_user_password(username, password))
 
-            console.print(
-                f"✅ Password changed successfully for user '{username}'", style="green"
-            )
-            console.print("💡 User should log in with the new password", style="dim")
+            # Handle JSON output
+            if json_output:
+                import json
+
+                result = {
+                    "success": True,
+                    "message": f"Password changed successfully for user '{username}'",
+                    "username": username,
+                }
+                print(json.dumps(result, indent=2))
+            else:
+                console.print(
+                    f"✅ Password changed successfully for user '{username}'",
+                    style="green",
+                )
+                console.print(
+                    "💡 User should log in with the new password", style="dim"
+                )
 
         finally:
             run_async(admin_client.close())
@@ -14188,300 +14408,337 @@ def admin_users_change_password(ctx, username: str, password: str, force: bool):
 
 
 # =============================================================================
-# Admin MCP Credentials Commands
+# MCP Credentials Management Commands (Story #748)
 # =============================================================================
 
 
 @admin_group.group("mcp-credentials")
 @click.pass_context
 def admin_mcp_credentials_group(ctx):
-    """MCP client credential management commands.
+    """MCP credential management commands.
 
-    Administrative commands for managing MCP (Model Context Protocol) client
-    credentials for users. Allows admins to create, list, and revoke credentials
-    on behalf of users.
+    Commands for creating, listing, and deleting MCP credentials.
+    Includes admin-only commands for managing other users' credentials.
     """
     pass
 
 
 @admin_mcp_credentials_group.command("list")
-@click.option("--user", required=True, help="Username to list credentials for")
 @click.option(
-    "--format",
-    type=click.Choice(["table", "json"]),
-    default="table",
-    help="Output format",
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
 )
 @click.pass_context
-def admin_mcp_credentials_list(ctx, user: str, format: str):
-    """List MCP credentials for a specific user."""
-    from .mode_detection.command_mode_detector import find_project_root
+def admin_mcp_credentials_list(ctx, json_output: bool):
+    """List all MCP credentials for the current user."""
+    import json as json_module
 
-    async def _list_credentials_async():
-        """Async wrapper to ensure proper event loop handling."""
-        admin_client = AdminAPIClient(
-            server_url=server_url, credentials=credentials, project_root=project_root
-        )
-        try:
-            response = await admin_client.list_mcp_credentials(username=user)
-            return response
-        finally:
-            await admin_client.close()
+    console = Console()
+    client, _ = _get_credential_client_and_config(json_output)
 
     try:
-        project_root = find_project_root(start_path=Path.cwd())
-        if not project_root:
-            console.print("❌ No project configuration found", style="red")
-            sys.exit(1)
+        result = run_async(client.list_mcp_credentials())
+        mcp_creds = result.get("credentials", [])
 
-        credentials, server_url = _load_admin_credentials(project_root)
-
-        with console.status(f"📋 Fetching MCP credentials for {user}..."):
-            response = run_async(_list_credentials_async())
-
-        credentials_list = response.get("credentials", [])
-
-        if format == "json":
-            console.print(json.dumps(credentials_list, indent=2))
+        if json_output:
+            print(
+                json_module.dumps({"success": True, "credentials": mcp_creds}, indent=2)
+            )
         else:
-            if not credentials_list:
-                console.print(f"No MCP credentials found for user: {user}", style="dim")
+            if not mcp_creds:
+                console.print("No MCP credentials found", style="yellow")
             else:
-                table = Table(title=f"MCP Credentials for {user}")
-                table.add_column("Name", style="cyan")
-                table.add_column("Client ID Prefix", style="green")
-                table.add_column("Created At", style="yellow")
-                table.add_column("Last Used At", style="magenta")
+                table = Table(title="MCP Credentials")
+                table.add_column("Credential ID", style="cyan")
+                table.add_column("Description", style="green")
+                table.add_column("Created", style="dim")
 
-                for cred in credentials_list:
+                for cred in mcp_creds:
                     table.add_row(
-                        cred.get("name") or "(unnamed)",
-                        cred.get("client_id_prefix", "N/A"),
-                        cred.get("created_at", "N/A"),
-                        cred.get("last_used_at") or "Never",
+                        str(cred.get("credential_id", "")),
+                        cred.get("description", ""),
+                        str(cred.get("created_at", "")),
                     )
-
                 console.print(table)
-
     except Exception as e:
-        console.print(f"❌ Failed to list MCP credentials: {e}", style="red")
-        error_str = str(e).lower()
-        if "user" in error_str and "not found" in error_str:
-            console.print(f"💡 User '{user}' not found", style="dim")
-        elif (
-            "insufficient privileges" in error_str or "admin role required" in error_str
-        ):
-            console.print("💡 You need admin privileges", style="dim")
-        if ctx.obj.get("verbose"):
-            import traceback
-
-            console.print(traceback.format_exc(), style="dim red")
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
         sys.exit(1)
+    finally:
+        run_async(client.close())
 
 
 @admin_mcp_credentials_group.command("create")
-@click.option("--user", required=True, help="Username to create credential for")
-@click.option("--name", default=None, help="Optional name for the credential")
+@click.option("--description", default="", help="Description for the MCP credential")
 @click.option(
-    "--format",
-    type=click.Choice(["table", "json"]),
-    default="table",
-    help="Output format",
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
 )
 @click.pass_context
-def admin_mcp_credentials_create(ctx, user: str, name: Optional[str], format: str):
-    """Create a new MCP credential for a user."""
-    from .mode_detection.command_mode_detector import find_project_root
+def admin_mcp_credentials_create(ctx, description: str, json_output: bool):
+    """Create a new MCP credential for the current user.
 
-    async def _create_credential_async():
-        """Async wrapper to ensure proper event loop handling."""
-        admin_client = AdminAPIClient(
-            server_url=server_url, credentials=credentials, project_root=project_root
-        )
-        try:
-            response = await admin_client.create_mcp_credential(
-                username=user, name=name
-            )
-            return response
-        finally:
-            await admin_client.close()
+    The secret will be displayed ONCE. Save it securely.
+    """
+    import json as json_module
+
+    console = Console()
+    client, _ = _get_credential_client_and_config(json_output)
 
     try:
-        project_root = find_project_root(start_path=Path.cwd())
-        if not project_root:
-            console.print("❌ No project configuration found", style="red")
-            sys.exit(1)
+        result = run_async(client.create_mcp_credential(description=description))
 
-        credentials, server_url = _load_admin_credentials(project_root)
-
-        with console.status(f"🔐 Creating MCP credential for {user}..."):
-            response = run_async(_create_credential_async())
-
-        if format == "json":
-            console.print(json.dumps(response, indent=2))
+        if json_output:
+            print(json_module.dumps({"success": True, **result}, indent=2))
         else:
-            console.print("✅ MCP Credential Created Successfully", style="green bold")
-            console.print()
-            console.print(
-                "⚠️  WARNING: Save these credentials now. The secret will not be shown again!",
-                style="yellow bold",
-            )
-            console.print()
-
-            table = Table(show_header=False, box=None)
-            table.add_column("Label", style="cyan bold")
-            table.add_column("Value", style="white")
-
-            table.add_row("Name:", response.get("name") or "(unnamed)")
-            table.add_row("Client ID:", response.get("client_id"))
-            table.add_row("Client Secret:", response.get("client_secret"))
-            table.add_row("Created At:", response.get("created_at"))
-
-            console.print(table)
-            console.print()
-            console.print(
-                "💡 Provide these credentials to the user securely", style="dim"
-            )
-
+            console.print("[bold green]MCP Credential Created[/bold green]")
+            console.print(f"Credential ID: {result.get('credential_id')}")
+            console.print(f"[bold yellow]Secret: {result.get('secret')}[/bold yellow]")
+            console.print("[dim]Save this secret - it will not be shown again![/dim]")
     except Exception as e:
-        console.print(f"❌ Failed to create MCP credential: {e}", style="red")
-        error_str = str(e).lower()
-        if "user" in error_str and "not found" in error_str:
-            console.print(f"💡 User '{user}' not found", style="dim")
-        elif (
-            "insufficient privileges" in error_str or "admin role required" in error_str
-        ):
-            console.print("💡 You need admin privileges", style="dim")
-        if ctx.obj.get("verbose"):
-            import traceback
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+    finally:
+        run_async(client.close())
 
-            console.print(traceback.format_exc(), style="dim red")
+
+@admin_mcp_credentials_group.command("delete")
+@click.argument("cred_id")
+@click.option("--confirm", is_flag=True, help="Confirm deletion (required)")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_mcp_credentials_delete(ctx, cred_id: str, confirm: bool, json_output: bool):
+    """Delete an MCP credential.
+
+    Requires --confirm flag for safety.
+    """
+    import json as json_module
+
+    console = Console()
+
+    if not confirm:
+        if json_output:
+            print(
+                json_module.dumps({"error": "--confirm flag is required for deletion"})
+            )
+        else:
+            console.print("--confirm flag is required for deletion", style="red")
         sys.exit(1)
 
-
-@admin_mcp_credentials_group.command("revoke")
-@click.option("--user", required=True, help="Username")
-@click.option("--credential-id", required=True, help="Credential ID to revoke")
-@click.pass_context
-def admin_mcp_credentials_revoke(ctx, user: str, credential_id: str):
-    """Revoke an MCP credential for a user."""
-    from .mode_detection.command_mode_detector import find_project_root
-
-    async def _revoke_credential_async():
-        """Async wrapper to ensure proper event loop handling."""
-        admin_client = AdminAPIClient(
-            server_url=server_url, credentials=credentials, project_root=project_root
-        )
-        try:
-            await admin_client.revoke_mcp_credential(
-                username=user, credential_id=credential_id
-            )
-        finally:
-            await admin_client.close()
+    client, _ = _get_credential_client_and_config(json_output)
 
     try:
-        project_root = find_project_root(start_path=Path.cwd())
-        if not project_root:
-            console.print("❌ No project configuration found", style="red")
-            sys.exit(1)
+        run_async(client.delete_mcp_credential(cred_id))
 
-        credentials, server_url = _load_admin_credentials(project_root)
-
-        with console.status("🗑️  Revoking credential..."):
-            run_async(_revoke_credential_async())
-
-        console.print("✅ Credential revoked successfully", style="green")
-
+        if json_output:
+            print(json_module.dumps({"success": True}, indent=2))
+        else:
+            console.print(f"MCP credential '{cred_id}' deleted", style="green")
     except Exception as e:
-        console.print(f"❌ Failed to revoke MCP credential: {e}", style="red")
-        error_str = str(e).lower()
-        if "credential not found" in error_str or "not found" in error_str:
-            console.print("💡 Credential not found", style="dim")
-        elif (
-            "insufficient privileges" in error_str or "admin role required" in error_str
-        ):
-            console.print("💡 You need admin privileges", style="dim")
-        if ctx.obj.get("verbose"):
-            import traceback
-
-            console.print(traceback.format_exc(), style="dim red")
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
         sys.exit(1)
+    finally:
+        run_async(client.close())
+
+
+@admin_mcp_credentials_group.command("list-user")
+@click.argument("username")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_mcp_credentials_list_user(ctx, username: str, json_output: bool):
+    """List all MCP credentials for a specific user (Admin only)."""
+    import json as json_module
+
+    console = Console()
+    client, _ = _get_credential_client_and_config(json_output)
+
+    try:
+        result = run_async(client.admin_list_user_mcp_credentials(username))
+        mcp_creds = result.get("credentials", [])
+
+        if json_output:
+            print(
+                json_module.dumps({"success": True, "credentials": mcp_creds}, indent=2)
+            )
+        else:
+            if not mcp_creds:
+                console.print(
+                    f"No MCP credentials found for user '{username}'", style="yellow"
+                )
+            else:
+                table = Table(title=f"MCP Credentials for {username}")
+                table.add_column("Credential ID", style="cyan")
+                table.add_column("Description", style="green")
+                table.add_column("Created", style="dim")
+
+                for cred in mcp_creds:
+                    table.add_row(
+                        str(cred.get("credential_id", "")),
+                        cred.get("description", ""),
+                        str(cred.get("created_at", "")),
+                    )
+                console.print(table)
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+    finally:
+        run_async(client.close())
+
+
+@admin_mcp_credentials_group.command("create-for-user")
+@click.argument("username")
+@click.option("--description", default="", help="Description for the MCP credential")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_mcp_credentials_create_for_user(
+    ctx, username: str, description: str, json_output: bool
+):
+    """Create a new MCP credential for a specific user (Admin only).
+
+    The secret will be displayed ONCE. Save it securely.
+    """
+    import json as json_module
+
+    console = Console()
+    client, _ = _get_credential_client_and_config(json_output)
+
+    try:
+        result = run_async(
+            client.admin_create_user_mcp_credential(
+                username=username, description=description
+            )
+        )
+
+        if json_output:
+            print(json_module.dumps({"success": True, **result}, indent=2))
+        else:
+            console.print(
+                f"[bold green]MCP Credential Created for {username}[/bold green]"
+            )
+            console.print(f"Credential ID: {result.get('credential_id')}")
+            console.print(f"[bold yellow]Secret: {result.get('secret')}[/bold yellow]")
+            console.print("[dim]Save this secret - it will not be shown again![/dim]")
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+    finally:
+        run_async(client.close())
+
+
+@admin_mcp_credentials_group.command("delete-for-user")
+@click.argument("username")
+@click.argument("cred_id")
+@click.option("--confirm", is_flag=True, help="Confirm deletion (required)")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_mcp_credentials_delete_for_user(
+    ctx, username: str, cred_id: str, confirm: bool, json_output: bool
+):
+    """Delete an MCP credential for a specific user (Admin only).
+
+    Requires --confirm flag for safety.
+    """
+    import json as json_module
+
+    console = Console()
+
+    if not confirm:
+        if json_output:
+            print(
+                json_module.dumps({"error": "--confirm flag is required for deletion"})
+            )
+        else:
+            console.print("--confirm flag is required for deletion", style="red")
+        sys.exit(1)
+
+    client, _ = _get_credential_client_and_config(json_output)
+
+    try:
+        run_async(client.admin_delete_user_mcp_credential(username, cred_id))
+
+        if json_output:
+            print(json_module.dumps({"success": True}, indent=2))
+        else:
+            console.print(
+                f"MCP credential '{cred_id}' for user '{username}' deleted",
+                style="green",
+            )
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+    finally:
+        run_async(client.close())
 
 
 @admin_mcp_credentials_group.command("list-all")
-@click.option("--limit", default=100, type=int, help="Maximum number of results")
 @click.option(
-    "--format",
-    type=click.Choice(["table", "json"]),
-    default="table",
-    help="Output format",
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
 )
 @click.pass_context
-def admin_mcp_credentials_list_all(ctx, limit: int, format: str):
-    """List all MCP credentials across all users."""
-    from .mode_detection.command_mode_detector import find_project_root
+def admin_mcp_credentials_list_all(ctx, json_output: bool):
+    """List all MCP credentials across all users (Admin only)."""
+    import json as json_module
 
-    async def _list_all_credentials_async():
-        """Async wrapper to ensure proper event loop handling."""
-        admin_client = AdminAPIClient(
-            server_url=server_url, credentials=credentials, project_root=project_root
-        )
-        try:
-            response = await admin_client.list_all_mcp_credentials(limit=limit)
-            return response
-        finally:
-            await admin_client.close()
+    console = Console()
+    client, _ = _get_credential_client_and_config(json_output)
 
     try:
-        project_root = find_project_root(start_path=Path.cwd())
-        if not project_root:
-            console.print("❌ No project configuration found", style="red")
-            sys.exit(1)
+        result = run_async(client.admin_list_all_mcp_credentials())
+        mcp_creds = result.get("credentials", [])
 
-        credentials, server_url = _load_admin_credentials(project_root)
-
-        with console.status("📋 Fetching all MCP credentials..."):
-            response = run_async(_list_all_credentials_async())
-
-        credentials_list = response.get("credentials", [])
-
-        if format == "json":
-            console.print(json.dumps(credentials_list, indent=2))
+        if json_output:
+            print(
+                json_module.dumps({"success": True, "credentials": mcp_creds}, indent=2)
+            )
         else:
-            if not credentials_list:
-                console.print("No MCP credentials found", style="dim")
+            if not mcp_creds:
+                console.print("No MCP credentials found", style="yellow")
             else:
                 table = Table(title="All MCP Credentials")
-                table.add_column("Username", style="cyan")
-                table.add_column("Name", style="green")
-                table.add_column("Client ID Prefix", style="yellow")
-                table.add_column("Created At", style="magenta")
-                table.add_column("Last Used At", style="blue")
+                table.add_column("Username", style="magenta")
+                table.add_column("Credential ID", style="cyan")
+                table.add_column("Description", style="green")
+                table.add_column("Created", style="dim")
 
-                for cred in credentials_list:
+                for cred in mcp_creds:
                     table.add_row(
-                        cred.get("username", "N/A"),
-                        cred.get("name") or "(unnamed)",
-                        cred.get("client_id_prefix", "N/A"),
-                        cred.get("created_at", "N/A"),
-                        cred.get("last_used_at") or "Never",
+                        cred.get("username", ""),
+                        str(cred.get("credential_id", "")),
+                        cred.get("description", ""),
+                        str(cred.get("created_at", "")),
                     )
-
                 console.print(table)
-                console.print(
-                    f"\nShowing {len(credentials_list)} credentials", style="dim"
-                )
-
     except Exception as e:
-        console.print(f"❌ Failed to list all MCP credentials: {e}", style="red")
-        error_str = str(e).lower()
-        if "insufficient privileges" in error_str or "admin role required" in error_str:
-            console.print("💡 You need admin privileges", style="dim")
-        if ctx.obj.get("verbose"):
-            import traceback
-
-            console.print(traceback.format_exc(), style="dim red")
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
         sys.exit(1)
+    finally:
+        run_async(client.close())
 
 
 # =============================================================================
@@ -14496,6 +14753,116 @@ def admin_jobs_group(ctx):
     pass
 
 
+@admin_jobs_group.command("list")
+@click.option("--limit", default=10, type=int, help="Maximum jobs to display")
+@click.option("--offset", default=0, type=int, help="Jobs to skip for pagination")
+@click.option(
+    "--status",
+    type=click.Choice(["pending", "running", "completed", "failed", "cancelled"]),
+    help="Filter jobs by status",
+)
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_jobs_list(
+    ctx, limit: int, offset: int, status: Optional[str], json_output: bool
+):
+    """List background jobs in the system."""
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    import json as json_mod
+    import requests
+
+    project_root = find_project_root(Path.cwd())
+    if not project_root:
+        console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    remote_config = load_remote_configuration(project_root)
+    creds_file = project_root / ".code-indexer" / ".credentials"
+    credentials = json_mod.loads(creds_file.read_text()) if creds_file.exists() else {}
+
+    server_url = remote_config.get("server_url")
+    token = credentials.get("token")
+    if not server_url or not token:
+        console.print("Missing server configuration or credentials", style="red")
+        sys.exit(1)
+
+    params: dict = {"limit": limit, "offset": offset}
+    if status:
+        params["status"] = status
+
+    try:
+        response = requests.get(
+            f"{server_url}/api/admin/jobs",
+            params=params,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+        if response.status_code == 401:
+            console.print("Authentication failed", style="red")
+            sys.exit(1)
+        elif response.status_code == 403:
+            console.print("Admin privileges required", style="red")
+            sys.exit(1)
+        elif response.status_code != 200:
+            console.print(f"Server error (HTTP {response.status_code})", style="red")
+            sys.exit(1)
+
+        result = response.json()
+        jobs = result.get("jobs", [])
+        total = result.get("total", len(jobs))
+
+        if json_output:
+            print(
+                json_mod.dumps(
+                    {"success": True, "jobs": jobs, "total": total}, indent=2
+                )
+            )
+            return
+
+        _display_admin_jobs_list_table(jobs, total, limit, offset)
+
+    except requests.exceptions.RequestException as e:
+        console.print(f"Network error: {e}", style="red")
+        sys.exit(1)
+
+
+def _display_admin_jobs_list_table(
+    jobs: list, total: int, limit: int, offset: int
+) -> None:
+    """Display admin jobs list in a Rich table format."""
+    if not jobs:
+        console.print("No jobs found", style="yellow")
+        return
+
+    table = Table(title="Background Jobs")
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("Type", style="green")
+    table.add_column("Status", style="yellow")
+    table.add_column("Created", style="dim")
+
+    for job in jobs:
+        # Truncate ID to first 8 chars (standard short ID format)
+        job_id = str(job.get("id", "unknown"))[:8]
+        job_type = job.get("type", "unknown")
+        job_status = job.get("status", "unknown")
+        created_at = job.get("created_at", "unknown")
+        # Format ISO datetime (YYYY-MM-DDTHH:MM:SS) to readable format
+        created_display = (
+            created_at[:19].replace("T", " ") if created_at != "unknown" else created_at
+        )
+        table.add_row(job_id, job_type, job_status, created_display)
+
+    console.print(table)
+    if total > limit:
+        console.print(
+            f"\nShowing {offset + 1}-{min(offset + limit, total)} of {total} jobs",
+            style="dim",
+        )
+
+
 @admin_jobs_group.command("cleanup")
 @click.option(
     "--older-than", default=30, type=int, help="Delete jobs older than N days"
@@ -14508,8 +14875,13 @@ def admin_jobs_group(ctx):
 @click.option(
     "--dry-run", is_flag=True, help="Show what would be deleted without deleting"
 )
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
 @click.pass_context
-def admin_jobs_cleanup(ctx, older_than: int, status: Optional[str], dry_run: bool):
+def admin_jobs_cleanup(
+    ctx, older_than: int, status: Optional[str], dry_run: bool, json_output: bool
+):
     """Cleanup old jobs from the system."""
     from .mode_detection.command_mode_detector import find_project_root
     from .remote.config import load_remote_configuration
@@ -14560,6 +14932,20 @@ def admin_jobs_cleanup(ctx, older_than: int, status: Optional[str], dry_run: boo
 
         result = response.json()
         cleaned_count = result.get("cleaned_count", 0)
+
+        # Handle JSON output
+        if json_output:
+            output = {
+                "success": True,
+                "cleaned_count": cleaned_count,
+                "dry_run": dry_run,
+                "older_than_days": older_than,
+            }
+            if status:
+                output["status_filter"] = status
+            print(json.dumps(output, indent=2))
+            return
+
         console.print(f"✅ Cleaned up {cleaned_count} jobs", style="green")
     except requests.exceptions.Timeout:
         console.print("❌ Request timed out", style="red")
@@ -14575,8 +14961,11 @@ def admin_jobs_cleanup(ctx, older_than: int, status: Optional[str], dry_run: boo
 @admin_jobs_group.command("stats")
 @click.option("--start", help="Start date (YYYY-MM-DD)")
 @click.option("--end", help="End date (YYYY-MM-DD)")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
 @click.pass_context
-def admin_jobs_stats(ctx, start: Optional[str], end: Optional[str]):
+def admin_jobs_stats(ctx, start: Optional[str], end: Optional[str], json_output: bool):
     """View job statistics and analytics."""
     from .mode_detection.command_mode_detector import find_project_root
     from .remote.config import load_remote_configuration
@@ -14619,6 +15008,16 @@ def admin_jobs_stats(ctx, start: Optional[str], end: Optional[str]):
         sys.exit(1)
 
     stats = response.json()
+
+    # Handle JSON output
+    if json_output:
+        output = {
+            "success": True,
+            **stats,
+        }
+        print(json.dumps(output, indent=2))
+        return
+
     console.print(f"Total Jobs: {stats['total_jobs']}")
 
     # Display status breakdown
@@ -14666,9 +15065,17 @@ def admin_repos_group(ctx):
 @click.option(
     "--default-branch", default="main", help="Default branch name (default: main)"
 )
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
 @click.pass_context
 def admin_repos_add(
-    ctx, git_url: str, alias: str, description: str, default_branch: str
+    ctx,
+    git_url: str,
+    alias: str,
+    description: str,
+    default_branch: str,
+    json_output: bool,
 ):
     """Add a new golden repository from Git URL.
 
@@ -14784,9 +15191,11 @@ def admin_repos_add(
         )
 
         try:
-            console.print(
-                f"📁 Adding golden repository '{alias}' from {git_url}...", style="blue"
-            )
+            if not json_output:
+                console.print(
+                    f"📁 Adding golden repository '{alias}' from {git_url}...",
+                    style="blue",
+                )
 
             # Add golden repository
             result = run_async(
@@ -14798,21 +15207,26 @@ def admin_repos_add(
                 )
             )
 
-            # Display success with job information
-            console.print(
-                "✅ Golden repository addition job submitted successfully",
-                style="green",
-            )
-            console.print(f"📋 Job ID: {result['job_id']}", style="cyan")
-            console.print(f"📝 Status: {result['status']}", style="dim")
+            if json_output:
+                import json
 
-            if "message" in result:
-                console.print(f"💬 {result['message']}", style="dim")
+                print(json.dumps(result, indent=2))
+            else:
+                # Display success with job information
+                console.print(
+                    "✅ Golden repository addition job submitted successfully",
+                    style="green",
+                )
+                console.print(f"📋 Job ID: {result['job_id']}", style="cyan")
+                console.print(f"📝 Status: {result['status']}", style="dim")
 
-            console.print(
-                "\n💡 Use 'cidx jobs status' to monitor the addition progress",
-                style="dim",
-            )
+                if "message" in result:
+                    console.print(f"💬 {result['message']}", style="dim")
+
+                console.print(
+                    "\n💡 Use 'cidx jobs status' to monitor the addition progress",
+                    style="dim",
+                )
 
         finally:
             run_async(admin_client.close())
@@ -14863,8 +15277,11 @@ def admin_repos_add(
 
 
 @admin_repos_group.command("list")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
 @click.pass_context
-def admin_repos_list(ctx):
+def admin_repos_list(ctx, json_output: bool):
     """List all golden repositories.
 
     Displays a formatted table of all golden repositories with their
@@ -14973,6 +15390,12 @@ def admin_repos_list(ctx):
             repositories = result.get("golden_repositories", [])
             total = result.get("total", 0)
 
+            if json_output:
+                import json
+
+                print(json.dumps(result, indent=2))
+                return
+
             if total == 0:
                 console.print("📂 No golden repositories found", style="yellow")
                 console.print(
@@ -15063,8 +15486,11 @@ def admin_repos_list(ctx):
 
 @admin_repos_group.command("show")
 @click.argument("alias")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
 @click.pass_context
-def admin_repos_show(ctx, alias: str):
+def admin_repos_show(ctx, alias: str, json_output: bool):
     """Show detailed information for a golden repository.
 
     Displays comprehensive details about a specific golden repository
@@ -15156,12 +15582,27 @@ def admin_repos_show(ctx, alias: str):
                     break
 
             if not target_repo:
-                console.print(f"❌ Repository '{alias}' not found", style="red")
-                console.print(
-                    "💡 Use 'cidx admin repos list' to see available repositories",
-                    style="dim",
-                )
+                if json_output:
+                    import json
+
+                    print(
+                        json.dumps(
+                            {"error": f"Repository '{alias}' not found"}, indent=2
+                        )
+                    )
+                else:
+                    console.print(f"❌ Repository '{alias}' not found", style="red")
+                    console.print(
+                        "💡 Use 'cidx admin repos list' to see available repositories",
+                        style="dim",
+                    )
                 sys.exit(1)
+
+            if json_output:
+                import json
+
+                print(json.dumps(target_repo, indent=2))
+                return
 
             # Display detailed repository information
             console.print(f"\n[bold cyan]Repository Details: {alias}[/bold cyan]")
@@ -15288,8 +15729,11 @@ def admin_repos_show(ctx, alias: str):
 
 @admin_repos_group.command("refresh")
 @click.argument("alias")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
 @click.pass_context
-def admin_repos_refresh(ctx, alias: str):
+def admin_repos_refresh(ctx, alias: str, json_output: bool):
     """Refresh a golden repository.
 
     Triggers a refresh and re-indexing of the specified golden repository.
@@ -15369,16 +15813,30 @@ def admin_repos_refresh(ctx, alias: str):
         )
 
         try:
-            console.print(
-                f"🔄 Initiating refresh for repository '{alias}'...", style="yellow"
-            )
+            if not json_output:
+                console.print(
+                    f"🔄 Initiating refresh for repository '{alias}'...", style="yellow"
+                )
 
             result = run_async(admin_client.refresh_golden_repository(alias))
 
             # Validate response type
             if not isinstance(result, dict):
-                console.print("❌ Invalid response from server", style="red")
+                if json_output:
+                    import json
+
+                    print(
+                        json.dumps({"error": "Invalid response from server"}, indent=2)
+                    )
+                else:
+                    console.print("❌ Invalid response from server", style="red")
                 sys.exit(1)
+
+            if json_output:
+                import json
+
+                print(json.dumps(result, indent=2))
+                return
 
             job_id = result.get("job_id")
             if not job_id:
@@ -15450,8 +15908,11 @@ def admin_repos_refresh(ctx, alias: str):
 @admin_repos_group.command("branches")
 @click.argument("alias")
 @click.option("--detailed", is_flag=True, help="Show detailed branch information")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
 @click.pass_context
-def admin_repos_branches(ctx, alias: str, detailed: bool):
+def admin_repos_branches(ctx, alias: str, detailed: bool, json_output: bool):
     """List branches in a golden repository.
 
     Displays all available branches in the specified golden repository
@@ -15540,8 +16001,23 @@ def admin_repos_branches(ctx, alias: str, detailed: bool):
 
             branches = result.get("branches")
             if branches is None:
-                console.print("❌ Server response missing branch data", style="red")
+                if json_output:
+                    import json
+
+                    print(
+                        json.dumps(
+                            {"error": "Server response missing branch data"}, indent=2
+                        )
+                    )
+                else:
+                    console.print("❌ Server response missing branch data", style="red")
                 sys.exit(1)
+
+            if json_output:
+                import json
+
+                print(json.dumps(result, indent=2))
+                return
 
             # Display Rich table
             table = Table(title=f"Golden Repository Branches: {alias}")
@@ -15633,48 +16109,81 @@ def admin_repos_branches(ctx, alias: str, detailed: bool):
 @admin_repos_group.command("delete")
 @click.argument("alias")
 @click.option(
+    "--confirm",
+    is_flag=True,
+    help="Confirm deletion (required to proceed with deletion)",
+)
+@click.option(
     "--force",
     is_flag=True,
     help="Skip confirmation prompt (for automation scenarios)",
 )
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
 @click.pass_context
-def admin_repos_delete(ctx, alias: str, force: bool):
+def admin_repos_delete(ctx, alias: str, confirm: bool, force: bool, json_output: bool):
     """Delete a golden repository (admin only).
 
-    ⚠️  DESTRUCTIVE OPERATION: This will permanently delete the specified
+    DESTRUCTIVE OPERATION: This will permanently delete the specified
     golden repository and all its associated data. This action cannot be undone.
 
     Deletes a golden repository from the CIDX server including:
-    • Repository metadata and configuration
-    • All indexed content and vector embeddings
-    • Background job history for this repository
-    • All user activations of this repository
+    - Repository metadata and configuration
+    - All indexed content and vector embeddings
+    - Background job history for this repository
+    - All user activations of this repository
 
     Requires admin privileges for execution.
 
     SAFETY FEATURES:
-    • Confirmation prompt with repository details (unless --force used)
-    • Repository existence validation before deletion
-    • Warning if repository has active user instances
-    • Comprehensive error handling and rollback on failures
+    - Requires --confirm flag to proceed with deletion
+    - Repository existence validation before deletion
+    - Warning if repository has active user instances
+    - Comprehensive error handling and rollback on failures
 
     Args:
         alias: Repository alias to delete
 
     Options:
-        --force: Skip confirmation prompt for automation scenarios
+        --confirm: Required flag to confirm deletion
+        --force: Skip interactive confirmation prompt (still requires --confirm)
+        --json: Output as JSON for automation
 
     Examples:
-        # Delete with confirmation prompt
-        cidx admin repos delete web-app
+        # Delete with confirmation flag (required)
+        cidx admin repos delete web-app --confirm
 
-        # Force delete without prompts (for automation)
-        cidx admin repos delete web-app --force
+        # Force delete without interactive prompts (for automation)
+        cidx admin repos delete web-app --confirm --force
 
         # Show repository details before deciding
         cidx admin repos show web-app
-        cidx admin repos delete web-app
+        cidx admin repos delete web-app --confirm
     """
+    import json as json_module  # Import once for JSON output handling
+
+    # Check if --confirm flag is provided (required for deletion)
+    if not confirm:
+        if json_output:
+            print(
+                json_module.dumps(
+                    {
+                        "error": "Deletion requires --confirm flag",
+                        "hint": "Use --confirm to confirm deletion of the repository",
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            console = Console()
+            console.print("❌ Deletion requires --confirm flag", style="red")
+            console.print(
+                f"💡 Use --confirm to confirm deletion: cidx admin repos delete {alias} --confirm",
+                style="dim",
+            )
+        sys.exit(1)
+
     try:
         from .mode_detection.command_mode_detector import find_project_root
         from .remote.config import load_remote_configuration
@@ -15738,8 +16247,8 @@ def admin_repos_delete(ctx, alias: str, force: bool):
         )
 
         try:
-            # If not force, show confirmation prompt
-            if not force:
+            # If not force and not json_output, show interactive confirmation prompt
+            if not force and not json_output:
                 # Get repository details for confirmation
                 try:
                     repos_result = run_async(admin_client.list_golden_repositories())
@@ -15812,16 +16321,33 @@ def admin_repos_delete(ctx, alias: str, force: bool):
                         sys.exit(0)
 
             # Perform deletion
-            console.print(f"🗑️  Deleting golden repository '{alias}'...", style="red")
-            run_async(admin_client.delete_golden_repository(alias, force=force))
+            if not json_output:
+                console.print(
+                    f"🗑️  Deleting golden repository '{alias}'...", style="red"
+                )
 
-            console.print(
-                f"✅ Golden repository '{alias}' deleted successfully", style="green"
+            result = run_async(
+                admin_client.delete_golden_repository(alias, force=force)
             )
-            console.print(
-                "💡 Use 'cidx admin repos list' to see remaining repositories",
-                style="dim",
-            )
+
+            if json_output:
+                output = {
+                    "status": "success",
+                    "alias": alias,
+                    "message": f"Golden repository '{alias}' deleted successfully",
+                }
+                if isinstance(result, dict):
+                    output.update(result)
+                print(json_module.dumps(output, indent=2))
+            else:
+                console.print(
+                    f"✅ Golden repository '{alias}' deleted successfully",
+                    style="green",
+                )
+                console.print(
+                    "💡 Use 'cidx admin repos list' to see remaining repositories",
+                    style="dim",
+                )
 
         finally:
             run_async(admin_client.close())
@@ -15879,6 +16405,802 @@ def admin_repos_delete(ctx, alias: str, force: bool):
 
             console.print(traceback.format_exc(), style="dim red")
         sys.exit(1)
+
+
+# =============================================================================
+# ADMIN GROUPS COMMANDS - Story #747
+# Group and Access Management from CLI Remote Mode
+# =============================================================================
+
+
+@admin_group.group("groups")
+@click.pass_context
+def admin_groups_group(ctx):
+    """Group and access management commands.
+
+    Administrative commands for creating, managing, and configuring
+    user groups and repository access on the CIDX server.
+    """
+    pass
+
+
+@admin_groups_group.command("list")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_list(ctx, json_output: bool):
+    """List all groups with member counts and repository access."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            result = run_async(client.list_groups())
+            groups = result.get("groups", [])
+
+            if json_output:
+                print(json_module.dumps({"success": True, "groups": groups}, indent=2))
+            else:
+                if not groups:
+                    console.print("No groups found", style="yellow")
+                else:
+                    table = Table(title="Groups")
+                    table.add_column("ID", style="cyan")
+                    table.add_column("Name", style="green")
+                    table.add_column("Members", justify="right")
+                    table.add_column("Repos", justify="right")
+
+                    for g in groups:
+                        table.add_row(
+                            str(g.get("id", "")),
+                            g.get("name", ""),
+                            str(g.get("member_count", 0)),
+                            str(g.get("repo_count", 0)),
+                        )
+                    console.print(table)
+        finally:
+            run_async(client.close())
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+@admin_groups_group.command("create")
+@click.option("--name", required=True, help="Name for the new group")
+@click.option("--description", default="", help="Description for the group")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_create(ctx, name: str, description: str, json_output: bool):
+    """Create a new custom group."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            result = run_async(client.create_group(name=name, description=description))
+
+            if json_output:
+                print(json_module.dumps({"success": True, **result}, indent=2))
+            else:
+                console.print(
+                    f"Group '{name}' created with ID {result.get('group_id')}",
+                    style="green",
+                )
+        finally:
+            run_async(client.close())
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+@admin_groups_group.command("show")
+@click.argument("group_id", type=int)
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_show(ctx, group_id: int, json_output: bool):
+    """Show detailed information about a specific group."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            result = run_async(client.get_group(group_id))
+
+            if json_output:
+                print(json_module.dumps({"success": True, **result}, indent=2))
+            else:
+                console.print(f"[bold]Group: {result.get('name')}[/bold]")
+                console.print(f"ID: {result.get('id')}")
+                console.print(f"Description: {result.get('description', 'N/A')}")
+                console.print(
+                    f"Members: {', '.join(result.get('members', [])) or 'None'}"
+                )
+                console.print(
+                    f"Repositories: {', '.join(result.get('repos', [])) or 'None'}"
+                )
+        finally:
+            run_async(client.close())
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+@admin_groups_group.command("update")
+@click.argument("group_id", type=int)
+@click.option("--name", default=None, help="New name for the group")
+@click.option("--description", default=None, help="New description for the group")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_update(
+    ctx, group_id: int, name: str, description: str, json_output: bool
+):
+    """Update a custom group's name and/or description."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    if name is None and description is None:
+        if json_output:
+            print(
+                json_module.dumps(
+                    {"error": "At least --name or --description required"}
+                )
+            )
+        else:
+            console.print("At least --name or --description required", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            run_async(client.update_group(group_id, name=name, description=description))
+
+            if json_output:
+                print(json_module.dumps({"success": True}, indent=2))
+            else:
+                console.print(f"Group {group_id} updated successfully", style="green")
+        finally:
+            run_async(client.close())
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+@admin_groups_group.command("delete")
+@click.argument("group_id", type=int)
+@click.option(
+    "--confirm", is_flag=True, required=True, help="Required flag to confirm deletion"
+)
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_delete(ctx, group_id: int, confirm: bool, json_output: bool):
+    """Delete a custom group (requires --confirm flag)."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            run_async(client.delete_group(group_id))
+
+            if json_output:
+                print(json_module.dumps({"success": True}, indent=2))
+            else:
+                console.print(f"Group {group_id} deleted successfully", style="green")
+        finally:
+            run_async(client.close())
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+@admin_groups_group.command("add-member")
+@click.argument("group_id", type=int)
+@click.option("--user", required=True, help="Username to add to the group")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_add_member(ctx, group_id: int, user: str, json_output: bool):
+    """Assign a user to a group."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            run_async(client.add_member(group_id, user_id=user))
+
+            if json_output:
+                print(json_module.dumps({"success": True}, indent=2))
+            else:
+                console.print(f"User '{user}' added to group {group_id}", style="green")
+        finally:
+            run_async(client.close())
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+@admin_groups_group.command("add-repos")
+@click.argument("group_id", type=int)
+@click.option("--repos", required=True, help="Comma-separated list of repository names")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_add_repos(ctx, group_id: int, repos: str, json_output: bool):
+    """Grant a group access to one or more repositories."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    repo_names = [r.strip() for r in repos.split(",") if r.strip()]
+    if not repo_names:
+        if json_output:
+            print(json_module.dumps({"error": "No repository names provided"}))
+        else:
+            console.print("No repository names provided", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            result = run_async(client.add_repos(group_id, repo_names=repo_names))
+            added = result.get("added_count", 0)
+
+            if json_output:
+                print(
+                    json_module.dumps({"success": True, "added_count": added}, indent=2)
+                )
+            else:
+                console.print(
+                    f"Added {added} repositories to group {group_id}", style="green"
+                )
+        finally:
+            run_async(client.close())
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+@admin_groups_group.command("remove-repo")
+@click.argument("group_id", type=int)
+@click.option("--repo", required=True, help="Repository name to remove from the group")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_remove_repo(ctx, group_id: int, repo: str, json_output: bool):
+    """Revoke a group's access to a single repository."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            run_async(client.remove_repo(group_id, repo_name=repo))
+
+            if json_output:
+                print(json_module.dumps({"success": True}, indent=2))
+            else:
+                console.print(
+                    f"Repository '{repo}' removed from group {group_id}", style="green"
+                )
+        finally:
+            run_async(client.close())
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+@admin_groups_group.command("remove-repos")
+@click.argument("group_id", type=int)
+@click.option("--repos", required=True, help="Comma-separated list of repository names")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_remove_repos(ctx, group_id: int, repos: str, json_output: bool):
+    """Revoke a group's access to multiple repositories."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    repo_names = [r.strip() for r in repos.split(",") if r.strip()]
+    if not repo_names:
+        if json_output:
+            print(json_module.dumps({"error": "No repository names provided"}))
+        else:
+            console.print("No repository names provided", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            result = run_async(client.remove_repos(group_id, repo_names=repo_names))
+            removed = result.get("removed_count", 0)
+
+            if json_output:
+                print(
+                    json_module.dumps(
+                        {"success": True, "removed_count": removed}, indent=2
+                    )
+                )
+            else:
+                console.print(
+                    f"Removed {removed} repositories from group {group_id}",
+                    style="green",
+                )
+        finally:
+            run_async(client.close())
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+# =============================================================================
+# API Keys Management Commands (Story #748)
+# =============================================================================
+
+
+@admin_group.group("api-keys")
+@click.pass_context
+def admin_api_keys_group(ctx):
+    """API key management commands.
+
+    Commands for creating, listing, and deleting API keys
+    for the current user.
+    """
+    pass
+
+
+@admin_api_keys_group.command("list")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_api_keys_list(ctx, json_output: bool):
+    """List all API keys for the current user."""
+    import json as json_module
+
+    console = Console()
+    client, _ = _get_credential_client_and_config(json_output)
+
+    try:
+        result = run_async(client.list_api_keys())
+        api_keys = result.get("api_keys", [])
+
+        if json_output:
+            print(json_module.dumps({"success": True, "api_keys": api_keys}, indent=2))
+        else:
+            if not api_keys:
+                console.print("No API keys found", style="yellow")
+            else:
+                table = Table(title="API Keys")
+                table.add_column("Key ID", style="cyan")
+                table.add_column("Description", style="green")
+                table.add_column("Created", style="dim")
+
+                for key in api_keys:
+                    table.add_row(
+                        str(key.get("key_id", "")),
+                        key.get("description", ""),
+                        str(key.get("created_at", "")),
+                    )
+                console.print(table)
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+    finally:
+        run_async(client.close())
+
+
+@admin_api_keys_group.command("create")
+@click.option("--description", default="", help="Description for the API key")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_api_keys_create(ctx, description: str, json_output: bool):
+    """Create a new API key for the current user.
+
+    The secret will be displayed ONCE. Save it securely.
+    """
+    import json as json_module
+
+    console = Console()
+    client, _ = _get_credential_client_and_config(json_output)
+
+    try:
+        result = run_async(client.create_api_key(description=description))
+
+        if json_output:
+            print(json_module.dumps({"success": True, **result}, indent=2))
+        else:
+            console.print("[bold green]API Key Created[/bold green]")
+            console.print(f"Key ID: {result.get('key_id')}")
+            console.print(f"[bold yellow]Secret: {result.get('secret')}[/bold yellow]")
+            console.print("[dim]Save this secret - it will not be shown again![/dim]")
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+    finally:
+        run_async(client.close())
+
+
+@admin_api_keys_group.command("delete")
+@click.argument("key_id")
+@click.option("--confirm", is_flag=True, help="Confirm deletion (required)")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_api_keys_delete(ctx, key_id: str, confirm: bool, json_output: bool):
+    """Delete an API key.
+
+    Requires --confirm flag for safety.
+    """
+    import json as json_module
+
+    console = Console()
+
+    if not confirm:
+        if json_output:
+            print(
+                json_module.dumps({"error": "--confirm flag is required for deletion"})
+            )
+        else:
+            console.print("--confirm flag is required for deletion", style="red")
+        sys.exit(1)
+
+    client, _ = _get_credential_client_and_config(json_output)
+
+    try:
+        run_async(client.delete_api_key(key_id))
+
+        if json_output:
+            print(json_module.dumps({"success": True}, indent=2))
+        else:
+            console.print(f"API key '{key_id}' deleted", style="green")
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+    finally:
+        run_async(client.close())
 
 
 @cli.group("global")

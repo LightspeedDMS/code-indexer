@@ -1989,7 +1989,7 @@ RELATED TOOLS:
     },
     "add_golden_repo_index": {
         "name": "add_golden_repo_index",
-        "description": "Add an index type to an existing golden repository. Submits a background job and returns job_id for tracking. INDEX TYPES: 'semantic_fts' (semantic search + full-text search), 'temporal' (git history/time-based search), 'scip' (call graph for code navigation). WORKFLOW: (1) Call add_golden_repo_index with alias and index_type, (2) Returns job_id immediately, (3) Monitor progress via get_job_statistics. REQUIREMENTS: Repository must already exist as golden repo (use add_golden_repo first if needed). ERROR CASES: Returns error if alias not found, invalid index_type, or index already exists (idempotent). PERFORMANCE: Index addition runs in background - semantic_fts takes seconds to minutes, temporal depends on commit history size, scip depends on codebase complexity.",
+        "description": "Add an index type to an existing golden repository. Submits a background job and returns job_id for tracking. INDEX TYPES: 'semantic' (embedding-based semantic search), 'fts' (Tantivy full-text search), 'temporal' (git history/time-based search), 'scip' (call graph for code navigation). WORKFLOW: (1) Call add_golden_repo_index with alias and index_type, (2) Returns job_id immediately, (3) Monitor progress via get_job_statistics. REQUIREMENTS: Repository must already exist as golden repo (use add_golden_repo first if needed). ERROR CASES: Returns error if alias not found, invalid index_type, or index already exists (idempotent). PERFORMANCE: Index addition runs in background - semantic/fts takes seconds to minutes, temporal depends on commit history size, scip depends on codebase complexity.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1999,8 +1999,8 @@ RELATED TOOLS:
                 },
                 "index_type": {
                     "type": "string",
-                    "enum": ["semantic_fts", "temporal", "scip"],
-                    "description": "Index type to add: 'semantic_fts' for semantic+FTS search, 'temporal' for git history search, 'scip' for call graph navigation",
+                    "enum": ["semantic", "fts", "temporal", "scip"],
+                    "description": "Index type to add: 'semantic' for embedding-based search, 'fts' for full-text search, 'temporal' for git history search, 'scip' for call graph navigation",
                 },
             },
             "required": ["alias", "index_type"],
@@ -2031,7 +2031,7 @@ RELATED TOOLS:
     },
     "get_golden_repo_indexes": {
         "name": "get_golden_repo_indexes",
-        "description": "Get structured status of all index types for a golden repository. Shows which indexes exist (semantic_fts, temporal, scip) with paths and last updated timestamps. USE CASES: (1) Check if index types are available before querying, (2) Verify index addition completed successfully, (3) Troubleshoot missing search capabilities. RESPONSE: Returns exists flag, filesystem path, and last_updated timestamp for each index type. Empty/null values indicate index does not exist yet.",
+        "description": "Get structured status of all index types for a golden repository. Shows which indexes exist (semantic, fts, temporal, scip) with paths and last updated timestamps. USE CASES: (1) Check if index types are available before querying, (2) Verify index addition completed successfully, (3) Troubleshoot missing search capabilities. RESPONSE: Returns exists flag, filesystem path, and last_updated timestamp for each index type. Empty/null values indicate index does not exist yet.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2058,8 +2058,18 @@ RELATED TOOLS:
                     "type": "object",
                     "description": "Status of each index type",
                     "properties": {
-                        "semantic_fts": {
+                        "semantic": {
                             "type": "object",
+                            "description": "Semantic search index (embedding-based)",
+                            "properties": {
+                                "exists": {"type": "boolean"},
+                                "path": {"type": ["string", "null"]},
+                                "last_updated": {"type": ["string", "null"]},
+                            },
+                        },
+                        "fts": {
+                            "type": "object",
+                            "description": "Full-text search index (Tantivy)",
                             "properties": {
                                 "exists": {"type": "boolean"},
                                 "path": {"type": ["string", "null"]},
@@ -2068,6 +2078,7 @@ RELATED TOOLS:
                         },
                         "temporal": {
                             "type": "object",
+                            "description": "Temporal index (git history)",
                             "properties": {
                                 "exists": {"type": "boolean"},
                                 "path": {"type": ["string", "null"]},
@@ -2076,6 +2087,7 @@ RELATED TOOLS:
                         },
                         "scip": {
                             "type": "object",
+                            "description": "SCIP index (call graph/code intelligence)",
                             "properties": {
                                 "exists": {"type": "boolean"},
                                 "path": {"type": ["string", "null"]},
@@ -3991,6 +4003,11 @@ TOOL_REGISTRY["scip_definition"] = {
                 "default": None,
                 "description": "Optional project filter to limit search to specific project",
             },
+            "repository_alias": {
+                "type": ["string", "null"],
+                "default": None,
+                "description": "Repository alias to filter SCIP search. String for single repo, null/omit for all repos.",
+            },
         },
         "required": ["symbol"],
     },
@@ -4098,6 +4115,11 @@ TOOL_REGISTRY["scip_references"] = {
                 "type": ["string", "null"],
                 "default": None,
                 "description": "Optional project filter to limit search to specific project",
+            },
+            "repository_alias": {
+                "type": ["string", "null"],
+                "default": None,
+                "description": "Repository alias to filter SCIP search. String for single repo, null/omit for all repos.",
             },
         },
         "required": ["symbol"],
@@ -4207,6 +4229,11 @@ TOOL_REGISTRY["scip_dependencies"] = {
                 "default": None,
                 "description": "Optional project filter to limit search to specific project",
             },
+            "repository_alias": {
+                "type": ["string", "null"],
+                "default": None,
+                "description": "Repository alias to filter SCIP search. String for single repo, null/omit for all repos.",
+            },
         },
         "required": ["symbol"],
     },
@@ -4315,6 +4342,11 @@ TOOL_REGISTRY["scip_dependents"] = {
                 "default": None,
                 "description": "Optional project filter to limit search to specific project",
             },
+            "repository_alias": {
+                "type": ["string", "null"],
+                "default": None,
+                "description": "Repository alias to filter SCIP search. String for single repo, null/omit for all repos.",
+            },
         },
         "required": ["symbol"],
     },
@@ -4417,6 +4449,11 @@ TOOL_REGISTRY["scip_impact"] = {
                 "type": ["string", "null"],
                 "default": None,
                 "description": "Optional project filter to limit search to specific project",
+            },
+            "repository_alias": {
+                "type": ["string", "null"],
+                "default": None,
+                "description": "Repository alias to filter SCIP search. String for single repo, null/omit for all repos.",
             },
         },
         "required": ["symbol"],
@@ -4593,6 +4630,11 @@ TOOL_REGISTRY["scip_callchain"] = {
                 "default": None,
                 "description": "Optional project filter to limit search to specific project",
             },
+            "repository_alias": {
+                "type": ["string", "null"],
+                "default": None,
+                "description": "Repository alias to filter SCIP search. String for single repo, null/omit for all repos.",
+            },
         },
         "required": ["from_symbol", "to_symbol"],
     },
@@ -4712,6 +4754,11 @@ TOOL_REGISTRY["scip_context"] = {
                 "type": ["string", "null"],
                 "default": None,
                 "description": "Optional project filter to limit search to specific project",
+            },
+            "repository_alias": {
+                "type": ["string", "null"],
+                "default": None,
+                "description": "Repository alias to filter SCIP search. String for single repo, null/omit for all repos.",
             },
         },
         "required": ["symbol"],
@@ -7410,7 +7457,13 @@ TOOL_REGISTRY["poll_delegation_job"] = {
             },
             "phase": {
                 "type": "string",
-                "enum": ["repo_registration", "repo_cloning", "cidx_indexing", "job_running", "done"],
+                "enum": [
+                    "repo_registration",
+                    "repo_cloning",
+                    "cidx_indexing",
+                    "job_running",
+                    "done",
+                ],
                 "description": "Current phase of job execution",
             },
             "progress": {
@@ -7440,4 +7493,871 @@ TOOL_REGISTRY["poll_delegation_job"] = {
         },
     },
     "required_permission": "query_repos",
+}
+
+# =============================================================================
+# GROUP & ACCESS MANAGEMENT TOOLS (Story #742)
+# =============================================================================
+# These tools expose group management REST endpoints to MCP users.
+# All tools require admin role (manage_users permission).
+
+TOOL_REGISTRY["list_groups"] = {
+    "name": "list_groups",
+    "description": (
+        "List all groups with member counts and repository access information. "
+        "Returns the default groups (admins, powerusers, users) and any custom groups. "
+        "Use this tool to see what groups exist and their basic statistics before "
+        "performing group management operations.\n\n"
+        "RESPONSE FIELDS:\n"
+        "- id: Unique group identifier\n"
+        "- name: Group name\n"
+        "- description: Group description\n"
+        "- member_count: Number of users in the group\n"
+        "- repo_count: Number of repositories accessible by the group\n\n"
+        "EXAMPLE:\n"
+        "list_groups() -> Returns all groups with counts"
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+    "required_permission": "manage_users",
+}
+
+TOOL_REGISTRY["create_group"] = {
+    "name": "create_group",
+    "description": (
+        "Create a new custom group for organizing users and repository access. "
+        "Custom groups can be assigned users and granted access to specific repositories. "
+        "Default groups (admins, powerusers, users) cannot be created - they exist automatically.\n\n"
+        "INPUTS:\n"
+        "- name (required): Unique group name (1-100 chars, alphanumeric with hyphens/underscores)\n"
+        "- description (optional): Description of the group's purpose\n\n"
+        "RETURNS:\n"
+        "- group_id: ID of the newly created group\n"
+        "- name: Name of the created group\n\n"
+        "ERRORS:\n"
+        "- 'Group name already exists': Name must be unique\n"
+        "- 'Invalid group name': Name contains invalid characters"
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Unique group name (1-100 characters)",
+            },
+            "description": {
+                "type": "string",
+                "description": "Optional group description",
+            },
+        },
+        "required": ["name"],
+    },
+    "required_permission": "manage_users",
+}
+
+TOOL_REGISTRY["get_group"] = {
+    "name": "get_group",
+    "description": (
+        "Get detailed information about a specific group including its members and "
+        "accessible repositories. Use this tool to see who belongs to a group and "
+        "what repositories they can access.\n\n"
+        "INPUTS:\n"
+        "- group_id (required): The unique identifier of the group\n\n"
+        "RETURNS:\n"
+        "- id: Group identifier\n"
+        "- name: Group name\n"
+        "- description: Group description\n"
+        "- members: Array of user IDs in the group\n"
+        "- repos: Array of repository names accessible by the group\n\n"
+        "ERRORS:\n"
+        "- 'Group not found': Invalid group_id"
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "group_id": {
+                "type": "string",
+                "description": "The unique identifier of the group to retrieve",
+            },
+        },
+        "required": ["group_id"],
+    },
+    "required_permission": "manage_users",
+}
+
+TOOL_REGISTRY["update_group"] = {
+    "name": "update_group",
+    "description": (
+        "Update a custom group's name and/or description. "
+        "Default groups (admins, powerusers, users) cannot be updated.\n\n"
+        "INPUTS:\n"
+        "- group_id (required): The unique identifier of the group to update\n"
+        "- name (optional): New group name (must be unique)\n"
+        "- description (optional): New group description\n\n"
+        "At least one of name or description must be provided.\n\n"
+        "ERRORS:\n"
+        "- 'Cannot update default groups': Default groups are immutable\n"
+        "- 'Group name already exists': Name must be unique\n"
+        "- 'Group not found': Invalid group_id"
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "group_id": {
+                "type": "string",
+                "description": "The unique identifier of the group to update",
+            },
+            "name": {
+                "type": "string",
+                "description": "New group name (optional)",
+            },
+            "description": {
+                "type": "string",
+                "description": "New group description (optional)",
+            },
+        },
+        "required": ["group_id"],
+    },
+    "required_permission": "manage_users",
+}
+
+TOOL_REGISTRY["delete_group"] = {
+    "name": "delete_group",
+    "description": (
+        "Delete a custom group. Default groups (admins, powerusers, users) cannot be deleted. "
+        "Groups with active members cannot be deleted - reassign users first.\n\n"
+        "INPUTS:\n"
+        "- group_id (required): The unique identifier of the group to delete\n\n"
+        "RETURNS:\n"
+        "- success: Boolean indicating if deletion succeeded\n\n"
+        "ERRORS:\n"
+        "- 'Cannot delete default group': Default groups are protected\n"
+        "- 'Group has active users': Reassign users before deleting\n"
+        "- 'Group not found': Invalid group_id"
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "group_id": {
+                "type": "string",
+                "description": "The unique identifier of the group to delete",
+            },
+        },
+        "required": ["group_id"],
+    },
+    "required_permission": "manage_users",
+}
+
+TOOL_REGISTRY["add_member_to_group"] = {
+    "name": "add_member_to_group",
+    "description": (
+        "Assign a user to a group. Each user can only belong to one group at a time - "
+        "this operation will move the user from their current group to the specified group.\n\n"
+        "INPUTS:\n"
+        "- group_id (required): The unique identifier of the target group\n"
+        "- user_id (required): The username/ID of the user to assign\n\n"
+        "RETURNS:\n"
+        "- success: Boolean indicating if assignment succeeded\n\n"
+        "ERRORS:\n"
+        "- 'Group not found': Invalid group_id\n"
+        "- 'User not found': Invalid user_id"
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "group_id": {
+                "type": "string",
+                "description": "The unique identifier of the target group",
+            },
+            "user_id": {
+                "type": "string",
+                "description": "The username/ID of the user to assign",
+            },
+        },
+        "required": ["group_id", "user_id"],
+    },
+    "required_permission": "manage_users",
+}
+
+TOOL_REGISTRY["remove_member_from_group"] = {
+    "name": "remove_member_from_group",
+    "description": (
+        "Remove a user from a group. This removes the user's group membership entirely, "
+        "leaving them without any group assignment.\n\n"
+        "INPUTS:\n"
+        "- group_id (required): The unique identifier of the group\n"
+        "- user_id (required): The username/ID of the user to remove\n\n"
+        "RETURNS:\n"
+        "- success: Boolean indicating if removal succeeded\n\n"
+        "ERRORS:\n"
+        "- 'Group not found': Invalid group_id"
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "group_id": {
+                "type": "string",
+                "description": "The unique identifier of the group",
+            },
+            "user_id": {
+                "type": "string",
+                "description": "The username/ID of the user to remove",
+            },
+        },
+        "required": ["group_id", "user_id"],
+    },
+    "required_permission": "manage_users",
+}
+
+TOOL_REGISTRY["add_repos_to_group"] = {
+    "name": "add_repos_to_group",
+    "description": (
+        "Grant a group access to one or more repositories. "
+        "Users in the group will be able to query these repositories.\n\n"
+        "INPUTS:\n"
+        "- group_id (required): The unique identifier of the group\n"
+        "- repo_names (required): Array of repository names to grant access to\n\n"
+        "RETURNS:\n"
+        "- success: Boolean indicating if operation succeeded\n"
+        "- added_count: Number of repositories newly added (repos already accessible are skipped)\n\n"
+        "IDEMPOTENT: Adding repos that are already accessible is a no-op.\n\n"
+        "ERRORS:\n"
+        "- 'Group not found': Invalid group_id"
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "group_id": {
+                "type": "string",
+                "description": "The unique identifier of the group",
+            },
+            "repo_names": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Array of repository names to grant access to",
+            },
+        },
+        "required": ["group_id", "repo_names"],
+    },
+    "required_permission": "manage_users",
+}
+
+TOOL_REGISTRY["remove_repo_from_group"] = {
+    "name": "remove_repo_from_group",
+    "description": (
+        "Revoke a group's access to a single repository. "
+        "Users in the group will no longer be able to query this repository.\n\n"
+        "INPUTS:\n"
+        "- group_id (required): The unique identifier of the group\n"
+        "- repo_name (required): The repository name to revoke access from\n\n"
+        "RETURNS:\n"
+        "- success: Boolean indicating if revocation succeeded\n\n"
+        "NOTE: cidx-meta access cannot be revoked from any group.\n\n"
+        "ERRORS:\n"
+        "- 'Group not found': Invalid group_id\n"
+        "- 'Repository access not found': Repo was not in group's access list\n"
+        "- 'cidx-meta access cannot be revoked': Special repository is always accessible"
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "group_id": {
+                "type": "string",
+                "description": "The unique identifier of the group",
+            },
+            "repo_name": {
+                "type": "string",
+                "description": "The repository name to revoke access from",
+            },
+        },
+        "required": ["group_id", "repo_name"],
+    },
+    "required_permission": "manage_users",
+}
+
+TOOL_REGISTRY["bulk_remove_repos_from_group"] = {
+    "name": "bulk_remove_repos_from_group",
+    "description": (
+        "Revoke a group's access to multiple repositories in a single operation. "
+        "Users in the group will no longer be able to query these repositories.\n\n"
+        "INPUTS:\n"
+        "- group_id (required): The unique identifier of the group\n"
+        "- repo_names (required): Array of repository names to revoke access from\n\n"
+        "RETURNS:\n"
+        "- success: Boolean indicating if operation succeeded\n"
+        "- removed_count: Number of repositories actually removed\n\n"
+        "NOTE: cidx-meta is silently skipped (cannot be removed).\n\n"
+        "ERRORS:\n"
+        "- 'Group not found': Invalid group_id"
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "group_id": {
+                "type": "string",
+                "description": "The unique identifier of the group",
+            },
+            "repo_names": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Array of repository names to revoke access from",
+            },
+        },
+        "required": ["group_id", "repo_names"],
+    },
+    "required_permission": "manage_users",
+}
+
+# =============================================================================
+# Credential Management Tools (Story #743)
+# User Self-Service API Keys
+# =============================================================================
+
+TOOL_REGISTRY["list_api_keys"] = {
+    "name": "list_api_keys",
+    "description": (
+        "List all API keys for the authenticated user. "
+        "Returns key metadata (ID, description, created_at, last_used) but NOT the key values.\n\n"
+        "USE CASES:\n"
+        "- View your existing API keys\n"
+        "- Check when keys were last used\n"
+        "- Find key ID for deletion\n\n"
+        "RETURNS:\n"
+        "- keys: Array of key metadata objects\n\n"
+        "NOTE: Full key values are only shown once at creation time."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+    "required_permission": "query_repos",
+}
+
+TOOL_REGISTRY["create_api_key"] = {
+    "name": "create_api_key",
+    "description": (
+        "Create a new API key for the authenticated user. "
+        "Returns the full key value (one-time display - save it immediately).\n\n"
+        "USE CASES:\n"
+        "- Generate new API key for programmatic access\n"
+        "- Create separate keys for different applications\n\n"
+        "INPUTS:\n"
+        "- description (optional): Human-readable label for the key\n\n"
+        "RETURNS:\n"
+        "- key_id: Unique identifier for the key\n"
+        "- api_key: Full key value (SAVE THIS - shown only once)\n"
+        "- description: Key description\n\n"
+        "SECURITY: The full api_key is returned only at creation. Store it securely."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "description": {
+                "type": "string",
+                "description": "Optional human-readable description for the API key",
+            },
+        },
+        "required": [],
+    },
+    "required_permission": "query_repos",
+}
+
+TOOL_REGISTRY["delete_api_key"] = {
+    "name": "delete_api_key",
+    "description": (
+        "Delete an API key belonging to the authenticated user. "
+        "The key will be immediately invalidated.\n\n"
+        "USE CASES:\n"
+        "- Revoke compromised key\n"
+        "- Remove unused keys\n"
+        "- Rotate keys\n\n"
+        "INPUTS:\n"
+        "- key_id (required): The unique identifier of the key to delete\n\n"
+        "RETURNS:\n"
+        "- success: Boolean indicating if deletion succeeded\n\n"
+        "NOTE: You can only delete your own keys. Use list_api_keys to find key IDs."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "key_id": {
+                "type": "string",
+                "description": "The unique identifier of the API key to delete",
+            },
+        },
+        "required": ["key_id"],
+    },
+    "required_permission": "query_repos",
+}
+
+# =============================================================================
+# Credential Management Tools (Story #743)
+# User Self-Service MCP Credentials
+# =============================================================================
+
+TOOL_REGISTRY["list_mcp_credentials"] = {
+    "name": "list_mcp_credentials",
+    "description": (
+        "List all MCP credentials for the authenticated user. "
+        "Returns credential metadata (ID, description, created_at) but NOT the secret values.\n\n"
+        "USE CASES:\n"
+        "- View your existing MCP credentials\n"
+        "- Find credential ID for deletion\n\n"
+        "RETURNS:\n"
+        "- credentials: Array of credential metadata objects\n\n"
+        "NOTE: Full credential values are only shown once at creation time."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+    "required_permission": "query_repos",
+}
+
+TOOL_REGISTRY["create_mcp_credential"] = {
+    "name": "create_mcp_credential",
+    "description": (
+        "Create a new MCP credential for the authenticated user. "
+        "Returns the full credential (one-time display - save it immediately).\n\n"
+        "USE CASES:\n"
+        "- Generate new MCP credential for MCP client connections\n"
+        "- Create separate credentials for different environments\n\n"
+        "INPUTS:\n"
+        "- description (optional): Human-readable label for the credential\n\n"
+        "RETURNS:\n"
+        "- credential_id: Unique identifier for the credential\n"
+        "- credential: Full credential value (SAVE THIS - shown only once)\n\n"
+        "SECURITY: The full credential is returned only at creation. Store it securely."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "description": {
+                "type": "string",
+                "description": "Optional human-readable description for the credential",
+            },
+        },
+        "required": [],
+    },
+    "required_permission": "query_repos",
+}
+
+TOOL_REGISTRY["delete_mcp_credential"] = {
+    "name": "delete_mcp_credential",
+    "description": (
+        "Delete an MCP credential belonging to the authenticated user. "
+        "The credential will be immediately invalidated.\n\n"
+        "USE CASES:\n"
+        "- Revoke compromised credential\n"
+        "- Remove unused credentials\n"
+        "- Rotate credentials\n\n"
+        "INPUTS:\n"
+        "- credential_id (required): The unique identifier of the credential to delete\n\n"
+        "RETURNS:\n"
+        "- success: Boolean indicating if deletion succeeded\n\n"
+        "NOTE: You can only delete your own credentials. Use list_mcp_credentials to find IDs."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "credential_id": {
+                "type": "string",
+                "description": "The unique identifier of the MCP credential to delete",
+            },
+        },
+        "required": ["credential_id"],
+    },
+    "required_permission": "query_repos",
+}
+
+# =============================================================================
+# Credential Management Tools (Story #743)
+# Admin Operations
+# =============================================================================
+
+TOOL_REGISTRY["admin_list_user_mcp_credentials"] = {
+    "name": "admin_list_user_mcp_credentials",
+    "description": (
+        "List all MCP credentials for a specific user (admin only). "
+        "Returns credential metadata (ID, description, created_at) but NOT the secret values.\n\n"
+        "USE CASES:\n"
+        "- Admin auditing user credentials\n"
+        "- Admin helping user find credential IDs\n"
+        "- Security review of user access\n\n"
+        "INPUTS:\n"
+        "- username (required): The username to list credentials for\n\n"
+        "RETURNS:\n"
+        "- credentials: Array of credential metadata objects\n\n"
+        "PERMISSIONS: Requires manage_users (admin only)."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "username": {
+                "type": "string",
+                "description": "The username to list MCP credentials for",
+            },
+        },
+        "required": ["username"],
+    },
+    "required_permission": "manage_users",
+}
+
+TOOL_REGISTRY["admin_create_user_mcp_credential"] = {
+    "name": "admin_create_user_mcp_credential",
+    "description": (
+        "Create a new MCP credential for a specific user (admin only). "
+        "Returns the full credential (one-time display - provide it to the user immediately).\n\n"
+        "USE CASES:\n"
+        "- Admin provisioning credentials for new users\n"
+        "- Admin creating credentials on behalf of users\n\n"
+        "INPUTS:\n"
+        "- username (required): The username to create credential for\n"
+        "- description (optional): Human-readable label for the credential\n\n"
+        "RETURNS:\n"
+        "- credential_id: Unique identifier for the credential\n"
+        "- credential: Full credential value (provide to user - shown only once)\n\n"
+        "PERMISSIONS: Requires manage_users (admin only)."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "username": {
+                "type": "string",
+                "description": "The username to create MCP credential for",
+            },
+            "description": {
+                "type": "string",
+                "description": "Optional human-readable description for the credential",
+            },
+        },
+        "required": ["username"],
+    },
+    "required_permission": "manage_users",
+}
+
+TOOL_REGISTRY["admin_delete_user_mcp_credential"] = {
+    "name": "admin_delete_user_mcp_credential",
+    "description": (
+        "Delete an MCP credential for a specific user (admin only). "
+        "The credential will be immediately invalidated.\n\n"
+        "USE CASES:\n"
+        "- Admin revoking compromised credentials\n"
+        "- Admin removing credentials for deactivated users\n"
+        "- Security incident response\n\n"
+        "INPUTS:\n"
+        "- username (required): The username whose credential to delete\n"
+        "- credential_id (required): The unique identifier of the credential to delete\n\n"
+        "RETURNS:\n"
+        "- success: Boolean indicating if deletion succeeded\n\n"
+        "PERMISSIONS: Requires manage_users (admin only)."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "username": {
+                "type": "string",
+                "description": "The username whose MCP credential to delete",
+            },
+            "credential_id": {
+                "type": "string",
+                "description": "The unique identifier of the MCP credential to delete",
+            },
+        },
+        "required": ["username", "credential_id"],
+    },
+    "required_permission": "manage_users",
+}
+
+TOOL_REGISTRY["admin_list_all_mcp_credentials"] = {
+    "name": "admin_list_all_mcp_credentials",
+    "description": (
+        "List all MCP credentials across all users (admin only). "
+        "Returns credential metadata with username for each credential.\n\n"
+        "USE CASES:\n"
+        "- Admin auditing all credentials in the system\n"
+        "- Security review of credential usage\n"
+        "- Identifying orphaned or suspicious credentials\n\n"
+        "RETURNS:\n"
+        "- credentials: Array of credential metadata objects, each with username field\n\n"
+        "PERMISSIONS: Requires manage_users (admin only)."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+    "required_permission": "manage_users",
+}
+
+# =============================================================================
+# Admin Operations MCP Tools (Story #744)
+# Audit Logs, Maintenance Mode, and SCIP Administration
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Audit Logs (1 tool)
+# -----------------------------------------------------------------------------
+
+TOOL_REGISTRY["query_audit_logs"] = {
+    "name": "query_audit_logs",
+    "description": (
+        "Query security audit logs with optional filtering (admin only). "
+        "Returns audit log entries for authentication, authorization, and "
+        "administrative actions.\n\n"
+        "USE CASES:\n"
+        "- Investigate security incidents\n"
+        "- Review user authentication history\n"
+        "- Audit administrative actions\n"
+        "- Monitor for suspicious activity\n\n"
+        "INPUTS:\n"
+        "- user (optional): Filter by username\n"
+        "- action (optional): Filter by action type (e.g., 'login', 'password_change')\n"
+        "- from_date (optional): Start date for time range (ISO 8601 format)\n"
+        "- to_date (optional): End date for time range (ISO 8601 format)\n"
+        "- limit (optional): Maximum number of entries to return (default: 100)\n\n"
+        "RETURNS:\n"
+        "- entries: Array of audit log entries with timestamp, user, action, "
+        "resource, and details fields\n\n"
+        "PERMISSIONS: Requires manage_users (admin only)."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "user": {
+                "type": "string",
+                "description": "Filter by username",
+            },
+            "action": {
+                "type": "string",
+                "description": "Filter by action type (e.g., 'login', 'password_change', 'token_refresh')",
+            },
+            "from_date": {
+                "type": "string",
+                "description": "Start date for time range filter (ISO 8601 format, e.g., '2024-01-01')",
+            },
+            "to_date": {
+                "type": "string",
+                "description": "End date for time range filter (ISO 8601 format, e.g., '2024-12-31')",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of entries to return",
+                "default": 100,
+                "minimum": 1,
+                "maximum": 1000,
+            },
+        },
+        "required": [],
+    },
+    "required_permission": "manage_users",
+}
+
+# -----------------------------------------------------------------------------
+# Maintenance Mode (3 tools)
+# -----------------------------------------------------------------------------
+
+TOOL_REGISTRY["enter_maintenance_mode"] = {
+    "name": "enter_maintenance_mode",
+    "description": (
+        "Enter server maintenance mode (admin only). "
+        "Stops accepting new background jobs while allowing running jobs to complete. "
+        "Query endpoints remain available during maintenance.\n\n"
+        "USE CASES:\n"
+        "- Prepare for server updates or deployments\n"
+        "- Gracefully drain active jobs before restart\n"
+        "- Coordinate with auto-update systems\n\n"
+        "INPUTS:\n"
+        "- message (optional): Custom maintenance message to display\n\n"
+        "RETURNS:\n"
+        "- success: Boolean indicating operation result\n"
+        "- message: Status message with job counts\n"
+        "- maintenance_mode: Current maintenance mode state\n"
+        "- running_jobs: Number of jobs still running\n"
+        "- queued_jobs: Number of jobs in queue\n\n"
+        "PERMISSIONS: Requires manage_users (admin only)."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "message": {
+                "type": "string",
+                "description": "Optional custom maintenance message",
+            },
+        },
+        "required": [],
+    },
+    "required_permission": "manage_users",
+}
+
+TOOL_REGISTRY["exit_maintenance_mode"] = {
+    "name": "exit_maintenance_mode",
+    "description": (
+        "Exit server maintenance mode (admin only). "
+        "Resumes accepting new background jobs.\n\n"
+        "USE CASES:\n"
+        "- Resume normal operations after maintenance\n"
+        "- Re-enable job processing after updates\n\n"
+        "RETURNS:\n"
+        "- success: Boolean indicating operation result\n"
+        "- maintenance_mode: Current maintenance mode state (should be false)\n"
+        "- message: Status message\n\n"
+        "PERMISSIONS: Requires manage_users (admin only)."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+    "required_permission": "manage_users",
+}
+
+TOOL_REGISTRY["get_maintenance_status"] = {
+    "name": "get_maintenance_status",
+    "description": (
+        "Get current server maintenance mode status. "
+        "Returns whether the server is in maintenance mode and job statistics.\n\n"
+        "USE CASES:\n"
+        "- Check if server is in maintenance mode before starting operations\n"
+        "- Monitor drain progress during maintenance\n"
+        "- Verify maintenance mode state\n\n"
+        "RETURNS:\n"
+        "- in_maintenance: Boolean indicating if server is in maintenance mode\n"
+        "- message: Maintenance message (if in maintenance mode)\n"
+        "- since: ISO timestamp when maintenance started (if applicable)\n"
+        "- drained: Boolean indicating if all jobs have completed\n"
+        "- running_jobs: Number of jobs still running\n"
+        "- queued_jobs: Number of jobs in queue\n\n"
+        "PERMISSIONS: Requires query_repos (any authenticated user can check status)."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+    "required_permission": "query_repos",
+}
+
+# -----------------------------------------------------------------------------
+# SCIP Administration (4 tools)
+# -----------------------------------------------------------------------------
+
+TOOL_REGISTRY["scip_pr_history"] = {
+    "name": "scip_pr_history",
+    "description": (
+        "Get SCIP self-healing PR creation history (admin only). "
+        "Returns history of pull requests created by the SCIP self-healing system "
+        "for dependency resolution and fix proposals.\n\n"
+        "USE CASES:\n"
+        "- Review SCIP self-healing activity\n"
+        "- Track automated dependency fix proposals\n"
+        "- Audit PR creation patterns\n\n"
+        "INPUTS:\n"
+        "- limit (optional): Maximum number of entries to return (default: 100)\n\n"
+        "RETURNS:\n"
+        "- history: Array of PR history entries with pr_number, repo, indexed_at, "
+        "and status fields\n\n"
+        "PERMISSIONS: Requires manage_users (admin only)."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of history entries to return",
+                "default": 100,
+                "minimum": 1,
+                "maximum": 1000,
+            },
+        },
+        "required": [],
+    },
+    "required_permission": "manage_users",
+}
+
+TOOL_REGISTRY["scip_cleanup_history"] = {
+    "name": "scip_cleanup_history",
+    "description": (
+        "Get SCIP workspace cleanup history (admin only). "
+        "Returns history of workspace cleanup operations performed by the "
+        "SCIP self-healing system.\n\n"
+        "USE CASES:\n"
+        "- Review cleanup operation history\n"
+        "- Monitor disk space reclamation\n"
+        "- Audit workspace lifecycle management\n\n"
+        "INPUTS:\n"
+        "- limit (optional): Maximum number of entries to return (default: 100)\n\n"
+        "RETURNS:\n"
+        "- history: Array of cleanup history entries with cleanup_id, started_at, "
+        "completed_at, and workspaces_cleaned fields\n\n"
+        "PERMISSIONS: Requires manage_users (admin only)."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of history entries to return",
+                "default": 100,
+                "minimum": 1,
+                "maximum": 1000,
+            },
+        },
+        "required": [],
+    },
+    "required_permission": "manage_users",
+}
+
+TOOL_REGISTRY["scip_cleanup_workspaces"] = {
+    "name": "scip_cleanup_workspaces",
+    "description": (
+        "Trigger SCIP workspace cleanup job (admin only). "
+        "Starts an async cleanup job to remove expired SCIP self-healing workspaces "
+        "and reclaim disk space.\n\n"
+        "USE CASES:\n"
+        "- Manually trigger cleanup when disk space is low\n"
+        "- Clean up after failed SCIP operations\n"
+        "- Force workspace cleanup outside scheduled window\n\n"
+        "RETURNS:\n"
+        "- job_id: Unique identifier for the cleanup job\n"
+        "- status: Initial job status (typically 'started')\n\n"
+        "NOTE: This is an async operation. Use scip_cleanup_status to monitor progress.\n\n"
+        "PERMISSIONS: Requires manage_users (admin only)."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+    "required_permission": "manage_users",
+}
+
+TOOL_REGISTRY["scip_cleanup_status"] = {
+    "name": "scip_cleanup_status",
+    "description": (
+        "Get SCIP workspace cleanup job status (admin only). "
+        "Returns the current status of the SCIP workspace cleanup operation.\n\n"
+        "USE CASES:\n"
+        "- Monitor progress of triggered cleanup job\n"
+        "- Check if cleanup is currently running\n"
+        "- Verify cleanup completion\n\n"
+        "RETURNS:\n"
+        "- running: Boolean indicating if cleanup is in progress\n"
+        "- job_id: Current cleanup job ID (if running)\n"
+        "- progress: Progress description (if running)\n"
+        "- last_cleanup_time: ISO timestamp of last completed cleanup\n"
+        "- workspace_count: Current number of SCIP workspaces\n\n"
+        "PERMISSIONS: Requires manage_users (admin only)."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+    "required_permission": "manage_users",
 }

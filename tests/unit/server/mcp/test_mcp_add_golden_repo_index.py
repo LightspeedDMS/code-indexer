@@ -42,13 +42,13 @@ class TestAddGoldenRepoIndex:
     """Test add_golden_repo_index MCP tool handler."""
 
     @pytest.mark.asyncio
-    async def test_add_index_success_semantic_fts(
+    async def test_add_index_success_semantic(
         self, mock_admin_user, mock_golden_repo_manager
     ):
-        """Test AC1: add_golden_repo_index successfully submits job for semantic_fts index."""
+        """Test AC1: add_golden_repo_index successfully submits job for semantic index."""
         # Setup mock to return job_id
         mock_golden_repo_manager.add_index_to_golden_repo.return_value = (
-            "job-123-semantic-fts"
+            "job-123-semantic"
         )
 
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
@@ -56,7 +56,7 @@ class TestAddGoldenRepoIndex:
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
             # Call handler
-            args = {"alias": "test-repo", "index_type": "semantic_fts"}
+            args = {"alias": "test-repo", "index_type": "semantic"}
             result = await handle_add_golden_repo_index(args, mock_admin_user)
 
             # Verify response structure
@@ -67,13 +67,48 @@ class TestAddGoldenRepoIndex:
             # Parse JSON response
             response_data = json.loads(result["content"][0]["text"])
             assert response_data["success"] is True
-            assert response_data["job_id"] == "job-123-semantic-fts"
+            assert response_data["job_id"] == "job-123-semantic"
             assert "message" in response_data
-            assert "semantic_fts" in response_data["message"]
+            assert "semantic" in response_data["message"]
 
             # Verify backend method called correctly
             mock_golden_repo_manager.add_index_to_golden_repo.assert_called_once_with(
-                alias="test-repo", index_type="semantic_fts", submitter_username="admin"
+                alias="test-repo", index_type="semantic", submitter_username="admin"
+            )
+
+    @pytest.mark.asyncio
+    async def test_add_index_success_fts(
+        self, mock_admin_user, mock_golden_repo_manager
+    ):
+        """Test AC1: add_golden_repo_index successfully submits job for fts index."""
+        # Setup mock to return job_id
+        mock_golden_repo_manager.add_index_to_golden_repo.return_value = (
+            "job-123-fts"
+        )
+
+        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+            mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
+            mock_app.golden_repo_manager = mock_golden_repo_manager
+
+            # Call handler
+            args = {"alias": "test-repo", "index_type": "fts"}
+            result = await handle_add_golden_repo_index(args, mock_admin_user)
+
+            # Verify response structure
+            assert "content" in result
+            assert len(result["content"]) == 1
+            assert result["content"][0]["type"] == "text"
+
+            # Parse JSON response
+            response_data = json.loads(result["content"][0]["text"])
+            assert response_data["success"] is True
+            assert response_data["job_id"] == "job-123-fts"
+            assert "message" in response_data
+            assert "fts" in response_data["message"]
+
+            # Verify backend method called correctly
+            mock_golden_repo_manager.add_index_to_golden_repo.assert_called_once_with(
+                alias="test-repo", index_type="fts", submitter_username="admin"
             )
 
     @pytest.mark.asyncio
@@ -129,7 +164,7 @@ class TestAddGoldenRepoIndex:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
-            args = {"alias": "nonexistent-repo", "index_type": "semantic_fts"}
+            args = {"alias": "nonexistent-repo", "index_type": "semantic"}
             result = await handle_add_golden_repo_index(args, mock_admin_user)
 
             response_data = json.loads(result["content"][0]["text"])
@@ -143,7 +178,7 @@ class TestAddGoldenRepoIndex:
     ):
         """Test AC3: Error when invalid index_type provided."""
         mock_golden_repo_manager.add_index_to_golden_repo.side_effect = ValueError(
-            "Invalid index_type: invalid_type. Must be one of: semantic_fts, temporal, scip"
+            "Invalid index_type: invalid_type. Must be one of: semantic, fts, temporal, scip"
         )
 
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
@@ -164,14 +199,14 @@ class TestAddGoldenRepoIndex:
     ):
         """Test AC5: Error when index type already exists."""
         mock_golden_repo_manager.add_index_to_golden_repo.side_effect = ValueError(
-            "Index type 'semantic_fts' already exists for golden repo 'test-repo'"
+            "Index type 'semantic' already exists for golden repo 'test-repo'"
         )
 
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
-            args = {"alias": "test-repo", "index_type": "semantic_fts"}
+            args = {"alias": "test-repo", "index_type": "semantic"}
             result = await handle_add_golden_repo_index(args, mock_admin_user)
 
             response_data = json.loads(result["content"][0]["text"])
@@ -185,7 +220,7 @@ class TestAddGoldenRepoIndex:
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
 
-            args = {"index_type": "semantic_fts"}
+            args = {"index_type": "semantic"}
             result = await handle_add_golden_repo_index(args, mock_admin_user)
 
             response_data = json.loads(result["content"][0]["text"])
@@ -214,13 +249,18 @@ class TestGetGoldenRepoIndexes:
     @pytest.mark.asyncio
     async def test_get_indexes_success(self, mock_admin_user, mock_golden_repo_manager):
         """Test AC2: get_golden_repo_indexes returns structured status."""
-        # Setup mock to return index status
+        # Setup mock to return index status with separate semantic and fts
         mock_golden_repo_manager.get_golden_repo_indexes.return_value = {
             "alias": "test-repo",
             "indexes": {
-                "semantic_fts": {
+                "semantic": {
                     "exists": True,
-                    "path": "/mock/golden-repos/test-repo/.code-indexer/index/tantivy",
+                    "path": "/mock/golden-repos/test-repo/.code-indexer/index",
+                    "last_updated": "2025-12-16T10:00:00+00:00",
+                },
+                "fts": {
+                    "exists": True,
+                    "path": "/mock/golden-repos/test-repo/.code-indexer/tantivy_index",
                     "last_updated": "2025-12-16T10:00:00+00:00",
                 },
                 "temporal": {"exists": False, "path": None, "last_updated": None},
@@ -245,14 +285,20 @@ class TestGetGoldenRepoIndexes:
             assert response_data["success"] is True
             assert response_data["alias"] == "test-repo"
             assert "indexes" in response_data
-            assert "semantic_fts" in response_data["indexes"]
+            assert "semantic" in response_data["indexes"]
+            assert "fts" in response_data["indexes"]
             assert "temporal" in response_data["indexes"]
             assert "scip" in response_data["indexes"]
 
-            # Verify semantic_fts index details
-            semantic_fts = response_data["indexes"]["semantic_fts"]
-            assert semantic_fts["exists"] is True
-            assert semantic_fts["path"] is not None
+            # Verify semantic index details
+            semantic = response_data["indexes"]["semantic"]
+            assert semantic["exists"] is True
+            assert semantic["path"] is not None
+
+            # Verify fts index details
+            fts = response_data["indexes"]["fts"]
+            assert fts["exists"] is True
+            assert fts["path"] is not None
 
             # Verify temporal index does not exist
             temporal = response_data["indexes"]["temporal"]

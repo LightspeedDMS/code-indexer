@@ -16,6 +16,11 @@ function showAddIndexForm(alias) {
     const form = document.getElementById(`add-index-form-${alias}`);
     if (form) {
         form.style.display = 'block';
+        // Track open form state for HTMX refresh preservation
+        if (typeof openAddIndexForms !== 'undefined') {
+            openAddIndexForms.add(alias);
+            console.log('[CIDX] Tracking open add-index form for:', alias);
+        }
     }
 }
 
@@ -27,29 +32,38 @@ function hideAddIndexForm(alias) {
     const form = document.getElementById(`add-index-form-${alias}`);
     if (form) {
         form.style.display = 'none';
+        // Remove from tracking when form is closed
+        if (typeof openAddIndexForms !== 'undefined') {
+            openAddIndexForms.delete(alias);
+            console.log('[CIDX] Stopped tracking add-index form for:', alias);
+        }
     }
 }
 
 /**
  * Submit add index request with confirmation dialog
+ * Supports multiple index type selection via checkboxes
  * @param {string} alias - Repository alias
  */
 async function submitAddIndex(alias) {
-    const selectElement = document.getElementById(`index-type-${alias}`);
-    if (!selectElement) {
-        console.error(`Select element not found for alias: ${alias}`);
+    // Collect all checked index types from checkboxes
+    const checkboxes = document.querySelectorAll(`input[name="index-types-${alias}"]:checked`);
+    const indexTypes = Array.from(checkboxes).map(cb => cb.value);
+
+    if (indexTypes.length === 0) {
+        alert('Please select at least one index type');
         return;
     }
 
-    const indexType = selectElement.value;
-    if (!indexType) {
-        alert('Please select an index type');
-        return;
-    }
+    // Build confirmation message with selected types
+    const typeLabels = Array.from(checkboxes).map(cb => {
+        const label = document.querySelector(`label[for="${cb.id}"]`);
+        return label ? label.textContent.trim() : cb.value;
+    });
+    const typesDisplay = typeLabels.join(', ');
 
     // AC7: Confirmation dialog before submission
-    const indexTypeLabel = selectElement.options[selectElement.selectedIndex].text;
-    if (!confirm(`Add ${indexTypeLabel} index to repository "${alias}"?\n\nThis operation may take several minutes.`)) {
+    if (!confirm(`Add the following indexes to repository "${alias}"?\n\n${typesDisplay}\n\nThis operation may take several minutes.`)) {
         return;
     }
 
@@ -71,7 +85,12 @@ async function submitAddIndex(alias) {
         // Get CSRF token from page
         const csrfToken = document.querySelector('input[name="csrf_token"]')?.value || '';
 
-        // Submit POST request to add index
+        // Submit POST request to add indexes (supports both single and multiple)
+        // Send index_types array for multiple, index_type string for single (backward compatibility)
+        const requestBody = indexTypes.length === 1
+            ? { index_type: indexTypes[0] }
+            : { index_types: indexTypes };
+
         const response = await fetch(`/api/admin/golden-repos/${alias}/indexes`, {
             method: 'POST',
             headers: {
@@ -79,7 +98,7 @@ async function submitAddIndex(alias) {
                 'X-CSRF-Token': csrfToken
             },
             credentials: 'same-origin',  // Include cookies (session_id) in request
-            body: JSON.stringify({ index_type: indexType })
+            body: JSON.stringify(requestBody)
         });
 
         if (!response.ok) {

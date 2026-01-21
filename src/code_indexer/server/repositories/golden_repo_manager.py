@@ -1761,9 +1761,9 @@ class GoldenRepoManager:
             raise GoldenRepoError(f"Golden repository '{alias}' not found")
 
         branch_service = GoldenRepoBranchService(self)
-        branches: List["GoldenRepoBranchInfo"] = (
-            await branch_service.get_golden_repo_branches(alias)
-        )
+        branches: List[
+            "GoldenRepoBranchInfo"
+        ] = await branch_service.get_golden_repo_branches(alias)
         return branches
 
     def add_index_to_golden_repo(
@@ -1780,32 +1780,29 @@ class GoldenRepoManager:
 
         Args:
             alias: The golden repo alias
-            index_type: One of "semantic_fts", "temporal", "scip"
+            index_type: One of "semantic", "fts", "temporal", "scip"
             submitter_username: Username for audit logging
 
         Returns:
             job_id: The background job ID for tracking
 
         Raises:
-            ValueError: If alias not found, index_type invalid, or index already exists
+            ValueError: If alias not found or index_type invalid
         """
         # AC4: Validate alias exists
         if alias not in self.golden_repos:
             raise ValueError(f"Golden repository '{alias}' not found")
 
-        # AC2: Validate index_type
-        valid_index_types = ["semantic_fts", "temporal", "scip"]
+        # AC2: Validate index_type - individual types only (semantic_fts removed)
+        valid_index_types = ["semantic", "fts", "temporal", "scip"]
         if index_type not in valid_index_types:
             raise ValueError(
                 f"Invalid index_type: {index_type}. Must be one of: {', '.join(valid_index_types)}"
             )
 
-        # AC3: Check if index already exists (idempotent behavior)
+        # Get golden repo reference for background worker
         golden_repo = self.golden_repos[alias]
-        if self._index_exists(golden_repo, index_type):
-            raise ValueError(
-                f"Index type '{index_type}' already exists for golden repo '{alias}'"
-            )
+        # Note: _index_exists check removed - allow rebuilding existing indexes
 
         # AC1: Create background job and return job_id
         def background_worker() -> Dict[str, Any]:
@@ -1820,9 +1817,32 @@ class GoldenRepoManager:
                 captured_stdout = ""
                 captured_stderr = ""
 
-                # AC5: semantic_fts - execute cidx index --fts
-                if index_type == "semantic_fts":
-                    command = ["cidx", "index", "--fts"]
+                # Ensure repo is initialized before running cidx index commands (idempotent)
+                # Always attempt init - it's safe to run on already-initialized repos
+                init_result = subprocess.run(
+                    ["cidx", "init"],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                )
+                # Success or "already exists" are both acceptable outcomes
+                init_output = (init_result.stdout or "") + (init_result.stderr or "")
+                if (
+                    init_result.returncode != 0
+                    and "already exists" not in init_output.lower()
+                ):
+                    raise GoldenRepoError(
+                        f"Failed to initialize repo before indexing: {init_result.stderr}"
+                    )
+                # Capture output for logging regardless of outcome
+                if init_result.stdout:
+                    captured_stdout += f"[init] {init_result.stdout}\n"
+                if init_result.stderr:
+                    captured_stderr += f"[init] {init_result.stderr}\n"
+
+                # semantic - execute cidx index (semantic embeddings only)
+                if index_type == "semantic":
+                    command = ["cidx", "index"]
                     result = subprocess.run(
                         command,
                         cwd=repo_path,
@@ -1833,10 +1853,26 @@ class GoldenRepoManager:
                     captured_stderr = result.stderr
                     if result.returncode != 0:
                         raise GoldenRepoError(
-                            f"Failed to create semantic_fts index: {result.stderr}"
+                            f"Failed to create semantic index: {result.stderr}"
                         )
 
-                # AC6: temporal - execute cidx index --index-commits with options
+                # fts - execute cidx index --rebuild-fts-index (FTS only)
+                elif index_type == "fts":
+                    command = ["cidx", "index", "--rebuild-fts-index"]
+                    result = subprocess.run(
+                        command,
+                        cwd=repo_path,
+                        capture_output=True,
+                        text=True,
+                    )
+                    captured_stdout = result.stdout
+                    captured_stderr = result.stderr
+                    if result.returncode != 0:
+                        raise GoldenRepoError(
+                            f"Failed to create FTS index: {result.stderr}"
+                        )
+
+                # temporal - execute cidx index --index-commits with options
                 elif index_type == "temporal":
                     command = ["cidx", "index", "--index-commits"]
 
@@ -1915,7 +1951,7 @@ class GoldenRepoManager:
 
         Args:
             golden_repo: The golden repository object
-            index_type: The index type to check ("semantic_fts", "temporal", "scip")
+            index_type: The index type to check ("semantic", "fts", "temporal", "scip")
 
         Returns:
             True if the index exists, False otherwise
@@ -1924,26 +1960,23 @@ class GoldenRepoManager:
         actual_path = self.get_actual_repo_path(golden_repo.alias)
         repo_dir = Path(actual_path)
 
-        if index_type == "semantic_fts":
-            # AC3: semantic_fts requires BOTH vector index AND FTS index with actual files
+        if index_type == "semantic":
+            # semantic index: check for vector index files
             vector_index = repo_dir / ".code-indexer" / "index"
-            fts_index = repo_dir / ".code-indexer" / "tantivy_index"
-
-            # Check for actual index files, not just directories
-            has_vector_files = False
-            has_fts_files = False
-
             if vector_index.exists():
                 # Check for any .json files in index subdirectories (collection folders)
-                has_vector_files = any(vector_index.rglob("*.json"))
+                return any(vector_index.rglob("*.json"))
+            return False
 
+        elif index_type == "fts":
+            # fts index: check for tantivy FTS index files
+            fts_index = repo_dir / ".code-indexer" / "tantivy_index"
             if fts_index.exists():
                 # Check for meta.json or any index files
-                has_fts_files = (fts_index / "meta.json").exists() or any(
+                return (fts_index / "meta.json").exists() or any(
                     fts_index.rglob("*.json")
                 )
-
-            return has_vector_files and has_fts_files
+            return False
 
         elif index_type == "temporal":
             # Temporal index detection is not yet implemented - always allow creation
@@ -2033,10 +2066,10 @@ class GoldenRepoManager:
         repo_dir = Path(actual_path)
 
         # Check each index type using helper method
+        # Return separate semantic and fts status (not combined semantic_fts)
         indexes = {
-            "semantic_fts": self._get_index_status(
-                repo_dir, "semantic_fts", golden_repo
-            ),
+            "semantic": self._get_index_status(repo_dir, "semantic", golden_repo),
+            "fts": self._get_index_status(repo_dir, "fts", golden_repo),
             "temporal": self._get_index_status(repo_dir, "temporal", golden_repo),
             "scip": self._get_index_status(repo_dir, "scip", golden_repo),
         }
@@ -2051,21 +2084,25 @@ class GoldenRepoManager:
 
         Args:
             repo_dir: Repository directory path
-            index_type: Index type ("semantic_fts", "temporal", "scip")
+            index_type: Index type ("semantic", "fts", "temporal", "scip")
             golden_repo: Golden repository object
 
         Returns:
             Status dict with exists, path, last_updated keys
         """
+        # Map index types to their filesystem paths
         path_map = {
-            "semantic_fts": "tantivy_index",
-            "temporal": "index",
-            "scip": "scip",
+            "semantic": "index",  # Semantic index directory
+            "fts": "tantivy_index",  # Full-text search (Tantivy) directory
+            "temporal": "index",  # Temporal uses same index directory
+            "scip": "scip",  # SCIP directory
         }
 
         exists = self._index_exists(golden_repo, index_type)
         if exists:
-            index_path = repo_dir / ".code-indexer" / path_map[index_type]
+            index_path = (
+                repo_dir / ".code-indexer" / path_map.get(index_type, index_type)
+            )
             return {
                 "exists": True,
                 "path": str(index_path),

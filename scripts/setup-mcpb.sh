@@ -17,7 +17,7 @@ CONFIG_DIR="$HOME/.mcpb"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 INSTALL_DIR="$HOME/.local/bin"
 MCPB_BINARY="$INSTALL_DIR/mcpb"
-GITHUB_REPO="jsbattig/code-indexer"
+GITHUB_REPO="LightspeedDMS/code-indexer"
 MCPB_VERSION="v8.3.0"
 
 # Print functions

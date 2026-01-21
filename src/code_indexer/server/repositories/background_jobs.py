@@ -909,12 +909,15 @@ class BackgroundJobManager:
         """
         Get recent jobs filtered by time period.
 
+        Story #4 AC1: Includes RUNNING, PENDING, COMPLETED, and FAILED jobs.
+        Running/pending jobs appear at the top of the list before completed jobs.
+
         Args:
             time_filter: Time filter string ("24h", "7d", "30d"), default "30d"
             limit: Maximum number of jobs to return, default 20
 
         Returns:
-            List of job dictionaries sorted by completion time (newest first)
+            List of job dictionaries with running/pending first, then sorted by time
         """
         cutoff_time = self._calculate_cutoff(time_filter)
 
@@ -922,12 +925,21 @@ class BackgroundJobManager:
             recent_jobs = []
 
             for job in self.jobs.values():
-                # Only include completed or failed jobs within time range
-                if (
-                    job.status in [JobStatus.COMPLETED, JobStatus.FAILED]
-                    and job.completed_at
-                    and job.completed_at >= cutoff_time
-                ):
+                # Story #4 AC1: Include RUNNING, PENDING, COMPLETED, FAILED jobs
+                # For running/pending jobs, use created_at for time filter
+                # For completed/failed jobs, use completed_at for time filter
+                include_job = False
+
+                if job.status in [JobStatus.RUNNING, JobStatus.PENDING]:
+                    # Running/pending jobs: filter by created_at
+                    if job.created_at >= cutoff_time:
+                        include_job = True
+                elif job.status in [JobStatus.COMPLETED, JobStatus.FAILED]:
+                    # Completed/failed jobs: filter by completed_at
+                    if job.completed_at and job.completed_at >= cutoff_time:
+                        include_job = True
+
+                if include_job:
                     job_dict = {
                         "job_id": job.job_id,
                         "operation_type": job.operation_type,
@@ -946,16 +958,33 @@ class BackgroundJobManager:
                     }
                     recent_jobs.append(job_dict)
 
-            # Sort by completion time (newest first)
-            # Note: completed_at is an ISO format datetime string from .isoformat()
-            recent_jobs.sort(
-                key=lambda x: (
-                    datetime.fromisoformat(x["completed_at"])
-                    if isinstance(x["completed_at"], str) and x["completed_at"]
-                    else datetime.min.replace(tzinfo=timezone.utc)
-                ),
-                reverse=True,
-            )
+            # Story #4 AC1: Sort with running/pending jobs first, then by time
+            # Priority: RUNNING (0) > PENDING (1) > COMPLETED/FAILED (2)
+            # Within each priority, sort by relevant time (newest first)
+            def sort_key(x):
+                status = x["status"]
+                if status == "running":
+                    priority = 0
+                    # Use started_at for running jobs, fallback to created_at
+                    time_str = x["started_at"] or x["created_at"]
+                elif status == "pending":
+                    priority = 1
+                    # Use created_at for pending jobs
+                    time_str = x["created_at"]
+                else:
+                    priority = 2
+                    # Use completed_at for completed/failed jobs
+                    time_str = x["completed_at"] or x["created_at"]
+
+                # Parse time for sorting (newest first = reverse, so negate)
+                if time_str:
+                    dt = datetime.fromisoformat(time_str)
+                else:
+                    dt = datetime.min.replace(tzinfo=timezone.utc)
+
+                return (priority, -dt.timestamp())
+
+            recent_jobs.sort(key=sort_key)
 
             # Return up to limit jobs
             return recent_jobs[:limit]

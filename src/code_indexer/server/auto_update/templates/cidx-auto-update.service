@@ -1,6 +1,6 @@
 [Unit]
 Description=CIDX Auto-Update Service
-Documentation=https://github.com/jsbattig/code-indexer
+Documentation=https://github.com/LightspeedDMS/code-indexer
 After=network.target
 
 [Service]

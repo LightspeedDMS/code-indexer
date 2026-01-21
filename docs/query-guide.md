@@ -734,13 +734,29 @@ cidx query "anything" --time-range-all --quiet
 
 ## Fact-Check Summary
 
-**Status**: ✅ FACT-CHECKED (2025-12-31)
+**Status**: FACT-CHECKED (2025-01-20)
 
-**Verification Scope**: All technical claims, parameter specifications, performance metrics, and code examples validated against CIDX implementation (commit: 464579c).
+**Verification Scope**: All technical claims, parameter specifications, performance metrics, and code examples validated against CIDX implementation v8.6.0.
 
 ### Corrections Made
 
-1. **Temporal Index File Location** (Line 388):
+1. **Missing --repo and --repos Parameters** (2025-01-20):
+   - **Issue**: Parameters existed in CLI but were not documented
+   - **Corrected**: Added to parameter reference table
+   - **Source**: `src/code_indexer/cli.py` lines 4426-4433
+   - **--repo**: Query a global repository by alias (remote mode)
+   - **--repos**: Query multiple repositories, comma-separated (remote mode)
+
+2. **min_score Default Value** (2025-01-20):
+   - **Original**: Default documented as 0.5
+   - **Corrected**: Default is None (Optional[float] with no default)
+   - **Source**: `src/code_indexer/cli.py` line 4446
+
+3. **Parameter Count** (2025-01-20):
+   - **Original**: "23 Query Parameters Total"
+   - **Corrected**: 25 parameters (added --repo and --repos)
+
+4. **Temporal Index File Location** (2025-12-31):
    - **Original**: `.code-indexer/index/*/temporal_chunks.json`
    - **Corrected**: `.code-indexer/index/*/temporal_meta.json`
    - **Source**: Verified in `src/code_indexer/services/temporal/temporal_indexer.py` line 155-156 and actual file existence at `/home/jsbattig/Dev/code-indexer/.code-indexer/index/code-indexer-temporal/temporal_meta.json`
@@ -772,10 +788,11 @@ cidx query "anything" --time-range-all --quiet
 
 #### Query Parameters (Lines 173-766)
 
-✅ **23 Query Parameters Total**:
-- **Status**: ACCURATE
-- **Source**: `src/code_indexer/query/QUERY_PARAMETERS.md` documents all 23 parameters
-- **Breakdown**: 18 CLI-exposed parameters + 5 API-only parameters (at_commit, include_removed, show_evolution, evolution_limit, file_extensions)
+✅ **25 Query Parameters Total**:
+- **Status**: ACCURATE (corrected 2025-01-20)
+- **Source**: `src/code_indexer/cli.py` query command definition (lines 4311-4464)
+- **Breakdown**: 20 CLI-exposed parameters + 5 API-only parameters (at_commit, include_removed, show_evolution, evolution_limit, file_extensions)
+- **Note**: Added --repo and --repos parameters (remote mode support) previously missing from documentation
 
 ✅ **Parameter Names and Defaults**:
 - **Status**: ACCURATE
@@ -861,21 +878,21 @@ cidx query "anything" --time-range-all --quiet
 - **Medium Confidence (?)**: ~20ms semantic search performance - no benchmark evidence, requires manual testing
 - **Corrections Applied**: 1 factual error corrected (temporal index file path)
 
-**Fact-checker**: Claude Sonnet 4.5 (fact-checking agent)
-**Verification Date**: 2025-12-31
-**Commit Reference**: 464579c
+**Fact-checker**: Claude Opus 4.5 (fact-checking agent)
+**Verification Date**: 2025-01-20
+**Version Reference**: v8.6.0
 
 ---
 
 ## Parameter Reference
 
-Complete list of all 23 query parameters with CLI flags, types, and defaults. For implementation details, see [QUERY_PARAMETERS.md](../src/code_indexer/query/QUERY_PARAMETERS.md).
+Complete list of all 25 query parameters with CLI flags, types, and defaults. For implementation details, see [QUERY_PARAMETERS.md](../src/code_indexer/query/QUERY_PARAMETERS.md).
 
 | Parameter | CLI Flag | Type | Default | Modes | Description |
 |-----------|----------|------|---------|-------|-------------|
 | query | QUERY | string | required | All | Search query text |
 | limit | --limit | int | 10 | All | Max results (1-100) |
-| min_score | --min-score | float | 0.5 | All | Min similarity (0.0-1.0) |
+| min_score | --min-score | float | None | All | Min similarity (0.0-1.0) |
 | language | --language | string | None | All | Filter by language |
 | path_filter | --path-filter | string | None | All | Include path pattern |
 | exclude_language | --exclude-language | string | None | All | Exclude language |
@@ -891,6 +908,8 @@ Complete list of all 23 query parameters with CLI flags, types, and defaults. Fo
 | diff_type | --diff-type | string | None | Temporal | Diff type filter |
 | author | --author | string | None | Temporal | Author filter |
 | chunk_type | --chunk-type | enum | None | Temporal | commit_message/commit_diff |
+| repo | --repo | string | None | Remote | Query global repo by alias |
+| repos | --repos | string | None | Remote | Query multiple repos (comma-separated) |
 
 **API-Only Parameters** (not in CLI):
 - file_extensions (array) - Filter by extensions

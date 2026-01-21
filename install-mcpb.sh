@@ -12,7 +12,7 @@ if [ $# -ne 3 ]; then
     echo "Usage: bash install-mcpb.sh SERVER_URL USERNAME PASSWORD"
     echo ""
     echo "Example:"
-    echo "  curl -fsSL https://raw.githubusercontent.com/jsbattig/code-indexer/master/install-mcpb.sh | bash -s -- \"https://linner.ddns.net:8383\" \"admin\" \"admin\""
+    echo "  curl -fsSL https://raw.githubusercontent.com/LightspeedDMS/code-indexer/master/install-mcpb.sh | bash -s -- \"https://linner.ddns.net:8383\" \"admin\" \"admin\""
     echo ""
     exit 1
 fi
@@ -47,7 +47,7 @@ else
     echo "Cloning repository..."
     mkdir -p "$HOME/Dev"
     cd "$HOME/Dev"
-    git clone https://github.com/jsbattig/code-indexer.git
+    git clone https://github.com/LightspeedDMS/code-indexer.git
     cd code-indexer
 fi
 

@@ -559,6 +559,37 @@ class GroupAccessManager:
         finally:
             conn.close()
 
+    def remove_user_from_group(self, user_id: str, group_id: int) -> bool:
+        """
+        Remove a user from a specific group.
+
+        Only removes the membership if the user is actually in the specified group.
+        This is an idempotent operation - returns True even if the user wasn't
+        in the group (no-op).
+
+        Args:
+            user_id: The user's unique identifier
+            group_id: The group ID to remove the user from
+
+        Returns:
+            True if operation succeeded (user removed or wasn't in that group)
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            # Only delete if user is actually in this specific group
+            cursor.execute(
+                """
+                DELETE FROM user_group_membership
+                WHERE user_id = ? AND group_id = ?
+            """,
+                (user_id, group_id),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
     def get_user_group(self, user_id: str) -> Optional[Group]:
         """
         Get the group a user belongs to.

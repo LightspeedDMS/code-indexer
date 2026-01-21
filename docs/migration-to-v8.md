@@ -415,8 +415,8 @@ cidx query "test query"
 
 ### Support Channels
 
-- **GitHub Issues**: https://github.com/jsbattig/code-indexer/issues
-- **Discussions**: https://github.com/jsbattig/code-indexer/discussions
+- **GitHub Issues**: https://github.com/LightspeedDMS/code-indexer/issues
+- **Discussions**: https://github.com/LightspeedDMS/code-indexer/discussions
 
 ### Reporting Migration Issues
 

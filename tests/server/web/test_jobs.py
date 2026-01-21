@@ -18,6 +18,56 @@ from .conftest import WebTestInfrastructure
 class TestJobListDisplay:
     """Tests for job list display (AC1)."""
 
+    def test_jobs_page_displays_repo_alias(
+        self, web_infrastructure: WebTestInfrastructure, admin_user: dict
+    ):
+        """
+        Bug fix: Jobs with repo_alias should display repository name, not "N/A".
+
+        Given I am authenticated as an admin
+        And there is a job with repo_alias set
+        When I view the jobs page
+        Then I see the repository name from repo_alias (not "N/A" or "Unknown")
+        """
+        from code_indexer.server.repositories.background_jobs import BackgroundJob, JobStatus
+        from datetime import datetime, timezone
+        import uuid
+
+        # Create a job with repo_alias set
+        job_id = str(uuid.uuid4())
+        test_repo_alias = "test-golden-repo"
+
+        job = BackgroundJob(
+            job_id=job_id,
+            operation_type="add_golden_repo",
+            status=JobStatus.COMPLETED,
+            created_at=datetime.now(timezone.utc),
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+            result=None,
+            error=None,
+            progress=100,
+            username="testadmin",
+            repo_alias=test_repo_alias,  # This should be displayed
+        )
+
+        # Add the job to the background job manager
+        assert web_infrastructure.app is not None
+        bg_manager = web_infrastructure.app.state.background_job_manager
+        bg_manager.jobs[job_id] = job
+
+        # Get authenticated client and fetch jobs page
+        client = web_infrastructure.get_authenticated_client(
+            admin_user["username"], admin_user["password"]
+        )
+        response = client.get("/admin/jobs")
+
+        assert response.status_code == 200
+        # The repo_alias should appear in the page, not "N/A" or "Unknown"
+        assert (
+            test_repo_alias in response.text
+        ), f"Expected '{test_repo_alias}' in page, but it was not found. Check if repo_alias is being used for repository_name."
+
     def test_jobs_page_requires_auth(self, web_client: TestClient):
         """
         AC1: Unauthenticated access to /admin/jobs redirects to login.

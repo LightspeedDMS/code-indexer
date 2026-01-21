@@ -1,5 +1,29 @@
 # Release Notes
 
+**Current Version: 8.6.0** | [Full Changelog](CHANGELOG.md)
+
+---
+
+## Recent Releases (v7.0.0+)
+
+For release notes on versions 7.0.0 and later, please see **[CHANGELOG.md](CHANGELOG.md)**, which contains comprehensive documentation of all features, fixes, and breaking changes.
+
+**Major releases since 7.0.0:**
+- **8.6.x** (Jan 2026) - Documentation overhaul, comprehensive feature documentation
+- **8.5.x** (Jan 2026) - Claude Delegation, OTEL Telemetry, Group Security, Auto-Discovery, SQLite Migration
+- **8.4.x** (Dec 2025) - MCP Tool Documentation, SCIP Query Improvements, Windows Fixes
+- **8.2.x** (Nov 2025) - Claude Desktop MCPB Integration, SSE Streaming
+- **8.0.x** (Nov 2025) - Filesystem Vector Store (container-free), CLI/Daemon mode consolidation
+- **7.x** (Oct-Nov 2025) - Multi-user server, Golden Repository Management, CoW Cloning
+
+---
+
+## Legacy Release Notes (v6.x and earlier)
+
+The sections below contain detailed historical release notes with problem analysis, solutions, and verification details for versions prior to 7.0.0.
+
+---
+
 ## Version 6.5.0 - Critical Bug Fix: Override Directory Exclusions
 
 **Release Date**: October 21, 2025
@@ -398,7 +422,7 @@ code-indexer
 pip install code-indexer
 
 # Now WORKS on Alpine (no build tools needed!)
-pip install git+https://github.com/jsbattig/code-indexer.git@v6.2.0
+pip install git+https://github.com/LightspeedDMS/code-indexer.git@v6.2.0
 ```
 
 ---
@@ -964,7 +988,7 @@ This release migrates from the abandoned **passlib** library to the modern **pwd
 ```bash
 pipx upgrade code-indexer
 # OR
-pipx install git+https://github.com/jsbattig/code-indexer.git@v5.7.0
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v5.7.0
 ```
 
 ---

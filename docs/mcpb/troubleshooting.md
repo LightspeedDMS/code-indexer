@@ -1251,7 +1251,7 @@ python3 --version >> platform.txt
 ### Contact Support
 
 Provide diagnostic information to:
-- GitHub issues: https://github.com/jsbattig/code-indexer/issues
+- GitHub issues: https://github.com/LightspeedDMS/code-indexer/issues
 - CIDX server administrator (for server-side issues)
 
 ## Version Information

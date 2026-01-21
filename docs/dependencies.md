@@ -4,7 +4,7 @@ This project supports both modern and traditional Python dependency management a
 
 ## For Users
 
-- **Modern Approach**: Use `pip install git+https://github.com/jsbattig/code-indexer.git` (dependencies automatically resolved from `pyproject.toml`)
+- **Modern Approach**: Use `pip install git+https://github.com/LightspeedDMS/code-indexer.git` (dependencies automatically resolved from `pyproject.toml`)
 - **Traditional Approach**: Use `pip install -r requirements.txt` for production dependencies only
 
 ## For Developers

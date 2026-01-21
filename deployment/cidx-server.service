@@ -1,6 +1,6 @@
 [Unit]
 Description=CIDX Server - Multi-User Semantic Code Search Server
-Documentation=https://github.com/jsbattig/code-indexer
+Documentation=https://github.com/LightspeedDMS/code-indexer
 After=network.target
 
 [Service]

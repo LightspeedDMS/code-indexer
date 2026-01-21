@@ -620,7 +620,7 @@ class TestGoldenRepoManager:
 
         with pytest.raises(
             ValueError,
-            match="Invalid index_type: invalid_type. Must be one of: semantic_fts, temporal, scip",
+            match="Invalid index_type: invalid_type. Must be one of: semantic, fts, temporal, scip",
         ):
             golden_repo_manager.add_index_to_golden_repo(
                 alias="test-repo", index_type="invalid_type", submitter_username="admin"
@@ -668,8 +668,8 @@ class TestGoldenRepoManager:
             # No job should be created when index already exists
             golden_repo_manager.background_job_manager.submit_job.assert_not_called()
 
-    def test_background_worker_semantic_fts_execution(self, golden_repo_manager):
-        """Test background worker executes correct command for semantic_fts index (AC5)."""
+    def test_background_worker_semantic_execution(self, golden_repo_manager):
+        """Test background worker executes correct command for semantic index (AC5)."""
         # Add test repository with actual path
         test_repo = GoldenRepo(
             alias="test-repo",
@@ -686,7 +686,7 @@ class TestGoldenRepoManager:
 
             # Call add_index_to_golden_repo
             golden_repo_manager.add_index_to_golden_repo(
-                alias="test-repo", index_type="semantic_fts", submitter_username="admin"
+                alias="test-repo", index_type="semantic", submitter_username="admin"
             )
 
             # Get the background worker function
@@ -699,13 +699,54 @@ class TestGoldenRepoManager:
 
                 result = background_worker()
 
-                # Verify cidx index --fts was called with correct cwd
+                # Verify cidx index was called (semantic only, no --fts flag)
                 mock_run.assert_called_once()
                 call_args = mock_run.call_args
                 command = call_args[0][0]
                 cwd = call_args[1]["cwd"]
 
-                assert command == ["cidx", "index", "--fts"]
+                assert command == ["cidx", "index"]
+                assert cwd == test_repo.clone_path
+                assert result["success"] is True
+
+    def test_background_worker_fts_execution(self, golden_repo_manager):
+        """Test background worker executes correct command for FTS index (AC5)."""
+        # Add test repository with actual path
+        test_repo = GoldenRepo(
+            alias="test-repo",
+            repo_url="https://github.com/test/repo.git",
+            default_branch="main",
+            clone_path=os.path.join(golden_repo_manager.golden_repos_dir, "test-repo"),
+            created_at="2023-01-01T00:00:00Z",
+        )
+        golden_repo_manager.golden_repos["test-repo"] = test_repo
+
+        # Mock index existence check
+        with patch.object(golden_repo_manager, "_index_exists") as mock_index_exists:
+            mock_index_exists.return_value = False
+
+            # Call add_index_to_golden_repo
+            golden_repo_manager.add_index_to_golden_repo(
+                alias="test-repo", index_type="fts", submitter_username="admin"
+            )
+
+            # Get the background worker function
+            call_args = golden_repo_manager.background_job_manager.submit_job.call_args
+            background_worker = call_args[1]["func"]
+
+            # Execute the background worker and verify command
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+                result = background_worker()
+
+                # Verify cidx index --fts-only was called with correct cwd
+                mock_run.assert_called_once()
+                call_args = mock_run.call_args
+                command = call_args[0][0]
+                cwd = call_args[1]["cwd"]
+
+                assert command == ["cidx", "index", "--fts-only"]
                 assert cwd == test_repo.clone_path
                 assert result["success"] is True
 
@@ -811,7 +852,8 @@ class TestGoldenRepoManager:
         """Test that subprocess calls do NOT include timeout parameter for long-running operations.
 
         Background jobs should run without timeout limits:
-        - semantic_fts indexing: 10-30 minutes for medium repos
+        - semantic indexing: 10-30 minutes for medium repos
+        - fts indexing: 5-15 minutes for medium repos
         - temporal indexing: 30-60 minutes for large repos
         - SCIP generation: can take HOURS for large repos
         """
@@ -827,7 +869,7 @@ class TestGoldenRepoManager:
         with patch.object(golden_repo_manager, "_index_exists") as mock_index_exists:
             mock_index_exists.return_value = False
 
-            for index_type in ["semantic_fts", "temporal", "scip"]:
+            for index_type in ["semantic", "fts", "temporal", "scip"]:
                 golden_repo_manager.add_index_to_golden_repo(
                     alias="test-repo", index_type=index_type, submitter_username="admin"
                 )
@@ -868,7 +910,7 @@ class TestGoldenRepoManager:
             mock_index_exists.return_value = False
 
             golden_repo_manager.add_index_to_golden_repo(
-                alias="test-repo", index_type="semantic_fts", submitter_username="admin"
+                alias="test-repo", index_type="semantic", submitter_username="admin"
             )
 
             # Get the background worker function
@@ -935,10 +977,10 @@ class TestGoldenRepoManager:
                 assert "--diff-context" in command
                 assert "5" in command
 
-    def test_index_exists_semantic_fts_validates_actual_files(
+    def test_index_exists_semantic_validates_actual_files(
         self, golden_repo_manager, temp_data_dir
     ):
-        """Test that _index_exists checks for actual index files, not just directories (CRITICAL ISSUE #9)."""
+        """Test that _index_exists checks for actual semantic index files, not just directories (CRITICAL ISSUE #9)."""
         # Create test repository
         test_repo = GoldenRepo(
             alias="test-repo",
@@ -950,23 +992,214 @@ class TestGoldenRepoManager:
 
         # Create directories but no actual index files
         index_dir = os.path.join(test_repo.clone_path, ".code-indexer", "index")
-        fts_dir = os.path.join(test_repo.clone_path, ".code-indexer", "tantivy_index")
         os.makedirs(index_dir, exist_ok=True)
-        os.makedirs(fts_dir, exist_ok=True)
 
         # Should return False because directories are empty
-        assert golden_repo_manager._index_exists(test_repo, "semantic_fts") is False
+        assert golden_repo_manager._index_exists(test_repo, "semantic") is False
 
         # Create actual index files
         collection_dir = os.path.join(index_dir, "test_collection")
         os.makedirs(collection_dir, exist_ok=True)
         with open(os.path.join(collection_dir, "vector_1.json"), "w") as f:
             f.write("{}")
+
+        # Now should return True
+        assert golden_repo_manager._index_exists(test_repo, "semantic") is True
+
+    def test_index_exists_fts_validates_actual_files(
+        self, golden_repo_manager, temp_data_dir
+    ):
+        """Test that _index_exists checks for actual FTS index files, not just directories."""
+        # Create test repository
+        test_repo = GoldenRepo(
+            alias="test-repo",
+            repo_url="https://github.com/test/repo.git",
+            default_branch="main",
+            clone_path=os.path.join(temp_data_dir, "test-repo"),
+            created_at="2023-01-01T00:00:00Z",
+        )
+
+        # Create directories but no actual index files
+        fts_dir = os.path.join(test_repo.clone_path, ".code-indexer", "tantivy_index")
+        os.makedirs(fts_dir, exist_ok=True)
+
+        # Should return False because directories are empty
+        assert golden_repo_manager._index_exists(test_repo, "fts") is False
+
+        # Create actual index files
         with open(os.path.join(fts_dir, "meta.json"), "w") as f:
             f.write("{}")
 
         # Now should return True
-        assert golden_repo_manager._index_exists(test_repo, "semantic_fts") is True
+        assert golden_repo_manager._index_exists(test_repo, "fts") is True
+
+    def test_add_index_always_runs_cidx_init_idempotently(
+        self, golden_repo_manager, temp_data_dir
+    ):
+        """Test that add_index_to_golden_repo always runs cidx init before cidx index.
+
+        Idempotent behavior: cidx init is always called regardless of .code-indexer state.
+        Success (exit 0) means repo was initialized.
+        """
+        # Create test repository with actual clone path
+        clone_path = os.path.join(temp_data_dir, "golden-repos", "test-repo")
+        os.makedirs(clone_path, exist_ok=True)
+
+        test_repo = GoldenRepo(
+            alias="test-repo",
+            repo_url="https://github.com/test/repo.git",
+            default_branch="main",
+            clone_path=clone_path,
+            created_at="2023-01-01T00:00:00Z",
+        )
+        golden_repo_manager.golden_repos["test-repo"] = test_repo
+
+        # Mock index existence check to return False (no existing index)
+        with patch.object(golden_repo_manager, "_index_exists") as mock_index_exists:
+            mock_index_exists.return_value = False
+
+            golden_repo_manager.add_index_to_golden_repo(
+                alias="test-repo", index_type="semantic", submitter_username="admin"
+            )
+
+            # Get the background worker function
+            call_args = golden_repo_manager.background_job_manager.submit_job.call_args
+            background_worker = call_args[1]["func"]
+
+            # Execute and verify cidx init is called first (always, regardless of state)
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                background_worker()
+
+                # Verify subprocess.run was called at least twice:
+                # 1. cidx init (always called for idempotent behavior)
+                # 2. cidx index
+                assert mock_run.call_count >= 2
+
+                # First call should be cidx init
+                first_call = mock_run.call_args_list[0]
+                first_command = first_call[0][0]
+                assert first_command == ["cidx", "init"], f"Expected first command to be ['cidx', 'init'], got {first_command}"
+
+                # Second call should be cidx index
+                second_call = mock_run.call_args_list[1]
+                second_command = second_call[0][0]
+                assert "cidx" in second_command
+                assert "index" in second_command
+
+    def test_add_index_handles_init_already_exists_idempotently(
+        self, golden_repo_manager, temp_data_dir
+    ):
+        """Test that add_index_to_golden_repo handles 'already exists' from cidx init gracefully.
+
+        Idempotent behavior: Even when .code-indexer already exists and cidx init returns
+        exit code 1 with 'Configuration already exists', we should continue and run cidx index.
+        This is the expected path for re-indexing an already-initialized repo.
+        """
+        # Create test repository with actual clone path that includes .code-indexer
+        clone_path = os.path.join(temp_data_dir, "golden-repos", "test-repo")
+        code_indexer_dir = os.path.join(clone_path, ".code-indexer")
+        os.makedirs(code_indexer_dir, exist_ok=True)
+
+        test_repo = GoldenRepo(
+            alias="test-repo",
+            repo_url="https://github.com/test/repo.git",
+            default_branch="main",
+            clone_path=clone_path,
+            created_at="2023-01-01T00:00:00Z",
+        )
+        golden_repo_manager.golden_repos["test-repo"] = test_repo
+
+        # Mock index existence check to return False (no existing index)
+        with patch.object(golden_repo_manager, "_index_exists") as mock_index_exists:
+            mock_index_exists.return_value = False
+
+            golden_repo_manager.add_index_to_golden_repo(
+                alias="test-repo", index_type="semantic", submitter_username="admin"
+            )
+
+            # Get the background worker function
+            call_args = golden_repo_manager.background_job_manager.submit_job.call_args
+            background_worker = call_args[1]["func"]
+
+            # Simulate cidx init returning "already exists" error (exit code 1)
+            # then cidx index succeeding
+            def mock_subprocess_run(command, **kwargs):
+                if command == ["cidx", "init"]:
+                    # Simulate already initialized - exit code 1 with "already exists" message
+                    return MagicMock(
+                        returncode=1,
+                        stdout="",
+                        stderr="Configuration already exists at .code-indexer/config.json. Use --force to overwrite.",
+                    )
+                else:
+                    # cidx index succeeds
+                    return MagicMock(returncode=0, stdout="Indexed successfully", stderr="")
+
+            with patch("subprocess.run", side_effect=mock_subprocess_run) as mock_run:
+                # Should NOT raise an error - "already exists" is acceptable
+                background_worker()
+
+                # Verify both commands were called
+                assert mock_run.call_count >= 2
+
+                # First call should be cidx init (always called for idempotent behavior)
+                first_call = mock_run.call_args_list[0]
+                first_command = first_call[0][0]
+                assert first_command == ["cidx", "init"]
+
+                # Second call should be cidx index (should proceed despite init "failure")
+                second_call = mock_run.call_args_list[1]
+                second_command = second_call[0][0]
+                assert second_command == ["cidx", "index"]
+
+    def test_add_index_raises_error_on_real_init_failure(
+        self, golden_repo_manager, temp_data_dir
+    ):
+        """Test that add_index_to_golden_repo raises error when cidx init fails for real reasons.
+
+        When cidx init fails with an error OTHER than 'already exists', we should
+        raise GoldenRepoError because something is genuinely wrong.
+        """
+        # Create test repository with actual clone path
+        clone_path = os.path.join(temp_data_dir, "golden-repos", "test-repo")
+        os.makedirs(clone_path, exist_ok=True)
+
+        test_repo = GoldenRepo(
+            alias="test-repo",
+            repo_url="https://github.com/test/repo.git",
+            default_branch="main",
+            clone_path=clone_path,
+            created_at="2023-01-01T00:00:00Z",
+        )
+        golden_repo_manager.golden_repos["test-repo"] = test_repo
+
+        # Mock index existence check to return False (no existing index)
+        with patch.object(golden_repo_manager, "_index_exists") as mock_index_exists:
+            mock_index_exists.return_value = False
+
+            golden_repo_manager.add_index_to_golden_repo(
+                alias="test-repo", index_type="semantic", submitter_username="admin"
+            )
+
+            # Get the background worker function
+            call_args = golden_repo_manager.background_job_manager.submit_job.call_args
+            background_worker = call_args[1]["func"]
+
+            # Simulate cidx init failing with a REAL error (not "already exists")
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=1,
+                    stdout="",
+                    stderr="Permission denied: cannot create .code-indexer directory",
+                )
+
+                # Should raise GoldenRepoError for real init failures
+                with pytest.raises(GoldenRepoError) as exc_info:
+                    background_worker()
+
+                assert "Failed to initialize repo before indexing" in str(exc_info.value)
+                assert "Permission denied" in str(exc_info.value)
 
 
 class TestGoldenRepo:

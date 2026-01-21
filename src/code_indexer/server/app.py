@@ -91,6 +91,8 @@ from .routers.groups import (
 )
 from .routes.multi_query_routes import router as multi_query_router
 from .routes.scip_multi_routes import router as scip_multi_router
+# TEMP: Commented for testing bug #751 - cicd has circular import
+# from .routes.cicd import router as cicd_router
 from .models.branch_models import BranchListResponse
 from .models.activated_repository import ActivatedRepository
 from .services.branch_service import BranchService
@@ -498,18 +500,53 @@ class GoldenRepoInfo(BaseModel):
 
 
 class AddIndexRequest(BaseModel):
-    """Request model for adding index to golden repository."""
+    """Request model for adding index to golden repository.
 
-    index_type: str = Field(
-        ..., description="Index type: semantic_fts, temporal, or scip"
+    Supports two modes:
+    - Single index: index_type (string) - for backward compatibility
+    - Multi-select: index_types (array) - for UI multi-select
+
+    At least one of index_type or index_types must be provided.
+    If both are provided, index_types takes precedence.
+    """
+
+    index_type: Optional[str] = Field(
+        None, description="Single index type: semantic, fts, temporal, or scip"
     )
+    index_types: Optional[List[str]] = Field(
+        None, description="Array of index types for multi-select: semantic, fts, temporal, scip"
+    )
+
+    @model_validator(mode="after")
+    def validate_at_least_one_type(self) -> "AddIndexRequest":
+        """Ensure at least one of index_type or index_types is provided."""
+        if not self.index_type and not self.index_types:
+            raise ValueError("Either index_type or index_types must be provided")
+        if self.index_types is not None and len(self.index_types) == 0:
+            raise ValueError("index_types cannot be empty")
+        return self
+
+    def get_index_types(self) -> List[str]:
+        """Get the list of index types to process.
+
+        Returns index_types if provided, otherwise wraps index_type in a list.
+        """
+        if self.index_types:
+            return self.index_types
+        return [self.index_type] if self.index_type else []
 
 
 class AddIndexResponse(BaseModel):
-    """Response model for add index operation."""
+    """Response model for add index operation.
 
-    job_id: str
-    status: str
+    Supports two modes:
+    - Single job: job_id (string), status - for backward compatibility
+    - Multi-job: job_ids (array), statuses - for multi-select
+    """
+
+    job_id: Optional[str] = None  # Single job ID (backward compatible)
+    job_ids: Optional[List[str]] = None  # Multiple job IDs (multi-select)
+    status: str = "pending"
 
 
 class IndexInfo(BaseModel):
@@ -4276,49 +4313,69 @@ def create_app() -> FastAPI:
         ),
     ):
         """
-        Add an index type to a golden repository (admin only) - async operation.
+        Add index type(s) to a golden repository (admin only) - async operation.
+
+        Supports both single and multi-select modes:
+        - Single: { "index_type": "semantic" } - backward compatible
+        - Multi: { "index_types": ["semantic", "fts", "temporal"] }
 
         Args:
             alias: Alias of the golden repository
-            request: AddIndexRequest with index_type
+            request: AddIndexRequest with index_type or index_types
             current_user: Current authenticated admin user
 
         Returns:
-            AddIndexResponse with job_id and status
+            AddIndexResponse with job_id (single) or job_ids (multi)
 
         Raises:
             HTTPException 404: If golden repository not found
-            HTTPException 400: If invalid index_type
+            HTTPException 400: If invalid index_type(s)
             HTTPException 409: If index already exists
             HTTPException 500: If job submission fails
         """
-        # AC4: Validate index_type at endpoint level to return 400
-        valid_index_types = ["semantic_fts", "temporal", "scip"]
-        if request.index_type not in valid_index_types:
+        from fastapi.responses import JSONResponse
+
+        # Get list of index types to process
+        index_types = request.get_index_types()
+
+        # Validate all index types first before submitting any jobs
+        valid_index_types = ["semantic", "fts", "temporal", "scip"]
+        invalid_types = [t for t in index_types if t not in valid_index_types]
+        if invalid_types:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid index_type: {request.index_type}. Must be one of: {', '.join(valid_index_types)}",
+                detail=f"Invalid index_type(s): {', '.join(invalid_types)}. Must be one of: {', '.join(valid_index_types)}",
             )
 
         try:
-            # Call golden_repo_manager.add_index_to_golden_repo
-            job_id = golden_repo_manager.add_index_to_golden_repo(
-                alias=alias,
-                index_type=request.index_type,
-                submitter_username=current_user.username,
-            )
+            # Submit job for each index type
+            job_ids = []
+            for index_type in index_types:
+                job_id = golden_repo_manager.add_index_to_golden_repo(
+                    alias=alias,
+                    index_type=index_type,
+                    submitter_username=current_user.username,
+                )
+                job_ids.append(job_id)
 
-            # Build response with Location header
-            response = AddIndexResponse(job_id=job_id, status="pending")
-
-            # Add Location header to response
-            from fastapi.responses import JSONResponse
-
-            return JSONResponse(
-                content=response.model_dump(),
-                status_code=202,
-                headers={"Location": f"/api/jobs/{job_id}"},
-            )
+            # Build response based on single vs multi-select
+            if len(job_ids) == 1:
+                # Single job - backward compatible response
+                response = AddIndexResponse(job_id=job_ids[0], status="pending")
+                return JSONResponse(
+                    content=response.model_dump(),
+                    status_code=202,
+                    headers={"Location": f"/api/jobs/{job_ids[0]}"},
+                )
+            else:
+                # Multi-job response
+                response = AddIndexResponse(job_ids=job_ids, status="pending")
+                return JSONResponse(
+                    content=response.model_dump(),
+                    status_code=202,
+                    # Location header points to first job (can be used to check overall status)
+                    headers={"Location": f"/api/jobs/{job_ids[0]}"},
+                )
 
         except ValueError as e:
             error_msg = str(e)
@@ -4366,9 +4423,9 @@ def create_app() -> FastAPI:
 
         golden_repo = golden_repo_manager.golden_repos[alias]
 
-        # Query index presence for all three types
+        # Query index presence for all four individual types
         indexes = {}
-        for index_type in ["semantic_fts", "temporal", "scip"]:
+        for index_type in ["semantic", "fts", "temporal", "scip"]:
             present = golden_repo_manager._index_exists(golden_repo, index_type)
             indexes[index_type] = IndexInfo(present=present)
 
@@ -7556,6 +7613,8 @@ def create_app() -> FastAPI:
     app.include_router(cache_router)
     app.include_router(multi_query_router)
     app.include_router(scip_multi_router)
+    # TEMP: Commented for testing bug #751
+    # app.include_router(cicd_router)
     app.include_router(groups_router)
     app.include_router(users_router)
     app.include_router(audit_router)
@@ -7608,7 +7667,9 @@ def create_app() -> FastAPI:
         return {
             "resource": f"{issuer_url}/mcp",
             "authorization_servers": [issuer_url],
+            "bearer_methods_supported": ["header"],
             "scopes_supported": ["mcp:read", "mcp:write"],
+            "resource_documentation": "https://github.com/LightspeedDMS/code-indexer",
         }
 
     # Favicon redirect

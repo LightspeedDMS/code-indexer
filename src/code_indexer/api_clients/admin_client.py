@@ -808,7 +808,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
 
         Args:
             alias: Golden repository alias
-            index_type: Type of index to add (semantic_fts, temporal, scip)
+            index_type: Type of index to add (semantic, fts, temporal, scip)
 
         Returns:
             Dictionary with job_id and status

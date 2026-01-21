@@ -321,7 +321,7 @@ See [Server Deployment Guide](server-deployment.md) for complete instructions.
 **Quick Overview**:
 ```bash
 # 1. Install on server
-pipx install git+https://github.com/jsbattig/code-indexer.git@v8.4.46
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.6.0
 
 # 2. Configure environment
 export VOYAGE_API_KEY="your-key"
@@ -422,6 +422,116 @@ curl -X POST http://localhost:8000/api/v1/query \
 - See [CIDX MCP Bridge](../README.md#cidx-mcp-bridge-for-claude-desktop)
 - Connects Claude to CIDX server
 - Semantic search in conversations
+
+### Claude Delegation (v8.5+)
+
+Enable AI-powered code analysis workflows on protected repositories without exposing source code to clients.
+
+**How It Works**:
+1. Admin defines **delegation functions** - pre-approved AI workflows (code review, analysis, etc.)
+2. Users execute functions via MCP tools (`list_delegation_functions`, `execute_delegation_function`)
+3. CIDX server delegates to Claude Server, which has direct repository access
+4. Results returned to user - source code never leaves the server
+
+**Key Components**:
+- **Delegation Repository**: Git repo containing function definitions (YAML/JSON)
+- **Function Templates**: Jinja2 templates for AI prompts with parameter substitution
+- **Group Access Control**: Functions restricted to specific user groups
+- **Callback Completion**: Efficient job polling with server-side callbacks
+
+**Example Function Definition**:
+```yaml
+name: code_review
+description: Review code changes for quality and security
+allowed_groups: ["developers", "reviewers"]
+parameters:
+  - name: file_path
+    required: true
+    description: Path to file to review
+prompt_template: |
+  Review the following code for:
+  - Security vulnerabilities
+  - Code quality issues
+  - Best practice violations
+
+  File: {{ file_path }}
+```
+
+**MCP Tools**:
+- `list_delegation_functions` - List available functions for current user
+- `execute_delegation_function` - Start a delegation job
+- `poll_delegation_job` - Wait for job completion and get results
+
+### Group-Based Security (v8.5+)
+
+Fine-grained access control using group membership for both repository access and delegation functions.
+
+**Features**:
+- Users belong to one or more groups
+- Golden repositories can be restricted to specific groups
+- Delegation functions filtered by `allowed_groups`
+- Admin impersonation respects target user's groups
+
+**Configuration**:
+- Groups managed via Web UI or REST API
+- User-group assignments stored in server database
+- Group filtering applied at query time
+
+### Auto-Discovery (v8.5+)
+
+Automatically discover repositories from external sources for indexing.
+
+**Supported Sources**:
+- GitHub Organizations (via GitHub API)
+- GitLab Groups (via GitLab API)
+- Local filesystem paths
+
+**How It Works**:
+1. Configure external sources in server settings
+2. Server periodically scans for new repositories
+3. Discovered repos appear in Web UI for approval
+4. Admin selects repos to add as golden repositories
+
+**Benefits**:
+- No manual repo URL entry
+- Automatic detection of new team repositories
+- Centralized repository catalog
+
+### OTEL Telemetry (v8.5+)
+
+OpenTelemetry integration for comprehensive server observability.
+
+**Capabilities**:
+- **Traces**: Request tracing across server components
+- **Metrics**: Query latency, cache hit rates, job statistics
+- **Spans**: Detailed timing for indexing and search operations
+
+**Configuration**:
+```bash
+# Enable OTEL export
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://collector:4317"
+export OTEL_SERVICE_NAME="cidx-server"
+```
+
+**Integration**:
+- Compatible with Jaeger, Zipkin, Honeycomb, Datadog
+- Grafana dashboards for visualization
+- Alert integration for performance anomalies
+
+### Auto-Update (v8.5+)
+
+Job-aware server updates with graceful drain mode.
+
+**Features**:
+- Automatic update detection from configured source
+- Graceful drain: waits for running jobs to complete
+- Zero-downtime updates for most operations
+- Rollback capability on update failure
+
+**Configuration**:
+- Update source (Git tag, release URL)
+- Drain timeout (max wait for jobs)
+- Auto-restart behavior
 
 ### Use Cases
 

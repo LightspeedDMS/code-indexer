@@ -256,5 +256,5 @@ MIT License - See LICENSE file in repository root.
 ## Support
 
 For issues or questions:
-- GitHub Issues: https://github.com/jsbattig/code-indexer/issues
-- Documentation: https://github.com/jsbattig/code-indexer
+- GitHub Issues: https://github.com/LightspeedDMS/code-indexer/issues
+- Documentation: https://github.com/LightspeedDMS/code-indexer

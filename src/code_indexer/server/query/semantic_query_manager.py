@@ -720,6 +720,16 @@ class SemanticQueryManager:
         Returns:
             List of QueryResult objects sorted by similarity score
         """
+        # Story #4 AC2: Track search metrics at service layer
+        # This ensures both MCP and REST API calls are counted
+        from code_indexer.server.services.api_metrics_service import api_metrics_service
+
+        if search_mode == "semantic":
+            api_metrics_service.increment_semantic_search()
+        else:
+            # FTS, hybrid, or temporal searches
+            api_metrics_service.increment_other_index_search()
+
         all_results: List[QueryResult] = []
 
         # Search each repository

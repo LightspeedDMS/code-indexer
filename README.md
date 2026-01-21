@@ -2,7 +2,7 @@
 
 AI-powered semantic code search for your codebase. Find code by meaning, not just keywords.
 
-**Version 8.4.46** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
+**Version 8.6.0** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
 
 ## Quick Navigation
 
@@ -22,7 +22,7 @@ CIDX combines semantic embeddings with traditional search to help you find code 
 ### pipx (Recommended)
 
 ```bash
-pipx install git+https://github.com/jsbattig/code-indexer.git@v8.4.46
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.6.0
 
 # Verify installation
 cidx --version
@@ -33,7 +33,7 @@ cidx --version
 ```bash
 python3 -m venv code-indexer-env
 source code-indexer-env/bin/activate
-pip install git+https://github.com/jsbattig/code-indexer.git@v8.4.46
+pip install git+https://github.com/LightspeedDMS/code-indexer.git@v8.6.0
 ```
 
 **Requirements**: Python 3.9+, 4GB+ RAM, VoyageAI API key
@@ -209,9 +209,22 @@ cidx-server start       # Start multi-user server
 - **User Management**: Create users, assign roles (admin/power_user/normal_user)
 - **Cache Monitoring**: Real-time cache statistics and performance metrics
 
+**Claude Delegation** (v8.5+):
+- **Protected Repository Analysis**: AI agents analyze code without exposing source to clients
+- **Delegation Functions**: Pre-defined AI workflows for code review, analysis, and transformation
+- **Group-Based Access**: Control which users can execute which delegation functions
+- **Callback-Based Completion**: Efficient job polling with server-side callbacks
+
+**Security & Observability** (v8.5+):
+- **Group-Based Security**: Fine-grained access control using group membership
+- **OTEL Telemetry**: OpenTelemetry integration for traces, metrics, and observability
+- **Auto-Discovery**: Automatic repository discovery from GitHub organizations or local paths
+- **Auto-Update**: Job-aware server updates with graceful drain mode
+
 **Authentication & Authorization**:
 - OAuth 2.0 and OIDC (OpenID Connect) support
 - Three role levels: admin (full access), power_user (activate repos), normal_user (query only)
+- Group-based function access for Claude Delegation
 - Secure token-based API access
 
 **Performance**:
@@ -347,9 +360,9 @@ pre-commit install
 
 ### Reporting Issues
 
-- **Bugs**: [GitHub Issues](https://github.com/jsbattig/code-indexer/issues)
-- **Features**: [GitHub Issues](https://github.com/jsbattig/code-indexer/issues)
-- **Questions**: [GitHub Discussions](https://github.com/jsbattig/code-indexer/discussions)
+- **Bugs**: [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
+- **Features**: [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
+- **Questions**: [GitHub Discussions](https://github.com/LightspeedDMS/code-indexer/discussions)
 
 ## License
 
@@ -357,8 +370,8 @@ MIT License - See repository for full license text.
 
 ---
 
-**Support**: [GitHub Issues](https://github.com/jsbattig/code-indexer/issues)
-**Repository**: [https://github.com/jsbattig/code-indexer](https://github.com/jsbattig/code-indexer)
+**Support**: [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
+**Repository**: [https://github.com/LightspeedDMS/code-indexer](https://github.com/LightspeedDMS/code-indexer)
 
 <!-- E2E Test: Auto-deployment validation for story #657 - 2025-12-31 16:15 CST -->
 <!-- E2E Test: Final auto-deployment test after fixes deployed - 2025-12-31 16:23 CST -->

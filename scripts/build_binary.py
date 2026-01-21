@@ -234,7 +234,7 @@ def create_bundle(
         "description": "MCP Stdio Bridge for CIDX - enables Claude Desktop to perform semantic code searches",
         "author": {
             "name": "Seba Battig",
-            "url": "https://github.com/jsbattig/code-indexer",
+            "url": "https://github.com/LightspeedDMS/code-indexer",
         },
         "server": {
             "type": "binary",

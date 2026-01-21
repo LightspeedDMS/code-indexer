@@ -273,9 +273,9 @@ code-indexer/
 
 ## Getting Help
 
-- **Questions**: Open a [GitHub Discussion](https://github.com/jsbattig/code-indexer/discussions)
-- **Bugs**: Report via [GitHub Issues](https://github.com/jsbattig/code-indexer/issues)
-- **Features**: Suggest via [GitHub Issues](https://github.com/jsbattig/code-indexer/issues)
+- **Questions**: Open a [GitHub Discussion](https://github.com/LightspeedDMS/code-indexer/discussions)
+- **Bugs**: Report via [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
+- **Features**: Suggest via [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
 
 ## License
 

@@ -66,7 +66,7 @@ Best for most users - provides isolated environment with global command access:
 
 ```bash
 # Install the package
-pipx install git+https://github.com/jsbattig/code-indexer.git@v8.4.46
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.6.0
 
 # Verify installation
 cidx --version
@@ -99,7 +99,7 @@ source code-indexer-env/bin/activate  # Linux/macOS
 code-indexer-env\Scripts\activate     # Windows
 
 # Install CIDX
-pip install git+https://github.com/jsbattig/code-indexer.git@v8.4.46
+pip install git+https://github.com/LightspeedDMS/code-indexer.git@v8.6.0
 
 # Verify installation
 cidx --version
@@ -116,7 +116,7 @@ For contributors or those who want to modify CIDX:
 
 ```bash
 # Clone repository
-git clone https://github.com/jsbattig/code-indexer.git
+git clone https://github.com/LightspeedDMS/code-indexer.git
 cd code-indexer
 
 # Install in editable mode with dev dependencies
@@ -201,7 +201,7 @@ The `~/.code-indexer/` directory is still used by CIDX server mode for storing g
 ```bash
 # 1. Check version
 cidx --version
-# Output: code-indexer, version 8.4.46
+# Output: code-indexer, version 8.6.0
 
 # 2. Check help
 cidx --help
@@ -286,7 +286,7 @@ python -m pipx ensurepath
 # Restart terminal
 
 # Install CIDX
-pipx install git+https://github.com/jsbattig/code-indexer.git@v8.4.46
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.6.0
 ```
 
 **Path issues**: If `cidx` not found:
@@ -317,17 +317,17 @@ pipx upgrade code-indexer
 source code-indexer-env/bin/activate
 
 # Upgrade
-pip install --upgrade git+https://github.com/jsbattig/code-indexer.git@master
+pip install --upgrade git+https://github.com/LightspeedDMS/code-indexer.git@master
 ```
 
 ### Upgrade to Specific Version
 
 ```bash
 # pipx
-pipx install --force git+https://github.com/jsbattig/code-indexer.git@v8.4.46
+pipx install --force git+https://github.com/LightspeedDMS/code-indexer.git@v8.6.0
 
 # pip
-pip install --force-reinstall git+https://github.com/jsbattig/code-indexer.git@v8.4.46
+pip install --force-reinstall git+https://github.com/LightspeedDMS/code-indexer.git@v8.6.0
 ```
 
 ### Post-Upgrade Steps
@@ -368,7 +368,7 @@ cidx index
 3. **Reinstall**:
    ```bash
    pipx uninstall code-indexer
-   pipx install git+https://github.com/jsbattig/code-indexer.git@v8.4.46
+   pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.6.0
    ```
 
 ### Python Version Too Old
@@ -393,7 +393,7 @@ cidx index
 
 3. **Use specific Python version**:
    ```bash
-   python3.11 -m pipx install git+https://github.com/jsbattig/code-indexer.git@v8.4.46
+   python3.11 -m pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.6.0
    ```
 
 ### VoyageAI API Key Not Found
@@ -562,7 +562,7 @@ After successful installation:
 ## Getting Help
 
 - **Documentation**: [Main README](../README.md)
-- **Issues**: [GitHub Issues](https://github.com/jsbattig/code-indexer/issues)
+- **Issues**: [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
 - **Architecture**: [Architecture Guide](architecture.md)
 - **Migration**: [Migration Guide](migration-to-v8.md)
 

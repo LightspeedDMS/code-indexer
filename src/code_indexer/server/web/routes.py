@@ -346,6 +346,7 @@ async def dashboard_stats_partial(
             "job_counts": stats_data["job_counts"],
             "repo_counts": stats_data["repo_counts"],
             "recent_jobs": stats_data["recent_jobs"],
+            "api_metrics": stats_data.get("api_metrics", {}),
             "time_filter": time_filter,
             "recent_filter": recent_filter,
         },
@@ -2504,10 +2505,8 @@ def _get_all_jobs(
                 "error_message": job.error,
                 "username": job.username,
                 "user_alias": getattr(job, "user_alias", None),
-                "repository_name": (
-                    getattr(job.result, "alias", None)
-                    if job.result and isinstance(job.result, dict)
-                    else None
+                "repository_name": getattr(job, "repo_alias", None) or (
+                    job.result.get("alias") if job.result and isinstance(job.result, dict) else None
                 ),
                 "repository_url": getattr(job, "repository_url", None),
                 "progress_info": getattr(job, "progress_info", None),
@@ -2517,6 +2516,26 @@ def _get_all_jobs(
                 job_dict["repository_name"] = job.result.get("alias") or job.result.get(
                     "repository"
                 )
+            # Calculate duration_seconds for completed jobs (Bug #751)
+            duration_seconds = None
+            if job.completed_at and job.started_at:
+                try:
+                    # Handle potential timezone-aware vs timezone-naive mismatch
+                    completed = job.completed_at
+                    started = job.started_at
+                    completed_aware = hasattr(completed, 'tzinfo') and completed.tzinfo is not None
+                    started_aware = hasattr(started, 'tzinfo') and started.tzinfo is not None
+                    # If one is aware and one is naive, strip timezone info from the aware one
+                    if completed_aware and not started_aware:
+                        completed = completed.replace(tzinfo=None)
+                    elif started_aware and not completed_aware:
+                        started = started.replace(tzinfo=None)
+                    duration = completed - started
+                    duration_seconds = int(duration.total_seconds())
+                except (TypeError, AttributeError):
+                    # If subtraction fails for any reason, leave duration as None
+                    duration_seconds = None
+            job_dict["duration_seconds"] = duration_seconds
             all_jobs.append(job_dict)
 
     # Apply filters

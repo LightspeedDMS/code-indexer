@@ -84,9 +84,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jsbattig/code-indexer"
-Repository = "https://github.com/jsbattig/code-indexer"
-Issues = "https://github.com/jsbattig/code-indexer/issues"
+Homepage = "https://github.com/LightspeedDMS/code-indexer"
+Repository = "https://github.com/LightspeedDMS/code-indexer"
+Issues = "https://github.com/LightspeedDMS/code-indexer/issues"
 
 [project.scripts]
 code-indexer = "code_indexer.cli_fast_entry:main"

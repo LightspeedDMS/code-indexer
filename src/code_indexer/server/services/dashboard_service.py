@@ -114,12 +114,22 @@ class DashboardService:
             user_role: User role ('admin' or 'user') - AC6 fix to prevent count flash
 
         Returns:
-            Dictionary containing job and repo counts
+            Dictionary containing job counts, repo counts, recent jobs, and API metrics
         """
+        # Story #4 AC2/AC3: Get API metrics for dashboard display
+        from .api_metrics_service import api_metrics_service
+
+        # Code Review Finding #2: Get metrics and then reset
+        # Metrics should represent activity SINCE last dashboard refresh, not all-time totals
+        # Similar to IO metrics pattern in health_service
+        api_metrics = api_metrics_service.get_metrics()
+        api_metrics_service.reset()
+
         return {
             "job_counts": self._get_job_counts(username, time_filter),
             "repo_counts": self._get_repo_counts(username, user_role),
             "recent_jobs": self._get_recent_jobs(username, recent_filter),
+            "api_metrics": api_metrics,
         }
 
     def _get_health_data(self) -> HealthCheckResponse:

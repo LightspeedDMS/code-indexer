@@ -31,7 +31,7 @@ CIDX server provides:
 
 ```bash
 # Install code-indexer
-pipx install git+https://github.com/jsbattig/code-indexer.git@v8.0.0
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.0.0
 
 # Verify installation
 cidx --version
@@ -45,7 +45,7 @@ python3 -m venv cidx-venv
 source cidx-venv/bin/activate
 
 # Install code-indexer
-pip install git+https://github.com/jsbattig/code-indexer.git@v8.0.0
+pip install git+https://github.com/LightspeedDMS/code-indexer.git@v8.0.0
 
 # Verify installation
 cidx --version
@@ -575,4 +575,4 @@ ps aux | grep cidx-server
 - [Main README](../README.md) - Project overview and features
 - [Manual Test Plan](manual-testing/hnsw-cache-manual-test-plan.md) - Cache performance validation
 - [MCP Bridge Documentation](mcpb/) - Claude Desktop integration
-- [GitHub Repository](https://github.com/jsbattig/code-indexer) - Source code and issues
+- [GitHub Repository](https://github.com/LightspeedDMS/code-indexer) - Source code and issues

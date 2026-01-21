@@ -20,6 +20,7 @@ import pathspec
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 from code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.server.auth import dependencies
 from code_indexer.server.utils.registry_factory import get_server_global_registry
 from code_indexer.server import app as app_module
 from code_indexer.server.services.ssh_key_manager import (
@@ -852,6 +853,10 @@ async def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Search code using semantic search, FTS, or hybrid mode."""
     try:
         from pathlib import Path
+
+        # Story #4 AC2: Metrics tracking moved to service layer
+        # SemanticQueryManager._perform_search() now handles metrics
+        # This ensures both MCP and REST API calls are counted
 
         repository_alias = params.get("repository_alias")
 
@@ -2502,6 +2507,10 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
         SearchLimitsConfigManager,
     )
     from code_indexer.server.services.search_error_formatter import SearchErrorFormatter
+
+    # Story #4 AC2: Metrics tracking moved to service layer
+    # RegexSearchService.search() now handles metrics
+    # This ensures both MCP and REST API calls are counted
 
     repository_alias = args.get("repository_alias")
     repository_alias = _parse_json_string_array(repository_alias)
@@ -8852,7 +8861,9 @@ def _get_delegation_function_repo_path() -> Optional[Path]:
             repo_path = golden_repo_manager.get_actual_repo_path(function_repo_alias)
             return Path(repo_path) if repo_path else None
         except Exception as e:
-            logger.warning(f"Function repository '{function_repo_alias}' not found: {e}")
+            logger.warning(
+                f"Function repository '{function_repo_alias}' not found: {e}"
+            )
             return None
 
     except Exception as e:
@@ -8974,7 +8985,9 @@ def _get_delegation_config():
         return None
 
 
-def _validate_function_parameters(target_function, parameters: Dict[str, Any]) -> Optional[str]:
+def _validate_function_parameters(
+    target_function, parameters: Dict[str, Any]
+) -> Optional[str]:
     """
     Validate required parameters are present.
 
@@ -8989,7 +9002,9 @@ def _validate_function_parameters(target_function, parameters: Dict[str, Any]) -
     return None
 
 
-async def _ensure_repos_registered(client, required_repos: List[Dict[str, Any]]) -> List[str]:
+async def _ensure_repos_registered(
+    client, required_repos: List[Dict[str, Any]]
+) -> List[str]:
     """
     Ensure required repositories are registered in Claude Server.
 
@@ -9064,8 +9079,14 @@ async def handle_execute_delegation_function(
         repo_path = _get_delegation_function_repo_path()
         delegation_config = _get_delegation_config()
 
-        if repo_path is None or delegation_config is None or not delegation_config.is_configured:
-            return _mcp_response({"success": False, "error": "Claude Delegation not configured"})
+        if (
+            repo_path is None
+            or delegation_config is None
+            or not delegation_config.is_configured
+        ):
+            return _mcp_response(
+                {"success": False, "error": "Claude Delegation not configured"}
+            )
 
         function_name = args.get("function_name", "")
         parameters = args.get("parameters", {})
@@ -9074,17 +9095,27 @@ async def handle_execute_delegation_function(
         # Load and find function
         loader = DelegationFunctionLoader()
         all_functions = loader.load_functions(repo_path)
-        target_function = next((f for f in all_functions if f.name == function_name), None)
+        target_function = next(
+            (f for f in all_functions if f.name == function_name), None
+        )
 
         if target_function is None:
-            return _mcp_response({"success": False, "error": f"Function not found: {function_name}"})
+            return _mcp_response(
+                {"success": False, "error": f"Function not found: {function_name}"}
+            )
 
         # Access validation
-        effective_user = session_state.effective_user if session_state and session_state.is_impersonating else user
+        effective_user = (
+            session_state.effective_user
+            if session_state and session_state.is_impersonating
+            else user
+        )
         user_groups = _get_user_groups(effective_user)
 
         if not (user_groups & set(target_function.allowed_groups)):
-            return _mcp_response({"success": False, "error": "Access denied: insufficient permissions"})
+            return _mcp_response(
+                {"success": False, "error": "Access denied: insufficient permissions"}
+            )
 
         # Parameter validation
         param_error = _validate_function_parameters(target_function, parameters)
@@ -9099,11 +9130,15 @@ async def handle_execute_delegation_function(
             password=delegation_config.claude_server_credential,
             skip_ssl_verify=delegation_config.skip_ssl_verify,
         ) as client:
-            repo_aliases = await _ensure_repos_registered(client, target_function.required_repos)
+            repo_aliases = await _ensure_repos_registered(
+                client, target_function.required_repos
+            )
 
             # Render prompt and create job
             processor = PromptTemplateProcessor()
-            impersonation_user = target_function.impersonation_user or effective_user.username
+            impersonation_user = (
+                target_function.impersonation_user or effective_user.username
+            )
             rendered_prompt = processor.render(
                 template=target_function.prompt_template,
                 parameters=parameters,
@@ -9111,19 +9146,27 @@ async def handle_execute_delegation_function(
                 impersonation_user=impersonation_user,
             )
 
-            job_result = await client.create_job(prompt=rendered_prompt, repositories=repo_aliases)
+            job_result = await client.create_job(
+                prompt=rendered_prompt, repositories=repo_aliases
+            )
             # Claude Server returns camelCase "jobId"
             job_id = job_result.get("jobId") or job_result.get("job_id")
             if not job_id:
-                return _mcp_response({"success": False, "error": "Job created but no job_id returned"})
+                return _mcp_response(
+                    {"success": False, "error": "Job created but no job_id returned"}
+                )
 
             # Story #720: Register callback URL with Claude Server for completion notification
             callback_base_url = _get_cidx_callback_base_url()
             if callback_base_url:
-                callback_url = f"{callback_base_url.rstrip('/')}/api/delegation/callback/{job_id}"
+                callback_url = (
+                    f"{callback_base_url.rstrip('/')}/api/delegation/callback/{job_id}"
+                )
                 try:
                     await client.register_callback(job_id, callback_url)
-                    logger.debug(f"Registered callback URL for job {job_id}: {callback_url}")
+                    logger.debug(
+                        f"Registered callback URL for job {job_id}: {callback_url}"
+                    )
                 except Exception as callback_err:
                     # Log but don't fail - callback registration is best-effort
                     logger.warning(
@@ -9142,10 +9185,15 @@ async def handle_execute_delegation_function(
             return _mcp_response({"success": True, "job_id": job_id})
 
     except ClaudeServerError as e:
-        logger.error(f"Claude Server error: {e}", extra={"correlation_id": get_correlation_id()})
+        logger.error(
+            f"Claude Server error: {e}", extra={"correlation_id": get_correlation_id()}
+        )
         return _mcp_response({"success": False, "error": f"Claude Server error: {e}"})
     except Exception as e:
-        logger.exception(f"Error in execute_delegation_function: {e}", extra={"correlation_id": get_correlation_id()})
+        logger.exception(
+            f"Error in execute_delegation_function: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -9179,66 +9227,1314 @@ async def handle_poll_delegation_job(
         delegation_config = _get_delegation_config()
 
         if delegation_config is None or not delegation_config.is_configured:
-            return _mcp_response({"success": False, "error": "Claude Delegation not configured"})
+            return _mcp_response(
+                {"success": False, "error": "Claude Delegation not configured"}
+            )
 
         job_id = args.get("job_id", "")
         if not job_id:
-            return _mcp_response({"success": False, "error": "Missing required parameter: job_id"})
+            return _mcp_response(
+                {"success": False, "error": "Missing required parameter: job_id"}
+            )
 
         # Story #720: Get timeout_seconds from args (default 45s, below MCP's 60s)
         # Also support legacy "timeout" parameter for backward compatibility
         timeout = args.get("timeout_seconds", args.get("timeout", 45))
         if not isinstance(timeout, (int, float)):
-            return _mcp_response({
-                "success": False,
-                "error": "timeout_seconds must be a number (recommended: 5-300)"
-            })
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "timeout_seconds must be a number (recommended: 5-300)",
+                }
+            )
         # Minimum 0.01s (for testing), maximum 300s (5 minutes)
         # Recommended range for production: 5-300 seconds
         if timeout < 0.01 or timeout > 300:
-            return _mcp_response({
-                "success": False,
-                "error": "timeout_seconds must be between 0.01 and 300"
-            })
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "timeout_seconds must be between 0.01 and 300",
+                }
+            )
 
         # Check if job exists in tracker before waiting
         tracker = DelegationJobTracker.get_instance()
         job_exists = await tracker.has_job(job_id)
         if not job_exists:
-            return _mcp_response({
-                "success": False,
-                "error": f"Job {job_id} not found or already completed",
-            })
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": f"Job {job_id} not found or already completed",
+                }
+            )
 
         # Wait for callback via DelegationJobTracker
         result = await tracker.wait_for_job(job_id, timeout=timeout)
 
         if result is None:
             # Timeout - job still exists, caller can try again
-            return _mcp_response({
-                "status": "waiting",
-                "message": "Job still running, callback not yet received",
-                "continue_polling": True,
-            })
+            return _mcp_response(
+                {
+                    "status": "waiting",
+                    "message": "Job still running, callback not yet received",
+                    "continue_polling": True,
+                }
+            )
 
         # Return result based on status from callback
         if result.status == "completed":
-            return _mcp_response({
-                "status": "completed",
-                "result": result.output,
-                "continue_polling": False,
-            })
+            return _mcp_response(
+                {
+                    "status": "completed",
+                    "result": result.output,
+                    "continue_polling": False,
+                }
+            )
         else:
             # Failed or other status
-            return _mcp_response({
-                "status": "failed",
-                "error": result.error or result.output,
-                "continue_polling": False,
-            })
+            return _mcp_response(
+                {
+                    "status": "failed",
+                    "error": result.error or result.output,
+                    "continue_polling": False,
+                }
+            )
 
     except Exception as e:
-        logger.error(f"Error waiting for delegation job {job_id}: {e}", extra={"correlation_id": get_correlation_id()})
-        return _mcp_response({"success": False, "error": f"Error waiting for job completion: {str(e)}"})
+        logger.error(
+            f"Error waiting for delegation job {job_id}: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response(
+            {"success": False, "error": f"Error waiting for job completion: {str(e)}"}
+        )
 
 
 HANDLER_REGISTRY["poll_delegation_job"] = handle_poll_delegation_job
+
+
+# =============================================================================
+# GROUP & ACCESS MANAGEMENT HANDLERS (Story #742)
+# =============================================================================
+
+
+def _get_group_manager():
+    """Get the GroupAccessManager from app.state."""
+    return getattr(app_module.app.state, "group_manager", None)
+
+
+def _validate_group_id(
+    args: Dict[str, Any], group_manager: Any
+) -> tuple[Optional[int], Any, Optional[Dict[str, Any]]]:
+    """Validate and parse group_id, check group exists.
+
+    Returns:
+        Tuple of (group_id, group, error_response) - error_response is None on success
+    """
+    group_id_str = args.get("group_id", "")
+    if not group_id_str:
+        return (
+            None,
+            None,
+            _mcp_response(
+                {"success": False, "error": "Missing required parameter: group_id"}
+            ),
+        )
+    try:
+        group_id = int(group_id_str)
+    except ValueError:
+        return (
+            None,
+            None,
+            _mcp_response(
+                {"success": False, "error": f"Invalid group_id: {group_id_str}"}
+            ),
+        )
+    group = group_manager.get_group(group_id)
+    if not group:
+        return (
+            None,
+            None,
+            _mcp_response({"success": False, "error": f"Group not found: {group_id}"}),
+        )
+    return group_id, group, None
+
+
+async def handle_list_groups(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """List all groups with member counts and repository access information."""
+    try:
+        group_manager = _get_group_manager()
+        if not group_manager:
+            return _mcp_response(
+                {"success": False, "error": "Group manager not configured"}
+            )
+
+        groups = group_manager.get_all_groups()
+        result_groups = []
+        for group in groups:
+            member_count = group_manager.get_user_count_in_group(group.id)
+            repos = group_manager.get_group_repos(group.id)
+            result_groups.append(
+                {
+                    "id": group.id,
+                    "name": group.name,
+                    "description": group.description,
+                    "member_count": member_count,
+                    "repo_count": len(repos),
+                }
+            )
+        return _mcp_response({"success": True, "groups": result_groups})
+    except Exception as e:
+        logger.error(
+            f"Error in handle_list_groups: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_create_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Create a new custom group."""
+    try:
+        group_manager = _get_group_manager()
+        if not group_manager:
+            return _mcp_response(
+                {"success": False, "error": "Group manager not configured"}
+            )
+
+        name = args.get("name", "")
+        if not name:
+            return _mcp_response(
+                {"success": False, "error": "Missing required parameter: name"}
+            )
+
+        try:
+            group = group_manager.create_group(
+                name=name, description=args.get("description", "")
+            )
+            group_manager.log_audit(
+                admin_id=user.username,
+                action_type="group_create",
+                target_type="group",
+                target_id=str(group.id),
+                details=f"Created group '{group.name}' via MCP",
+            )
+            return _mcp_response(
+                {"success": True, "group_id": group.id, "name": group.name}
+            )
+        except ValueError as e:
+            return _mcp_response({"success": False, "error": str(e)})
+    except Exception as e:
+        logger.error(
+            f"Error in handle_create_group: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_get_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Get detailed information about a specific group."""
+    try:
+        group_manager = _get_group_manager()
+        if not group_manager:
+            return _mcp_response(
+                {"success": False, "error": "Group manager not configured"}
+            )
+
+        group_id, group, error = _validate_group_id(args, group_manager)
+        if error:
+            return error
+
+        members = group_manager.get_users_in_group(group_id)
+        repos = group_manager.get_group_repos(group_id)
+        return _mcp_response(
+            {
+                "success": True,
+                "id": group.id,
+                "name": group.name,
+                "description": group.description,
+                "members": members,
+                "repos": repos,
+            }
+        )
+    except Exception as e:
+        logger.error(
+            f"Error in handle_get_group: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Update a custom group's name and/or description."""
+    try:
+        group_manager = _get_group_manager()
+        if not group_manager:
+            return _mcp_response(
+                {"success": False, "error": "Group manager not configured"}
+            )
+
+        group_id, _, error = _validate_group_id(args, group_manager)
+        if error:
+            return error
+
+        try:
+            updated_group = group_manager.update_group(
+                group_id=group_id,
+                name=args.get("name"),
+                description=args.get("description"),
+            )
+            if not updated_group:
+                return _mcp_response(
+                    {"success": False, "error": f"Group not found: {group_id}"}
+                )
+            group_manager.log_audit(
+                admin_id=user.username,
+                action_type="group_update",
+                target_type="group",
+                target_id=str(group_id),
+                details=f"Updated group '{updated_group.name}' via MCP",
+            )
+            return _mcp_response({"success": True})
+        except ValueError as e:
+            return _mcp_response({"success": False, "error": str(e)})
+    except Exception as e:
+        logger.error(
+            f"Error in handle_update_group: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Delete a custom group."""
+    from ..services.group_access_manager import (
+        DefaultGroupCannotBeDeletedError,
+        GroupHasUsersError,
+    )
+
+    try:
+        group_manager = _get_group_manager()
+        if not group_manager:
+            return _mcp_response(
+                {"success": False, "error": "Group manager not configured"}
+            )
+
+        group_id, group, error = _validate_group_id(args, group_manager)
+        if error:
+            return error
+        group_name = group.name
+
+        try:
+            result = group_manager.delete_group(group_id)
+            if not result:
+                return _mcp_response(
+                    {"success": False, "error": f"Group not found: {group_id}"}
+                )
+            group_manager.log_audit(
+                admin_id=user.username,
+                action_type="group_delete",
+                target_type="group",
+                target_id=str(group_id),
+                details=f"Deleted group '{group_name}' via MCP",
+            )
+            return _mcp_response({"success": True})
+        except (DefaultGroupCannotBeDeletedError, GroupHasUsersError) as e:
+            return _mcp_response({"success": False, "error": str(e)})
+    except Exception as e:
+        logger.error(
+            f"Error in handle_delete_group: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_add_member_to_group(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Assign a user to a group."""
+    try:
+        group_manager = _get_group_manager()
+        if not group_manager:
+            return _mcp_response(
+                {"success": False, "error": "Group manager not configured"}
+            )
+
+        group_id, group, error = _validate_group_id(args, group_manager)
+        if error:
+            return error
+
+        user_id = args.get("user_id", "")
+        if not user_id:
+            return _mcp_response(
+                {"success": False, "error": "Missing required parameter: user_id"}
+            )
+
+        group_manager.assign_user_to_group(
+            user_id=user_id, group_id=group_id, assigned_by=user.username
+        )
+        group_manager.log_audit(
+            admin_id=user.username,
+            action_type="user_group_change",
+            target_type="user",
+            target_id=user_id,
+            details=f"Assigned user '{user_id}' to group '{group.name}' via MCP",
+        )
+        return _mcp_response({"success": True})
+    except Exception as e:
+        logger.error(
+            f"Error in handle_add_member_to_group: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_remove_member_from_group(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Remove a user from a group."""
+    try:
+        group_manager = _get_group_manager()
+        if not group_manager:
+            return _mcp_response(
+                {"success": False, "error": "Group manager not configured"}
+            )
+
+        group_id, group, error = _validate_group_id(args, group_manager)
+        if error:
+            return error
+
+        user_id = args.get("user_id", "")
+        if not user_id:
+            return _mcp_response(
+                {"success": False, "error": "Missing required parameter: user_id"}
+            )
+
+        group_manager.remove_user_from_group(user_id=user_id, group_id=group_id)
+        group_manager.log_audit(
+            admin_id=user.username,
+            action_type="user_group_change",
+            target_type="user",
+            target_id=user_id,
+            details=f"Removed user '{user_id}' from group '{group.name}' via MCP",
+        )
+        return _mcp_response({"success": True})
+    except Exception as e:
+        logger.error(
+            f"Error in handle_remove_member_from_group: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Grant a group access to one or more repositories."""
+    try:
+        group_manager = _get_group_manager()
+        if not group_manager:
+            return _mcp_response(
+                {"success": False, "error": "Group manager not configured"}
+            )
+
+        group_id, group, error = _validate_group_id(args, group_manager)
+        if error:
+            return error
+
+        repo_names = _parse_json_string_array(args.get("repo_names", []))
+        if not repo_names:
+            return _mcp_response(
+                {"success": False, "error": "Missing required parameter: repo_names"}
+            )
+
+        added_count = 0
+        for repo_name in repo_names:
+            if group_manager.grant_repo_access(
+                repo_name=repo_name, group_id=group_id, granted_by=user.username
+            ):
+                added_count += 1
+                group_manager.log_audit(
+                    admin_id=user.username,
+                    action_type="repo_access_grant",
+                    target_type="repo",
+                    target_id=repo_name,
+                    details=f"Granted access to '{repo_name}' for group '{group.name}' via MCP",
+                )
+        return _mcp_response({"success": True, "added_count": added_count})
+    except Exception as e:
+        logger.error(
+            f"Error in handle_add_repos_to_group: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_remove_repo_from_group(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Revoke a group's access to a single repository."""
+    from ..services.group_access_manager import CidxMetaCannotBeRevokedError
+
+    try:
+        group_manager = _get_group_manager()
+        if not group_manager:
+            return _mcp_response(
+                {"success": False, "error": "Group manager not configured"}
+            )
+
+        group_id, group, error = _validate_group_id(args, group_manager)
+        if error:
+            return error
+
+        repo_name = args.get("repo_name", "")
+        if not repo_name:
+            return _mcp_response(
+                {"success": False, "error": "Missing required parameter: repo_name"}
+            )
+
+        try:
+            if not group_manager.revoke_repo_access(
+                repo_name=repo_name, group_id=group_id
+            ):
+                return _mcp_response(
+                    {
+                        "success": False,
+                        "error": f"Repository '{repo_name}' not found in group's access list",
+                    }
+                )
+            group_manager.log_audit(
+                admin_id=user.username,
+                action_type="repo_access_revoke",
+                target_type="repo",
+                target_id=repo_name,
+                details=f"Revoked access to '{repo_name}' from group '{group.name}' via MCP",
+            )
+            return _mcp_response({"success": True})
+        except CidxMetaCannotBeRevokedError:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "cidx-meta access cannot be revoked from any group",
+                }
+            )
+    except Exception as e:
+        logger.error(
+            f"Error in handle_remove_repo_from_group: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_bulk_remove_repos_from_group(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Revoke a group's access to multiple repositories."""
+    from ..services.group_access_manager import CidxMetaCannotBeRevokedError
+    from ..services.constants import CIDX_META_REPO
+
+    try:
+        group_manager = _get_group_manager()
+        if not group_manager:
+            return _mcp_response(
+                {"success": False, "error": "Group manager not configured"}
+            )
+
+        group_id, group, error = _validate_group_id(args, group_manager)
+        if error:
+            return error
+
+        repo_names = _parse_json_string_array(args.get("repo_names", []))
+        if not repo_names:
+            return _mcp_response(
+                {"success": False, "error": "Missing required parameter: repo_names"}
+            )
+
+        removed_count = 0
+        for repo_name in repo_names:
+            if repo_name == CIDX_META_REPO:
+                continue
+            try:
+                if group_manager.revoke_repo_access(
+                    repo_name=repo_name, group_id=group_id
+                ):
+                    removed_count += 1
+                    group_manager.log_audit(
+                        admin_id=user.username,
+                        action_type="repo_access_revoke",
+                        target_type="repo",
+                        target_id=repo_name,
+                        details=f"Revoked access to '{repo_name}' from group '{group.name}' via MCP",
+                    )
+            except CidxMetaCannotBeRevokedError:
+                continue
+        return _mcp_response({"success": True, "removed_count": removed_count})
+    except Exception as e:
+        logger.error(
+            f"Error in handle_bulk_remove_repos_from_group: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+HANDLER_REGISTRY["list_groups"] = handle_list_groups
+HANDLER_REGISTRY["create_group"] = handle_create_group
+HANDLER_REGISTRY["get_group"] = handle_get_group
+HANDLER_REGISTRY["update_group"] = handle_update_group
+HANDLER_REGISTRY["delete_group"] = handle_delete_group
+HANDLER_REGISTRY["add_member_to_group"] = handle_add_member_to_group
+HANDLER_REGISTRY["remove_member_from_group"] = handle_remove_member_from_group
+HANDLER_REGISTRY["add_repos_to_group"] = handle_add_repos_to_group
+HANDLER_REGISTRY["remove_repo_from_group"] = handle_remove_repo_from_group
+HANDLER_REGISTRY["bulk_remove_repos_from_group"] = handle_bulk_remove_repos_from_group
+
+
+# =============================================================================
+# CREDENTIAL MANAGEMENT HANDLERS (Story #743)
+# User Self-Service API Keys
+# =============================================================================
+
+
+async def handle_list_api_keys(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """List all API keys for the authenticated user."""
+    try:
+        keys = app_module.user_manager.get_api_keys(user.username)
+        return _mcp_response(
+            {
+                "success": True,
+                "keys": [
+                    {
+                        "id": k.get("key_id", k.get("id", "")),
+                        "description": k.get("name", k.get("description", "")),
+                        "created_at": k.get("created_at", ""),
+                        "last_used": k.get("last_used_at"),
+                    }
+                    for k in keys
+                ],
+            }
+        )
+    except Exception as e:
+        logger.error(
+            f"Error in handle_list_api_keys: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_create_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Create a new API key for the authenticated user."""
+    try:
+        from code_indexer.server.auth.api_key_manager import ApiKeyManager
+
+        description = args.get("description", "")
+        api_key_manager = ApiKeyManager(user_manager=app_module.user_manager)
+        api_key, key_id = api_key_manager.generate_key(user.username, name=description)
+        return _mcp_response(
+            {
+                "success": True,
+                "key_id": key_id,
+                "api_key": api_key,
+                "description": description,
+            }
+        )
+    except Exception as e:
+        logger.error(
+            f"Error in handle_create_api_key: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_delete_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Delete an API key belonging to the authenticated user."""
+    try:
+        key_id = args.get("key_id", "")
+        if not key_id:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Missing required parameter: key_id",
+                }
+            )
+
+        result = app_module.user_manager.delete_api_key(user.username, key_id)
+        return _mcp_response({"success": result})
+    except Exception as e:
+        logger.error(
+            f"Error in handle_delete_api_key: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+HANDLER_REGISTRY["list_api_keys"] = handle_list_api_keys
+HANDLER_REGISTRY["create_api_key"] = handle_create_api_key
+HANDLER_REGISTRY["delete_api_key"] = handle_delete_api_key
+
+
+# =============================================================================
+# CREDENTIAL MANAGEMENT HANDLERS (Story #743)
+# User Self-Service MCP Credentials
+# =============================================================================
+
+
+async def handle_list_mcp_credentials(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """List all MCP credentials for the authenticated user."""
+    try:
+        credentials = dependencies.mcp_credential_manager.get_credentials(user.username)
+        return _mcp_response(
+            {
+                "success": True,
+                "credentials": [
+                    {
+                        "id": c.get("credential_id", c.get("id", "")),
+                        "description": c.get("name", c.get("description", "")),
+                        "created_at": c.get("created_at", ""),
+                    }
+                    for c in credentials
+                ],
+            }
+        )
+    except Exception as e:
+        logger.error(
+            f"Error in handle_list_mcp_credentials: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_create_mcp_credential(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Create a new MCP credential for the authenticated user."""
+    try:
+        description = args.get("description", "")
+        result = dependencies.mcp_credential_manager.generate_credential(
+            user.username, name=description
+        )
+        return _mcp_response(
+            {
+                "success": True,
+                "credential_id": result.get("credential_id", ""),
+                "credential": result.get("client_secret", ""),
+                "client_id": result.get("client_id", ""),
+                "client_secret": result.get("client_secret", ""),
+                "description": description,
+            }
+        )
+    except Exception as e:
+        logger.error(
+            f"Error in handle_create_mcp_credential: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_delete_mcp_credential(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Delete an MCP credential belonging to the authenticated user."""
+    try:
+        credential_id = args.get("credential_id", "")
+        if not credential_id:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Missing required parameter: credential_id",
+                }
+            )
+
+        result = dependencies.mcp_credential_manager.revoke_credential(
+            user.username, credential_id
+        )
+        return _mcp_response({"success": result})
+    except Exception as e:
+        logger.error(
+            f"Error in handle_delete_mcp_credential: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+HANDLER_REGISTRY["list_mcp_credentials"] = handle_list_mcp_credentials
+HANDLER_REGISTRY["create_mcp_credential"] = handle_create_mcp_credential
+HANDLER_REGISTRY["delete_mcp_credential"] = handle_delete_mcp_credential
+
+
+# =============================================================================
+# CREDENTIAL MANAGEMENT HANDLERS (Story #743)
+# Admin Operations - Part 1
+# =============================================================================
+
+
+async def handle_admin_list_user_mcp_credentials(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """List all MCP credentials for a specific user (admin only)."""
+    try:
+        username = args.get("username", "")
+        if not username:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Missing required parameter: username",
+                }
+            )
+
+        credentials = dependencies.mcp_credential_manager.get_credentials(username)
+        return _mcp_response(
+            {
+                "success": True,
+                "credentials": [
+                    {
+                        "id": c.get("credential_id", c.get("id", "")),
+                        "description": c.get("name", c.get("description", "")),
+                        "created_at": c.get("created_at", ""),
+                    }
+                    for c in credentials
+                ],
+            }
+        )
+    except Exception as e:
+        logger.error(
+            f"Error in handle_admin_list_user_mcp_credentials: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_admin_create_user_mcp_credential(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Create a new MCP credential for a specific user (admin only)."""
+    try:
+        username = args.get("username", "")
+        if not username:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Missing required parameter: username",
+                }
+            )
+
+        description = args.get("description", "")
+        result = dependencies.mcp_credential_manager.generate_credential(
+            username, name=description
+        )
+        return _mcp_response(
+            {
+                "success": True,
+                "credential_id": result.get("credential_id", ""),
+                "credential": result.get("client_secret", ""),
+                "client_id": result.get("client_id", ""),
+                "client_secret": result.get("client_secret", ""),
+                "description": description,
+            }
+        )
+    except Exception as e:
+        logger.error(
+            f"Error in handle_admin_create_user_mcp_credential: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+HANDLER_REGISTRY["admin_list_user_mcp_credentials"] = (
+    handle_admin_list_user_mcp_credentials
+)
+HANDLER_REGISTRY["admin_create_user_mcp_credential"] = (
+    handle_admin_create_user_mcp_credential
+)
+
+
+# =============================================================================
+# CREDENTIAL MANAGEMENT HANDLERS (Story #743)
+# Admin Operations - Part 2
+# =============================================================================
+
+
+async def handle_admin_delete_user_mcp_credential(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Delete an MCP credential for a specific user (admin only)."""
+    try:
+        username = args.get("username", "")
+        credential_id = args.get("credential_id", "")
+
+        if not username:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Missing required parameter: username",
+                }
+            )
+        if not credential_id:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Missing required parameter: credential_id",
+                }
+            )
+
+        result = dependencies.mcp_credential_manager.revoke_credential(
+            username, credential_id
+        )
+        return _mcp_response({"success": result})
+    except Exception as e:
+        logger.error(
+            f"Error in handle_admin_delete_user_mcp_credential: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_admin_list_all_mcp_credentials(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """List all MCP credentials across all users (admin only)."""
+    try:
+        all_credentials = []
+        all_users = app_module.user_manager.get_all_users()
+
+        for target_user in all_users:
+            user_creds = dependencies.mcp_credential_manager.get_credentials(
+                target_user.username
+            )
+            for c in user_creds:
+                all_credentials.append(
+                    {
+                        "id": c.get("credential_id", c.get("id", "")),
+                        "username": target_user.username,
+                        "description": c.get("name", c.get("description", "")),
+                        "created_at": c.get("created_at", ""),
+                    }
+                )
+
+        return _mcp_response(
+            {
+                "success": True,
+                "credentials": all_credentials,
+            }
+        )
+    except Exception as e:
+        logger.error(
+            f"Error in handle_admin_list_all_mcp_credentials: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+HANDLER_REGISTRY["admin_delete_user_mcp_credential"] = (
+    handle_admin_delete_user_mcp_credential
+)
+HANDLER_REGISTRY["admin_list_all_mcp_credentials"] = (
+    handle_admin_list_all_mcp_credentials
+)
+
+
+# =============================================================================
+# ADMIN OPERATIONS MCP HANDLERS (Story #744)
+# Audit Logs, Maintenance Mode, and SCIP Administration
+# =============================================================================
+
+# Named constants for admin operations
+DEFAULT_AUDIT_LOG_LIMIT = 100
+JOB_ID_LENGTH = 8
+
+
+def _filter_audit_entries(
+    entries: List[Dict[str, Any]],
+    filter_user: Optional[str],
+    action: Optional[str],
+    from_date: Optional[str],
+    to_date: Optional[str],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    """Filter audit log entries by user, action, and date range."""
+    filtered = entries
+    if filter_user:
+        filtered = [
+            e for e in filtered if e.get("user", "").lower() == filter_user.lower()
+        ]
+    if action:
+        filtered = [
+            e for e in filtered if action.lower() in e.get("action", "").lower()
+        ]
+    if from_date:
+        filtered = [e for e in filtered if e.get("timestamp", "") >= from_date]
+    if to_date:
+        filtered = [e for e in filtered if e.get("timestamp", "") <= to_date]
+    return filtered[:limit]
+
+
+async def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Query security audit logs with optional filtering (admin only)."""
+    try:
+        if user.role != UserRole.ADMIN:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Permission denied. Admin role required to query audit logs.",
+                }
+            )
+
+        from code_indexer.server.auth.audit_logger import password_audit_logger
+
+        limit = args.get("limit", DEFAULT_AUDIT_LOG_LIMIT)
+        pr_logs = password_audit_logger.get_pr_logs(limit=limit)
+        cleanup_logs = password_audit_logger.get_cleanup_logs(limit=limit)
+
+        all_entries = [
+            {
+                "timestamp": log.get("timestamp", ""),
+                "user": log.get("repo_alias", ""),
+                "action": log.get("event_type", ""),
+                "resource": log.get("pr_url", ""),
+                "details": log,
+            }
+            for log in pr_logs
+        ] + [
+            {
+                "timestamp": log.get("timestamp", ""),
+                "user": "system",
+                "action": log.get("event_type", ""),
+                "resource": log.get("repo_path", ""),
+                "details": log,
+            }
+            for log in cleanup_logs
+        ]
+
+        filtered = _filter_audit_entries(
+            all_entries,
+            args.get("user"),
+            args.get("action"),
+            args.get("from_date"),
+            args.get("to_date"),
+            limit,
+        )
+        return _mcp_response(
+            {"success": True, "entries": filtered, "total": len(filtered)}
+        )
+    except Exception as e:
+        logger.error(
+            f"Error in handle_query_audit_logs: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_enter_maintenance_mode(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Enter server maintenance mode (admin only)."""
+    try:
+        if user.role != UserRole.ADMIN:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Permission denied. Admin role required to enter maintenance mode.",
+                }
+            )
+
+        from code_indexer.server.services.maintenance_service import (
+            get_maintenance_state,
+        )
+
+        state = get_maintenance_state()
+        result = state.enter_maintenance_mode()
+        if args.get("message"):
+            result["custom_message"] = args["message"]
+        return _mcp_response({"success": True, **result})
+    except Exception as e:
+        logger.error(
+            f"Error in handle_enter_maintenance_mode: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_exit_maintenance_mode(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Exit server maintenance mode (admin only)."""
+    try:
+        if user.role != UserRole.ADMIN:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Permission denied. Admin role required to exit maintenance mode.",
+                }
+            )
+
+        from code_indexer.server.services.maintenance_service import (
+            get_maintenance_state,
+        )
+
+        state = get_maintenance_state()
+        result = state.exit_maintenance_mode()
+        return _mcp_response({"success": True, **result})
+    except Exception as e:
+        logger.error(
+            f"Error in handle_exit_maintenance_mode: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+HANDLER_REGISTRY["query_audit_logs"] = handle_query_audit_logs
+HANDLER_REGISTRY["enter_maintenance_mode"] = handle_enter_maintenance_mode
+HANDLER_REGISTRY["exit_maintenance_mode"] = handle_exit_maintenance_mode
+
+
+async def handle_get_maintenance_status(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Get current server maintenance mode status (any authenticated user)."""
+    try:
+        from code_indexer.server.services.maintenance_service import (
+            get_maintenance_state,
+        )
+
+        state = get_maintenance_state()
+        status = state.get_status()
+        return _mcp_response(
+            {
+                "success": True,
+                "in_maintenance": status.get("maintenance_mode", False),
+                "message": status.get("message"),
+                "since": status.get("entered_at"),
+                "drained": status.get("drained", False),
+                "running_jobs": status.get("running_jobs", 0),
+                "queued_jobs": status.get("queued_jobs", 0),
+            }
+        )
+    except Exception as e:
+        logger.error(
+            f"Error in handle_get_maintenance_status: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_scip_pr_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Get SCIP self-healing PR creation history (admin only)."""
+    try:
+        if user.role != UserRole.ADMIN:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Permission denied. Admin role required to view SCIP PR history.",
+                }
+            )
+
+        from code_indexer.server.auth.audit_logger import password_audit_logger
+
+        limit = args.get("limit", DEFAULT_AUDIT_LOG_LIMIT)
+        pr_logs = password_audit_logger.get_pr_logs(limit=limit)
+
+        history = [
+            {
+                "pr_number": (
+                    log.get("pr_url", "").split("/")[-1] if log.get("pr_url") else None
+                ),
+                "repo": log.get("repo_alias", ""),
+                "indexed_at": log.get("timestamp", ""),
+                "status": (
+                    "success"
+                    if log.get("event_type") == "pr_creation_success"
+                    else "failed"
+                ),
+                "pr_url": log.get("pr_url"),
+                "branch_name": log.get("branch_name"),
+                "job_id": log.get("job_id"),
+            }
+            for log in pr_logs
+        ]
+
+        return _mcp_response(
+            {"success": True, "history": history, "total": len(history)}
+        )
+    except Exception as e:
+        logger.error(
+            f"Error in handle_scip_pr_history: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_scip_cleanup_history(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Get SCIP workspace cleanup history (admin only)."""
+    try:
+        if user.role != UserRole.ADMIN:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Permission denied. Admin role required to view SCIP cleanup history.",
+                }
+            )
+
+        from code_indexer.server.auth.audit_logger import password_audit_logger
+
+        limit = args.get("limit", DEFAULT_AUDIT_LOG_LIMIT)
+        cleanup_logs = password_audit_logger.get_cleanup_logs(limit=limit)
+
+        history = [
+            {
+                "cleanup_id": log.get("timestamp", "")
+                .replace(":", "-")
+                .replace(".", "-"),
+                "started_at": log.get("timestamp", ""),
+                "completed_at": log.get("timestamp", ""),
+                "workspaces_cleaned": len(log.get("files_cleared", [])),
+                "repo_path": log.get("repo_path"),
+            }
+            for log in cleanup_logs
+        ]
+
+        return _mcp_response(
+            {"success": True, "history": history, "total": len(history)}
+        )
+    except Exception as e:
+        logger.error(
+            f"Error in handle_scip_cleanup_history: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+HANDLER_REGISTRY["get_maintenance_status"] = handle_get_maintenance_status
+HANDLER_REGISTRY["scip_pr_history"] = handle_scip_pr_history
+HANDLER_REGISTRY["scip_cleanup_history"] = handle_scip_cleanup_history
+
+
+# Cleanup job state tracking for scip_cleanup_workspaces/scip_cleanup_status
+_cleanup_job_state: Dict[str, Any] = {
+    "running": False,
+    "job_id": None,
+    "progress": None,
+    "last_result": None,
+}
+
+
+def _execute_workspace_cleanup() -> Dict[str, Any]:
+    """Execute workspace cleanup and return result dict."""
+    workspace_cleanup_service = getattr(
+        app_module.app.state, "workspace_cleanup_service", None
+    )
+    if workspace_cleanup_service:
+        result = workspace_cleanup_service.cleanup_workspaces()
+        return {
+            "workspaces_scanned": result.workspaces_scanned,
+            "workspaces_deleted": result.workspaces_deleted,
+            "workspaces_preserved": result.workspaces_preserved,
+            "space_reclaimed_bytes": result.space_reclaimed_bytes,
+            "duration_seconds": result.duration_seconds,
+            "errors": result.errors,
+        }
+    return {"message": "Workspace cleanup service not available"}
+
+
+async def handle_scip_cleanup_workspaces(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Trigger SCIP workspace cleanup job (admin only)."""
+    global _cleanup_job_state
+    try:
+        if user.role != UserRole.ADMIN:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Permission denied. Admin role required to trigger SCIP cleanup.",
+                }
+            )
+
+        if _cleanup_job_state["running"]:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Cleanup job already running",
+                    "job_id": _cleanup_job_state["job_id"],
+                }
+            )
+
+        import uuid
+
+        job_id = str(uuid.uuid4())[:JOB_ID_LENGTH]
+
+        _cleanup_job_state.update(
+            {"running": True, "job_id": job_id, "progress": "started"}
+        )
+        try:
+            _cleanup_job_state["last_result"] = _execute_workspace_cleanup()
+            _cleanup_job_state["progress"] = "completed"
+        except Exception as cleanup_error:
+            logger.error(
+                f"Workspace cleanup failed: {cleanup_error}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            _cleanup_job_state["progress"] = f"failed: {str(cleanup_error)}"
+        finally:
+            _cleanup_job_state["running"] = False
+
+        return _mcp_response(
+            {
+                "success": True,
+                "job_id": job_id,
+                "status": _cleanup_job_state["progress"],
+            }
+        )
+    except Exception as e:
+        _cleanup_job_state["running"] = False
+        logger.error(
+            f"Error in handle_scip_cleanup_workspaces: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_scip_cleanup_status(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Get SCIP workspace cleanup job status (admin only)."""
+    try:
+        if user.role != UserRole.ADMIN:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Permission denied. Admin role required to view cleanup status.",
+                }
+            )
+
+        workspace_cleanup_service = getattr(
+            app_module.app.state, "workspace_cleanup_service", None
+        )
+        service_status = (
+            workspace_cleanup_service.get_cleanup_status()
+            if workspace_cleanup_service
+            else {}
+        )
+
+        return _mcp_response(
+            {
+                "success": True,
+                "running": _cleanup_job_state["running"],
+                "job_id": _cleanup_job_state["job_id"],
+                "progress": _cleanup_job_state["progress"],
+                "last_cleanup_time": service_status.get("last_cleanup_time"),
+                "workspace_count": service_status.get("workspace_count", 0),
+                "oldest_workspace_age": service_status.get("oldest_workspace_age"),
+                "total_size_mb": service_status.get("total_size_mb", 0.0),
+                "last_result": _cleanup_job_state.get("last_result"),
+            }
+        )
+    except Exception as e:
+        logger.error(
+            f"Error in handle_scip_cleanup_status: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+HANDLER_REGISTRY["scip_cleanup_workspaces"] = handle_scip_cleanup_workspaces
+HANDLER_REGISTRY["scip_cleanup_status"] = handle_scip_cleanup_status

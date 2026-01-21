@@ -205,14 +205,14 @@ class TestServerAddIndexCommand:
             mock_client = MagicMock()
             mock_client.add_index_to_golden_repo = AsyncMock(
                 side_effect=APIClientError(
-                    "Index type 'semantic_fts' already exists for 'my-repo'", 409
+                    "Index type 'semantic' already exists for 'my-repo'", 409
                 )
             )
             mock_client.close = AsyncMock()
             mock_client_class.return_value = mock_client
 
             result = self.runner.invoke(
-                cli, ["server", "add-index", "my-repo", "semantic_fts"]
+                cli, ["server", "add-index", "my-repo", "semantic"]
             )
 
             assert result.exit_code == 1
@@ -331,8 +331,8 @@ class TestServerAddIndexCommand:
             assert result.exit_code == 2
             assert "timeout" in result.output.lower()
 
-    def test_add_index_command_invalid_index_type(self):
-        """Test AC5: Invalid index_type returns 400 with friendly error."""
+    def test_add_index_command_api_returns_400_error(self):
+        """Test AC5: API 400 errors are handled with friendly error message."""
         with (
             patch(
                 "code_indexer.remote.config.RemoteConfig"
@@ -358,16 +358,17 @@ class TestServerAddIndexCommand:
             mock_client = MagicMock()
             mock_client.add_index_to_golden_repo = AsyncMock(
                 side_effect=APIClientError(
-                    "Invalid request: index_type must be one of: semantic_fts, temporal, scip",
+                    "Invalid request: index_type must be one of: semantic, fts, temporal, scip",
                     400,
                 )
             )
             mock_client.close = AsyncMock()
             mock_client_class.return_value = mock_client
 
-            # Note: click.Choice validates at CLI level, but we test API error handling too
+            # Use a valid CLI type (semantic) - the API returns a 400 error
+            # Note: CLI validates types at Click level with: semantic, fts, temporal, scip
             result = self.runner.invoke(
-                cli, ["server", "add-index", "my-repo", "semantic_fts"]
+                cli, ["server", "add-index", "my-repo", "semantic"]
             )
 
             assert result.exit_code == 1
@@ -431,7 +432,8 @@ class TestServerListIndexesCommand:
                 return_value={
                     "alias": "my-repo",
                     "indexes": {
-                        "semantic_fts": {"present": True},
+                        "semantic": {"present": True},
+                        "fts": {"present": True},
                         "temporal": {"present": False},
                         "scip": {"present": False},
                     },
@@ -444,7 +446,8 @@ class TestServerListIndexesCommand:
 
             assert result.exit_code == 0
             assert "my-repo" in result.output
-            assert "semantic_fts" in result.output
+            assert "semantic" in result.output
+            assert "fts" in result.output
             assert "temporal" in result.output
             assert "scip" in result.output
 

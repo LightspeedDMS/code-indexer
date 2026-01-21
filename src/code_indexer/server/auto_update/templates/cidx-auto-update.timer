@@ -1,6 +1,6 @@
 [Unit]
 Description=CIDX Auto-Update Timer
-Documentation=https://github.com/jsbattig/code-indexer
+Documentation=https://github.com/LightspeedDMS/code-indexer
 Requires=cidx-auto-update.service
 
 [Timer]

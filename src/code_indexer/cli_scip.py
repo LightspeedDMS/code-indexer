@@ -52,9 +52,88 @@ def _extract_display_name(full_symbol: str) -> str:
     return _extract_short_symbol_name(full_symbol)
 
 
+def _is_remote_mode() -> bool:
+    """Check if we are in remote mode."""
+    from .mode_detection.command_mode_detector import CommandModeDetector, find_project_root
+
+    project_root = find_project_root(Path.cwd())
+    detector = CommandModeDetector(project_root)
+    return detector.detect_mode() == "remote"
+
+
+def _get_remote_config() -> dict:
+    """Get remote server configuration from project config.
+
+    Returns:
+        Configuration dict with server_url and credentials
+
+    Raises:
+        click.ClickException: If config file is missing or malformed
+    """
+    import json
+    from .mode_detection.command_mode_detector import find_project_root
+
+    project_root = find_project_root(Path.cwd())
+    config_file = project_root / ".code-indexer" / "config.json"
+
+    if not config_file.exists():
+        raise click.ClickException(
+            f"Configuration file not found: {config_file}\n"
+            "Run 'cidx init' to configure remote mode."
+        )
+
+    try:
+        with open(config_file) as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        raise click.ClickException(f"Invalid JSON in config file: {e}")
+
+
+def _display_scip_results(result: dict, symbol: str, query_type: str):
+    """Display SCIP query results from remote API response.
+
+    Args:
+        result: API response dict with results, metadata, errors keys
+        symbol: The symbol that was searched
+        query_type: Type of query (definition, references, etc.)
+    """
+    # Check for errors
+    errors = result.get("errors", {})
+    for repo_id, error in errors.items():
+        console.print(f"Error from {repo_id}: {error}", style="red")
+
+    # Collect all results across repositories
+    all_items = []
+    for repo_id, items in result.get("results", {}).items():
+        for item in items:
+            item["_repo_id"] = repo_id
+            all_items.append(item)
+
+    if not all_items:
+        console.print(f"No {query_type}s found for '{symbol}'", style="yellow")
+        sys.exit(0)
+
+    console.print(
+        f"Found {len(all_items)} {query_type}(s) for '{symbol}':\n", style="green bold"
+    )
+
+    for item in all_items:
+        symbol_name = item.get("symbol", item.get("name", "unknown"))
+        display_name = _extract_display_name(symbol_name)
+        file_path = item.get("file_path", item.get("path", ""))
+        line = item.get("line", 0)
+        column = item.get("column", 0)
+        console.print(
+            f"  {display_name} ({file_path}:{line}:{column})",
+            style="cyan",
+        )
+
+    sys.exit(0)
+
+
 @click.group("scip")
 @click.pass_context
-@require_mode("local")
+@require_mode("local", "remote")
 def scip_group(ctx):
     """SCIP index generation and status commands.
 
@@ -658,8 +737,15 @@ def scip_verify(ctx, database_path: str):
     "--project",
     help="Limit search to specific project path",
 )
+@click.option(
+    "--repository",
+    "-r",
+    help="Repository alias for remote mode queries",
+)
 @click.pass_context
-def scip_definition(ctx, symbol: str, limit: int, exact: bool, project: Optional[str]):
+def scip_definition(
+    ctx, symbol: str, limit: int, exact: bool, project: Optional[str], repository: Optional[str]
+):
     """Find where a symbol is defined.
 
     Searches SCIP indexes for symbol definitions and returns file locations.
@@ -670,17 +756,29 @@ def scip_definition(ctx, symbol: str, limit: int, exact: bool, project: Optional
       cidx scip definition UserService            # Find UserService definitions
       cidx scip definition authenticate           # Find authenticate method
       cidx scip definition UserService --exact    # Exact match only
+      cidx scip definition MyClass -r backend     # Remote mode with repository
 
     REQUIRES:
-      SCIP indexes must be generated first (run 'cidx scip generate')
+      Local mode: SCIP indexes must be generated first (run 'cidx scip generate')
+      Remote mode: --repository flag required
     """
+    # Remote mode handling
+    if _is_remote_mode():
+        if not repository:
+            console.print(
+                "Error: --repository flag required for remote SCIP queries", style="red"
+            )
+            sys.exit(1)
+        _run_remote_definition(symbol, repository, project)
+        return
+
+    # Local mode - existing implementation
     from code_indexer.scip.query import SCIPQueryEngine
     from code_indexer.scip.status import StatusTracker
 
     repo_root = Path.cwd()
     scip_dir = repo_root / ".code-indexer" / "scip"
 
-    # Check if SCIP indexes exist
     tracker = StatusTracker(scip_dir)
     status = tracker.load()
 
@@ -689,13 +787,10 @@ def scip_definition(ctx, symbol: str, limit: int, exact: bool, project: Optional
         console.print("   Run 'cidx scip generate' first", style="dim")
         sys.exit(1)
 
-    # Find all .scip.db files (filter by project if specified)
     if project:
-        # Filter to specific project path
         project_scip_dir = scip_dir / project
         scip_files = list(project_scip_dir.glob("**/*.scip.db"))
     else:
-        # Search all projects
         scip_files = list(scip_dir.glob("**/*.scip.db"))
 
     if not scip_files:
@@ -707,7 +802,6 @@ def scip_definition(ctx, symbol: str, limit: int, exact: bool, project: Optional
             console.print("Error: No .scip.db files found", style="red")
         sys.exit(1)
 
-    # Search across all SCIP files
     all_results = []
     for scip_file in scip_files:
         try:
@@ -719,11 +813,9 @@ def scip_definition(ctx, symbol: str, limit: int, exact: bool, project: Optional
                 f"Warning: Failed to query {scip_file}: {e}", style="yellow dim"
             )
 
-    # Apply limit if specified
     if limit > 0:
         all_results = all_results[:limit]
 
-    # Display results
     if not all_results:
         console.print(f"No definitions found for '{symbol}'", style="yellow")
         sys.exit(0)
@@ -740,6 +832,30 @@ def scip_definition(ctx, symbol: str, limit: int, exact: bool, project: Optional
         )
 
     sys.exit(0)
+
+
+def _run_remote_definition(symbol: str, repository: str, project: Optional[str]):
+    """Execute remote SCIP definition query via SCIPAPIClient."""
+    import asyncio
+    from code_indexer.api_clients.scip_client import SCIPAPIClient
+
+    config = _get_remote_config()
+    server_url = config.get("server_url")
+    if not server_url:
+        raise click.ClickException("server_url not found in config")
+
+    credentials = {"username": config.get("username"), "password": config.get("password")}
+
+    async def run_query():
+        client = SCIPAPIClient(server_url, credentials, Path.cwd())
+        try:
+            result = await client.definition(symbol, repository, project)
+            return result
+        finally:
+            await client.close()
+
+    result = asyncio.run(run_query())
+    _display_scip_results(result, symbol, "definition")
 
 
 @scip_group.command("references")
@@ -759,8 +875,15 @@ def scip_definition(ctx, symbol: str, limit: int, exact: bool, project: Optional
     "--project",
     help="Limit search to specific project path",
 )
+@click.option(
+    "--repository",
+    "-r",
+    help="Repository alias for remote mode queries",
+)
 @click.pass_context
-def scip_references(ctx, symbol: str, limit: int, exact: bool, project: Optional[str]):
+def scip_references(
+    ctx, symbol: str, limit: int, exact: bool, project: Optional[str], repository: Optional[str]
+):
     """Find all references to a symbol.
 
     Searches SCIP indexes for symbol usages and returns file locations.
@@ -770,17 +893,29 @@ def scip_references(ctx, symbol: str, limit: int, exact: bool, project: Optional
       cidx scip references UserService              # Find all UserService usages
       cidx scip references authenticate --limit 10  # Limit to 10 results
       cidx scip references UserService --exact      # Exact match only
+      cidx scip references MyClass -r backend       # Remote mode with repository
 
     REQUIRES:
-      SCIP indexes must be generated first (run 'cidx scip generate')
+      Local mode: SCIP indexes must be generated first (run 'cidx scip generate')
+      Remote mode: --repository flag required
     """
+    # Remote mode handling
+    if _is_remote_mode():
+        if not repository:
+            console.print(
+                "Error: --repository flag required for remote SCIP queries", style="red"
+            )
+            sys.exit(1)
+        _run_remote_references(symbol, repository, limit, project)
+        return
+
+    # Local mode - existing implementation
     from code_indexer.scip.query import SCIPQueryEngine
     from code_indexer.scip.status import StatusTracker
 
     repo_root = Path.cwd()
     scip_dir = repo_root / ".code-indexer" / "scip"
 
-    # Check if SCIP indexes exist
     tracker = StatusTracker(scip_dir)
     status = tracker.load()
 
@@ -789,13 +924,10 @@ def scip_references(ctx, symbol: str, limit: int, exact: bool, project: Optional
         console.print("   Run 'cidx scip generate' first", style="dim")
         sys.exit(1)
 
-    # Find all .scip.db files (filter by project if specified)
     if project:
-        # Filter to specific project path
         project_scip_dir = scip_dir / project
         scip_files = list(project_scip_dir.glob("**/*.scip.db"))
     else:
-        # Search all projects
         scip_files = list(scip_dir.glob("**/*.scip.db"))
 
     if not scip_files:
@@ -807,7 +939,6 @@ def scip_references(ctx, symbol: str, limit: int, exact: bool, project: Optional
             console.print("Error: No .scip.db files found", style="red")
         sys.exit(1)
 
-    # Search across all SCIP files
     all_results = []
     for scip_file in scip_files:
         try:
@@ -821,11 +952,9 @@ def scip_references(ctx, symbol: str, limit: int, exact: bool, project: Optional
                 f"Warning: Failed to query {scip_file}: {e}", style="yellow dim"
             )
 
-    # Trim to limit if specified
     if limit > 0:
         all_results = all_results[:limit]
 
-    # Display results
     if not all_results:
         console.print(f"No references found for '{symbol}'", style="yellow")
         sys.exit(0)
@@ -844,6 +973,31 @@ def scip_references(ctx, symbol: str, limit: int, exact: bool, project: Optional
         )
 
     sys.exit(0)
+
+
+def _run_remote_references(symbol: str, repository: str, limit: int, project: Optional[str]):
+    """Execute remote SCIP references query via SCIPAPIClient."""
+    import asyncio
+    from code_indexer.api_clients.scip_client import SCIPAPIClient
+
+    config = _get_remote_config()
+    server_url = config.get("server_url")
+    if not server_url:
+        raise click.ClickException("server_url not found in config")
+
+    credentials = {"username": config.get("username"), "password": config.get("password")}
+    api_limit = limit if limit > 0 else 100
+
+    async def run_query():
+        client = SCIPAPIClient(server_url, credentials, Path.cwd())
+        try:
+            result = await client.references(symbol, repository, api_limit, project)
+            return result
+        finally:
+            await client.close()
+
+    result = asyncio.run(run_query())
+    _display_scip_results(result, symbol, "reference")
 
 
 @scip_group.command("dependencies")
@@ -869,9 +1023,14 @@ def scip_references(ctx, symbol: str, limit: int, exact: bool, project: Optional
     "--project",
     help="Limit search to specific project path",
 )
+@click.option(
+    "--repository",
+    "-r",
+    help="Repository alias for remote mode queries",
+)
 @click.pass_context
 def scip_dependencies(
-    ctx, symbol: str, limit: int, depth: int, exact: bool, project: Optional[str]
+    ctx, symbol: str, limit: int, depth: int, exact: bool, project: Optional[str], repository: Optional[str]
 ):
     """Get symbols that this symbol depends on.
 
@@ -882,17 +1041,29 @@ def scip_dependencies(
       cidx scip dependencies UserService              # Direct dependencies only
       cidx scip dependencies UserService --depth 2    # Include transitive deps
       cidx scip dependencies authenticate --exact     # Exact symbol match
+      cidx scip dependencies MyClass -r backend       # Remote mode with repository
 
     REQUIRES:
-      SCIP indexes must be generated first (run 'cidx scip generate')
+      Local mode: SCIP indexes must be generated first (run 'cidx scip generate')
+      Remote mode: --repository flag required
     """
+    # Remote mode handling
+    if _is_remote_mode():
+        if not repository:
+            console.print(
+                "Error: --repository flag required for remote SCIP queries", style="red"
+            )
+            sys.exit(1)
+        _run_remote_dependencies(symbol, repository, depth, project)
+        return
+
+    # Local mode - existing implementation
     from code_indexer.scip.query import SCIPQueryEngine
     from code_indexer.scip.status import StatusTracker
 
     repo_root = Path.cwd()
     scip_dir = repo_root / ".code-indexer" / "scip"
 
-    # Check if SCIP indexes exist
     tracker = StatusTracker(scip_dir)
     status = tracker.load()
 
@@ -901,13 +1072,10 @@ def scip_dependencies(
         console.print("   Run 'cidx scip generate' first", style="dim")
         sys.exit(1)
 
-    # Find all .scip.db files (filter by project if specified)
     if project:
-        # Filter to specific project path
         project_scip_dir = scip_dir / project
         scip_files = list(project_scip_dir.glob("**/*.scip.db"))
     else:
-        # Search all projects
         scip_files = list(scip_dir.glob("**/*.scip.db"))
 
     if not scip_files:
@@ -919,7 +1087,6 @@ def scip_dependencies(
             console.print("Error: No .scip.db files found", style="red")
         sys.exit(1)
 
-    # Search across all SCIP files
     all_results = []
     for scip_file in scip_files:
         try:
@@ -931,11 +1098,9 @@ def scip_dependencies(
                 f"Warning: Failed to query {scip_file}: {e}", style="yellow dim"
             )
 
-    # Apply limit if specified
     if limit > 0:
         all_results = all_results[:limit]
 
-    # Display results
     if not all_results:
         console.print(f"No dependencies found for '{symbol}'", style="yellow")
         console.print(
@@ -958,6 +1123,30 @@ def scip_dependencies(
         )
 
     sys.exit(0)
+
+
+def _run_remote_dependencies(symbol: str, repository: str, depth: int, project: Optional[str]):
+    """Execute remote SCIP dependencies query via SCIPAPIClient."""
+    import asyncio
+    from code_indexer.api_clients.scip_client import SCIPAPIClient
+
+    config = _get_remote_config()
+    server_url = config.get("server_url")
+    if not server_url:
+        raise click.ClickException("server_url not found in config")
+
+    credentials = {"username": config.get("username"), "password": config.get("password")}
+
+    async def run_query():
+        client = SCIPAPIClient(server_url, credentials, Path.cwd())
+        try:
+            result = await client.dependencies(symbol, repository, depth, project)
+            return result
+        finally:
+            await client.close()
+
+    result = asyncio.run(run_query())
+    _display_scip_results(result, symbol, "dependency")
 
 
 @scip_group.command("dependents")
@@ -983,9 +1172,14 @@ def scip_dependencies(
     "--project",
     help="Limit search to specific project path",
 )
+@click.option(
+    "--repository",
+    "-r",
+    help="Repository alias for remote mode queries",
+)
 @click.pass_context
 def scip_dependents(
-    ctx, symbol: str, limit: int, depth: int, exact: bool, project: Optional[str]
+    ctx, symbol: str, limit: int, depth: int, exact: bool, project: Optional[str], repository: Optional[str]
 ):
     """Get symbols that depend on this symbol.
 
@@ -996,17 +1190,29 @@ def scip_dependents(
       cidx scip dependents Logger                   # Direct dependents only
       cidx scip dependents Logger --depth 2         # Include transitive deps
       cidx scip dependents UserService --exact      # Exact symbol match
+      cidx scip dependents MyClass -r backend       # Remote mode with repository
 
     REQUIRES:
-      SCIP indexes must be generated first (run 'cidx scip generate')
+      Local mode: SCIP indexes must be generated first (run 'cidx scip generate')
+      Remote mode: --repository flag required
     """
+    # Remote mode handling
+    if _is_remote_mode():
+        if not repository:
+            console.print(
+                "Error: --repository flag required for remote SCIP queries", style="red"
+            )
+            sys.exit(1)
+        _run_remote_dependents(symbol, repository, depth, project)
+        return
+
+    # Local mode - existing implementation
     from code_indexer.scip.query import SCIPQueryEngine
     from code_indexer.scip.status import StatusTracker
 
     repo_root = Path.cwd()
     scip_dir = repo_root / ".code-indexer" / "scip"
 
-    # Check if SCIP indexes exist
     tracker = StatusTracker(scip_dir)
     status = tracker.load()
 
@@ -1015,13 +1221,10 @@ def scip_dependents(
         console.print("   Run 'cidx scip generate' first", style="dim")
         sys.exit(1)
 
-    # Find all .scip.db files (filter by project if specified)
     if project:
-        # Filter to specific project path
         project_scip_dir = scip_dir / project
         scip_files = list(project_scip_dir.glob("**/*.scip.db"))
     else:
-        # Search all projects
         scip_files = list(scip_dir.glob("**/*.scip.db"))
 
     if not scip_files:
@@ -1033,7 +1236,6 @@ def scip_dependents(
             console.print("Error: No .scip.db files found", style="red")
         sys.exit(1)
 
-    # Search across all SCIP files
     all_results = []
     for scip_file in scip_files:
         try:
@@ -1045,11 +1247,9 @@ def scip_dependents(
                 f"Warning: Failed to query {scip_file}: {e}", style="yellow dim"
             )
 
-    # Apply limit if specified
     if limit > 0:
         all_results = all_results[:limit]
 
-    # Display results
     if not all_results:
         console.print(f"No dependents found for '{symbol}'", style="yellow")
         console.print(
@@ -1061,10 +1261,8 @@ def scip_dependents(
         f"Found {len(all_results)} dependent(s) for '{symbol}':\n", style="green bold"
     )
 
-    # Flat output: one line per result
     for result in all_results:
         display_name = _extract_display_name(result.symbol)
-        # Format: display_name (file:line) [relationship]
         console.print(
             f"  {display_name} ({result.file_path}:{result.line}) [{result.relationship}]",
             style="dim",
@@ -1073,6 +1271,30 @@ def scip_dependents(
         )
 
     sys.exit(0)
+
+
+def _run_remote_dependents(symbol: str, repository: str, depth: int, project: Optional[str]):
+    """Execute remote SCIP dependents query via SCIPAPIClient."""
+    import asyncio
+    from code_indexer.api_clients.scip_client import SCIPAPIClient
+
+    config = _get_remote_config()
+    server_url = config.get("server_url")
+    if not server_url:
+        raise click.ClickException("server_url not found in config")
+
+    credentials = {"username": config.get("username"), "password": config.get("password")}
+
+    async def run_query():
+        client = SCIPAPIClient(server_url, credentials, Path.cwd())
+        try:
+            result = await client.dependents(symbol, repository, depth, project)
+            return result
+        finally:
+            await client.close()
+
+    result = asyncio.run(run_query())
+    _display_scip_results(result, symbol, "dependent")
 
 
 @scip_group.command("impact")
@@ -1088,6 +1310,11 @@ def scip_dependents(
 @click.option("--exclude", help="Exclude pattern (e.g., */tests/*)")
 @click.option("--include", help="Include pattern")
 @click.option("--kind", help="Filter by symbol kind (class/function/variable)")
+@click.option(
+    "--repository",
+    "-r",
+    help="Repository alias for remote mode queries",
+)
 @click.pass_context
 def scip_impact(
     ctx,
@@ -1098,6 +1325,7 @@ def scip_impact(
     exclude: Optional[str],
     include: Optional[str],
     kind: Optional[str],
+    repository: Optional[str],
 ):
     """Analyze impact of changes to a symbol (shows what depends on it).
 
@@ -1110,17 +1338,29 @@ def scip_impact(
       cidx scip impact authenticate --depth 1       # Direct dependents only
       cidx scip impact Logger --exclude '*/tests/*' # Exclude test files
       cidx scip impact Config --project backend/    # Limit to backend project
+      cidx scip impact MyClass -r backend           # Remote mode with repository
 
     REQUIRES:
-      SCIP indexes must be generated first (run 'cidx scip generate')
+      Local mode: SCIP indexes must be generated first (run 'cidx scip generate')
+      Remote mode: --repository flag required
     """
+    # Remote mode handling
+    if _is_remote_mode():
+        if not repository:
+            console.print(
+                "Error: --repository flag required for remote SCIP queries", style="red"
+            )
+            sys.exit(1)
+        _run_remote_impact(symbol, repository, depth, project)
+        return
+
+    # Local mode - existing implementation
     from code_indexer.scip.query.composites import analyze_impact
     from code_indexer.scip.status import StatusTracker
 
     repo_root = Path.cwd()
     scip_dir = repo_root / ".code-indexer" / "scip"
 
-    # Check if SCIP indexes exist
     tracker = StatusTracker(scip_dir)
     status = tracker.load()
 
@@ -1129,7 +1369,6 @@ def scip_impact(
         console.print("   Run 'cidx scip generate' first", style="dim")
         sys.exit(1)
 
-    # Run impact analysis
     console.print(f"Analyzing impact for '{symbol}' (depth={depth})...\n", style="blue")
     result = analyze_impact(
         symbol,
@@ -1148,21 +1387,17 @@ def scip_impact(
         )
         sys.exit(0)
 
-    # Apply limit if specified
     affected_symbols = result.affected_symbols
     if limit > 0:
         affected_symbols = affected_symbols[:limit]
 
-    # Display results
     console.print(
         f"Found {result.total_affected} affected symbol(s) in {len(result.affected_files)} file(s):\n",
         style="green bold",
     )
 
-    # Flat output: one line per affected symbol with depth indicator
     for sym in affected_symbols:
         display_name = _extract_display_name(sym.symbol)
-        # Format: [depth N] display_name (file:line)
         console.print(
             f"  [depth {sym.depth}] {display_name} ({sym.file_path}:{sym.line})",
             style="dim",
@@ -1173,6 +1408,30 @@ def scip_impact(
     sys.exit(0)
 
 
+def _run_remote_impact(symbol: str, repository: str, depth: int, project: Optional[str]):
+    """Execute remote SCIP impact query via SCIPAPIClient."""
+    import asyncio
+    from code_indexer.api_clients.scip_client import SCIPAPIClient
+
+    config = _get_remote_config()
+    server_url = config.get("server_url")
+    if not server_url:
+        raise click.ClickException("server_url not found in config")
+
+    credentials = {"username": config.get("username"), "password": config.get("password")}
+
+    async def run_query():
+        client = SCIPAPIClient(server_url, credentials, Path.cwd())
+        try:
+            result = await client.impact(symbol, repository, depth, project)
+            return result
+        finally:
+            await client.close()
+
+    result = asyncio.run(run_query())
+    _display_scip_results(result, symbol, "impact")
+
+
 @scip_group.command("callchain")
 @click.argument("from_symbol")
 @click.argument("to_symbol")
@@ -1181,6 +1440,11 @@ def scip_impact(
 )
 @click.option("--limit", type=int, default=0, help="Maximum results (0 = unlimited)")
 @click.option("--project", help="Filter to specific project path")
+@click.option(
+    "--repository",
+    "-r",
+    help="Repository alias for remote mode queries",
+)
 @click.pass_context
 def scip_callchain(
     ctx,
@@ -1189,6 +1453,7 @@ def scip_callchain(
     max_depth: int,
     limit: int,
     project: Optional[str],
+    repository: Optional[str],
 ):
     """Trace call chains between two symbols.
 
@@ -1199,10 +1464,23 @@ def scip_callchain(
       cidx scip callchain main Application.run     # Find paths from main to run
       cidx scip callchain Logger UserService       # Trace Logger to UserService
       cidx scip callchain A B --max-depth 5        # Limit to 5 hops max
+      cidx scip callchain main process -r backend  # Remote mode with repository
 
     REQUIRES:
-      SCIP indexes must be generated first (run 'cidx scip generate')
+      Local mode: SCIP indexes must be generated first (run 'cidx scip generate')
+      Remote mode: --repository flag required
     """
+    # Remote mode handling
+    if _is_remote_mode():
+        if not repository:
+            console.print(
+                "Error: --repository flag required for remote SCIP queries", style="red"
+            )
+            sys.exit(1)
+        _run_remote_callchain(from_symbol, to_symbol, repository, max_depth, project)
+        return
+
+    # Local mode - existing implementation
     from code_indexer.scip.query.primitives import SCIPQueryEngine
     from code_indexer.scip.query.composites import (
         CallStep,
@@ -1368,14 +1646,86 @@ def scip_callchain(
     sys.exit(0)
 
 
+def _run_remote_callchain(
+    from_symbol: str, to_symbol: str, repository: str, max_depth: int, project: Optional[str]
+):
+    """Execute remote SCIP callchain query via SCIPAPIClient."""
+    import asyncio
+    from code_indexer.api_clients.scip_client import SCIPAPIClient
+
+    config = _get_remote_config()
+    server_url = config.get("server_url")
+    if not server_url:
+        raise click.ClickException("server_url not found in config")
+
+    credentials = {"username": config.get("username"), "password": config.get("password")}
+
+    async def run_query():
+        client = SCIPAPIClient(server_url, credentials, Path.cwd())
+        try:
+            result = await client.callchain(from_symbol, to_symbol, repository, max_depth, project)
+            return result
+        finally:
+            await client.close()
+
+    result = asyncio.run(run_query())
+    _display_callchain_results(result, from_symbol, to_symbol)
+
+
+def _display_callchain_results(result: dict, from_symbol: str, to_symbol: str):
+    """Display callchain results from remote API response.
+
+    Callchain has unique structure: chains contain paths of steps,
+    unlike flat results from other SCIP queries.
+    """
+    errors = result.get("errors", {})
+    for repo_id, error in errors.items():
+        console.print(f"Error from {repo_id}: {error}", style="red")
+
+    all_chains = []
+    for repo_id, items in result.get("results", {}).items():
+        all_chains.extend(items)
+
+    if not all_chains:
+        console.print(
+            f"No call chain found from '{from_symbol}' to '{to_symbol}'", style="yellow"
+        )
+        console.print(
+            "   Symbols may not be connected or path exceeds max depth", style="dim"
+        )
+        sys.exit(0)
+
+    console.print(f"Found {len(all_chains)} call chain(s):\n", style="green bold")
+
+    for i, chain in enumerate(all_chains, 1):
+        path = chain.get("path", [])
+        console.print(f"Chain {i} ({len(path)} step(s)):", style="cyan bold")
+        for j, step in enumerate(path, 1):
+            symbol_name = step.get("symbol", "")
+            if not symbol_name:
+                symbol_name = step.get("name", "")
+            display_name = _extract_display_name(symbol_name) if symbol_name else "(unknown)"
+            file_path = step.get("file_path", step.get("path", ""))
+            line = step.get("line", 0)
+            console.print(f"  {j}. {display_name} ({file_path}:{line})", style="dim")
+        console.print()
+
+    sys.exit(0)
+
+
 @scip_group.command("context")
 @click.argument("symbol")
 @click.option("--limit", type=int, default=0, help="Maximum results (0 = unlimited)")
 @click.option("--min-score", default=0.0, help="Minimum relevance score (0.0-1.0)")
 @click.option("--project", help="Filter to specific project path")
+@click.option(
+    "--repository",
+    "-r",
+    help="Repository alias for remote mode queries",
+)
 @click.pass_context
 def scip_context(
-    ctx, symbol: str, limit: int, min_score: float, project: Optional[str]
+    ctx, symbol: str, limit: int, min_score: float, project: Optional[str], repository: Optional[str]
 ):
     """Get smart context for a symbol - curated file list with relevance.
 
@@ -1386,17 +1736,30 @@ def scip_context(
       cidx scip context UserService              # Get context for UserService
       cidx scip context Logger --limit 10        # Limit to top 10 files
       cidx scip context Config --min-score 0.5   # Filter low relevance
+      cidx scip context MyClass -r backend       # Remote mode with repository
 
     REQUIRES:
-      SCIP indexes must be generated first (run 'cidx scip generate')
+      Local mode: SCIP indexes must be generated first (run 'cidx scip generate')
+      Remote mode: --repository flag required
     """
+    # Remote mode handling
+    if _is_remote_mode():
+        if not repository:
+            console.print(
+                "Error: --repository flag required for remote SCIP queries", style="red"
+            )
+            sys.exit(1)
+        api_limit = limit if limit > 0 else 20
+        _run_remote_context(symbol, repository, api_limit, project)
+        return
+
+    # Local mode - existing implementation
     from code_indexer.scip.query.composites import get_smart_context
     from code_indexer.scip.status import StatusTracker
 
     repo_root = Path.cwd()
     scip_dir = repo_root / ".code-indexer" / "scip"
 
-    # Check if SCIP indexes exist
     tracker = StatusTracker(scip_dir)
     status = tracker.load()
 
@@ -1405,7 +1768,6 @@ def scip_context(
         console.print("   Run 'cidx scip generate' first", style="dim")
         sys.exit(1)
 
-    # Get smart context
     console.print(f"Building smart context for '{symbol}'...\n", style="blue")
     result = get_smart_context(
         symbol, scip_dir, limit=limit, min_score=min_score, project=project
@@ -1418,13 +1780,11 @@ def scip_context(
         )
         sys.exit(0)
 
-    # Display summary
     console.print(
         f"Found {result.total_symbols} relevant symbol(s) in {result.total_files} file(s):\n",
         style="green bold",
     )
 
-    # Flat output: one line per symbol with role indicator and score
     for cf in result.files:
         for sym in cf.symbols:
             symbol_attr = getattr(sym, "symbol", None)
@@ -1433,13 +1793,10 @@ def scip_context(
                 if symbol_attr
                 else _extract_display_name(getattr(sym, "name", ""))
             )
-            # Abbreviate role: definition -> def, reference -> ref
-            # Check relationship first, but only use if it's a string (not a Mock)
             relationship = getattr(sym, "relationship", None)
             role = getattr(sym, "role", "")
             role_value = relationship if isinstance(relationship, str) else role
             role_abbrev = str(role_value)[:3]
-            # Format: [role] display_name (file:line) - score: X.XX
             console.print(
                 f"  [{role_abbrev}] {display_name} ({cf.path}:{sym.line}) - score: {cf.relevance_score:.2f}",
                 style="dim",
@@ -1448,3 +1805,27 @@ def scip_context(
             )
 
     sys.exit(0)
+
+
+def _run_remote_context(symbol: str, repository: str, limit: int, project: Optional[str]):
+    """Execute remote SCIP context query via SCIPAPIClient."""
+    import asyncio
+    from code_indexer.api_clients.scip_client import SCIPAPIClient
+
+    config = _get_remote_config()
+    server_url = config.get("server_url")
+    if not server_url:
+        raise click.ClickException("server_url not found in config")
+
+    credentials = {"username": config.get("username"), "password": config.get("password")}
+
+    async def run_query():
+        client = SCIPAPIClient(server_url, credentials, Path.cwd())
+        try:
+            result = await client.context(symbol, repository, limit, project)
+            return result
+        finally:
+            await client.close()
+
+    result = asyncio.run(run_query())
+    _display_scip_results(result, symbol, "context")

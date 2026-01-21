@@ -194,6 +194,14 @@ async def handle_tools_call(
 
     handler = HANDLER_REGISTRY[tool_name]
 
+    # Story #4 AC2: Track "other" API calls for tools not already instrumented
+    # search_code tracks semantic_search/other_index_search, regex_search tracks regex_search
+    # All other tools should be counted as "other_api_calls"
+    tools_with_own_metrics = {"search_code", "regex_search"}
+    if tool_name not in tools_with_own_metrics:
+        from code_indexer.server.services.api_metrics_service import api_metrics_service
+        api_metrics_service.increment_other_api_call()
+
     # Call handler with arguments
     # Special handling for handlers that need session_state (CRITICAL 1, 3 fix)
     from typing import cast

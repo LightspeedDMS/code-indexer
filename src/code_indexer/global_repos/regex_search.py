@@ -106,6 +106,12 @@ class RegexSearchService:
             ValueError: If path doesn't exist
             TimeoutError: If search exceeds timeout_seconds
         """
+        # Story #4 AC2: Track regex search at service layer
+        # This ensures both MCP and REST API calls are counted
+        from code_indexer.server.services.api_metrics_service import api_metrics_service
+
+        api_metrics_service.increment_regex_search()
+
         start_time = time.time()
 
         search_path = self.repo_path / path if path else self.repo_path
