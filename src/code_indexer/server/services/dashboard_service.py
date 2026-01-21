@@ -103,6 +103,7 @@ class DashboardService:
         time_filter: str = "24h",
         recent_filter: str = "30d",
         user_role: str = "user",
+        api_window: int = 60,
     ) -> Dict[str, Any]:
         """
         Get statistics data for partial refresh.
@@ -112,18 +113,17 @@ class DashboardService:
             time_filter: Time filter for job stats ("24h", "7d", "30d")
             recent_filter: Time filter for recent activity ("24h", "7d", "30d")
             user_role: User role ('admin' or 'user') - AC6 fix to prevent count flash
+            api_window: Time window in seconds for API metrics (default 60).
+                Common values: 60 (1 min), 900 (15 min), 3600 (1 hour), 86400 (24 hours)
 
         Returns:
             Dictionary containing job counts, repo counts, recent jobs, and API metrics
         """
         # Story #4 AC2/AC3: Get API metrics for dashboard display
+        # Rolling window implementation - no reset needed, timestamps age out naturally
         from .api_metrics_service import api_metrics_service
 
-        # Code Review Finding #2: Get metrics and then reset
-        # Metrics should represent activity SINCE last dashboard refresh, not all-time totals
-        # Similar to IO metrics pattern in health_service
-        api_metrics = api_metrics_service.get_metrics()
-        api_metrics_service.reset()
+        api_metrics = api_metrics_service.get_metrics(window_seconds=api_window)
 
         return {
             "job_counts": self._get_job_counts(username, time_filter),
@@ -284,16 +284,22 @@ class DashboardService:
 
             recent = []
             for job in recent_jobs_data:
-                # Extract repo name from result or operation type
-                repo_name = "Unknown"
-                result = job.get("result", {}) or {}
-                if isinstance(result, dict):
-                    # Check alias (golden repos), user_alias (activated repos), repository
-                    repo_name = (
-                        result.get("alias")
-                        or result.get("user_alias")
-                        or result.get("repository", "Unknown")
-                    )
+                # Extract repo name: prefer repo_alias (works for running/pending),
+                # fallback to result dict (for backward compatibility)
+                repo_name = job.get("repo_alias")
+                if not repo_name:
+                    # Fallback to result dict for completed jobs or legacy data
+                    result = job.get("result", {}) or {}
+                    if isinstance(result, dict):
+                        # Check alias (golden repos), user_alias (activated repos), repository
+                        repo_name = (
+                            result.get("alias")
+                            or result.get("user_alias")
+                            or result.get("repository")
+                        )
+                # Final fallback to "Unknown"
+                if not repo_name:
+                    repo_name = "Unknown"
 
                 recent.append(
                     RecentJob(

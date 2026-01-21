@@ -75,7 +75,6 @@ class GlobalRegistry:
             )
 
             self._sqlite_backend = GlobalReposSqliteBackend(db_path)
-            logger.info(f"GlobalRegistry using SQLite backend: {db_path}")
         else:
             # JSON file storage (backward compatible)
             self._registry_data: Dict[str, Dict[str, Any]] = {}

@@ -14,18 +14,27 @@ Following TDD methodology: Write failing tests FIRST, then implement.
 
 import pytest
 from contextlib import ExitStack
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, AsyncMock
 from pathlib import Path
 
 
 class TestSemanticSearchServiceMetrics:
-    """Test that SemanticSearchService increments semantic_search metrics."""
+    """Test that SemanticSearchService does NOT track metrics (to prevent double-counting).
 
-    def test_search_repository_path_increments_semantic_search_metric(self):
-        """Test that search_repository_path increments semantic_search counter.
+    Metrics tracking happens at the MCP/REST entry point layer
+    (semantic_query_manager._perform_search), NOT in SemanticSearchService.
+    Having metrics tracking in both places caused each search to be counted twice.
+    """
 
-        Story #4 Fix: Metrics should be tracked at service layer so both
-        MCP and REST APIs get metrics tracked.
+    def test_search_repository_path_does_not_track_metrics(self):
+        """Test that search_repository_path does NOT increment metrics.
+
+        ARCHITECTURE FIX: Metrics were previously tracked in BOTH:
+        1. semantic_query_manager._perform_search() (CORRECT - keep this)
+        2. search_service.search_repository_path() (INCORRECT - removed)
+
+        This caused double-counting - each semantic search was counted twice.
+        Now metrics are ONLY tracked at the entry point layer.
         """
         from code_indexer.server.services.api_metrics_service import (
             api_metrics_service,
@@ -61,11 +70,14 @@ class TestSemanticSearchServiceMetrics:
             assert result is not None
             assert result.results == []
 
-        # Verify semantic search metric was incremented
+        # Verify NO metrics were incremented by search_repository_path
+        # Metrics tracking is done at the MCP entry point layer
+        # (semantic_query_manager._perform_search), not here
         metrics = api_metrics_service.get_metrics()
-        assert metrics["semantic_searches"] == 1, (
-            f"Expected 1 semantic search, got {metrics['semantic_searches']}. "
-            "Service-level instrumentation missing in search_repository_path()"
+        assert metrics["semantic_searches"] == 0, (
+            f"Expected 0 semantic searches (should not track here), got {metrics['semantic_searches']}. "
+            "search_repository_path() should NOT track metrics - that causes double-counting. "
+            "Metrics are tracked in semantic_query_manager._perform_search() instead."
         )
         assert metrics["other_index_searches"] == 0
         assert metrics["regex_searches"] == 0

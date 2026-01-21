@@ -955,6 +955,7 @@ class BackgroundJobManager:
                         "result": job.result,
                         "error": job.error,
                         "username": job.username,
+                        "repo_alias": job.repo_alias,
                     }
                     recent_jobs.append(job_dict)
 

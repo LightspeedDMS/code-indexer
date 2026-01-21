@@ -105,11 +105,9 @@ class SemanticSearchService:
             FileNotFoundError: If repository path doesn't exist
             ValueError: If search request is invalid
         """
-        # Story #4 AC2: Track semantic search at service layer
-        # This ensures both MCP and REST API calls are counted
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_semantic_search()
+        # Note: Metrics tracking is done at the MCP/REST entry point level
+        # (semantic_query_manager._perform_search), NOT here.
+        # Having it here caused double-counting bug - each search was counted twice.
 
         if not os.path.exists(repo_path):
             raise FileNotFoundError(f"Repository path {repo_path} not found")

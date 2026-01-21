@@ -313,16 +313,20 @@ async def dashboard_stats_partial(
     request: Request,
     time_filter: str = "24h",
     recent_filter: str = "30d",
+    api_filter: int = 60,
 ):
     """
     Partial refresh endpoint for dashboard statistics section.
 
     Story #541 AC3/AC5: Support time filtering for job stats and recent activity.
+    Rolling window API metrics: Support configurable time window for API activity.
 
     Args:
         request: HTTP request
         time_filter: Time filter for job stats ("24h", "7d", "30d")
         recent_filter: Time filter for recent activity ("24h", "7d", "30d")
+        api_filter: Time window in seconds for API metrics (default 60).
+            Common values: 60 (1 min), 900 (15 min), 3600 (1 hour), 86400 (24 hours)
 
     Returns HTML fragment for htmx partial updates.
     """
@@ -332,11 +336,13 @@ async def dashboard_stats_partial(
 
     dashboard_service = _get_dashboard_service()
     # Story #712 AC6: Pass user_role to prevent activated repos count flash
+    # Rolling window API metrics: Pass api_window for configurable time window
     stats_data = dashboard_service.get_stats_partial(
         session.username,
         time_filter=time_filter,
         recent_filter=recent_filter,
         user_role=session.role,
+        api_window=api_filter,
     )
 
     return templates.TemplateResponse(
@@ -349,6 +355,7 @@ async def dashboard_stats_partial(
             "api_metrics": stats_data.get("api_metrics", {}),
             "time_filter": time_filter,
             "recent_filter": recent_filter,
+            "api_filter": api_filter,
         },
     )
 

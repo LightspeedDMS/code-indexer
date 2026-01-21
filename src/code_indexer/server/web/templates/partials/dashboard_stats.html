@@ -90,8 +90,19 @@
     </article>
 </div>
 
-<!-- API Activity Section (Story #4 AC3) -->
-<h2>API Activity</h2>
+<!-- API Activity Section (Story #4 AC3) - Rolling Window -->
+<div style="display: flex; justify-content: space-between; align-items: center;">
+    <h2>API Activity</h2>
+    <div>
+        <label for="api-filter" style="margin-right: 0.5rem;">Time Window:</label>
+        <select id="api-filter" onchange="updateApiActivity()" style="padding: 0.25rem 0.5rem;">
+            <option value="60" {{ 'selected' if api_filter == 60 else '' }}>Last 1 Minute</option>
+            <option value="900" {{ 'selected' if api_filter == 900 else '' }}>Last 15 Minutes</option>
+            <option value="3600" {{ 'selected' if api_filter == 3600 else '' }}>Last 1 Hour</option>
+            <option value="86400" {{ 'selected' if api_filter == 86400 else '' }}>Last 24 Hours</option>
+        </select>
+    </div>
+</div>
 
 <div class="stats-grid">
     <article class="stat-card">
@@ -183,7 +194,8 @@
 function updateJobStats() {
     const timeFilter = document.getElementById('time-filter').value;
     const recentFilter = document.getElementById('recent-filter').value;
-    htmx.ajax('GET', `/admin/partials/dashboard-stats?time_filter=${timeFilter}&recent_filter=${recentFilter}`, {
+    const apiFilter = document.getElementById('api-filter').value;
+    htmx.ajax('GET', `/admin/partials/dashboard-stats?time_filter=${timeFilter}&recent_filter=${recentFilter}&api_filter=${apiFilter}`, {
         target: '#stats-section',
         swap: 'innerHTML'
     });
@@ -192,7 +204,18 @@ function updateJobStats() {
 function updateRecentActivity() {
     const timeFilter = document.getElementById('time-filter').value;
     const recentFilter = document.getElementById('recent-filter').value;
-    htmx.ajax('GET', `/admin/partials/dashboard-stats?time_filter=${timeFilter}&recent_filter=${recentFilter}`, {
+    const apiFilter = document.getElementById('api-filter').value;
+    htmx.ajax('GET', `/admin/partials/dashboard-stats?time_filter=${timeFilter}&recent_filter=${recentFilter}&api_filter=${apiFilter}`, {
+        target: '#stats-section',
+        swap: 'innerHTML'
+    });
+}
+
+function updateApiActivity() {
+    const timeFilter = document.getElementById('time-filter').value;
+    const recentFilter = document.getElementById('recent-filter').value;
+    const apiFilter = document.getElementById('api-filter').value;
+    htmx.ajax('GET', `/admin/partials/dashboard-stats?time_filter=${timeFilter}&recent_filter=${recentFilter}&api_filter=${apiFilter}`, {
         target: '#stats-section',
         swap: 'innerHTML'
     });
