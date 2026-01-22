@@ -1,6 +1,6 @@
 # Release Notes
 
-**Current Version: 8.6.0** | [Full Changelog](CHANGELOG.md)
+**Current Version: 8.6.1** | [Full Changelog](CHANGELOG.md)
 
 ---
 
