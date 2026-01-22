@@ -13,6 +13,7 @@ from typing import List, Optional, Tuple, Dict, Any, Set, cast
 from datetime import datetime, timezone
 import logging
 import math
+import hashlib
 
 import pathspec
 
@@ -639,6 +640,12 @@ class FileListingService:
         # Story #686: Calculate next_offset for pagination
         next_offset = effective_offset + returned_lines if has_more else None
 
+        # Story #7 AC2: Compute content_hash from FULL file content for optimistic locking
+        # Hash must be of entire file (not just paginated portion) so clients can
+        # use it for edit operations regardless of which portion they read
+        full_content = "".join(all_lines)
+        content_hash = hashlib.sha256(full_content.encode("utf-8")).hexdigest()
+
         # Build metadata with pagination info
         stat_info = full_file_path.stat()
         metadata = {
@@ -648,6 +655,8 @@ class FileListingService:
             ).isoformat(),
             "language": self._detect_language(full_file_path),
             "path": file_path,
+            # Story #7 AC2: content_hash for optimistic locking
+            "content_hash": content_hash,
             # Original pagination metadata
             "total_lines": total_lines,
             "returned_lines": returned_lines,

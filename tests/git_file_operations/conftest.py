@@ -282,6 +282,52 @@ def captured_state(state_manager: GitRepoStateManager) -> Generator[GitRepoState
 
 
 @pytest.fixture(scope="function")
+def synced_remote_state(
+    local_test_repo: Path,
+    state_manager: GitRepoStateManager,
+) -> Generator[GitRepoState, None, None]:
+    """
+    Capture repository state and ensure remote is synced before/after test.
+
+    This fixture is essential for remote operation tests (push, pull, fetch).
+    It ensures that both the local repository AND the bare remote are restored
+    to the same initial state after each test.
+
+    Unlike captured_state, this fixture:
+    1. Captures the initial state including remote refs
+    2. After the test, force-pushes local state to remote to reset it
+
+    Usage:
+        def test_push_something(synced_remote_state, local_test_repo):
+            # Test code here - both local and remote will be restored
+            pass
+
+    Yields:
+        GitRepoState captured before test
+    """
+    state = state_manager.capture_state()
+    yield state
+
+    # First restore local state
+    state_manager.restore_state(state)
+
+    # Then force-push to sync the remote back to local state
+    # This ensures subsequent tests start with remote matching local
+    try:
+        subprocess.run(
+            ["git", "push", "--force", "origin", "main"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"Failed to force-push to reset remote: {e}")
+    except subprocess.TimeoutExpired:
+        logger.warning("Force-push to reset remote timed out")
+
+
+@pytest.fixture(scope="function")
 def activated_local_repo(local_test_repo: Path) -> Generator[str, None, None]:
     """
     Mock activated repository returning local test repo path.

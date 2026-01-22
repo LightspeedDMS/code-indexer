@@ -15,12 +15,14 @@ USE CASES:
 WHAT YOU'LL LEARN:
 - How to check your permissions and role
 - How to discover available repositories
+- How to find which repository has the code you need (CRITICAL)
 - How to run your first search
 - How to explore repository structure
 - How to activate repositories for file editing
 - How to use git operations
 
 THE WORKFLOW:
+
 Step 1: Check your identity and permissions
   whoami() -> See your username, role, and what you can do
 
@@ -30,28 +32,45 @@ Step 2: Discover available repositories
 Step 3: Check repository capabilities
   global_repo_status('repo-name-global') -> Check what indexes exist (semantic, FTS, temporal, SCIP)
 
-Step 4: Run your first search
+Step 4: CRITICAL - Find the right repository (Don't skip this!)
+
+  IMPORTANT: If you don't know which repository contains the code you're looking for, DO NOT GUESS. Use cidx-meta-global first.
+
+  cidx-meta-global is the "index of indexes" - it contains .md files describing what each repository contains.
+
+  4a. Search cidx-meta-global to discover relevant repositories:
+      search_code(query_text='authentication', repository_alias='cidx-meta-global', limit=5)
+      -> Returns .md files describing which repos handle authentication
+
+  4b. Read the returned .md file to understand which repo to use
+
+  4c. THEN proceed to Step 5 with the correct repository
+
+  WHY THIS MATTERS: Skipping this step leads to wasted time searching wrong repositories. cidx-meta-global prevents guesswork.
+
+Step 5: Run your first search (in the correct repository)
   search_code(query_text='authentication', repository_alias='backend-global', limit=5)
   -> Find code related to authentication, start with small limit
 
-Step 5: Explore repository structure
+Step 6: Explore repository structure
   browse_directory(repository_alias='backend-global', path='src')
   -> See what files and folders exist
 
-Step 6: Use code intelligence (if SCIP available)
+Step 7: Use code intelligence (if SCIP available)
   scip_definition(symbol='authenticate_user', repository_alias='backend-global')
   -> Find where functions are defined
 
-Step 7: For file editing - activate a repository
+Step 8: For file editing - activate a repository
   activate_repository(username='yourname', golden_repo_alias='backend-golden', user_alias='my-backend')
   -> Creates your personal writable copy
 
-Step 8: Make changes with git workflow
+Step 9: Make changes with git workflow
   create_file(...) -> edit_file(...) -> git_stage(...) -> git_commit(...) -> git_push(...)
 
 ESSENTIAL WORKFLOWS:
 
-WORKFLOW A - Unknown Repository (Discovery):
+WORKFLOW A - Unknown Repository (Discovery) - USE THIS FIRST:
+This is the MOST COMMON workflow. Always start here if unsure which repo to search.
 1. search_code('your topic', repository_alias='cidx-meta-global')
 2. Read returned .md file to identify relevant repo
 3. search_code('your topic', repository_alias='identified-repo-global')
@@ -73,6 +92,7 @@ WORKFLOW B - Cross-Cutting Analysis (Multi-Repo Search):
 TOOLS SUPPORTING MULTI-REPO: search_code, regex_search, git_log, git_search_commits, list_files
 
 WORKFLOW C - Deep Dive (Single Repo):
+Use when you KNOW which repo to search.
 1. list_global_repos() to find repo name
 2. search_code('topic', repository_alias='specific-repo-global')
 3. get_file_content() to read full files
@@ -84,6 +104,7 @@ NEXT STEPS:
 - Check permission_reference if you get permission errors
 
 COMMON QUESTIONS:
+
 Q: When do I use '-global' suffix?
 A: Always for global repos (read-only, shared). Never for activated repos (your personal copies).
 
@@ -98,3 +119,6 @@ A: limit=10 with 3 repos returns 10 TOTAL results, not 30. In 'per_repo' mode, r
 
 Q: What happens if one repo fails in a multi-repo search?
 A: You get partial results. Successful repos return results normally, failed repos appear in 'errors' field.
+
+Q: I don't know which repository to search - what do I do?
+A: Search cidx-meta-global FIRST! It contains descriptions of all repositories. See Step 4 above.

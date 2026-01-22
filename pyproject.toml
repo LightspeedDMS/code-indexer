@@ -213,6 +213,8 @@ markers = [
     "integration: Integration tests requiring multiple services",
     "unit: Unit tests with mocked dependencies",
     "full_automation: Tests that should only be run in full automation pipeline",
+    "requires_ssh: Tests requiring SSH access to external repositories (skipped when CIDX_SKIP_SSH_TESTS=1)",
+    "destructive: Tests that modify repository state (require careful cleanup)",
 ]
 
 [tool.coverage.run]
