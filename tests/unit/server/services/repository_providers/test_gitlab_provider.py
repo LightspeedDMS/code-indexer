@@ -509,3 +509,251 @@ class TestGitLabProviderErrorHandling:
                 await provider.discover_repositories(page=1, page_size=50)
 
         assert "timed out" in str(exc_info.value).lower()
+
+
+class TestGitLabProviderServerSideSearch:
+    """Tests for GitLab server-side search functionality (Story #16)."""
+
+    @pytest.mark.asyncio
+    async def test_search_parameter_passed_to_api_request(self):
+        """Test that search parameter is passed to GitLab API request."""
+        from code_indexer.server.services.repository_providers.gitlab_provider import (
+            GitLabProvider,
+        )
+        from code_indexer.server.services.ci_token_manager import TokenData
+
+        token_manager = MagicMock()
+        token_manager.get_token.return_value = TokenData(
+            platform="gitlab",
+            token="glpat-test-token-123456789012",
+            base_url=None,
+        )
+        golden_repo_manager = MagicMock()
+        golden_repo_manager.list_golden_repos.return_value = []
+
+        provider = GitLabProvider(
+            token_manager=token_manager,
+            golden_repo_manager=golden_repo_manager,
+        )
+
+        # Track the params passed to _make_api_request
+        captured_params = {}
+
+        def capture_request(endpoint, params=None):
+            captured_params.update(params or {})
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.headers = {"x-total": "0", "x-total-pages": "0"}
+            mock_response.json.return_value = []
+            mock_response.raise_for_status = MagicMock()
+            return mock_response
+
+        with patch.object(provider, "_make_api_request", side_effect=capture_request):
+            await provider.discover_repositories(
+                page=1, page_size=50, search="myproject"
+            )
+
+        # Verify search parameter is included in API request
+        assert "search" in captured_params, "search parameter not passed to API request"
+        assert (
+            captured_params["search"] == "myproject"
+        ), f"Expected search='myproject', got '{captured_params.get('search')}'"
+
+    @pytest.mark.asyncio
+    async def test_no_client_side_filtering_when_search_provided(self):
+        """Test that no client-side filtering is applied when search is provided.
+
+        The API handles filtering, so all repos returned should be passed through.
+        """
+        from code_indexer.server.services.repository_providers.gitlab_provider import (
+            GitLabProvider,
+        )
+        from code_indexer.server.services.ci_token_manager import TokenData
+
+        token_manager = MagicMock()
+        token_manager.get_token.return_value = TokenData(
+            platform="gitlab",
+            token="glpat-test-token-123456789012",
+            base_url=None,
+        )
+        golden_repo_manager = MagicMock()
+        golden_repo_manager.list_golden_repos.return_value = []
+
+        provider = GitLabProvider(
+            token_manager=token_manager,
+            golden_repo_manager=golden_repo_manager,
+        )
+
+        # Mock API response - API already filtered, returns matching repos
+        # These repos "match" the search term (API did the filtering)
+        gitlab_projects = [
+            {
+                "id": 1,
+                "path_with_namespace": "group/myproject-alpha",
+                "description": "First project",
+                "http_url_to_repo": "https://gitlab.com/group/myproject-alpha.git",
+                "ssh_url_to_repo": "git@gitlab.com:group/myproject-alpha.git",
+                "default_branch": "main",
+                "last_activity_at": "2024-01-15T10:30:00Z",
+                "visibility": "private",
+            },
+            {
+                "id": 2,
+                "path_with_namespace": "group/myproject-beta",
+                "description": "Second project",
+                "http_url_to_repo": "https://gitlab.com/group/myproject-beta.git",
+                "ssh_url_to_repo": "git@gitlab.com:group/myproject-beta.git",
+                "default_branch": "main",
+                "last_activity_at": "2024-01-15T10:30:00Z",
+                "visibility": "private",
+            },
+        ]
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"x-total": "2", "x-total-pages": "1"}
+        mock_response.json.return_value = gitlab_projects
+        mock_response.raise_for_status = MagicMock()
+
+        with patch.object(provider, "_make_api_request", return_value=mock_response):
+            result = await provider.discover_repositories(
+                page=1, page_size=50, search="myproject"
+            )
+
+        # All repos from API should be returned (no client-side filtering)
+        assert len(result.repositories) == 2, (
+            f"Expected 2 repos from API, got {len(result.repositories)}. "
+            "Client-side filtering may be incorrectly applied."
+        )
+        assert result.repositories[0].name == "group/myproject-alpha"
+        assert result.repositories[1].name == "group/myproject-beta"
+
+    @pytest.mark.asyncio
+    async def test_empty_search_does_not_add_search_param(self):
+        """Test that empty search string does not add search parameter to API."""
+        from code_indexer.server.services.repository_providers.gitlab_provider import (
+            GitLabProvider,
+        )
+        from code_indexer.server.services.ci_token_manager import TokenData
+
+        token_manager = MagicMock()
+        token_manager.get_token.return_value = TokenData(
+            platform="gitlab",
+            token="glpat-test-token-123456789012",
+            base_url=None,
+        )
+        golden_repo_manager = MagicMock()
+        golden_repo_manager.list_golden_repos.return_value = []
+
+        provider = GitLabProvider(
+            token_manager=token_manager,
+            golden_repo_manager=golden_repo_manager,
+        )
+
+        # Test with search=None
+        captured_params_none = {}
+
+        def capture_request_none(endpoint, params=None):
+            captured_params_none.update(params or {})
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.headers = {"x-total": "0", "x-total-pages": "0"}
+            mock_response.json.return_value = []
+            mock_response.raise_for_status = MagicMock()
+            return mock_response
+
+        with patch.object(
+            provider, "_make_api_request", side_effect=capture_request_none
+        ):
+            await provider.discover_repositories(page=1, page_size=50, search=None)
+
+        assert (
+            "search" not in captured_params_none
+        ), "search parameter should not be in API request when search=None"
+
+        # Test with search=""
+        captured_params_empty = {}
+
+        def capture_request_empty(endpoint, params=None):
+            captured_params_empty.update(params or {})
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.headers = {"x-total": "0", "x-total-pages": "0"}
+            mock_response.json.return_value = []
+            mock_response.raise_for_status = MagicMock()
+            return mock_response
+
+        with patch.object(
+            provider, "_make_api_request", side_effect=capture_request_empty
+        ):
+            await provider.discover_repositories(page=1, page_size=50, search="")
+
+        assert (
+            "search" not in captured_params_empty
+        ), "search parameter should not be in API request when search=''"
+
+    @pytest.mark.asyncio
+    async def test_search_with_indexed_repo_exclusion(self):
+        """Test that indexed repos are still excluded when search is provided."""
+        from code_indexer.server.services.repository_providers.gitlab_provider import (
+            GitLabProvider,
+        )
+        from code_indexer.server.services.ci_token_manager import TokenData
+
+        token_manager = MagicMock()
+        token_manager.get_token.return_value = TokenData(
+            platform="gitlab",
+            token="glpat-test-token-123456789012",
+            base_url=None,
+        )
+        golden_repo_manager = MagicMock()
+        # This repo is already indexed
+        golden_repo_manager.list_golden_repos.return_value = [
+            {"repo_url": "https://gitlab.com/group/data-indexed.git"}
+        ]
+
+        provider = GitLabProvider(
+            token_manager=token_manager,
+            golden_repo_manager=golden_repo_manager,
+        )
+
+        # API returns both indexed and non-indexed repos matching search
+        gitlab_projects = [
+            {
+                "id": 1,
+                "path_with_namespace": "group/data-indexed",
+                "description": "Already indexed data project",
+                "http_url_to_repo": "https://gitlab.com/group/data-indexed.git",
+                "ssh_url_to_repo": "git@gitlab.com:group/data-indexed.git",
+                "default_branch": "main",
+                "last_activity_at": "2024-01-15T10:30:00Z",
+                "visibility": "private",
+            },
+            {
+                "id": 2,
+                "path_with_namespace": "group/data-services",
+                "description": "Not indexed data services",
+                "http_url_to_repo": "https://gitlab.com/group/data-services.git",
+                "ssh_url_to_repo": "git@gitlab.com:group/data-services.git",
+                "default_branch": "main",
+                "last_activity_at": "2024-01-15T10:30:00Z",
+                "visibility": "private",
+            },
+        ]
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"x-total": "2", "x-total-pages": "1"}
+        mock_response.json.return_value = gitlab_projects
+        mock_response.raise_for_status = MagicMock()
+
+        with patch.object(provider, "_make_api_request", return_value=mock_response):
+            result = await provider.discover_repositories(
+                page=1, page_size=50, search="data"
+            )
+
+        # Only non-indexed repo should be returned
+        assert (
+            len(result.repositories) == 1
+        ), f"Expected 1 repo (indexed one excluded), got {len(result.repositories)}"
+        assert result.repositories[0].name == "group/data-services"
