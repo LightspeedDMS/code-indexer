@@ -1,7 +1,9 @@
 """
-Database Health Service for monitoring all 8 central databases.
+Database Health Service for monitoring all 7 central databases.
 
 Story #712: Dashboard Refinements - Database Health Honeycomb
+Story #3: Removed search_config.db and file_content_limits.db (migrated to config.json)
+         Added scip_audit.db for SCIP indexing audit tracking
 
 Implements 5-point health checks per database:
 1. Connect - Open SQLite connection
@@ -72,21 +74,22 @@ class DatabaseHealthResult:
 
 
 # Database file to display name mapping (central server databases only)
+# Story #3: Removed search_config.db and file_content_limits.db (migrated to config.json)
+# Added scip_audit.db for SCIP indexing audit tracking
 DATABASE_DISPLAY_NAMES: Dict[str, str] = {
     "cidx_server.db": "Main Server",
     "oauth.db": "OAuth",
     "refresh_tokens.db": "Refresh Tokens",
     "logs.db": "Logs",
-    "search_config.db": "Search Config",
-    "file_content_limits.db": "File Limits",
     "groups.db": "Groups",
+    "scip_audit.db": "SCIP Audit",
     "payload_cache.db": "Payload Cache",
 }
 
 
 class DatabaseHealthService:
     """
-    Service for checking health of all 8 central CIDX databases.
+    Service for checking health of all 7 central CIDX databases.
 
     Performs 5-point health checks on each database and determines
     overall status (healthy/warning/error).

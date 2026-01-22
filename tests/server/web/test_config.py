@@ -334,6 +334,51 @@ class TestConfigReset:
             "reset" in text_lower and "default" in text_lower
         ), "Page should have 'Reset to Defaults' button"
 
+    def test_config_reset_post_restores_defaults(
+        self, authenticated_client: TestClient, web_infrastructure: WebTestInfrastructure
+    ):
+        """
+        AC6: POST to /admin/config/reset restores configuration to defaults.
+
+        Given I am authenticated as an admin and have modified config
+        When I POST to /admin/config/reset with valid CSRF token
+        Then configuration is restored to default values
+        And I see a success message
+        """
+        # First modify a config value
+        config_page = authenticated_client.get("/admin/config")
+        csrf_token = web_infrastructure.extract_csrf_token(config_page.text)
+        authenticated_client.post(
+            "/admin/config/mcp_session",
+            data={
+                "csrf_token": csrf_token,
+                "session_ttl_seconds": "9999",
+                "cleanup_interval_seconds": "8888",
+            },
+        )
+
+        # Verify modification
+        from code_indexer.server.services.config_service import get_config_service
+        config_service = get_config_service()
+        config = config_service.get_config()
+        assert config.mcp_session_config.session_ttl_seconds == 9999
+
+        # Reset to defaults
+        config_page = authenticated_client.get("/admin/config")
+        csrf_token = web_infrastructure.extract_csrf_token(config_page.text)
+        response = authenticated_client.post(
+            "/admin/config/reset",
+            data={"csrf_token": csrf_token},
+        )
+
+        # Verify reset
+        assert response.status_code == 200
+        assert "reset to defaults successfully" in response.text.lower()
+
+        # Verify config is back to defaults
+        config = config_service.get_config()
+        assert config.mcp_session_config.session_ttl_seconds == 3600  # default value
+
 
 # =============================================================================
 # AC7: Read-Only Fields Tests

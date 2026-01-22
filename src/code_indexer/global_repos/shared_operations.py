@@ -5,10 +5,7 @@ Provides consistent operations for CLI, REST, and MCP protocols to ensure
 feature parity and eliminate code duplication.
 """
 
-import json
 import logging
-import os
-import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -45,7 +42,6 @@ class GlobalRepoOperations:
         )
 
         self.golden_repos_dir = Path(golden_repos_dir)
-        self.config_file = self.golden_repos_dir / "global_config.json"
 
         # Ensure directory structure exists
         self.golden_repos_dir.mkdir(parents=True, exist_ok=True)
@@ -138,31 +134,21 @@ class GlobalRepoOperations:
             Configuration dict with fields:
             - refresh_interval: Refresh interval in seconds
 
-        Creates default config file if it doesn't exist.
-        Handles corrupted config files by returning defaults.
+        Story #3 - Configuration Consolidation:
+        Now reads from centralized config.json via ConfigService instead of
+        separate global_config.json file.
         """
-        # Check if config file exists
-        if not self.config_file.exists():
-            # Create default config
-            default_config = {"refresh_interval": DEFAULT_REFRESH_INTERVAL}
-            self._save_config(default_config)
-            return default_config
+        # Story #3: Use ConfigService for centralized configuration
+        from code_indexer.server.services.config_service import get_config_service
 
-        # Load config from file
         try:
-            with open(self.config_file, "r") as f:
-                config = json.load(f)
-
-            # Validate config has required fields
-            if "refresh_interval" not in config:
-                logger.warning("Config missing refresh_interval, using default")
-                config["refresh_interval"] = DEFAULT_REFRESH_INTERVAL
-
-            return dict(config)
-
-        except (json.JSONDecodeError, IOError) as e:
-            logger.warning(f"Failed to load config file, using defaults: {e}")
-            # Return default config
+            config_service = get_config_service()
+            golden_repos_config = config_service.get_config().golden_repos_config
+            # golden_repos_config is guaranteed non-None by ServerConfig.__post_init__
+            return {"refresh_interval": golden_repos_config.refresh_interval_seconds}
+        except (RuntimeError, ValueError, IOError) as e:
+            logger.warning(f"Failed to load config from ConfigService, using defaults: {e}")
+            # Return default config on error
             return {"refresh_interval": DEFAULT_REFRESH_INTERVAL}
 
     def set_config(self, refresh_interval: int) -> None:
@@ -175,60 +161,24 @@ class GlobalRepoOperations:
         Raises:
             ValueError: If refresh_interval < 60 seconds
 
-        Uses atomic write pattern to prevent corruption:
-        1. Write to temporary file
-        2. Sync to disk
-        3. Atomic rename over existing file
+        Story #3 - Configuration Consolidation:
+        Now writes to centralized config.json via ConfigService instead of
+        separate global_config.json file. Validation is handled by ConfigService.
         """
-        # Validate refresh interval
+        # Story #3: Use ConfigService for centralized configuration
+        from code_indexer.server.services.config_service import get_config_service
+
+        # Validate refresh interval (matches ConfigService validation rules)
         if refresh_interval < MINIMUM_REFRESH_INTERVAL:
             raise ValueError(
                 f"Refresh interval must be at least {MINIMUM_REFRESH_INTERVAL} seconds. "
                 f"Got: {refresh_interval} seconds."
             )
 
-        # Create config dict
-        config = {"refresh_interval": refresh_interval}
-
-        # Save with atomic write
-        self._save_config(config)
-
-        logger.info(f"Updated global config: refresh_interval={refresh_interval}s")
-
-    def _save_config(self, config: Dict[str, Any]) -> None:
-        """
-        Save configuration with atomic write.
-
-        Uses atomic write pattern to prevent corruption:
-        1. Write to temporary file
-        2. Sync to disk
-        3. Atomic rename over existing file
-
-        Args:
-            config: Configuration dict to save
-
-        Raises:
-            RuntimeError: If save fails
-        """
-        # Write to temporary file first
-        tmp_fd, tmp_path = tempfile.mkstemp(
-            dir=str(self.golden_repos_dir), prefix=".global_config_", suffix=".tmp"
+        # Update via ConfigService
+        config_service = get_config_service()
+        config_service.update_setting(
+            "golden_repos", "refresh_interval_seconds", refresh_interval
         )
 
-        try:
-            with os.fdopen(tmp_fd, "w") as f:
-                json.dump(config, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-
-            # Atomic rename
-            os.replace(tmp_path, str(self.config_file))
-            logger.debug("Global config saved atomically")
-
-        except Exception as e:
-            # Clean up temp file on failure
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise RuntimeError(f"Failed to save global config: {e}")
+        logger.info(f"Updated global config: refresh_interval={refresh_interval}s")

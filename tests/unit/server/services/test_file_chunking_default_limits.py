@@ -5,34 +5,53 @@ Tests default_max_lines=500 and max_allowed_limit=5000 behavior.
 These line limits work IN ADDITION to existing token limits.
 """
 
+import os
 import pytest
 
 from code_indexer.server.services.file_service import FileListingService
-from code_indexer.server.models.file_content_limits_config import (
-    FileContentLimitsConfig,
-)
-from code_indexer.server.services.file_content_limits_config_manager import (
-    FileContentLimitsConfigManager,
+from code_indexer.server.services.config_service import (
+    get_config_service,
+    reset_config_service,
 )
 
 
 @pytest.fixture
 def high_token_service(tmp_path):
     """Service with high token limit so line limits are the deciding factor."""
-    FileContentLimitsConfigManager._instance = None
+    # Save original environment
+    original_env = os.environ.get("CIDX_SERVER_DATA_DIR")
+
+    # Set environment to use temp directory
+    os.environ["CIDX_SERVER_DATA_DIR"] = str(tmp_path)
+
+    # Reset config service singleton to pick up new environment
+    reset_config_service()
+
+    # Create test repo
     repo_path = tmp_path / "test_repo"
     repo_path.mkdir(parents=True)
 
-    config_manager = FileContentLimitsConfigManager(db_path=str(tmp_path / "config.db"))
+    # Get config service and update file content limits
+    config_service = get_config_service()
+    config = config_service.get_config()
     # 20000 tokens * 4 chars = 80000 chars max (max allowed by config)
     # This is enough for 500 lines * 10 chars = 5000 chars for short lines
-    config_manager.update_config(
-        FileContentLimitsConfig(max_tokens_per_request=20000, chars_per_token=4)
-    )
+    assert config.file_content_limits_config is not None
+    config.file_content_limits_config.max_tokens_per_request = 20000
+    config.file_content_limits_config.chars_per_token = 4
+    config_service.config_manager.save_config(config)
 
+    # Create service
     service = FileListingService()
-    service._config_manager = config_manager
-    return service, repo_path
+
+    yield service, repo_path
+
+    # Cleanup: restore environment and reset singleton
+    reset_config_service()
+    if original_env is not None:
+        os.environ["CIDX_SERVER_DATA_DIR"] = original_env
+    else:
+        os.environ.pop("CIDX_SERVER_DATA_DIR", None)
 
 
 class TestDefaultMaxLinesLimit:

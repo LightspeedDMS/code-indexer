@@ -6,15 +6,13 @@ Tests token-based content limits for get_file_content and get_file_content_by_pa
 
 import os
 import tempfile
+import shutil
 from pathlib import Path
 
-
 from code_indexer.server.services.file_service import FileListingService
-from code_indexer.server.models.file_content_limits_config import (
-    FileContentLimitsConfig,
-)
-from code_indexer.server.services.file_content_limits_config_manager import (
-    FileContentLimitsConfigManager,
+from code_indexer.server.services.config_service import (
+    get_config_service,
+    reset_config_service,
 )
 
 
@@ -37,30 +35,53 @@ class TestFileServiceTokenEnforcement:
         with open(self.test_file_path, "w", encoding="utf-8") as f:
             f.writelines(self.test_content_lines)
 
-        # Reset singleton instance to avoid cross-test contamination
-        FileContentLimitsConfigManager._instance = None
+        # Save original environment
+        self._original_env = os.environ.get("CIDX_SERVER_DATA_DIR")
 
-        # Initialize config manager with test database
-        self.config_db_path = Path(self.temp_dir) / "test_config.db"
-        self.config_manager = FileContentLimitsConfigManager(
-            db_path=str(self.config_db_path)
-        )
+        # Set environment to use temp directory for config
+        self.config_dir = Path(self.temp_dir) / "cidx_config"
+        self.config_dir.mkdir(parents=True)
+        os.environ["CIDX_SERVER_DATA_DIR"] = str(self.config_dir)
 
-        # Initialize service with test config manager
+        # Reset config service singleton to pick up new environment
+        reset_config_service()
+
+        # Initialize service
         self.service = FileListingService()
-        self.service._config_manager = self.config_manager
 
     def teardown_method(self):
         """Clean up test fixtures."""
-        import shutil
+        # Reset config service singleton
+        reset_config_service()
 
+        # Restore original environment
+        if self._original_env is not None:
+            os.environ["CIDX_SERVER_DATA_DIR"] = self._original_env
+        else:
+            os.environ.pop("CIDX_SERVER_DATA_DIR", None)
+
+        # Clean up temp directory
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
+
+    def _get_config(self):
+        """Get current file content limits config."""
+        config_service = get_config_service()
+        return config_service.get_config().file_content_limits_config
+
+    def _update_config(self, max_tokens_per_request, chars_per_token):
+        """Update file content limits config."""
+        config_service = get_config_service()
+        config = config_service.get_config()
+        assert config.file_content_limits_config is not None
+        config.file_content_limits_config.max_tokens_per_request = max_tokens_per_request
+        config.file_content_limits_config.chars_per_token = chars_per_token
+        config_service.config_manager.save_config(config)
 
     def test_default_behavior_returns_first_chunk_only(self):
         """Test that calling get_file_content_by_path without params enforces token limits."""
         # Default config: 5000 tokens, 4 chars/token = 20000 chars max
-        config = self.config_manager.get_config()
+        config = self._get_config()
         assert config.max_tokens_per_request == 5000
         assert config.chars_per_token == 4
 
@@ -132,7 +153,7 @@ class TestFileServiceTokenEnforcement:
         metadata = result["metadata"]
 
         # Config: 5000 tokens * 4 chars/token = 20000 chars max
-        config = self.config_manager.get_config()
+        config = self._get_config()
         assert len(content) <= config.max_chars_per_request
 
         # Should be truncated
@@ -156,7 +177,7 @@ class TestFileServiceTokenEnforcement:
         metadata = result["metadata"]
 
         # Config: 5000 tokens * 4 chars/token = 20000 chars max
-        config = self.config_manager.get_config()
+        config = self._get_config()
         assert len(content) <= config.max_chars_per_request
         assert metadata["estimated_tokens"] <= config.max_tokens_per_request
 
@@ -189,7 +210,7 @@ class TestFileServiceTokenEnforcement:
         )
 
         metadata = result["metadata"]
-        config = self.config_manager.get_config()
+        config = self._get_config()
 
         assert "max_tokens_per_request" in metadata
         assert metadata["max_tokens_per_request"] == config.max_tokens_per_request
@@ -288,10 +309,7 @@ class TestFileServiceTokenEnforcement:
     def test_custom_config_affects_token_limit(self):
         """Test that updating config changes token enforcement."""
         # Update config to smaller token limit
-        new_config = FileContentLimitsConfig(
-            max_tokens_per_request=1000, chars_per_token=4
-        )
-        self.config_manager.update_config(new_config)
+        self._update_config(max_tokens_per_request=1000, chars_per_token=4)
 
         # Create file that would fit in 5000 tokens but not 1000 tokens
         # 200 lines * 24 chars = 4800 chars total, exceeds 1000 token budget (4000 chars)
@@ -335,7 +353,7 @@ class TestFileServiceTokenEnforcement:
 
         content = result["content"]
         metadata = result["metadata"]
-        config = self.config_manager.get_config()
+        config = self._get_config()
 
         # CRITICAL: NEVER exceed token budget
         assert len(content) <= config.max_chars_per_request
@@ -366,6 +384,6 @@ class TestFileServiceTokenEnforcement:
         # Returned lines may be less than 20 if token budget exceeded
         assert metadata["returned_lines"] <= 20
 
-        config = self.config_manager.get_config()
+        config = self._get_config()
         assert len(content) <= config.max_chars_per_request
         assert metadata["estimated_tokens"] <= config.max_tokens_per_request

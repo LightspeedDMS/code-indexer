@@ -28,6 +28,7 @@ from .database_health_service import (
     DatabaseHealthStatus,
     DatabaseHealthResult,
 )
+from .config_service import get_config_service
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,30 @@ CPU_SUSTAINED_THRESHOLD = 95.0  # CPU % threshold for sustained high load detect
 MIN_CPU_READINGS_FOR_DEGRADED = 3  # Minimum readings needed for 30s assessment
 MIN_CPU_READINGS_FOR_UNHEALTHY = 6  # Minimum readings needed for 60s assessment
 MAX_CPU_HISTORY_SIZE = 120  # Safety limit to prevent unbounded growth
+
+
+def _load_thresholds_from_config() -> None:
+    """
+    Load health thresholds from ConfigService (Story #3 Phase 2 AC4-AC8).
+
+    Updates module-level threshold constants from ConfigService if available.
+    Falls back to hardcoded defaults if ConfigService is unavailable.
+    """
+    global MEMORY_WARNING_THRESHOLD, MEMORY_CRITICAL_THRESHOLD
+    global DISK_WARNING_THRESHOLD_PERCENT, DISK_CRITICAL_THRESHOLD_PERCENT
+    global CPU_SUSTAINED_THRESHOLD
+
+    try:
+        config_service = get_config_service()
+        config = config_service.get_config()
+        if config.health_config is not None:
+            MEMORY_WARNING_THRESHOLD = config.health_config.memory_warning_threshold_percent
+            MEMORY_CRITICAL_THRESHOLD = config.health_config.memory_critical_threshold_percent
+            DISK_WARNING_THRESHOLD_PERCENT = config.health_config.disk_warning_threshold_percent
+            DISK_CRITICAL_THRESHOLD_PERCENT = config.health_config.disk_critical_threshold_percent
+            CPU_SUSTAINED_THRESHOLD = config.health_config.cpu_sustained_threshold_percent
+    except Exception as e:
+        logger.warning(f"Could not read health config, using defaults: {e}")
 
 
 class HealthCheckService:
@@ -81,6 +106,9 @@ class HealthCheckService:
             # List of (timestamp, cpu_percent) tuples for rolling 60s window
             self._cpu_history: List[Tuple[float, float]] = []
             self._cpu_history_lock = threading.Lock()  # Thread safety for concurrent requests
+
+            # Story #3 Phase 2: Load thresholds from ConfigService (AC4-AC8)
+            _load_thresholds_from_config()
 
         except Exception as e:
             logger.error(

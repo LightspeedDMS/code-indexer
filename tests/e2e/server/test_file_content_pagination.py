@@ -5,18 +5,16 @@ Tests the complete pagination workflow with real files and real FileListingServi
 Following TDD methodology and anti-mock principle - real systems only.
 """
 
+import os
 import pytest
 import tempfile
 import shutil
-import os
 from pathlib import Path
 
 from code_indexer.server.services.file_service import FileListingService
-from code_indexer.server.models.file_content_limits_config import (
-    FileContentLimitsConfig,
-)
-from code_indexer.server.services.file_content_limits_config_manager import (
-    FileContentLimitsConfigManager,
+from code_indexer.server.services.config_service import (
+    get_config_service,
+    reset_config_service,
 )
 
 
@@ -30,26 +28,42 @@ class TestFileContentPaginationE2E:
         self.repo_path = Path(self.test_dir) / "test_repo"
         self.repo_path.mkdir(parents=True)
 
-        # Reset singleton to ensure clean state
-        FileContentLimitsConfigManager._instance = None
+        # Save original environment
+        self._original_env = os.environ.get("CIDX_SERVER_DATA_DIR")
+
+        # Set environment to use temp directory for config
+        self.config_dir = Path(self.test_dir) / "cidx_config"
+        self.config_dir.mkdir(parents=True)
+        os.environ["CIDX_SERVER_DATA_DIR"] = str(self.config_dir)
+
+        # Reset config service singleton to pick up new environment
+        reset_config_service()
 
         # Configure with high token limit so line limits are the deciding factor
-        self.config_db_path = Path(self.test_dir) / "config.db"
-        self.config_manager = FileContentLimitsConfigManager(
-            db_path=str(self.config_db_path)
-        )
-        self.config_manager.update_config(
-            FileContentLimitsConfig(max_tokens_per_request=20000, chars_per_token=4)
-        )
+        config_service = get_config_service()
+        config = config_service.get_config()
+        assert config.file_content_limits_config is not None
+        config.file_content_limits_config.max_tokens_per_request = 20000
+        config.file_content_limits_config.chars_per_token = 4
+        config_service.config_manager.save_config(config)
 
         self.service = FileListingService()
-        self.service._config_manager = self.config_manager
 
         # Create test files with known content
         self._create_test_files()
 
     def teardown_method(self):
         """Clean up test directory."""
+        # Reset config service singleton
+        reset_config_service()
+
+        # Restore original environment
+        if self._original_env is not None:
+            os.environ["CIDX_SERVER_DATA_DIR"] = self._original_env
+        else:
+            os.environ.pop("CIDX_SERVER_DATA_DIR", None)
+
+        # Clean up test directory
         if os.path.exists(self.test_dir):
             shutil.rmtree(self.test_dir)
 

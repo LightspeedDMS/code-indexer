@@ -2503,9 +2503,7 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
     """Handler for regex_search tool - pattern matching with timeout protection."""
     from pathlib import Path
     from code_indexer.global_repos.regex_search import RegexSearchService
-    from code_indexer.server.services.search_limits_config_manager import (
-        SearchLimitsConfigManager,
-    )
+    from code_indexer.server.services.config_service import get_config_service
     from code_indexer.server.services.search_error_formatter import SearchErrorFormatter
 
     # Story #4 AC2: Metrics tracking moved to service layer
@@ -2544,9 +2542,9 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
             )
         repo_path = Path(resolved)
 
-        # Get search limits configuration
-        config_manager = SearchLimitsConfigManager.get_instance()
-        config = config_manager.get_config()
+        # Get search limits configuration from consolidated config
+        config_service = get_config_service()
+        search_limits = config_service.get_config().search_limits_config
 
         # Create service and execute search with timeout protection
         service = RegexSearchService(repo_path)
@@ -2558,7 +2556,7 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
             case_sensitive=args.get("case_sensitive", True),
             context_lines=args.get("context_lines", 0),
             max_results=args.get("max_results", 100),
-            timeout_seconds=config.timeout_seconds,
+            timeout_seconds=search_limits.timeout_seconds,
         )
 
         # Convert dataclass to dict for JSON serialization
@@ -2595,10 +2593,10 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
         )
         # Format timeout error response
         error_formatter = SearchErrorFormatter()
-        config_manager = SearchLimitsConfigManager.get_instance()
-        config = config_manager.get_config()
+        config_service = get_config_service()
+        search_limits = config_service.get_config().search_limits_config
         error_data = error_formatter.format_timeout_error(
-            timeout_seconds=config.timeout_seconds,
+            timeout_seconds=search_limits.timeout_seconds,
             partial_results=None,
         )
         return _mcp_response({"success": False, **error_data})

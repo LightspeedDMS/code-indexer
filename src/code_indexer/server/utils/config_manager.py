@@ -178,6 +178,221 @@ class TelemetryConfig:
 
 
 @dataclass
+class SearchLimitsConfig:
+    """
+    Search limits configuration (Story #3 - Configuration Consolidation).
+
+    Migrated from SQLite-based SearchLimitsConfigManager to main config.json.
+    Controls maximum result size and timeout for search operations.
+    """
+
+    # AC-M1: Maximum result size in megabytes (default 1 MB, range 1-100 MB)
+    max_result_size_mb: int = 1
+    # AC-M2: Search timeout in seconds (default 30s, range 5-300s)
+    timeout_seconds: int = 30
+
+    @property
+    def max_size_bytes(self) -> int:
+        """Return max result size in bytes."""
+        return self.max_result_size_mb * 1024 * 1024
+
+
+@dataclass
+class FileContentLimitsConfig:
+    """
+    File content limits configuration (Story #3 - Configuration Consolidation).
+
+    Migrated from SQLite-based FileContentLimitsConfigManager to main config.json.
+    Controls token budgets for file content operations.
+    """
+
+    # AC-M3: Maximum tokens per request (default 5000, range 1000-50000)
+    max_tokens_per_request: int = 5000
+    # AC-M4: Characters per token ratio (default 4, range 1-10)
+    chars_per_token: int = 4
+
+    @property
+    def max_chars_per_request(self) -> int:
+        """Return max characters per request based on token budget."""
+        return self.max_tokens_per_request * self.chars_per_token
+
+
+@dataclass
+class GoldenReposConfig:
+    """
+    Golden repositories configuration (Story #3 - Configuration Consolidation).
+
+    Migrated from separate global_config.json to main config.json.
+    Controls refresh intervals for golden repository synchronization.
+    """
+
+    # AC-M5: Refresh interval in seconds (default 3600s/1 hour, minimum 60s)
+    refresh_interval_seconds: int = 3600
+
+
+@dataclass
+class McpSessionConfig:
+    """
+    MCP Session configuration (Story #3 - Phase 2, AC2-AC3).
+
+    Controls MCP session lifecycle settings including TTL and cleanup intervals.
+    Migrated from hardcoded constants in session_registry.py.
+    """
+
+    # AC2: Session TTL in seconds (default 3600s/1 hour, minimum 300s/5 min)
+    session_ttl_seconds: int = 3600
+    # AC3: Cleanup interval in seconds (default 900s/15 min, minimum 60s/1 min)
+    cleanup_interval_seconds: int = 900
+
+
+@dataclass
+class HealthConfig:
+    """
+    Health monitoring thresholds configuration (Story #3 - Phase 2, AC4-AC8, AC37).
+
+    Controls resource monitoring thresholds for memory, disk, CPU, and metrics caching.
+    Migrated from hardcoded constants in health_service.py.
+    """
+
+    # AC4: Memory warning threshold (default 80%, range 50-95%)
+    memory_warning_threshold_percent: float = 80.0
+    # AC5: Memory critical threshold (default 90%, range 60-99%)
+    memory_critical_threshold_percent: float = 90.0
+    # AC6: Disk warning threshold (default 80%, range 50-95%)
+    disk_warning_threshold_percent: float = 80.0
+    # AC7: Disk critical threshold (default 90%, range 60-99%)
+    disk_critical_threshold_percent: float = 90.0
+    # AC8: CPU sustained threshold (default 95%, range 70-100%)
+    cpu_sustained_threshold_percent: float = 95.0
+    # AC37: System metrics cache TTL in seconds (default 5s, range 1-60s)
+    system_metrics_cache_ttl_seconds: int = 5
+
+
+@dataclass
+class ScipConfig:
+    """
+    SCIP indexing configuration (Story #3 - Phase 2, AC9-AC11, AC31-AC34).
+
+    Controls SCIP indexing timeouts, temporal staleness thresholds, and query limits.
+    Migrated from hardcoded constants in activated_repo_index_manager.py and scip_query_engine.py.
+    """
+
+    # AC9: Indexing timeout in seconds (default 3600s/1 hour, minimum 300s/5 min)
+    indexing_timeout_seconds: int = 3600
+    # AC10: SCIP generation timeout in seconds (default 600s/10 min, minimum 60s/1 min)
+    scip_generation_timeout_seconds: int = 600
+    # AC11: Temporal staleness threshold in days (default 7 days, minimum 1 day)
+    temporal_stale_threshold_days: int = 7
+    # AC31: SCIP reference limit (default 100, range 10-10000)
+    scip_reference_limit: int = 100
+    # AC32: SCIP dependency depth (default 3, range 1-20)
+    scip_dependency_depth: int = 3
+    # AC33: SCIP callchain max depth (default 10, range 1-50)
+    scip_callchain_max_depth: int = 10
+    # AC34: SCIP callchain limit (default 100, range 1-1000)
+    scip_callchain_limit: int = 100
+
+
+@dataclass
+class GitTimeoutsConfig:
+    """
+    Git operation timeouts configuration (Story #3 - Phase 2, AC12-AC15, AC27-AC30).
+
+    Controls timeout values for various git operations.
+    Migrated from hardcoded constants in git_operations_service.py and activated_repo_manager.py.
+    """
+
+    # AC12-AC13: Local git operation timeout (default 30s, minimum 5s)
+    git_local_timeout: int = 30
+    # AC14: Remote git operation timeout (default 300s, minimum 30s)
+    git_remote_timeout: int = 300
+    # AC15: Git command timeout (default 30s, minimum 5s)
+    git_command_timeout: int = 30
+    # AC15: Git fetch timeout (default 60s, minimum 10s)
+    git_fetch_timeout: int = 60
+    # AC27: GitHub API timeout (default 30s, range 5-120s)
+    github_api_timeout: int = 30
+    # AC28: GitLab API timeout (default 30s, range 5-120s)
+    gitlab_api_timeout: int = 30
+    # AC29: GitHub provider timeout (default 30s, range 5-120s)
+    github_provider_timeout: int = 30
+    # AC30: GitLab provider timeout (default 30s, range 5-120s)
+    gitlab_provider_timeout: int = 30
+
+
+@dataclass
+class ErrorHandlingConfig:
+    """
+    Error handling and retry configuration (Story #3 - Phase 2, AC16-AC18).
+
+    Controls retry behavior for database and transient errors.
+    Migrated from hardcoded constants in error_handler.py.
+    """
+
+    # AC16-AC17: Maximum retry attempts (default 3, range 1-10)
+    max_retry_attempts: int = 3
+    # AC18: Base retry delay in seconds (default 0.1s, range 0.01-5.0s)
+    base_retry_delay_seconds: float = 0.1
+    # AC18: Maximum retry delay in seconds (default 60s, range 1-300s)
+    max_retry_delay_seconds: float = 60.0
+
+
+@dataclass
+class ApiLimitsConfig:
+    """
+    API response limits configuration (Story #3 - Phase 2, AC19-AC24, AC35, AC38-AC39).
+
+    Controls default and maximum limits for file reading, diff, log operations,
+    audit logs, and log aggregator page sizes.
+    Migrated from hardcoded constants in file_service.py and git_operations_service.py.
+    """
+
+    # AC19-AC20: File read lines (default 500, range 100-5000; max 5000, range 500-50000)
+    default_file_read_lines: int = 500
+    max_file_read_lines: int = 5000
+    # AC21-AC22: Diff lines (default 500, range 100-5000; max 5000, range 500-50000)
+    default_diff_lines: int = 500
+    max_diff_lines: int = 5000
+    # AC23-AC24: Log commits (default 50, range 10-500; max 500, range 50-5000)
+    default_log_commits: int = 50
+    max_log_commits: int = 500
+    # AC35: Audit log default limit (default 100, range 10-1000)
+    audit_log_default_limit: int = 100
+    # AC38: Log page size default (default 50, range 10-500)
+    log_page_size_default: int = 50
+    # AC39: Log page size max (default 500, range 100-5000)
+    log_page_size_max: int = 500
+
+
+@dataclass
+class WebSecurityConfig:
+    """
+    Web security configuration (Story #3 - Phase 2, AC25-AC26).
+
+    Controls CSRF token and session timeout settings for the web UI.
+    Migrated from hardcoded constants in routes.py and auth.py.
+    """
+
+    # AC25-AC26: CSRF max age in seconds (default 600s/10min, range 60-3600s)
+    csrf_max_age_seconds: int = 600
+    # AC25-AC26: Web session timeout in seconds (default 28800s/8hr, range 1800-86400s)
+    web_session_timeout_seconds: int = 28800
+
+
+@dataclass
+class AuthConfig:
+    """
+    Authentication configuration (Story #3 - Phase 2, AC36).
+
+    Controls OAuth token extension and authentication settings.
+    Migrated from hardcoded constants in oauth_service.py.
+    """
+
+    # AC36: OAuth extension threshold in hours (default 4hr, range 1-24hr)
+    oauth_extension_threshold_hours: int = 4
+
+
+@dataclass
 class ServerConfig:
     """
     Server configuration data structure.
@@ -200,6 +415,25 @@ class ServerConfig:
     auto_watch_config: Optional[AutoWatchConfig] = None
     oidc_provider_config: Optional[OIDCProviderConfig] = None
     telemetry_config: Optional[TelemetryConfig] = None
+
+    # Story #3 - Configuration Consolidation: Migrated settings
+    search_limits_config: Optional[SearchLimitsConfig] = None
+    file_content_limits_config: Optional[FileContentLimitsConfig] = None
+    golden_repos_config: Optional[GoldenReposConfig] = None
+
+    # Story #3 - Phase 2: P0/P1 settings
+    mcp_session_config: Optional[McpSessionConfig] = None
+    health_config: Optional[HealthConfig] = None
+    scip_config: Optional[ScipConfig] = None
+
+    # Story #3 - Phase 2: P2 settings (AC12-AC26)
+    git_timeouts_config: Optional[GitTimeoutsConfig] = None
+    error_handling_config: Optional[ErrorHandlingConfig] = None
+    api_limits_config: Optional[ApiLimitsConfig] = None
+    web_security_config: Optional[WebSecurityConfig] = None
+
+    # Story #3 - Phase 2: P3 settings (AC36)
+    auth_config: Optional[AuthConfig] = None
 
     # Claude CLI integration settings
     anthropic_api_key: Optional[str] = None
@@ -232,6 +466,32 @@ class ServerConfig:
             self.oidc_provider_config = OIDCProviderConfig()
         if self.telemetry_config is None:
             self.telemetry_config = TelemetryConfig()
+        # Story #3 - Configuration Consolidation: Initialize migrated configs
+        if self.search_limits_config is None:
+            self.search_limits_config = SearchLimitsConfig()
+        if self.file_content_limits_config is None:
+            self.file_content_limits_config = FileContentLimitsConfig()
+        if self.golden_repos_config is None:
+            self.golden_repos_config = GoldenReposConfig()
+        # Story #3 - Phase 2: Initialize P0/P1 configs
+        if self.mcp_session_config is None:
+            self.mcp_session_config = McpSessionConfig()
+        if self.health_config is None:
+            self.health_config = HealthConfig()
+        if self.scip_config is None:
+            self.scip_config = ScipConfig()
+        # Story #3 - Phase 2: Initialize P2 configs (AC12-AC26)
+        if self.git_timeouts_config is None:
+            self.git_timeouts_config = GitTimeoutsConfig()
+        if self.error_handling_config is None:
+            self.error_handling_config = ErrorHandlingConfig()
+        if self.api_limits_config is None:
+            self.api_limits_config = ApiLimitsConfig()
+        if self.web_security_config is None:
+            self.web_security_config = WebSecurityConfig()
+        # Story #3 - Phase 2: Initialize P3 configs (AC36)
+        if self.auth_config is None:
+            self.auth_config = AuthConfig()
 
 
 class ServerConfigManager:
@@ -358,6 +618,98 @@ class ServerConfigManager:
             ):
                 config_dict["telemetry_config"] = TelemetryConfig(
                     **config_dict["telemetry_config"]
+                )
+
+            # Story #3 - Configuration Consolidation: Convert migrated config dicts
+            # Convert nested search_limits_config dict to SearchLimitsConfig
+            if "search_limits_config" in config_dict and isinstance(
+                config_dict["search_limits_config"], dict
+            ):
+                config_dict["search_limits_config"] = SearchLimitsConfig(
+                    **config_dict["search_limits_config"]
+                )
+
+            # Convert nested file_content_limits_config dict to FileContentLimitsConfig
+            if "file_content_limits_config" in config_dict and isinstance(
+                config_dict["file_content_limits_config"], dict
+            ):
+                config_dict["file_content_limits_config"] = FileContentLimitsConfig(
+                    **config_dict["file_content_limits_config"]
+                )
+
+            # Convert nested golden_repos_config dict to GoldenReposConfig
+            if "golden_repos_config" in config_dict and isinstance(
+                config_dict["golden_repos_config"], dict
+            ):
+                config_dict["golden_repos_config"] = GoldenReposConfig(
+                    **config_dict["golden_repos_config"]
+                )
+
+            # Story #3 - Phase 2: Convert P0/P1 config dicts
+            # Convert nested mcp_session_config dict to McpSessionConfig
+            if "mcp_session_config" in config_dict and isinstance(
+                config_dict["mcp_session_config"], dict
+            ):
+                config_dict["mcp_session_config"] = McpSessionConfig(
+                    **config_dict["mcp_session_config"]
+                )
+
+            # Convert nested health_config dict to HealthConfig
+            if "health_config" in config_dict and isinstance(
+                config_dict["health_config"], dict
+            ):
+                config_dict["health_config"] = HealthConfig(
+                    **config_dict["health_config"]
+                )
+
+            # Convert nested scip_config dict to ScipConfig
+            if "scip_config" in config_dict and isinstance(
+                config_dict["scip_config"], dict
+            ):
+                config_dict["scip_config"] = ScipConfig(
+                    **config_dict["scip_config"]
+                )
+
+            # Story #3 - Phase 2: Convert P2 config dicts (AC12-AC26)
+            # Convert nested git_timeouts_config dict to GitTimeoutsConfig
+            if "git_timeouts_config" in config_dict and isinstance(
+                config_dict["git_timeouts_config"], dict
+            ):
+                config_dict["git_timeouts_config"] = GitTimeoutsConfig(
+                    **config_dict["git_timeouts_config"]
+                )
+
+            # Convert nested error_handling_config dict to ErrorHandlingConfig
+            if "error_handling_config" in config_dict and isinstance(
+                config_dict["error_handling_config"], dict
+            ):
+                config_dict["error_handling_config"] = ErrorHandlingConfig(
+                    **config_dict["error_handling_config"]
+                )
+
+            # Convert nested api_limits_config dict to ApiLimitsConfig
+            if "api_limits_config" in config_dict and isinstance(
+                config_dict["api_limits_config"], dict
+            ):
+                config_dict["api_limits_config"] = ApiLimitsConfig(
+                    **config_dict["api_limits_config"]
+                )
+
+            # Convert nested web_security_config dict to WebSecurityConfig
+            if "web_security_config" in config_dict and isinstance(
+                config_dict["web_security_config"], dict
+            ):
+                config_dict["web_security_config"] = WebSecurityConfig(
+                    **config_dict["web_security_config"]
+                )
+
+            # Story #3 - Phase 2: Convert P3 config dicts (AC36)
+            # Convert nested auth_config dict to AuthConfig
+            if "auth_config" in config_dict and isinstance(
+                config_dict["auth_config"], dict
+            ):
+                config_dict["auth_config"] = AuthConfig(
+                    **config_dict["auth_config"]
                 )
 
             return ServerConfig(**config_dict)
@@ -541,6 +893,201 @@ class ServerConfigManager:
             if config.telemetry_config.machine_metrics_interval_seconds < 1:
                 raise ValueError(
                     f"machine_metrics_interval_seconds must be >= 1, got {config.telemetry_config.machine_metrics_interval_seconds}"
+                )
+
+        # Validate search_limits_config (Story #3 - Phase 1, AC-M1, AC-M2)
+        if config.search_limits_config:
+            # Validate max_result_size_mb (1-100 MB range)
+            if not (1 <= config.search_limits_config.max_result_size_mb <= 100):
+                raise ValueError(
+                    f"max_result_size_mb must be between 1 and 100, got {config.search_limits_config.max_result_size_mb}"
+                )
+            # Validate timeout_seconds (5-300 seconds range)
+            if not (5 <= config.search_limits_config.timeout_seconds <= 300):
+                raise ValueError(
+                    f"timeout_seconds must be between 5 and 300, got {config.search_limits_config.timeout_seconds}"
+                )
+
+        # Validate file_content_limits_config (Story #3 - Phase 1, AC-M3, AC-M4)
+        if config.file_content_limits_config:
+            # Validate max_tokens_per_request (1000-50000 tokens range)
+            if not (1000 <= config.file_content_limits_config.max_tokens_per_request <= 50000):
+                raise ValueError(
+                    f"max_tokens_per_request must be between 1000 and 50000, got {config.file_content_limits_config.max_tokens_per_request}"
+                )
+            # Validate chars_per_token (1-10 range)
+            if not (1 <= config.file_content_limits_config.chars_per_token <= 10):
+                raise ValueError(
+                    f"chars_per_token must be between 1 and 10, got {config.file_content_limits_config.chars_per_token}"
+                )
+
+        # Validate golden_repos_config (Story #3 - Phase 1, AC-M5)
+        if config.golden_repos_config:
+            # Validate refresh_interval_seconds (minimum 60 seconds)
+            if config.golden_repos_config.refresh_interval_seconds < 60:
+                raise ValueError(
+                    f"refresh_interval_seconds must be >= 60, got {config.golden_repos_config.refresh_interval_seconds}"
+                )
+
+        # Validate health_config (Story #3 - Phase 2, AC37)
+        if config.health_config:
+            # AC37: system_metrics_cache_ttl_seconds range 1-60
+            if not (1 <= config.health_config.system_metrics_cache_ttl_seconds <= 60):
+                raise ValueError(
+                    f"system_metrics_cache_ttl_seconds must be between 1 and 60, got {config.health_config.system_metrics_cache_ttl_seconds}"
+                )
+
+        # Validate scip_config (Story #3 - Phase 2, AC31-AC34)
+        if config.scip_config:
+            # AC31: scip_reference_limit range 10-10000
+            if not (10 <= config.scip_config.scip_reference_limit <= 10000):
+                raise ValueError(
+                    f"scip_reference_limit must be between 10 and 10000, got {config.scip_config.scip_reference_limit}"
+                )
+            # AC32: scip_dependency_depth range 1-20
+            if not (1 <= config.scip_config.scip_dependency_depth <= 20):
+                raise ValueError(
+                    f"scip_dependency_depth must be between 1 and 20, got {config.scip_config.scip_dependency_depth}"
+                )
+            # AC33: scip_callchain_max_depth range 1-50
+            if not (1 <= config.scip_config.scip_callchain_max_depth <= 50):
+                raise ValueError(
+                    f"scip_callchain_max_depth must be between 1 and 50, got {config.scip_config.scip_callchain_max_depth}"
+                )
+            # AC34: scip_callchain_limit range 1-1000
+            if not (1 <= config.scip_config.scip_callchain_limit <= 1000):
+                raise ValueError(
+                    f"scip_callchain_limit must be between 1 and 1000, got {config.scip_config.scip_callchain_limit}"
+                )
+
+        # Validate git_timeouts_config (Story #3 - Phase 2, AC12-AC15, AC27-AC30)
+        if config.git_timeouts_config:
+            # AC13: git_local_timeout minimum 5 seconds
+            if config.git_timeouts_config.git_local_timeout < 5:
+                raise ValueError(
+                    f"git_local_timeout must be >= 5, got {config.git_timeouts_config.git_local_timeout}"
+                )
+            # AC14: git_remote_timeout minimum 30 seconds
+            if config.git_timeouts_config.git_remote_timeout < 30:
+                raise ValueError(
+                    f"git_remote_timeout must be >= 30, got {config.git_timeouts_config.git_remote_timeout}"
+                )
+            # AC15: git_command_timeout minimum 5 seconds
+            if config.git_timeouts_config.git_command_timeout < 5:
+                raise ValueError(
+                    f"git_command_timeout must be >= 5, got {config.git_timeouts_config.git_command_timeout}"
+                )
+            # AC15: git_fetch_timeout minimum 10 seconds
+            if config.git_timeouts_config.git_fetch_timeout < 10:
+                raise ValueError(
+                    f"git_fetch_timeout must be >= 10, got {config.git_timeouts_config.git_fetch_timeout}"
+                )
+            # AC27: github_api_timeout range 5-120 seconds
+            if not (5 <= config.git_timeouts_config.github_api_timeout <= 120):
+                raise ValueError(
+                    f"github_api_timeout must be between 5 and 120, got {config.git_timeouts_config.github_api_timeout}"
+                )
+            # AC28: gitlab_api_timeout range 5-120 seconds
+            if not (5 <= config.git_timeouts_config.gitlab_api_timeout <= 120):
+                raise ValueError(
+                    f"gitlab_api_timeout must be between 5 and 120, got {config.git_timeouts_config.gitlab_api_timeout}"
+                )
+            # AC29: github_provider_timeout range 5-120 seconds
+            if not (5 <= config.git_timeouts_config.github_provider_timeout <= 120):
+                raise ValueError(
+                    f"github_provider_timeout must be between 5 and 120, got {config.git_timeouts_config.github_provider_timeout}"
+                )
+            # AC30: gitlab_provider_timeout range 5-120 seconds
+            if not (5 <= config.git_timeouts_config.gitlab_provider_timeout <= 120):
+                raise ValueError(
+                    f"gitlab_provider_timeout must be between 5 and 120, got {config.git_timeouts_config.gitlab_provider_timeout}"
+                )
+
+        # Validate error_handling_config (Story #3 - Phase 2, AC16-AC18)
+        if config.error_handling_config:
+            # AC17: max_retry_attempts range 1-10
+            if not (1 <= config.error_handling_config.max_retry_attempts <= 10):
+                raise ValueError(
+                    f"max_retry_attempts must be between 1 and 10, got {config.error_handling_config.max_retry_attempts}"
+                )
+            # AC18: base_retry_delay_seconds range 0.01-5.0
+            if not (0.01 <= config.error_handling_config.base_retry_delay_seconds <= 5.0):
+                raise ValueError(
+                    f"base_retry_delay_seconds must be between 0.01 and 5.0, got {config.error_handling_config.base_retry_delay_seconds}"
+                )
+            # AC18: max_retry_delay_seconds range 1-300
+            if not (1 <= config.error_handling_config.max_retry_delay_seconds <= 300):
+                raise ValueError(
+                    f"max_retry_delay_seconds must be between 1 and 300, got {config.error_handling_config.max_retry_delay_seconds}"
+                )
+
+        # Validate api_limits_config (Story #3 - Phase 2, AC19-AC24, AC35, AC38-AC39)
+        if config.api_limits_config:
+            # AC20: default_file_read_lines range 100-5000
+            if not (100 <= config.api_limits_config.default_file_read_lines <= 5000):
+                raise ValueError(
+                    f"default_file_read_lines must be between 100 and 5000, got {config.api_limits_config.default_file_read_lines}"
+                )
+            # AC20: max_file_read_lines range 500-50000
+            if not (500 <= config.api_limits_config.max_file_read_lines <= 50000):
+                raise ValueError(
+                    f"max_file_read_lines must be between 500 and 50000, got {config.api_limits_config.max_file_read_lines}"
+                )
+            # AC21-22: default_diff_lines range 100-5000
+            if not (100 <= config.api_limits_config.default_diff_lines <= 5000):
+                raise ValueError(
+                    f"default_diff_lines must be between 100 and 5000, got {config.api_limits_config.default_diff_lines}"
+                )
+            # AC21-22: max_diff_lines range 500-50000
+            if not (500 <= config.api_limits_config.max_diff_lines <= 50000):
+                raise ValueError(
+                    f"max_diff_lines must be between 500 and 50000, got {config.api_limits_config.max_diff_lines}"
+                )
+            # AC23-24: default_log_commits range 10-500
+            if not (10 <= config.api_limits_config.default_log_commits <= 500):
+                raise ValueError(
+                    f"default_log_commits must be between 10 and 500, got {config.api_limits_config.default_log_commits}"
+                )
+            # AC23-24: max_log_commits range 50-5000
+            if not (50 <= config.api_limits_config.max_log_commits <= 5000):
+                raise ValueError(
+                    f"max_log_commits must be between 50 and 5000, got {config.api_limits_config.max_log_commits}"
+                )
+            # AC35: audit_log_default_limit range 10-1000
+            if not (10 <= config.api_limits_config.audit_log_default_limit <= 1000):
+                raise ValueError(
+                    f"audit_log_default_limit must be between 10 and 1000, got {config.api_limits_config.audit_log_default_limit}"
+                )
+            # AC38: log_page_size_default range 10-500
+            if not (10 <= config.api_limits_config.log_page_size_default <= 500):
+                raise ValueError(
+                    f"log_page_size_default must be between 10 and 500, got {config.api_limits_config.log_page_size_default}"
+                )
+            # AC39: log_page_size_max range 100-5000
+            if not (100 <= config.api_limits_config.log_page_size_max <= 5000):
+                raise ValueError(
+                    f"log_page_size_max must be between 100 and 5000, got {config.api_limits_config.log_page_size_max}"
+                )
+
+        # Validate web_security_config (Story #3 - Phase 2, AC25-AC26)
+        if config.web_security_config:
+            # AC26: csrf_max_age_seconds range 60-3600
+            if not (60 <= config.web_security_config.csrf_max_age_seconds <= 3600):
+                raise ValueError(
+                    f"csrf_max_age_seconds must be between 60 and 3600, got {config.web_security_config.csrf_max_age_seconds}"
+                )
+            # AC26: web_session_timeout_seconds range 1800-86400
+            if not (1800 <= config.web_security_config.web_session_timeout_seconds <= 86400):
+                raise ValueError(
+                    f"web_session_timeout_seconds must be between 1800 and 86400, got {config.web_security_config.web_session_timeout_seconds}"
+                )
+
+        # Validate auth_config (Story #3 - Phase 2, AC36)
+        if config.auth_config:
+            # AC36: oauth_extension_threshold_hours range 1-24
+            if not (1 <= config.auth_config.oauth_extension_threshold_hours <= 24):
+                raise ValueError(
+                    f"oauth_extension_threshold_hours must be between 1 and 24, got {config.auth_config.oauth_extension_threshold_hours}"
                 )
 
     def create_server_directories(self) -> None:

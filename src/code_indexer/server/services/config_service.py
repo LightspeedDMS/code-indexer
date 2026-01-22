@@ -87,6 +87,21 @@ class ConfigService:
         assert config.password_security is not None
         assert config.oidc_provider_config is not None
         assert config.telemetry_config is not None
+        # Story #3 - Configuration Consolidation: Assert new config objects
+        assert config.search_limits_config is not None
+        assert config.file_content_limits_config is not None
+        assert config.golden_repos_config is not None
+        # Story #3 - Phase 2: Assert P0/P1 config objects
+        assert config.mcp_session_config is not None
+        assert config.health_config is not None
+        assert config.scip_config is not None
+        # Story #3 - Phase 2: Assert P2 config objects (AC12-AC26)
+        assert config.git_timeouts_config is not None
+        assert config.error_handling_config is not None
+        assert config.api_limits_config is not None
+        assert config.web_security_config is not None
+        # Story #3 - Phase 2: Assert P3 config objects (AC36)
+        assert config.auth_config is not None
 
         settings = {
             # Server settings
@@ -180,6 +195,79 @@ class ConfigService:
             },
             # Claude Delegation configuration (Story #721)
             "claude_delegation": self._get_delegation_settings(),
+            # Story #3 - Configuration Consolidation: Migrated settings
+            "search_limits": {
+                "max_result_size_mb": config.search_limits_config.max_result_size_mb,
+                "timeout_seconds": config.search_limits_config.timeout_seconds,
+            },
+            "file_content_limits": {
+                "max_tokens_per_request": config.file_content_limits_config.max_tokens_per_request,
+                "chars_per_token": config.file_content_limits_config.chars_per_token,
+            },
+            "golden_repos": {
+                "refresh_interval_seconds": config.golden_repos_config.refresh_interval_seconds,
+            },
+            # Story #3 - Phase 2: P0/P1 settings
+            "mcp_session": {
+                "session_ttl_seconds": config.mcp_session_config.session_ttl_seconds,
+                "cleanup_interval_seconds": config.mcp_session_config.cleanup_interval_seconds,
+            },
+            "health": {
+                "memory_warning_threshold_percent": config.health_config.memory_warning_threshold_percent,
+                "memory_critical_threshold_percent": config.health_config.memory_critical_threshold_percent,
+                "disk_warning_threshold_percent": config.health_config.disk_warning_threshold_percent,
+                "disk_critical_threshold_percent": config.health_config.disk_critical_threshold_percent,
+                "cpu_sustained_threshold_percent": config.health_config.cpu_sustained_threshold_percent,
+                # P3 settings (AC37)
+                "system_metrics_cache_ttl_seconds": config.health_config.system_metrics_cache_ttl_seconds,
+            },
+            "scip": {
+                "indexing_timeout_seconds": config.scip_config.indexing_timeout_seconds,
+                "scip_generation_timeout_seconds": config.scip_config.scip_generation_timeout_seconds,
+                "temporal_stale_threshold_days": config.scip_config.temporal_stale_threshold_days,
+                # P3 settings (AC31-AC34)
+                "scip_reference_limit": config.scip_config.scip_reference_limit,
+                "scip_dependency_depth": config.scip_config.scip_dependency_depth,
+                "scip_callchain_max_depth": config.scip_config.scip_callchain_max_depth,
+                "scip_callchain_limit": config.scip_config.scip_callchain_limit,
+            },
+            # Story #3 - Phase 2: P2 settings (AC12-AC26)
+            "git_timeouts": {
+                "git_local_timeout": config.git_timeouts_config.git_local_timeout,
+                "git_remote_timeout": config.git_timeouts_config.git_remote_timeout,
+                "git_command_timeout": config.git_timeouts_config.git_command_timeout,
+                "git_fetch_timeout": config.git_timeouts_config.git_fetch_timeout,
+                # P3 settings (AC27-AC30)
+                "github_api_timeout": config.git_timeouts_config.github_api_timeout,
+                "gitlab_api_timeout": config.git_timeouts_config.gitlab_api_timeout,
+                "github_provider_timeout": config.git_timeouts_config.github_provider_timeout,
+                "gitlab_provider_timeout": config.git_timeouts_config.gitlab_provider_timeout,
+            },
+            "error_handling": {
+                "max_retry_attempts": config.error_handling_config.max_retry_attempts,
+                "base_retry_delay_seconds": config.error_handling_config.base_retry_delay_seconds,
+                "max_retry_delay_seconds": config.error_handling_config.max_retry_delay_seconds,
+            },
+            "api_limits": {
+                "default_file_read_lines": config.api_limits_config.default_file_read_lines,
+                "max_file_read_lines": config.api_limits_config.max_file_read_lines,
+                "default_diff_lines": config.api_limits_config.default_diff_lines,
+                "max_diff_lines": config.api_limits_config.max_diff_lines,
+                "default_log_commits": config.api_limits_config.default_log_commits,
+                "max_log_commits": config.api_limits_config.max_log_commits,
+                # P3 settings (AC35, AC38-AC39)
+                "audit_log_default_limit": config.api_limits_config.audit_log_default_limit,
+                "log_page_size_default": config.api_limits_config.log_page_size_default,
+                "log_page_size_max": config.api_limits_config.log_page_size_max,
+            },
+            "web_security": {
+                "csrf_max_age_seconds": config.web_security_config.csrf_max_age_seconds,
+                "web_session_timeout_seconds": config.web_security_config.web_session_timeout_seconds,
+            },
+            # Story #3 - Phase 2: P3 settings (AC36)
+            "auth": {
+                "oauth_extension_threshold_hours": config.auth_config.oauth_extension_threshold_hours,
+            },
         }
 
         return settings
@@ -235,6 +323,32 @@ class ConfigService:
             self._update_scip_cleanup_setting(config, key, value)
         elif category == "telemetry":
             self._update_telemetry_setting(config, key, value)
+        # Story #3 - Configuration Consolidation: New categories
+        elif category == "search_limits":
+            self._update_search_limits_setting(config, key, value)
+        elif category == "file_content_limits":
+            self._update_file_content_limits_setting(config, key, value)
+        elif category == "golden_repos":
+            self._update_golden_repos_setting(config, key, value)
+        # Story #3 - Phase 2: P0/P1 categories
+        elif category == "mcp_session":
+            self._update_mcp_session_setting(config, key, value)
+        elif category == "health":
+            self._update_health_setting(config, key, value)
+        elif category == "scip":
+            self._update_scip_setting(config, key, value)
+        # Story #3 - Phase 2: P2 categories (AC12-AC26)
+        elif category == "git_timeouts":
+            self._update_git_timeouts_setting(config, key, value)
+        elif category == "error_handling":
+            self._update_error_handling_setting(config, key, value)
+        elif category == "api_limits":
+            self._update_api_limits_setting(config, key, value)
+        elif category == "web_security":
+            self._update_web_security_setting(config, key, value)
+        # Story #3 - Phase 2: P3 categories (AC36)
+        elif category == "auth":
+            self._update_auth_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
 
@@ -457,6 +571,195 @@ class ConfigService:
             telemetry.deployment_environment = str(value)
         else:
             raise ValueError(f"Unknown telemetry setting: {key}")
+
+    def _update_search_limits_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a search limits setting (Story #3 - Configuration Consolidation)."""
+        search_limits = config.search_limits_config
+        assert search_limits is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "max_result_size_mb":
+            search_limits.max_result_size_mb = int(value)
+        elif key == "timeout_seconds":
+            search_limits.timeout_seconds = int(value)
+        else:
+            raise ValueError(f"Unknown search limits setting: {key}")
+
+    def _update_file_content_limits_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a file content limits setting (Story #3 - Configuration Consolidation)."""
+        file_content_limits = config.file_content_limits_config
+        assert file_content_limits is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "max_tokens_per_request":
+            file_content_limits.max_tokens_per_request = int(value)
+        elif key == "chars_per_token":
+            file_content_limits.chars_per_token = int(value)
+        else:
+            raise ValueError(f"Unknown file content limits setting: {key}")
+
+    def _update_golden_repos_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a golden repos setting (Story #3 - Configuration Consolidation)."""
+        golden_repos = config.golden_repos_config
+        assert golden_repos is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "refresh_interval_seconds":
+            golden_repos.refresh_interval_seconds = int(value)
+        else:
+            raise ValueError(f"Unknown golden repos setting: {key}")
+
+    def _update_mcp_session_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update an MCP session setting (Story #3 - Phase 2)."""
+        mcp_session = config.mcp_session_config
+        assert mcp_session is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "session_ttl_seconds":
+            mcp_session.session_ttl_seconds = int(value)
+        elif key == "cleanup_interval_seconds":
+            mcp_session.cleanup_interval_seconds = int(value)
+        else:
+            raise ValueError(f"Unknown MCP session setting: {key}")
+
+    def _update_health_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a health monitoring setting (Story #3 - Phase 2, AC37)."""
+        health = config.health_config
+        assert health is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "memory_warning_threshold_percent":
+            health.memory_warning_threshold_percent = float(value)
+        elif key == "memory_critical_threshold_percent":
+            health.memory_critical_threshold_percent = float(value)
+        elif key == "disk_warning_threshold_percent":
+            health.disk_warning_threshold_percent = float(value)
+        elif key == "disk_critical_threshold_percent":
+            health.disk_critical_threshold_percent = float(value)
+        elif key == "cpu_sustained_threshold_percent":
+            health.cpu_sustained_threshold_percent = float(value)
+        # P3 settings (AC37)
+        elif key == "system_metrics_cache_ttl_seconds":
+            health.system_metrics_cache_ttl_seconds = int(value)
+        else:
+            raise ValueError(f"Unknown health setting: {key}")
+
+    def _update_scip_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a SCIP setting (Story #3 - Phase 2)."""
+        scip = config.scip_config
+        assert scip is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "indexing_timeout_seconds":
+            scip.indexing_timeout_seconds = int(value)
+        elif key == "scip_generation_timeout_seconds":
+            scip.scip_generation_timeout_seconds = int(value)
+        elif key == "temporal_stale_threshold_days":
+            scip.temporal_stale_threshold_days = int(value)
+        # P3 settings (AC31-AC34)
+        elif key == "scip_reference_limit":
+            scip.scip_reference_limit = int(value)
+        elif key == "scip_dependency_depth":
+            scip.scip_dependency_depth = int(value)
+        elif key == "scip_callchain_max_depth":
+            scip.scip_callchain_max_depth = int(value)
+        elif key == "scip_callchain_limit":
+            scip.scip_callchain_limit = int(value)
+        else:
+            raise ValueError(f"Unknown SCIP setting: {key}")
+
+    def _update_git_timeouts_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a git timeouts setting (Story #3 - Phase 2, AC12-AC15, AC27-AC30)."""
+        git_timeouts = config.git_timeouts_config
+        assert git_timeouts is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "git_local_timeout":
+            git_timeouts.git_local_timeout = int(value)
+        elif key == "git_remote_timeout":
+            git_timeouts.git_remote_timeout = int(value)
+        elif key == "git_command_timeout":
+            git_timeouts.git_command_timeout = int(value)
+        elif key == "git_fetch_timeout":
+            git_timeouts.git_fetch_timeout = int(value)
+        # P3 settings (AC27-AC30)
+        elif key == "github_api_timeout":
+            git_timeouts.github_api_timeout = int(value)
+        elif key == "gitlab_api_timeout":
+            git_timeouts.gitlab_api_timeout = int(value)
+        elif key == "github_provider_timeout":
+            git_timeouts.github_provider_timeout = int(value)
+        elif key == "gitlab_provider_timeout":
+            git_timeouts.gitlab_provider_timeout = int(value)
+        else:
+            raise ValueError(f"Unknown git timeouts setting: {key}")
+
+    def _update_error_handling_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update an error handling setting (Story #3 - Phase 2, AC16-AC18)."""
+        error_handling = config.error_handling_config
+        assert error_handling is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "max_retry_attempts":
+            error_handling.max_retry_attempts = int(value)
+        elif key == "base_retry_delay_seconds":
+            error_handling.base_retry_delay_seconds = float(value)
+        elif key == "max_retry_delay_seconds":
+            error_handling.max_retry_delay_seconds = float(value)
+        else:
+            raise ValueError(f"Unknown error handling setting: {key}")
+
+    def _update_api_limits_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update an API limits setting (Story #3 - Phase 2, AC19-AC24, AC35, AC38-AC39)."""
+        api_limits = config.api_limits_config
+        assert api_limits is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "default_file_read_lines":
+            api_limits.default_file_read_lines = int(value)
+        elif key == "max_file_read_lines":
+            api_limits.max_file_read_lines = int(value)
+        elif key == "default_diff_lines":
+            api_limits.default_diff_lines = int(value)
+        elif key == "max_diff_lines":
+            api_limits.max_diff_lines = int(value)
+        elif key == "default_log_commits":
+            api_limits.default_log_commits = int(value)
+        elif key == "max_log_commits":
+            api_limits.max_log_commits = int(value)
+        # P3 settings (AC35, AC38-AC39)
+        elif key == "audit_log_default_limit":
+            api_limits.audit_log_default_limit = int(value)
+        elif key == "log_page_size_default":
+            api_limits.log_page_size_default = int(value)
+        elif key == "log_page_size_max":
+            api_limits.log_page_size_max = int(value)
+        else:
+            raise ValueError(f"Unknown API limits setting: {key}")
+
+    def _update_web_security_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a web security setting (Story #3 - Phase 2, AC25-AC26)."""
+        web_security = config.web_security_config
+        assert web_security is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "csrf_max_age_seconds":
+            web_security.csrf_max_age_seconds = int(value)
+        elif key == "web_session_timeout_seconds":
+            web_security.web_session_timeout_seconds = int(value)
+        else:
+            raise ValueError(f"Unknown web security setting: {key}")
+
+    def _update_auth_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update an auth setting (Story #3 - Phase 2, AC36)."""
+        auth = config.auth_config
+        assert auth is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "oauth_extension_threshold_hours":
+            auth.oauth_extension_threshold_hours = int(value)
+        else:
+            raise ValueError(f"Unknown auth setting: {key}")
 
     def save_all_settings(self, settings: Dict[str, Dict[str, Any]]) -> None:
         """

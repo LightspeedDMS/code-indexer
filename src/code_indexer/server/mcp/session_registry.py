@@ -41,6 +41,7 @@ from typing import Dict, Optional
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.auth.mcp_session_state import MCPSessionState
+from code_indexer.server.services.config_service import get_config_service
 
 
 logger = logging.getLogger(__name__)
@@ -216,8 +217,8 @@ class SessionRegistry:
 
     def start_background_cleanup(
         self,
-        ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS,
-        cleanup_interval_seconds: int = DEFAULT_CLEANUP_INTERVAL_SECONDS,
+        ttl_seconds: Optional[int] = None,
+        cleanup_interval_seconds: Optional[int] = None,
     ) -> None:
         """
         Start background cleanup task.
@@ -226,9 +227,32 @@ class SessionRegistry:
         Safe to call multiple times - will not create duplicate tasks.
 
         Args:
-            ttl_seconds: Session TTL in seconds (default: 1 hour)
-            cleanup_interval_seconds: Cleanup interval in seconds (default: 15 minutes)
+            ttl_seconds: Session TTL in seconds. If None, reads from ConfigService
+                        (defaults to 1 hour if config unavailable)
+            cleanup_interval_seconds: Cleanup interval in seconds. If None, reads from
+                        ConfigService (defaults to 15 minutes if config unavailable)
         """
+        # Story #3 Phase 2: Read from ConfigService if not explicitly provided
+        if ttl_seconds is None or cleanup_interval_seconds is None:
+            try:
+                config_service = get_config_service()
+                config = config_service.get_config()
+                if config.mcp_session_config is not None:
+                    if ttl_seconds is None:
+                        ttl_seconds = config.mcp_session_config.session_ttl_seconds
+                    if cleanup_interval_seconds is None:
+                        cleanup_interval_seconds = (
+                            config.mcp_session_config.cleanup_interval_seconds
+                        )
+            except Exception as e:
+                logger.warning(f"Could not read config, using defaults: {e}")
+
+        # Fall back to module-level defaults if still None
+        if ttl_seconds is None:
+            ttl_seconds = DEFAULT_SESSION_TTL_SECONDS
+        if cleanup_interval_seconds is None:
+            cleanup_interval_seconds = DEFAULT_CLEANUP_INTERVAL_SECONDS
+
         self._ttl_seconds = ttl_seconds
         self._cleanup_interval_seconds = cleanup_interval_seconds
         if self._cleanup_task is None or self._cleanup_task.done():

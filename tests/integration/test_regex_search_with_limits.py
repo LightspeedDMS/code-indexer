@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from code_indexer.server.models.search_limits_config import SearchLimitsConfig
+from code_indexer.server.utils.config_manager import SearchLimitsConfig
 from code_indexer.server.services.subprocess_executor import (
     SubprocessExecutor,
     ExecutionStatus,

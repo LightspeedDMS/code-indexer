@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Any, Callable
 
 from ..repositories.background_jobs import BackgroundJobManager
 from ..repositories.activated_repo_manager import ActivatedRepoManager
+from .config_service import get_config_service
 
 
 class IndexingError(Exception):
@@ -78,6 +79,26 @@ class ActivatedRepoIndexManager:
         self.activated_repo_manager = activated_repo_manager or ActivatedRepoManager(
             self.data_dir
         )
+
+        # Story #3 Phase 2 AC9-AC11: Load SCIP settings from ConfigService
+        self._load_scip_config()
+
+    def _load_scip_config(self) -> None:
+        """
+        Load SCIP configuration from ConfigService (Story #3 Phase 2 AC9-AC11).
+
+        Updates instance-level timeout and threshold attributes from ConfigService.
+        Falls back to class-level defaults if ConfigService is unavailable.
+        """
+        try:
+            config_service = get_config_service()
+            config = config_service.get_config()
+            if config.scip_config is not None:
+                self.INDEXING_TIMEOUT_SECONDS = config.scip_config.indexing_timeout_seconds
+                self.SCIP_TIMEOUT_SECONDS = config.scip_config.scip_generation_timeout_seconds
+                self.STALE_THRESHOLD_DAYS = config.scip_config.temporal_stale_threshold_days
+        except Exception as e:
+            self.logger.warning(f"Could not read SCIP config, using defaults: {e}")
 
     def trigger_reindex(
         self,

@@ -4010,7 +4010,24 @@ async def _reload_oidc_configuration():
 def _get_current_config() -> dict:
     """Get current configuration from ConfigService (persisted to ~/.cidx-server/config.json)."""
     from ..services.config_service import get_config_service
-    from ..utils.config_manager import OIDCProviderConfig, TelemetryConfig
+    from ..utils.config_manager import (
+        OIDCProviderConfig,
+        TelemetryConfig,
+        SearchLimitsConfig,
+        FileContentLimitsConfig,
+        GoldenReposConfig,
+        # Story #3 - Phase 2: P0/P1 settings (AC2-AC11)
+        McpSessionConfig,
+        HealthConfig,
+        ScipConfig,
+        # Story #3 - Phase 2: P2 settings (AC12-AC26)
+        GitTimeoutsConfig,
+        ErrorHandlingConfig,
+        ApiLimitsConfig,
+        WebSecurityConfig,
+        # Story #3 - Phase 2: P3 settings (AC36)
+        AuthConfig,
+    )
     from dataclasses import asdict
 
     config_service = get_config_service()
@@ -4042,6 +4059,57 @@ def _get_current_config() -> dict:
     # Get claude_delegation config (Story #721)
     claude_delegation_config = settings.get("claude_delegation", {})
 
+    # Get search_limits, file_content_limits, and golden_repos config (Story #3)
+    # Provide defaults if config sections are missing (backward compatibility)
+    search_limits_config = settings.get("search_limits")
+    if not search_limits_config:
+        search_limits_config = asdict(SearchLimitsConfig())
+
+    file_content_limits_config = settings.get("file_content_limits")
+    if not file_content_limits_config:
+        file_content_limits_config = asdict(FileContentLimitsConfig())
+
+    golden_repos_config = settings.get("golden_repos")
+    if not golden_repos_config:
+        golden_repos_config = asdict(GoldenReposConfig())
+
+    # Story #3 - Phase 2: P0/P1 settings (AC2-AC11)
+    # Get mcp_session, health, scip config with defaults for backward compatibility
+    mcp_session_config = settings.get("mcp_session")
+    if not mcp_session_config:
+        mcp_session_config = asdict(McpSessionConfig())
+
+    health_config = settings.get("health")
+    if not health_config:
+        health_config = asdict(HealthConfig())
+
+    scip_config = settings.get("scip")
+    if not scip_config:
+        scip_config = asdict(ScipConfig())
+
+    # Story #3 - Phase 2: P2 settings (AC12-AC26)
+    # Get git_timeouts, error_handling, api_limits, web_security config with defaults
+    git_timeouts_config = settings.get("git_timeouts")
+    if not git_timeouts_config:
+        git_timeouts_config = asdict(GitTimeoutsConfig())
+
+    error_handling_config = settings.get("error_handling")
+    if not error_handling_config:
+        error_handling_config = asdict(ErrorHandlingConfig())
+
+    api_limits_config = settings.get("api_limits")
+    if not api_limits_config:
+        api_limits_config = asdict(ApiLimitsConfig())
+
+    web_security_config = settings.get("web_security")
+    if not web_security_config:
+        web_security_config = asdict(WebSecurityConfig())
+
+    # Story #3 - Phase 2: P3 settings (AC36)
+    auth_config = settings.get("auth")
+    if not auth_config:
+        auth_config = asdict(AuthConfig())
+
     # Convert to template-friendly format
     return {
         "server": settings["server"],
@@ -4053,6 +4121,20 @@ def _get_current_config() -> dict:
         "job_queue": job_queue_config,
         "telemetry": telemetry_config,
         "claude_delegation": claude_delegation_config,
+        "search_limits": search_limits_config,
+        "file_content_limits": file_content_limits_config,
+        "golden_repos": golden_repos_config,
+        # Story #3 - Phase 2: P0/P1 settings
+        "mcp_session": mcp_session_config,
+        "health": health_config,
+        "scip": scip_config,
+        # Story #3 - Phase 2: P2 settings (AC12-AC26)
+        "git_timeouts": git_timeouts_config,
+        "error_handling": error_handling_config,
+        "api_limits": api_limits_config,
+        "web_security": web_security_config,
+        # Story #3 - Phase 2: P3 settings (AC36)
+        "auth": auth_config,
     }
 
 
@@ -4336,6 +4418,470 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Machine metrics interval must be at least 1 second"
             except (ValueError, TypeError):
                 return "Machine metrics interval must be a valid number"
+
+    elif section == "search_limits":
+        # Validate max_result_size_mb (1-100 MB)
+        max_size = data.get("max_result_size_mb")
+        if max_size is not None:
+            try:
+                max_size_int = int(max_size)
+                if max_size_int < 1 or max_size_int > 100:
+                    return "Max Result Size must be between 1 and 100 MB"
+            except (ValueError, TypeError):
+                return "Max Result Size must be a valid number"
+
+        # Validate timeout_seconds (5-300 seconds)
+        timeout = data.get("timeout_seconds")
+        if timeout is not None:
+            try:
+                timeout_int = int(timeout)
+                if timeout_int < 5 or timeout_int > 300:
+                    return "Timeout must be between 5 and 300 seconds"
+            except (ValueError, TypeError):
+                return "Timeout must be a valid number"
+
+    elif section == "file_content_limits":
+        # Validate max_tokens_per_request (1000-50000 tokens)
+        max_tokens = data.get("max_tokens_per_request")
+        if max_tokens is not None:
+            try:
+                max_tokens_int = int(max_tokens)
+                if max_tokens_int < 1000 or max_tokens_int > 50000:
+                    return "Max Tokens per Request must be between 1000 and 50000"
+            except (ValueError, TypeError):
+                return "Max Tokens per Request must be a valid number"
+
+        # Validate chars_per_token (1-10 characters)
+        chars_per_token = data.get("chars_per_token")
+        if chars_per_token is not None:
+            try:
+                chars_int = int(chars_per_token)
+                if chars_int < 1 or chars_int > 10:
+                    return "Characters per Token must be between 1 and 10"
+            except (ValueError, TypeError):
+                return "Characters per Token must be a valid number"
+
+    elif section == "golden_repos":
+        # Validate refresh_interval_seconds (minimum 60 seconds)
+        refresh_interval = data.get("refresh_interval_seconds")
+        if refresh_interval is not None:
+            try:
+                interval_int = int(refresh_interval)
+                if interval_int < 60:
+                    return "Refresh Interval must be at least 60 seconds"
+            except (ValueError, TypeError):
+                return "Refresh Interval must be a valid number"
+
+    elif section == "mcp_session":
+        # Story #3 Phase 2 AC2-AC3: MCP Session configuration
+        session_ttl = data.get("session_ttl_seconds")
+        if session_ttl is not None:
+            try:
+                ttl_int = int(session_ttl)
+                if ttl_int < 60:
+                    return "Session TTL must be at least 60 seconds"
+            except (ValueError, TypeError):
+                return "Session TTL must be a valid number"
+
+        cleanup_interval = data.get("cleanup_interval_seconds")
+        if cleanup_interval is not None:
+            try:
+                interval_int = int(cleanup_interval)
+                if interval_int < 60:
+                    return "Cleanup Interval must be at least 60 seconds"
+            except (ValueError, TypeError):
+                return "Cleanup Interval must be a valid number"
+
+    elif section == "health":
+        # Story #3 Phase 2 AC4-AC8: Health monitoring configuration
+        for field in [
+            "memory_warning_threshold_percent",
+            "memory_critical_threshold_percent",
+            "disk_warning_threshold_percent",
+            "disk_critical_threshold_percent",
+            "cpu_sustained_threshold_percent",
+        ]:
+            value = data.get(field)
+            if value is not None:
+                try:
+                    val_float = float(value)
+                    if val_float < 0 or val_float > 100:
+                        field_name = field.replace("_", " ").title()
+                        return f"{field_name} must be between 0 and 100"
+                except (ValueError, TypeError):
+                    field_name = field.replace("_", " ").title()
+                    return f"{field_name} must be a valid number"
+
+        # AC37: System Metrics Cache TTL
+        from ..services.constants import (
+            MIN_SYSTEM_METRICS_CACHE_TTL_SECONDS,
+            MAX_SYSTEM_METRICS_CACHE_TTL_SECONDS,
+        )
+
+        cache_ttl = data.get("metrics_cache_ttl_seconds")
+        if cache_ttl is not None:
+            try:
+                ttl_float = float(cache_ttl)
+                if ttl_float < MIN_SYSTEM_METRICS_CACHE_TTL_SECONDS or ttl_float > MAX_SYSTEM_METRICS_CACHE_TTL_SECONDS:
+                    return f"System Metrics Cache TTL must be between {MIN_SYSTEM_METRICS_CACHE_TTL_SECONDS} and {MAX_SYSTEM_METRICS_CACHE_TTL_SECONDS} seconds"
+            except (ValueError, TypeError):
+                return "System Metrics Cache TTL must be a valid number"
+
+    elif section == "scip":
+        # Story #3 Phase 2 AC9-AC11: SCIP configuration
+        # Story #3 Phase 2 AC31-AC34: SCIP query limits
+        from ..services.constants import (
+            MIN_SCIP_REFERENCE_LIMIT,
+            MAX_SCIP_REFERENCE_LIMIT,
+            MIN_SCIP_DEPENDENCY_DEPTH,
+            MAX_SCIP_DEPENDENCY_DEPTH,
+            MIN_SCIP_CALLCHAIN_MAX_DEPTH,
+            MAX_SCIP_CALLCHAIN_MAX_DEPTH,
+            MIN_SCIP_CALLCHAIN_LIMIT,
+            MAX_SCIP_CALLCHAIN_LIMIT,
+        )
+
+        indexing_timeout = data.get("indexing_timeout_seconds")
+        if indexing_timeout is not None:
+            try:
+                timeout_int = int(indexing_timeout)
+                if timeout_int < 60:
+                    return "Indexing Timeout must be at least 60 seconds"
+            except (ValueError, TypeError):
+                return "Indexing Timeout must be a valid number"
+
+        scip_timeout = data.get("scip_generation_timeout_seconds")
+        if scip_timeout is not None:
+            try:
+                timeout_int = int(scip_timeout)
+                if timeout_int < 60:
+                    return "SCIP Generation Timeout must be at least 60 seconds"
+            except (ValueError, TypeError):
+                return "SCIP Generation Timeout must be a valid number"
+
+        stale_threshold = data.get("temporal_stale_threshold_days")
+        if stale_threshold is not None:
+            try:
+                days_int = int(stale_threshold)
+                if days_int < 1:
+                    return "Temporal Stale Threshold must be at least 1 day"
+            except (ValueError, TypeError):
+                return "Temporal Stale Threshold must be a valid number"
+
+        # P3 settings (AC31-AC34)
+        scip_ref_limit = data.get("scip_reference_limit")
+        if scip_ref_limit is not None:
+            try:
+                limit_int = int(scip_ref_limit)
+                if limit_int < MIN_SCIP_REFERENCE_LIMIT or limit_int > MAX_SCIP_REFERENCE_LIMIT:
+                    return f"SCIP Reference Limit must be between {MIN_SCIP_REFERENCE_LIMIT} and {MAX_SCIP_REFERENCE_LIMIT}"
+            except (ValueError, TypeError):
+                return "SCIP Reference Limit must be a valid number"
+
+        scip_dep_depth = data.get("scip_dependency_depth")
+        if scip_dep_depth is not None:
+            try:
+                depth_int = int(scip_dep_depth)
+                if depth_int < MIN_SCIP_DEPENDENCY_DEPTH or depth_int > MAX_SCIP_DEPENDENCY_DEPTH:
+                    return f"SCIP Dependency Depth must be between {MIN_SCIP_DEPENDENCY_DEPTH} and {MAX_SCIP_DEPENDENCY_DEPTH}"
+            except (ValueError, TypeError):
+                return "SCIP Dependency Depth must be a valid number"
+
+        scip_callchain_depth = data.get("scip_callchain_max_depth")
+        if scip_callchain_depth is not None:
+            try:
+                depth_int = int(scip_callchain_depth)
+                if depth_int < MIN_SCIP_CALLCHAIN_MAX_DEPTH or depth_int > MAX_SCIP_CALLCHAIN_MAX_DEPTH:
+                    return f"SCIP Callchain Max Depth must be between {MIN_SCIP_CALLCHAIN_MAX_DEPTH} and {MAX_SCIP_CALLCHAIN_MAX_DEPTH}"
+            except (ValueError, TypeError):
+                return "SCIP Callchain Max Depth must be a valid number"
+
+        scip_callchain_limit = data.get("scip_callchain_limit")
+        if scip_callchain_limit is not None:
+            try:
+                limit_int = int(scip_callchain_limit)
+                if limit_int < MIN_SCIP_CALLCHAIN_LIMIT or limit_int > MAX_SCIP_CALLCHAIN_LIMIT:
+                    return f"SCIP Callchain Limit must be between {MIN_SCIP_CALLCHAIN_LIMIT} and {MAX_SCIP_CALLCHAIN_LIMIT}"
+            except (ValueError, TypeError):
+                return "SCIP Callchain Limit must be a valid number"
+
+    elif section == "git_timeouts":
+        # Story #3 Phase 2 AC12-AC15: Git timeouts configuration
+        # Story #3 Phase 2 AC27-AC30: API provider timeouts
+        from ..services.constants import (
+            MIN_GIT_LOCAL_TIMEOUT_SECONDS,
+            MIN_GIT_REMOTE_TIMEOUT_SECONDS,
+            MIN_GIT_COMMAND_TIMEOUT_SECONDS,
+            MIN_GIT_FETCH_TIMEOUT_SECONDS,
+            MIN_GITHUB_API_TIMEOUT_SECONDS,
+            MAX_GITHUB_API_TIMEOUT_SECONDS,
+            MIN_GITLAB_API_TIMEOUT_SECONDS,
+            MAX_GITLAB_API_TIMEOUT_SECONDS,
+            MIN_GITHUB_PROVIDER_TIMEOUT_SECONDS,
+            MAX_GITHUB_PROVIDER_TIMEOUT_SECONDS,
+            MIN_GITLAB_PROVIDER_TIMEOUT_SECONDS,
+            MAX_GITLAB_PROVIDER_TIMEOUT_SECONDS,
+        )
+
+        git_local = data.get("git_local_timeout")
+        if git_local is not None:
+            try:
+                timeout_int = int(git_local)
+                if timeout_int < MIN_GIT_LOCAL_TIMEOUT_SECONDS:
+                    return f"Git Local Timeout must be at least {MIN_GIT_LOCAL_TIMEOUT_SECONDS} seconds"
+            except (ValueError, TypeError):
+                return "Git Local Timeout must be a valid number"
+
+        git_remote = data.get("git_remote_timeout")
+        if git_remote is not None:
+            try:
+                timeout_int = int(git_remote)
+                if timeout_int < MIN_GIT_REMOTE_TIMEOUT_SECONDS:
+                    return f"Git Remote Timeout must be at least {MIN_GIT_REMOTE_TIMEOUT_SECONDS} seconds"
+            except (ValueError, TypeError):
+                return "Git Remote Timeout must be a valid number"
+
+        git_command = data.get("git_command_timeout")
+        if git_command is not None:
+            try:
+                timeout_int = int(git_command)
+                if timeout_int < MIN_GIT_COMMAND_TIMEOUT_SECONDS:
+                    return f"Git Command Timeout must be at least {MIN_GIT_COMMAND_TIMEOUT_SECONDS} seconds"
+            except (ValueError, TypeError):
+                return "Git Command Timeout must be a valid number"
+
+        git_fetch = data.get("git_fetch_timeout")
+        if git_fetch is not None:
+            try:
+                timeout_int = int(git_fetch)
+                if timeout_int < MIN_GIT_FETCH_TIMEOUT_SECONDS:
+                    return f"Git Fetch Timeout must be at least {MIN_GIT_FETCH_TIMEOUT_SECONDS} seconds"
+            except (ValueError, TypeError):
+                return "Git Fetch Timeout must be a valid number"
+
+        # P3 settings (AC27-AC30)
+        github_api = data.get("github_api_timeout")
+        if github_api is not None:
+            try:
+                timeout_int = int(github_api)
+                if timeout_int < MIN_GITHUB_API_TIMEOUT_SECONDS or timeout_int > MAX_GITHUB_API_TIMEOUT_SECONDS:
+                    return f"GitHub API Timeout must be between {MIN_GITHUB_API_TIMEOUT_SECONDS} and {MAX_GITHUB_API_TIMEOUT_SECONDS} seconds"
+            except (ValueError, TypeError):
+                return "GitHub API Timeout must be a valid number"
+
+        gitlab_api = data.get("gitlab_api_timeout")
+        if gitlab_api is not None:
+            try:
+                timeout_int = int(gitlab_api)
+                if timeout_int < MIN_GITLAB_API_TIMEOUT_SECONDS or timeout_int > MAX_GITLAB_API_TIMEOUT_SECONDS:
+                    return f"GitLab API Timeout must be between {MIN_GITLAB_API_TIMEOUT_SECONDS} and {MAX_GITLAB_API_TIMEOUT_SECONDS} seconds"
+            except (ValueError, TypeError):
+                return "GitLab API Timeout must be a valid number"
+
+        github_provider = data.get("github_provider_timeout")
+        if github_provider is not None:
+            try:
+                timeout_int = int(github_provider)
+                if timeout_int < MIN_GITHUB_PROVIDER_TIMEOUT_SECONDS or timeout_int > MAX_GITHUB_PROVIDER_TIMEOUT_SECONDS:
+                    return f"GitHub Provider Timeout must be between {MIN_GITHUB_PROVIDER_TIMEOUT_SECONDS} and {MAX_GITHUB_PROVIDER_TIMEOUT_SECONDS} seconds"
+            except (ValueError, TypeError):
+                return "GitHub Provider Timeout must be a valid number"
+
+        gitlab_provider = data.get("gitlab_provider_timeout")
+        if gitlab_provider is not None:
+            try:
+                timeout_int = int(gitlab_provider)
+                if timeout_int < MIN_GITLAB_PROVIDER_TIMEOUT_SECONDS or timeout_int > MAX_GITLAB_PROVIDER_TIMEOUT_SECONDS:
+                    return f"GitLab Provider Timeout must be between {MIN_GITLAB_PROVIDER_TIMEOUT_SECONDS} and {MAX_GITLAB_PROVIDER_TIMEOUT_SECONDS} seconds"
+            except (ValueError, TypeError):
+                return "GitLab Provider Timeout must be a valid number"
+
+    elif section == "error_handling":
+        # Story #3 Phase 2 AC16-AC18: Error handling configuration
+        from ..services.constants import (
+            MIN_RETRY_ATTEMPTS,
+            MAX_RETRY_ATTEMPTS,
+            MIN_BASE_RETRY_DELAY_SECONDS,
+            MAX_BASE_RETRY_DELAY_SECONDS,
+            MIN_MAX_RETRY_DELAY_SECONDS,
+            MAX_MAX_RETRY_DELAY_SECONDS,
+        )
+
+        max_retry = data.get("max_retry_attempts")
+        if max_retry is not None:
+            try:
+                retry_int = int(max_retry)
+                if retry_int < MIN_RETRY_ATTEMPTS or retry_int > MAX_RETRY_ATTEMPTS:
+                    return f"Max Retry Attempts must be between {MIN_RETRY_ATTEMPTS} and {MAX_RETRY_ATTEMPTS}"
+            except (ValueError, TypeError):
+                return "Max Retry Attempts must be a valid number"
+
+        base_delay = data.get("base_retry_delay_seconds")
+        if base_delay is not None:
+            try:
+                delay_float = float(base_delay)
+                if delay_float < MIN_BASE_RETRY_DELAY_SECONDS or delay_float > MAX_BASE_RETRY_DELAY_SECONDS:
+                    return f"Base Retry Delay must be between {MIN_BASE_RETRY_DELAY_SECONDS} and {MAX_BASE_RETRY_DELAY_SECONDS} seconds"
+            except (ValueError, TypeError):
+                return "Base Retry Delay must be a valid number"
+
+        max_delay = data.get("max_retry_delay_seconds")
+        if max_delay is not None:
+            try:
+                delay_float = float(max_delay)
+                if delay_float < MIN_MAX_RETRY_DELAY_SECONDS or delay_float > MAX_MAX_RETRY_DELAY_SECONDS:
+                    return f"Max Retry Delay must be between {MIN_MAX_RETRY_DELAY_SECONDS} and {MAX_MAX_RETRY_DELAY_SECONDS} seconds"
+            except (ValueError, TypeError):
+                return "Max Retry Delay must be a valid number"
+
+    elif section == "api_limits":
+        # Story #3 Phase 2 AC19-AC24: API limits configuration
+        # Story #3 Phase 2 AC35, AC38-AC39: Audit/log limits
+        from ..services.constants import (
+            MIN_DEFAULT_FILE_READ_LINES,
+            MAX_DEFAULT_FILE_READ_LINES,
+            MIN_MAX_FILE_READ_LINES,
+            MAX_MAX_FILE_READ_LINES,
+            MIN_DEFAULT_DIFF_LINES,
+            MAX_DEFAULT_DIFF_LINES,
+            MIN_MAX_DIFF_LINES,
+            MAX_MAX_DIFF_LINES,
+            MIN_DEFAULT_LOG_COMMITS,
+            MAX_DEFAULT_LOG_COMMITS,
+            MIN_MAX_LOG_COMMITS,
+            MAX_MAX_LOG_COMMITS,
+            MIN_AUDIT_LOG_DEFAULT_LIMIT,
+            MAX_AUDIT_LOG_DEFAULT_LIMIT,
+            MIN_LOG_PAGE_SIZE_DEFAULT,
+            MAX_LOG_PAGE_SIZE_DEFAULT,
+            MIN_LOG_PAGE_SIZE_MAX,
+            MAX_LOG_PAGE_SIZE_MAX,
+        )
+
+        default_file_lines = data.get("default_file_read_lines")
+        if default_file_lines is not None:
+            try:
+                lines_int = int(default_file_lines)
+                if lines_int < MIN_DEFAULT_FILE_READ_LINES or lines_int > MAX_DEFAULT_FILE_READ_LINES:
+                    return f"Default File Read Lines must be between {MIN_DEFAULT_FILE_READ_LINES} and {MAX_DEFAULT_FILE_READ_LINES}"
+            except (ValueError, TypeError):
+                return "Default File Read Lines must be a valid number"
+
+        max_file_lines = data.get("max_file_read_lines")
+        if max_file_lines is not None:
+            try:
+                lines_int = int(max_file_lines)
+                if lines_int < MIN_MAX_FILE_READ_LINES or lines_int > MAX_MAX_FILE_READ_LINES:
+                    return f"Max File Read Lines must be between {MIN_MAX_FILE_READ_LINES} and {MAX_MAX_FILE_READ_LINES}"
+            except (ValueError, TypeError):
+                return "Max File Read Lines must be a valid number"
+
+        default_diff_lines = data.get("default_diff_lines")
+        if default_diff_lines is not None:
+            try:
+                lines_int = int(default_diff_lines)
+                if lines_int < MIN_DEFAULT_DIFF_LINES or lines_int > MAX_DEFAULT_DIFF_LINES:
+                    return f"Default Diff Lines must be between {MIN_DEFAULT_DIFF_LINES} and {MAX_DEFAULT_DIFF_LINES}"
+            except (ValueError, TypeError):
+                return "Default Diff Lines must be a valid number"
+
+        max_diff_lines = data.get("max_diff_lines")
+        if max_diff_lines is not None:
+            try:
+                lines_int = int(max_diff_lines)
+                if lines_int < MIN_MAX_DIFF_LINES or lines_int > MAX_MAX_DIFF_LINES:
+                    return f"Max Diff Lines must be between {MIN_MAX_DIFF_LINES} and {MAX_MAX_DIFF_LINES}"
+            except (ValueError, TypeError):
+                return "Max Diff Lines must be a valid number"
+
+        default_log = data.get("default_log_commits")
+        if default_log is not None:
+            try:
+                commits_int = int(default_log)
+                if commits_int < MIN_DEFAULT_LOG_COMMITS or commits_int > MAX_DEFAULT_LOG_COMMITS:
+                    return f"Default Log Commits must be between {MIN_DEFAULT_LOG_COMMITS} and {MAX_DEFAULT_LOG_COMMITS}"
+            except (ValueError, TypeError):
+                return "Default Log Commits must be a valid number"
+
+        max_log = data.get("max_log_commits")
+        if max_log is not None:
+            try:
+                commits_int = int(max_log)
+                if commits_int < MIN_MAX_LOG_COMMITS or commits_int > MAX_MAX_LOG_COMMITS:
+                    return f"Max Log Commits must be between {MIN_MAX_LOG_COMMITS} and {MAX_MAX_LOG_COMMITS}"
+            except (ValueError, TypeError):
+                return "Max Log Commits must be a valid number"
+
+        # P3 settings (AC35, AC38-AC39)
+        audit_limit = data.get("audit_log_default_limit")
+        if audit_limit is not None:
+            try:
+                limit_int = int(audit_limit)
+                if limit_int < MIN_AUDIT_LOG_DEFAULT_LIMIT or limit_int > MAX_AUDIT_LOG_DEFAULT_LIMIT:
+                    return f"Audit Log Default Limit must be between {MIN_AUDIT_LOG_DEFAULT_LIMIT} and {MAX_AUDIT_LOG_DEFAULT_LIMIT}"
+            except (ValueError, TypeError):
+                return "Audit Log Default Limit must be a valid number"
+
+        log_page_default = data.get("log_page_size_default")
+        if log_page_default is not None:
+            try:
+                size_int = int(log_page_default)
+                if size_int < MIN_LOG_PAGE_SIZE_DEFAULT or size_int > MAX_LOG_PAGE_SIZE_DEFAULT:
+                    return f"Log Page Size Default must be between {MIN_LOG_PAGE_SIZE_DEFAULT} and {MAX_LOG_PAGE_SIZE_DEFAULT}"
+            except (ValueError, TypeError):
+                return "Log Page Size Default must be a valid number"
+
+        log_page_max = data.get("log_page_size_max")
+        if log_page_max is not None:
+            try:
+                size_int = int(log_page_max)
+                if size_int < MIN_LOG_PAGE_SIZE_MAX or size_int > MAX_LOG_PAGE_SIZE_MAX:
+                    return f"Log Page Size Max must be between {MIN_LOG_PAGE_SIZE_MAX} and {MAX_LOG_PAGE_SIZE_MAX}"
+            except (ValueError, TypeError):
+                return "Log Page Size Max must be a valid number"
+
+    elif section == "web_security":
+        # Story #3 Phase 2 AC25-AC26: Web security configuration
+        from ..services.constants import (
+            MIN_CSRF_MAX_AGE_SECONDS,
+            MAX_CSRF_MAX_AGE_SECONDS,
+            MIN_WEB_SESSION_TIMEOUT_SECONDS,
+            MAX_WEB_SESSION_TIMEOUT_SECONDS,
+        )
+
+        csrf_max_age = data.get("csrf_max_age_seconds")
+        if csrf_max_age is not None:
+            try:
+                age_int = int(csrf_max_age)
+                if age_int < MIN_CSRF_MAX_AGE_SECONDS or age_int > MAX_CSRF_MAX_AGE_SECONDS:
+                    return f"CSRF Max Age must be between {MIN_CSRF_MAX_AGE_SECONDS} and {MAX_CSRF_MAX_AGE_SECONDS} seconds"
+            except (ValueError, TypeError):
+                return "CSRF Max Age must be a valid number"
+
+        session_timeout = data.get("web_session_timeout_seconds")
+        if session_timeout is not None:
+            try:
+                timeout_int = int(session_timeout)
+                if timeout_int < MIN_WEB_SESSION_TIMEOUT_SECONDS or timeout_int > MAX_WEB_SESSION_TIMEOUT_SECONDS:
+                    return f"Web Session Timeout must be between {MIN_WEB_SESSION_TIMEOUT_SECONDS} and {MAX_WEB_SESSION_TIMEOUT_SECONDS} seconds"
+            except (ValueError, TypeError):
+                return "Web Session Timeout must be a valid number"
+
+    elif section == "auth":
+        # Story #3 Phase 2 AC36: Authentication configuration
+        from ..services.constants import (
+            MIN_OAUTH_EXTENSION_THRESHOLD_HOURS,
+            MAX_OAUTH_EXTENSION_THRESHOLD_HOURS,
+        )
+
+        oauth_threshold = data.get("oauth_extension_threshold_hours")
+        if oauth_threshold is not None:
+            try:
+                threshold_int = int(oauth_threshold)
+                if threshold_int < MIN_OAUTH_EXTENSION_THRESHOLD_HOURS or threshold_int > MAX_OAUTH_EXTENSION_THRESHOLD_HOURS:
+                    return f"OAuth Extension Threshold must be between {MIN_OAUTH_EXTENSION_THRESHOLD_HOURS} and {MAX_OAUTH_EXTENSION_THRESHOLD_HOURS} hours"
+            except (ValueError, TypeError):
+                return "OAuth Extension Threshold must be a valid number"
 
     return None
 
@@ -4697,6 +5243,52 @@ async def update_claude_delegation_config(
         request, session, success_message="Claude Delegation configuration saved and verified")
 
 
+# NOTE: This specific route MUST come BEFORE /config/{section} to avoid being
+# caught by the parameterized route. FastAPI matches routes in order of definition.
+@web_router.post("/config/reset", response_class=HTMLResponse)
+async def reset_config(
+    request: Request,
+    csrf_token: Optional[str] = Form(None),
+):
+    """Reset configuration to defaults."""
+    from ..services.config_service import get_config_service
+
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+
+    # Validate CSRF token
+    if not validate_login_csrf_token(request, csrf_token):
+        return _create_config_page_response(
+            request, session, error_message="Invalid CSRF token"
+        )
+
+    # Reset to defaults using ConfigService
+    try:
+        config_service = get_config_service()
+        # Create a fresh default config and save it
+        default_config = config_service.config_manager.create_default_config()
+        config_service.config_manager.save_config(default_config)
+        config_service._config = default_config  # Update cached config
+
+        return _create_config_page_response(
+            request,
+            session,
+            success_message="Configuration reset to defaults successfully",
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to reset config: %s",
+            e,
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _create_config_page_response(
+            request,
+            session,
+            error_message=f"Failed to reset configuration: {str(e)}",
+        )
+
+
 @web_router.post("/config/{section}", response_class=HTMLResponse)
 async def update_config_section(
     request: Request,
@@ -4726,6 +5318,19 @@ async def update_config_section(
         "oidc",
         "job_queue",
         "telemetry",
+        "search_limits",
+        "file_content_limits",
+        "golden_repos",
+        "mcp_session",
+        "health",
+        "scip",
+        # Story #3 - Phase 2: P2 settings (AC12-AC26)
+        "git_timeouts",
+        "error_handling",
+        "api_limits",
+        "web_security",
+        # Story #3 - Phase 2: P3 settings (AC36)
+        "auth",
     ]
     if section not in valid_sections:
         return _create_config_page_response(
@@ -5099,13 +5704,11 @@ async def file_content_limits_page(request: Request):
     if not session:
         return _create_login_redirect(request)
 
-    from ..services.file_content_limits_config_manager import (
-        FileContentLimitsConfigManager,
-    )
+    from ..services.config_service import get_config_service
 
-    # Get current configuration
-    config_manager = FileContentLimitsConfigManager.get_instance()
-    config = config_manager.get_config()
+    # Get current configuration from ConfigService (Story #3 - Configuration Consolidation)
+    config_service = get_config_service()
+    config = config_service.get_config().file_content_limits_config
 
     # Generate CSRF token
     csrf_token = generate_csrf_token()
@@ -5156,36 +5759,34 @@ async def update_file_content_limits(
             request, session, error_message="Invalid CSRF token"
         )
 
-    # Validate max_tokens_per_request range
-    if max_tokens_per_request < 1000 or max_tokens_per_request > 20000:
+    # Validate max_tokens_per_request range (Story #3 AC-M3: 1000-50000)
+    if max_tokens_per_request < 1000 or max_tokens_per_request > 50000:
         return _create_file_content_limits_response(
             request,
             session,
-            error_message="Max tokens per request must be between 1000 and 20000",
+            error_message="Max tokens per request must be between 1000 and 50000",
         )
 
-    # Validate chars_per_token range
-    if chars_per_token < 3 or chars_per_token > 5:
+    # Validate chars_per_token range (Story #3 AC-M4: 1-10)
+    if chars_per_token < 1 or chars_per_token > 10:
         return _create_file_content_limits_response(
             request,
             session,
-            error_message="Chars per token must be between 3 and 5",
+            error_message="Chars per token must be between 1 and 10",
         )
 
-    # Update configuration
+    # Update configuration using ConfigService (Story #3 - Configuration Consolidation)
     try:
-        from ..models.file_content_limits_config import FileContentLimitsConfig
-        from ..services.file_content_limits_config_manager import (
-            FileContentLimitsConfigManager,
-        )
+        from ..services.config_service import get_config_service
 
-        new_config = FileContentLimitsConfig(
-            max_tokens_per_request=max_tokens_per_request,
-            chars_per_token=chars_per_token,
+        config_service = get_config_service()
+        # Update settings individually with validation
+        config_service.update_setting(
+            "file_content_limits", "max_tokens_per_request", max_tokens_per_request
         )
-
-        config_manager = FileContentLimitsConfigManager.get_instance()
-        config_manager.update_config(new_config)
+        config_service.update_setting(
+            "file_content_limits", "chars_per_token", chars_per_token
+        )
 
         return _create_file_content_limits_response(
             request,
@@ -5212,12 +5813,11 @@ def _create_file_content_limits_response(
     error_message: Optional[str] = None,
 ) -> HTMLResponse:
     """Create file content limits page response with messages."""
-    from ..services.file_content_limits_config_manager import (
-        FileContentLimitsConfigManager,
-    )
+    from ..services.config_service import get_config_service
 
-    config_manager = FileContentLimitsConfigManager.get_instance()
-    config = config_manager.get_config()
+    # Get configuration from ConfigService (Story #3 - Configuration Consolidation)
+    config_service = get_config_service()
+    config = config_service.get_config().file_content_limits_config
 
     csrf_token = generate_csrf_token()
 

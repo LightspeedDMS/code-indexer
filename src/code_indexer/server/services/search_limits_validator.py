@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .search_result_file_manager import ParseResult
-from ..models.search_limits_config import SearchLimitsConfig
+from ..utils.config_manager import SearchLimitsConfig
 
 logger = logging.getLogger(__name__)
 

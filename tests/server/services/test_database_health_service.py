@@ -29,14 +29,15 @@ class TestDatabaseHealthService:
             data_dir = server_dir / "data"
             data_dir.mkdir(parents=True)
 
-            # Create all 8 central database files with proper schema
+            # Create all 7 central database files with proper schema
+            # Story #3: Removed search_config.db and file_content_limits.db (migrated to config.json)
+            # Added scip_audit.db for SCIP indexing audit tracking
             databases = {
                 "cidx_server.db": "CREATE TABLE IF NOT EXISTS test_table (id INTEGER PRIMARY KEY)",
                 "oauth.db": "CREATE TABLE IF NOT EXISTS oauth_providers (id INTEGER PRIMARY KEY)",
                 "refresh_tokens.db": "CREATE TABLE IF NOT EXISTS tokens (id INTEGER PRIMARY KEY)",
                 "logs.db": "CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY)",
-                "search_config.db": "CREATE TABLE IF NOT EXISTS config (id INTEGER PRIMARY KEY)",
-                "file_content_limits.db": "CREATE TABLE IF NOT EXISTS limits (id INTEGER PRIMARY KEY)",
+                "groups.db": "CREATE TABLE IF NOT EXISTS groups (id INTEGER PRIMARY KEY)",
                 "scip_audit.db": "CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY)",
                 "payload_cache.db": "CREATE TABLE IF NOT EXISTS cache (id INTEGER PRIMARY KEY)",
             }
@@ -53,13 +54,16 @@ class TestDatabaseHealthService:
 
             yield server_dir
 
-    def test_health_service_checks_all_8_databases(self, temp_server_dir: Path):
+    def test_health_service_checks_all_7_databases(self, temp_server_dir: Path):
         """
-        AC1: Health service checks all 8 central databases.
+        AC1: Health service checks all 7 central databases.
+
+        Story #3: Removed search_config.db and file_content_limits.db (migrated to config.json)
+        Added scip_audit.db for SCIP indexing audit tracking.
 
         Given the health service is initialized
         When get_all_database_health() is called
-        Then it returns health status for exactly 8 databases
+        Then it returns health status for exactly 7 databases
         """
         from code_indexer.server.services.database_health_service import (
             DatabaseHealthService,
@@ -69,17 +73,17 @@ class TestDatabaseHealthService:
         health_results = service.get_all_database_health()
 
         assert (
-            len(health_results) == 8
-        ), f"Expected 8 databases, got {len(health_results)}"
+            len(health_results) == 7
+        ), f"Expected 7 databases, got {len(health_results)}"
 
         # Verify all expected databases are present
+        # Story #3: Removed search_config.db and file_content_limits.db
         expected_files = {
             "cidx_server.db",
             "oauth.db",
             "refresh_tokens.db",
             "logs.db",
-            "search_config.db",
-            "file_content_limits.db",
+            "groups.db",
             "scip_audit.db",
             "payload_cache.db",
         }
@@ -103,13 +107,13 @@ class TestDatabaseHealthService:
         service = DatabaseHealthService(server_dir=str(temp_server_dir))
         health_results = service.get_all_database_health()
 
+        # Story #3: Removed search_config.db and file_content_limits.db
         expected_display_names = {
             "cidx_server.db": "Main Server",
             "oauth.db": "OAuth",
             "refresh_tokens.db": "Refresh Tokens",
             "logs.db": "Logs",
-            "search_config.db": "Search Config",
-            "file_content_limits.db": "File Limits",
+            "groups.db": "Groups",
             "scip_audit.db": "SCIP Audit",
             "payload_cache.db": "Payload Cache",
         }

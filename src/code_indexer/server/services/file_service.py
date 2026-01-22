@@ -22,7 +22,7 @@ from ..models.api_models import (
     PaginationInfo,
     FileListQueryParams,
 )
-from ..services.file_content_limits_config_manager import FileContentLimitsConfigManager
+from ..services.config_service import get_config_service
 
 logger = logging.getLogger(__name__)
 
@@ -93,13 +93,11 @@ class FileListingService:
         from ..repositories.activated_repo_manager import ActivatedRepoManager
 
         self.activated_repo_manager = ActivatedRepoManager()
-        self._config_manager = None
 
-    def _get_config_manager(self):
-        """Get config manager instance (lazy initialization)."""
-        if not hasattr(self, "_config_manager") or self._config_manager is None:
-            self._config_manager = FileContentLimitsConfigManager.get_instance()
-        return self._config_manager
+    def _get_file_content_limits_config(self):
+        """Get file content limits config from ConfigService."""
+        config_service = get_config_service()
+        return config_service.get_config().file_content_limits_config
 
     def list_files(
         self, repo_id: str, username: str, query_params: FileListQueryParams
@@ -493,11 +491,11 @@ class FileListingService:
         Returns:
             Tuple of (possibly truncated content, metadata dict with token info)
         """
-        config = self._get_config_manager().get_config()
-        max_chars = config.max_chars_per_request
+        file_content_limits = self._get_file_content_limits_config()
+        max_chars = file_content_limits.max_chars_per_request
 
         # Calculate estimated tokens from content length
-        estimated_tokens = len(content) // config.chars_per_token
+        estimated_tokens = len(content) // file_content_limits.chars_per_token
 
         # Check if truncation needed
         truncated = False
@@ -514,7 +512,7 @@ class FileListingService:
             truncated_at_line = effective_offset + lines_before_truncation
 
             # Recalculate estimated tokens for truncated content
-            estimated_tokens = len(actual_content) // config.chars_per_token
+            estimated_tokens = len(actual_content) // file_content_limits.chars_per_token
 
         # Determine if pagination required
         # Formula: last_returned_line = effective_offset + returned_lines - 1
@@ -542,7 +540,7 @@ class FileListingService:
         # Build token enforcement metadata
         token_metadata = {
             "estimated_tokens": estimated_tokens,
-            "max_tokens_per_request": config.max_tokens_per_request,
+            "max_tokens_per_request": file_content_limits.max_tokens_per_request,
             "truncated": truncated,
             "truncated_at_line": truncated_at_line,
             "requires_pagination": requires_pagination,
