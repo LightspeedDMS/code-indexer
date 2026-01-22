@@ -561,7 +561,63 @@ Consult this file when deploying to test environments.
 
 ---
 
-## 11. Where to Find More
+## 11. MCP Tool Documentation
+
+MCP tool documentation is externalized to markdown files for maintainability.
+
+### Directory Structure
+
+```
+src/code_indexer/server/mcp/tool_docs/
+  admin/       # Admin tools (users, groups, auth, maintenance)
+  cicd/        # CI/CD tools (GitHub Actions, GitLab CI)
+  files/       # File CRUD operations
+  git/         # Git operations
+  guides/      # User guides and quick reference
+  repos/       # Repository management
+  scip/        # SCIP code intelligence
+  search/      # Search and browse tools
+  ssh/         # SSH key management
+```
+
+### Tool Documentation Format
+
+Each `.md` file has YAML frontmatter:
+
+```yaml
+---
+name: tool_name
+category: search
+required_permission: query_repos
+tl_dr: Brief one-line description.
+quick_reference: true  # Optional, for quick ref inclusion
+---
+
+Full tool description here.
+```
+
+### Scripts
+
+- **Convert**: `python3 tools/convert_tool_docs.py` - Generates 128 .md files from TOOL_REGISTRY
+- **Verify**: `python3 tools/verify_tool_docs.py` - CI gate validation (file count, frontmatter, coverage)
+
+### Adding New Tools
+
+1. Add tool to TOOL_REGISTRY in `src/code_indexer/server/mcp/tools.py`
+2. Run conversion script: `python3 tools/convert_tool_docs.py`
+3. Verify: `python3 tools/verify_tool_docs.py`
+4. Tests will validate backward compatibility
+
+### Related Files
+
+- `src/code_indexer/server/mcp/tool_doc_loader.py` - Runtime loader with caching
+- `tests/unit/tools/test_convert_tool_docs.py` - Conversion tests
+- `tests/unit/tools/test_verify_tool_docs.py` - Verification tests
+- `tests/unit/server/mcp/test_tool_doc_*.py` - Loader tests
+
+---
+
+## 12. Where to Find More
 
 **Detailed Architecture**: `/docs/v5.0.0-architecture-summary.md`, `/docs/v7.2.0-architecture-incremental-updates.md`
 

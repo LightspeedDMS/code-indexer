@@ -1,0 +1,8 @@
+---
+name: cidx_quick_reference
+category: guides
+required_permission: query_repos
+tl_dr: Get quick reference for CIDX MCP tools with decision guidance.
+---
+
+TL;DR: Get quick reference for CIDX MCP tools with decision guidance. CRITICAL WORKFLOWS: (1) DISCOVERY: When user doesn't specify a repo, search cidx-meta-global FIRST to find relevant repositories. (2) SINGLE-REPO: For deep-diving into one codebase, use repository_alias as string. (3) MULTI-REPO: For cross-cutting analysis, use repository_alias as array with aggregation_mode='per_repo' (comparison) or 'global' (best matches). MULTI-REPO SEARCH GUIDE: TOOLS SUPPORTING MULTI-REPO: search_code, regex_search, git_log, git_search_commits, list_files. SYNTAX: repository_alias=['repo1-global', 'repo2-global'] or wildcard '*-global'. AGGREGATION: 'global' returns top N by score across all repos. 'per_repo' distributes N evenly (limit/repos each, NOT limit per repo). LIMIT MATH: limit=10 with 3 repos in per_repo mode returns 4+3+3=10 total results, not 30. CACHING: Large results (>2000 chars) return preview + cache_handle. Each result has its own handle (not per-repo). Use get_cached_content(handle) to fetch full content. ERROR HANDLING: Partial results supported. Failed repos appear in 'errors' field, successful repos return results. PERFORMANCE: Start with limit=3-5 for multi-repo searches. Token usage scales with number of repos. CATEGORIES: search, scip, git_exploration, git_operations, files, repo_management, golden_repos, system, user_management, ssh_keys, meta. OUTPUT: Tool names with TL;DR descriptions. Use category filter to narrow results. EXAMPLE: {"category": "search"} returns search tools with summaries.

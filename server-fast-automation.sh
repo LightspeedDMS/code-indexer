@@ -87,7 +87,16 @@ fi
 print_step "Skipping mypy (disabled: module path configuration issue)"
 print_warning "MyPy temporarily disabled - fix module path duplication issue"
 
-# 5. Run server unit tests only
+# 5. Verify MCP tool documentation completeness
+print_step "Verifying MCP tool documentation"
+if python3 tools/verify_tool_docs.py; then
+    print_success "Tool documentation verification passed"
+else
+    print_error "Tool documentation verification failed"
+    exit 1
+fi
+
+# 6. Run server unit tests only
 print_step "Running server unit tests"
 echo "ℹ️  Testing CIDX server functionality including:"
 echo "   • API endpoints and authentication"

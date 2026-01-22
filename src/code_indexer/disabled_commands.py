@@ -28,17 +28,11 @@ COMMAND_COMPATIBILITY: Dict[str, Dict[str, bool]] = {
     "version": {"local": True, "remote": True, "proxy": True, "uninitialized": True},
     # Core functionality commands - work in initialized modes only
     "query": {"local": True, "remote": True, "proxy": True, "uninitialized": False},
-    "ask": {
-        "local": True,
-        "remote": True,
-        "proxy": False,
-        "uninitialized": False,
-    },  # Claude integration
     # Initialization commands - always available since they set up the system
     "init": {"local": True, "remote": True, "proxy": True, "uninitialized": True},
     # Local-only infrastructure commands - require local container management
-    "start": {"local": True, "remote": False, "proxy": True, "uninitialized": False},
-    "stop": {"local": True, "remote": False, "proxy": True, "uninitialized": False},
+    "start": {"local": True, "remote": False, "proxy": False, "uninitialized": False},
+    "stop": {"local": True, "remote": False, "proxy": False, "uninitialized": False},
     "index": {"local": True, "remote": False, "proxy": False, "uninitialized": False},
     "watch": {"local": True, "remote": False, "proxy": True, "uninitialized": False},
     # Mode-adapted commands - different behavior per mode but available in both
@@ -105,9 +99,9 @@ COMMAND_COMPATIBILITY: Dict[str, Dict[str, bool]] = {
         "proxy": False,
         "uninitialized": False,
     },
-    "jobs": {"local": True, "remote": True, "proxy": False, "uninitialized": False},
-    # Admin commands - available in both local and remote modes for testing
-    "admin": {"local": True, "remote": True, "proxy": False, "uninitialized": False},
+    "jobs": {"local": False, "remote": True, "proxy": False, "uninitialized": False},
+    # Admin commands - remote only (requires server connection)
+    "admin": {"local": False, "remote": True, "proxy": False, "uninitialized": False},
     "admin_group": {
         "local": True,
         "remote": True,
@@ -126,10 +120,10 @@ COMMAND_COMPATIBILITY: Dict[str, Dict[str, bool]] = {
         "proxy": False,
         "uninitialized": False,
     },
-    # Repository management commands - available in both local and remote modes
-    "repos": {"local": True, "remote": True, "proxy": False, "uninitialized": False},
-    # System health commands - available in both local and remote modes for testing
-    "system": {"local": True, "remote": True, "proxy": False, "uninitialized": False},
+    # Repository management commands - remote only (requires server connection)
+    "repos": {"local": False, "remote": True, "proxy": False, "uninitialized": False},
+    # System health commands - remote only (requires server connection)
+    "system": {"local": False, "remote": True, "proxy": False, "uninitialized": False},
     # Repository configuration commands - local only since they manage local .code-indexer/config.json
     "config": {
         "local": True,

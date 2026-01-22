@@ -298,7 +298,10 @@ QUICK START: search_code('user authentication', repository_alias='myrepo-global'
 
 TROUBLESHOOTING: (1) 0 results? Verify alias with list_global_repos, try broader terms. (2) Temporal queries empty? Check enable_temporal via global_repo_status. (3) Slow? Start with limit=5, use path_filter.
 
-WHEN NOT TO USE: (1) Need ALL matches with pattern -> use regex_search, (2) Exploring directory structure -> use browse_directory first.""",
+WHEN NOT TO USE: (1) Need ALL matches with pattern -> use regex_search, (2) Exploring directory structure -> use browse_directory first.
+
+EXAMPLE: search_code('authentication logic', repository_alias='backend-global', search_mode='semantic', limit=3)
+Returns: {"success": true, "results": [{"file_path": "src/auth/login.py", "line_number": 15, "code_snippet": "def authenticate_user(username, password):\\n    # Validates user credentials...", "similarity_score": 0.92, "source_repo": "backend-global"}], "total_results": 3, "query_metadata": {"query_text": "authentication logic", "execution_time_ms": 145, "repositories_searched": 1}}""",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1192,7 +1195,8 @@ RELATED TOOLS:
     # Tools 9-13: Files & Health
     "list_files": {
         "name": "list_files",
-        "description": "TL;DR: List all files in repository with metadata (size, modified_at, language, is_indexed). Returns flat list of files with filtering options. QUICK START: list_files('backend-global') returns all files. USE CASES: (1) Inventory repository contents, (2) Check indexing status across files, (3) Find files by path pattern. FILTERING: Use path parameter to scope to directory (path='src/auth'). OMNI-SEARCH: Pass array of aliases (['backend-global', 'frontend-global']) to list files across multiple repos. AGGREGATION: Use aggregation_mode='per_repo' for balanced representation, 'global' for sorted results. RESPONSE FORMATS: 'flat' (default) returns single array with source_repo field, 'grouped' organizes by repository. WHEN NOT TO USE: (1) Need file content -> use get_file_content, (2) Need directory tree view -> use browse_directory or directory_tree, (3) Need to search file content -> use search_code or regex_search. OUTPUT: Returns array of file objects with path, size_bytes, modified_at, language, is_indexed fields. TROUBLESHOOTING: Empty results? Check repository_alias with list_global_repos. RELATED TOOLS: browse_directory (tree view with directories), get_file_content (read file), directory_tree (recursive directory structure).",
+        "description": "TL;DR: List all files in repository with metadata (size, modified_at, language, is_indexed). Returns flat list of files with filtering options. QUICK START: list_files('backend-global') returns all files. USE CASES: (1) Inventory repository contents, (2) Check indexing status across files, (3) Find files by path pattern. FILTERING: Use path parameter to scope to directory (path='src/auth'). OMNI-SEARCH: Pass array of aliases (['backend-global', 'frontend-global']) to list files across multiple repos. AGGREGATION: Use aggregation_mode='per_repo' for balanced representation, 'global' for sorted results. RESPONSE FORMATS: 'flat' (default) returns single array with source_repo field, 'grouped' organizes by repository. WHEN NOT TO USE: (1) Need file content -> use get_file_content, (2) Need directory tree view -> use browse_directory or directory_tree, (3) Need to search file content -> use search_code or regex_search. OUTPUT: Returns array of file objects with path, size_bytes, modified_at, language, is_indexed fields. TROUBLESHOOTING: Empty results? Check repository_alias with list_global_repos. RELATED TOOLS: browse_directory (tree view with directories), get_file_content (read file), directory_tree (recursive directory structure). "
+        'EXAMPLE: {"repository_alias": "backend-global", "path": "src", "path_pattern": "*.py"} returns {"success": true, "files": [{"path": "src/main.py", "size_bytes": 1234, "modified_at": "2024-01-15T10:30:00Z", "language": "python", "is_indexed": true}, {"path": "src/utils.py", "size_bytes": 856, "modified_at": "2024-01-14T09:15:00Z", "language": "python", "is_indexed": true}], "total_files": 12}',
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1275,7 +1279,8 @@ RELATED TOOLS:
     },
     "get_file_content": {
         "name": "get_file_content",
-        "description": "TL;DR: Read file content from repository with metadata and token-based pagination to prevent LLM context exhaustion. CRITICAL BEHAVIOR CHANGE: Default behavior (no offset/limit params) now returns FIRST CHUNK ONLY (up to 5000 tokens, ~200-250 lines), NOT entire file. Token limits enforced on ALL requests. QUICK START: get_file_content('backend-global', 'src/auth.py') returns first ~200-250 lines if file is large. Check metadata.requires_pagination to see if more content exists. USE PAGINATION: get_file_content('backend-global', 'large_file.py', offset=251, limit=250) reads next chunk. AUTOMATIC TRUNCATION: Content exceeding token budget is truncated. Check metadata.truncated and metadata.truncated_at_line. Use metadata.pagination_hint for navigation instructions. USE CASES: (1) Read source code after search_code identifies relevant files, (2) Inspect configuration files, (3) Review file content before editing, (4) Navigate large files efficiently with token budgets. TOKEN ENFORCEMENT: Default config: 5000 tokens max per request (~20000 chars at 4 chars/token). Small files returned completely. Large files returned in chunks. metadata.estimated_tokens shows actual token count of returned content. PAGINATION WORKFLOW: (1) Call without params to get first chunk, (2) Check metadata.requires_pagination, (3) If true, use metadata.pagination_hint offset value to continue, (4) Repeat until metadata.requires_pagination=false. OUTPUT FORMAT: Returns array of content blocks following MCP specification - each block has type='text' and text=file_content. Metadata includes file size, detected language, modification timestamp, pagination info, and token enforcement info (estimated_tokens, max_tokens_per_request, truncated, requires_pagination, pagination_hint). WHEN TO USE: After identifying target file via search_code, browse_directory, or list_files. WHEN NOT TO USE: (1) Need file listing -> use list_files or browse_directory, (2) Need to search content -> use search_code or regex_search first, (3) Need directory structure -> use directory_tree. TROUBLESHOOTING: File not found? Verify file_path with list_files or browse_directory. Permission denied? Check repository is activated and accessible. Content truncated unexpectedly? Check metadata.truncated and metadata.estimated_tokens - use offset/limit params to navigate. RELATED TOOLS: list_files (find files), search_code (search content), edit_file (modify content), browse_directory (list with metadata).",
+        "description": "TL;DR: Read file content from repository with metadata and token-based pagination to prevent LLM context exhaustion. CRITICAL BEHAVIOR CHANGE: Default behavior (no offset/limit params) now returns FIRST CHUNK ONLY (up to 5000 tokens, ~200-250 lines), NOT entire file. Token limits enforced on ALL requests. QUICK START: get_file_content('backend-global', 'src/auth.py') returns first ~200-250 lines if file is large. Check metadata.requires_pagination to see if more content exists. USE PAGINATION: get_file_content('backend-global', 'large_file.py', offset=251, limit=250) reads next chunk. AUTOMATIC TRUNCATION: Content exceeding token budget is truncated. Check metadata.truncated and metadata.truncated_at_line. Use metadata.pagination_hint for navigation instructions. USE CASES: (1) Read source code after search_code identifies relevant files, (2) Inspect configuration files, (3) Review file content before editing, (4) Navigate large files efficiently with token budgets. TOKEN ENFORCEMENT: Default config: 5000 tokens max per request (~20000 chars at 4 chars/token). Small files returned completely. Large files returned in chunks. metadata.estimated_tokens shows actual token count of returned content. PAGINATION WORKFLOW: (1) Call without params to get first chunk, (2) Check metadata.requires_pagination, (3) If true, use metadata.pagination_hint offset value to continue, (4) Repeat until metadata.requires_pagination=false. OUTPUT FORMAT: Returns array of content blocks following MCP specification - each block has type='text' and text=file_content. Metadata includes file size, detected language, modification timestamp, pagination info, and token enforcement info (estimated_tokens, max_tokens_per_request, truncated, requires_pagination, pagination_hint). WHEN TO USE: After identifying target file via search_code, browse_directory, or list_files. WHEN NOT TO USE: (1) Need file listing -> use list_files or browse_directory, (2) Need to search content -> use search_code or regex_search first, (3) Need directory structure -> use directory_tree. TROUBLESHOOTING: File not found? Verify file_path with list_files or browse_directory. Permission denied? Check repository is activated and accessible. Content truncated unexpectedly? Check metadata.truncated and metadata.estimated_tokens - use offset/limit params to navigate. RELATED TOOLS: list_files (find files), search_code (search content), edit_file (modify content), browse_directory (list with metadata). "
+        'EXAMPLE: {"repository_alias": "backend-global", "file_path": "src/auth.py"} returns {"success": true, "content": [{"type": "text", "text": "def authenticate(user, password):\\n    ..."}], "metadata": {"size": 2048, "modified_at": "2024-01-15T10:30:00Z", "language": "python", "path": "src/auth.py", "total_lines": 85, "returned_lines": 85, "offset": 1, "limit": null, "has_more": false, "estimated_tokens": 450, "max_tokens_per_request": 5000, "truncated": false, "truncated_at_line": null, "requires_pagination": false, "pagination_hint": null}}. PAGINATION EXAMPLE: {"repository_alias": "backend-global", "file_path": "large_file.py", "offset": 251, "limit": 250} returns content starting at line 251 with metadata showing remaining lines.',
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1399,7 +1404,15 @@ RELATED TOOLS:
     },
     "browse_directory": {
         "name": "browse_directory",
-        "description": "TL;DR: List files with metadata (size, language, modified date) - flat list for filtering/sorting. WHEN TO USE: (1) Find files by pattern, (2) Filter by language/size, (3) Programmatic file listing. COMPARISON: browse_directory = flat list with metadata | directory_tree = visual ASCII hierarchy. RELATED TOOLS: directory_tree (visual hierarchy), get_file_content (read files), list_files (simple file listing).",
+        "description": (
+            "TL;DR: List files with metadata (size, language, modified date) - flat list for filtering/sorting. "
+            "WHEN TO USE: (1) Find files by pattern, (2) Filter by language/size, (3) Programmatic file listing. "
+            "COMPARISON: browse_directory = flat list with metadata | directory_tree = visual ASCII hierarchy. "
+            "RELATED TOOLS: directory_tree (visual hierarchy), get_file_content (read files), list_files (simple file listing). "
+            "QUICK START: browse_directory('backend-global', path='src') lists files in src/ directory. "
+            'EXAMPLE: browse_directory(\'backend-global\', path=\'src/auth\', language=\'python\') '
+            'Returns: {"success": true, "structure": {"path": "src/auth", "files": [{"path": "src/auth/login.py", "size_bytes": 2048, "modified_at": "2024-01-15T10:30:00Z", "language": "python", "is_indexed": true}], "total": 5}}'
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2365,7 +2378,10 @@ RELATED TOOLS:
             "COMPARISON: regex_search = comprehensive/slower (searches files directly) | "
             "search_code(fts) = fast/indexed (may miss unindexed files) | "
             "search_code(semantic) = conceptual/approximate (finds by meaning, not text). "
-            "RELATED TOOLS: search_code (pre-indexed semantic/FTS search), git_search_diffs (find code changes in git history)."
+            "RELATED TOOLS: search_code (pre-indexed semantic/FTS search), git_search_diffs (find code changes in git history). "
+            "QUICK START: regex_search('backend-global', 'def authenticate') finds all function definitions. "
+            'EXAMPLE: regex_search(\'backend-global\', \'TODO|FIXME\', include_patterns=[\'*.py\'], context_lines=1) '
+            'Returns: {"success": true, "matches": [{"file_path": "src/auth.py", "line": 42, "content": "# TODO: add input validation", "context_before": ["def login(user):"], "context_after": ["    pass"]}], "total_matches": 3}'
         ),
         "inputSchema": {
             "type": "object",
@@ -3447,7 +3463,10 @@ TOOL_REGISTRY["directory_tree"] = {
         "TL;DR: Visual ASCII tree of directory structure (like 'tree' command). "
         "WHEN TO USE: (1) Understand project layout, (2) Explore unfamiliar codebase, (3) Find where files are located. "
         "COMPARISON: directory_tree = visual hierarchy | browse_directory = flat list with metadata (size, language, dates). "
-        "RELATED TOOLS: browse_directory (flat list with file details), get_file_content (read files)."
+        "RELATED TOOLS: browse_directory (flat list with file details), get_file_content (read files). "
+        "QUICK START: directory_tree('backend-global') returns visual file tree. "
+        'EXAMPLE: directory_tree(\'backend-global\', path=\'src\', max_depth=2) '
+        'Returns: {"success": true, "tree": "src/\\n\u251c\u2500\u2500 auth/\\n\u2502   \u251c\u2500\u2500 login.py\\n\u2502   \u2514\u2500\u2500 logout.py\\n\u251c\u2500\u2500 api/\\n\u2502   \u2514\u2500\u2500 routes.py\\n\u2514\u2500\u2500 main.py", "stats": {"directories": 3, "files": 4}}'
     ),
     "inputSchema": {
         "type": "object",
@@ -3638,7 +3657,10 @@ TOOL_REGISTRY["cidx_ssh_key_create"] = {
         "SECURITY: Keys stored in ~/.ssh/ with metadata in ~/.code-indexer-server/ssh_keys/. "
         "Generated keys are 4096-bit RSA or Ed25519 (default). "
         "RELATED TOOLS: cidx_ssh_key_list (view keys), cidx_ssh_key_assign_host "
-        "(configure SSH host), cidx_ssh_key_show_public (get public key for server upload)."
+        "(configure SSH host), cidx_ssh_key_show_public (get public key for server upload). "
+        'EXAMPLE: {"name": "github-key", "key_type": "ed25519", "email": "dev@example.com"} '
+        'Returns: {"success": true, "name": "github-key", "fingerprint": "SHA256:abc123...", '
+        '"key_type": "ed25519", "public_key": "ssh-ed25519 AAAA... dev@example.com"}'
     ),
     "inputSchema": {
         "type": "object",
@@ -3722,7 +3744,10 @@ TOOL_REGISTRY["cidx_ssh_key_list"] = {
         "KEY TYPES: Managed keys have metadata (email, description, hosts), "
         "unmanaged keys are detected in ~/.ssh but not managed by CIDX. "
         "RELATED TOOLS: cidx_ssh_key_create (create key), cidx_ssh_key_show_public "
-        "(get public key), cidx_ssh_key_assign_host (assign to host)."
+        "(get public key), cidx_ssh_key_assign_host (assign to host). "
+        'EXAMPLE: {} Returns: {"success": true, "managed": [{"name": "github-key", '
+        '"fingerprint": "SHA256:abc...", "key_type": "ed25519", "hosts": ["github.com"]}], '
+        '"unmanaged": [{"name": "id_rsa", "fingerprint": "SHA256:xyz..."}]}'
     ),
     "inputSchema": {
         "type": "object",
@@ -3815,7 +3840,9 @@ TOOL_REGISTRY["cidx_ssh_key_delete"] = {
         "Operation is IDEMPOTENT (always succeeds even if key doesn't exist). "
         "DESTRUCTIVE: Cannot be undone. "
         "RELATED TOOLS: cidx_ssh_key_list (view keys before deletion), "
-        "cidx_ssh_key_create (create replacement key)."
+        "cidx_ssh_key_create (create replacement key). "
+        'EXAMPLE: {"name": "old-key"} Returns: {"success": true, '
+        '"message": "Key old-key deleted successfully"}'
     ),
     "inputSchema": {
         "type": "object",
@@ -3858,7 +3885,9 @@ TOOL_REGISTRY["cidx_ssh_key_show_public"] = {
         "to authorized_keys or git hosting services. "
         "SECURITY: Only returns PUBLIC key (safe to share). Private key never exposed. "
         "RELATED TOOLS: cidx_ssh_key_list (view all keys), cidx_ssh_key_create "
-        "(create new key), cidx_ssh_key_assign_host (configure SSH host)."
+        "(create new key), cidx_ssh_key_assign_host (configure SSH host). "
+        'EXAMPLE: {"name": "github-key"} Returns: {"success": true, "name": "github-key", '
+        '"public_key": "ssh-ed25519 AAAA...base64...== dev@example.com"}'
     ),
     "inputSchema": {
         "type": "object",
@@ -3909,7 +3938,10 @@ TOOL_REGISTRY["cidx_ssh_key_assign_host"] = {
         "Use force=true to replace existing Host entry. "
         "RELATED TOOLS: cidx_ssh_key_create (create key first), "
         "cidx_ssh_key_list (view configured hosts), cidx_ssh_key_show_public "
-        "(get public key for remote server setup)."
+        "(get public key for remote server setup). "
+        'EXAMPLE: {"name": "github-key", "hostname": "github.com"} Returns: {"success": true, '
+        '"name": "github-key", "hostname": "github.com", '
+        '"message": "Host github.com configured to use key github-key"}'
     ),
     "inputSchema": {
         "type": "object",
@@ -5342,11 +5374,13 @@ TOOL_REGISTRY["delete_file"] = {
 TOOL_REGISTRY["git_status"] = {
     "name": "git_status",
     "description": (
+        "TL;DR: Get working tree status showing staged/unstaged/untracked files. "
         "Get git working tree status for an activated repository. "
         "USE CASES: (1) Check modified/staged/untracked files, (2) Verify working tree state before commits, (3) Identify conflicts. "
         "RETURNS: Staged files, unstaged changes, untracked files, current branch, merge conflicts. "
         "PERMISSIONS: Requires repository:read. "
-        'EXAMPLE: {"repository_alias": "my-repo"}'
+        'EXAMPLE: {"repository_alias": "my-repo"} '
+        'Returns: {"success": true, "staged": ["src/main.py"], "unstaged": ["src/utils.py"], "untracked": ["new_file.py"]}'
     ),
     "inputSchema": {
         "type": "object",
@@ -5384,11 +5418,13 @@ TOOL_REGISTRY["git_status"] = {
 TOOL_REGISTRY["git_stage"] = {
     "name": "git_stage",
     "description": (
+        "TL;DR: Stage files for commit (git add). "
         "Stage files for commit (git add). "
         "USE CASES: (1) Stage modified files, (2) Stage new files, (3) Prepare files for commit. "
         "REQUIREMENTS: Files must exist and have changes. "
         "PERMISSIONS: Requires repository:write. "
-        'EXAMPLE: {"repository_alias": "my-repo", "file_paths": ["src/file1.py", "src/file2.py"]}'
+        'EXAMPLE: {"repository_alias": "my-repo", "file_paths": ["src/file1.py", "src/file2.py"]} '
+        'Returns: {"success": true, "staged_files": ["src/file1.py", "src/file2.py"]}'
     ),
     "inputSchema": {
         "type": "object",
@@ -5420,11 +5456,13 @@ TOOL_REGISTRY["git_stage"] = {
 TOOL_REGISTRY["git_unstage"] = {
     "name": "git_unstage",
     "description": (
+        "TL;DR: Remove files from staging area (git reset HEAD). "
         "Unstage files (git reset HEAD). "
         "USE CASES: (1) Remove files from staging area, (2) Un-stage accidentally staged files. "
         "REQUIREMENTS: Files must be currently staged. "
         "PERMISSIONS: Requires repository:write. "
-        'EXAMPLE: {"repository_alias": "my-repo", "file_paths": ["src/file1.py"]}'
+        'EXAMPLE: {"repository_alias": "my-repo", "file_paths": ["src/file1.py"]} '
+        'Returns: {"success": true, "unstaged_files": ["src/file1.py"]}'
     ),
     "inputSchema": {
         "type": "object",
@@ -5456,12 +5494,14 @@ TOOL_REGISTRY["git_unstage"] = {
 TOOL_REGISTRY["git_commit"] = {
     "name": "git_commit",
     "description": (
+        "TL;DR: Create a commit with staged changes. "
         "Create a git commit with staged changes. "
         "USE CASES: (1) Commit staged files, (2) Create checkpoint with message, (3) Record changes with attribution. "
         "REQUIREMENTS: Must have staged files. "
         "OPTIONAL: author_name and author_email for custom commit attribution. "
         "PERMISSIONS: Requires repository:write. "
-        'EXAMPLE: {"repository_alias": "my-repo", "message": "Fix authentication bug", "author_name": "John Doe", "author_email": "john@example.com"}'
+        'EXAMPLE: {"repository_alias": "my-repo", "message": "Fix authentication bug", "author_name": "John Doe", "author_email": "john@example.com"} '
+        'Returns: {"success": true, "commit_hash": "abc123def...", "short_hash": "abc123d", "message": "Fix bug", "author": "John Doe", "files_committed": ["src/file.py"]}'
     ),
     "inputSchema": {
         "type": "object",
@@ -5507,11 +5547,13 @@ TOOL_REGISTRY["git_commit"] = {
 TOOL_REGISTRY["git_push"] = {
     "name": "git_push",
     "description": (
+        "TL;DR: Push local commits to remote repository. "
         "Push commits to remote repository. "
         "USE CASES: (1) Push committed changes, (2) Sync local commits to remote, (3) Share work with team. "
         "OPTIONAL: Specify remote (default: origin) and branch (default: current). "
         "PERMISSIONS: Requires repository:write. "
-        'EXAMPLE: {"repository_alias": "my-repo", "remote": "origin", "branch": "main"}'
+        'EXAMPLE: {"repository_alias": "my-repo", "remote": "origin", "branch": "main"} '
+        'Returns: {"success": true, "remote": "origin", "branch": "main", "commits_pushed": 3}'
     ),
     "inputSchema": {
         "type": "object",
@@ -5548,11 +5590,13 @@ TOOL_REGISTRY["git_push"] = {
 TOOL_REGISTRY["git_pull"] = {
     "name": "git_pull",
     "description": (
+        "TL;DR: Fetch and merge changes from remote repository. "
         "Pull changes from remote repository. "
         "USE CASES: (1) Fetch and merge remote changes, (2) Update local branch, (3) Sync with team changes. "
         "OPTIONAL: Specify remote (default: origin) and branch (default: current). "
         "PERMISSIONS: Requires repository:write. "
-        'EXAMPLE: {"repository_alias": "my-repo", "remote": "origin", "branch": "main"}'
+        'EXAMPLE: {"repository_alias": "my-repo", "remote": "origin", "branch": "main"} '
+        'Returns: {"success": true, "remote": "origin", "branch": "main", "files_changed": 5, "commits_pulled": 2}'
     ),
     "inputSchema": {
         "type": "object",
@@ -5593,11 +5637,13 @@ TOOL_REGISTRY["git_pull"] = {
 TOOL_REGISTRY["git_fetch"] = {
     "name": "git_fetch",
     "description": (
+        "TL;DR: Download remote changes without merging. "
         "Fetch changes from remote repository without merging. "
         "USE CASES: (1) Download remote updates, (2) Check remote changes before merge, (3) Update remote-tracking branches. "
         "OPTIONAL: Specify remote (default: origin). "
         "PERMISSIONS: Requires repository:write. "
-        'EXAMPLE: {"repository_alias": "my-repo", "remote": "origin"}'
+        'EXAMPLE: {"repository_alias": "my-repo", "remote": "origin"} '
+        'Returns: {"success": true, "remote": "origin", "refs_fetched": ["refs/heads/main", "refs/heads/develop"]}'
     ),
     "inputSchema": {
         "type": "object",
@@ -5630,12 +5676,14 @@ TOOL_REGISTRY["git_fetch"] = {
 TOOL_REGISTRY["git_reset"] = {
     "name": "git_reset",
     "description": (
+        "TL;DR: Reset working tree to specific state (DESTRUCTIVE). "
         "Reset working tree to specific state (DESTRUCTIVE). "
         "USE CASES: (1) Discard commits, (2) Reset to specific commit, (3) Clean working tree. "
         "MODES: soft (keep changes staged), mixed (keep changes unstaged), hard (discard all changes). "
         "SAFETY: Requires explicit mode. Optional commit_hash and confirmation_token for destructive operations. "
         "PERMISSIONS: Requires repository:admin (destructive operation). "
-        'EXAMPLE: {"repository_alias": "my-repo", "mode": "hard", "commit_hash": "abc123", "confirmation_token": "CONFIRM_RESET"}'
+        'EXAMPLE: {"repository_alias": "my-repo", "mode": "hard", "commit_hash": "abc123", "confirmation_token": "CONFIRM_RESET"} '
+        'Returns: {"success": true, "reset_mode": "hard", "target_commit": "abc123"}'
     ),
     "inputSchema": {
         "type": "object",
@@ -5757,11 +5805,13 @@ TOOL_REGISTRY["git_clean"] = {
 TOOL_REGISTRY["git_merge_abort"] = {
     "name": "git_merge_abort",
     "description": (
+        "TL;DR: Cancel in-progress merge and restore pre-merge state. "
         "Abort an in-progress merge operation. "
         "USE CASES: (1) Cancel merge with conflicts, (2) Restore pre-merge state, (3) Abandon merge attempt. "
         "REQUIREMENTS: Must have merge in progress. "
         "PERMISSIONS: Requires repository:write. "
-        'EXAMPLE: {"repository_alias": "my-repo"}'
+        'EXAMPLE: {"repository_alias": "my-repo"} '
+        'Returns: {"success": true, "message": "Merge aborted"}'
     ),
     "inputSchema": {
         "type": "object",
@@ -5784,11 +5834,13 @@ TOOL_REGISTRY["git_merge_abort"] = {
 TOOL_REGISTRY["git_checkout_file"] = {
     "name": "git_checkout_file",
     "description": (
+        "TL;DR: Discard local changes and restore file to HEAD. "
         "Restore file to HEAD version (discard local changes). "
         "USE CASES: (1) Discard unwanted changes, (2) Restore deleted file, (3) Reset file to last commit. "
         "SAFETY: This discards local modifications to the file. "
         "PERMISSIONS: Requires repository:write. "
-        'EXAMPLE: {"repository_alias": "my-repo", "file_path": "src/file.py"}'
+        'EXAMPLE: {"repository_alias": "my-repo", "file_path": "src/file.py"} '
+        'Returns: {"success": true, "restored_files": ["src/file.py"]}'
     ),
     "inputSchema": {
         "type": "object",
@@ -5819,11 +5871,13 @@ TOOL_REGISTRY["git_checkout_file"] = {
 TOOL_REGISTRY["git_branch_list"] = {
     "name": "git_branch_list",
     "description": (
+        "TL;DR: List all branches with current branch indicator. "
         "List all branches in repository. "
         "USE CASES: (1) View available branches, (2) Check current branch, (3) Identify remote branches. "
         "RETURNS: Local and remote branches with current branch indicator. "
         "PERMISSIONS: Requires repository:read. "
-        'EXAMPLE: {"repository_alias": "my-repo"}'
+        'EXAMPLE: {"repository_alias": "my-repo"} '
+        'Returns: {"success": true, "current": "main", "local": ["main", "develop"], "remote": ["origin/main"]}'
     ),
     "inputSchema": {
         "type": "object",
@@ -5857,11 +5911,13 @@ TOOL_REGISTRY["git_branch_list"] = {
 TOOL_REGISTRY["git_branch_create"] = {
     "name": "git_branch_create",
     "description": (
+        "TL;DR: Create a new git branch at current HEAD. "
         "Create a new git branch. "
         "USE CASES: (1) Create feature branch, (2) Create bugfix branch, (3) Isolate work in new branch. "
         "REQUIREMENTS: Branch name must be unique. "
         "PERMISSIONS: Requires repository:write. "
-        'EXAMPLE: {"repository_alias": "my-repo", "branch_name": "feature/new-feature"}'
+        'EXAMPLE: {"repository_alias": "my-repo", "branch_name": "feature/new-feature"} '
+        'Returns: {"success": true, "created_branch": "feature/new-feature"}'
     ),
     "inputSchema": {
         "type": "object",
@@ -5888,11 +5944,12 @@ TOOL_REGISTRY["git_branch_create"] = {
 TOOL_REGISTRY["git_branch_switch"] = {
     "name": "git_branch_switch",
     "description": (
-        "Switch to a different branch (git checkout). "
+        "TL;DR: Switch to a different branch (git checkout). "
         "USE CASES: (1) Switch to existing branch, (2) Change working context, (3) Review different branch. "
         "REQUIREMENTS: Branch must exist, working tree must be clean. "
         "PERMISSIONS: Requires repository:write. "
-        'EXAMPLE: {"repository_alias": "my-repo", "branch_name": "main"}'
+        'EXAMPLE: {"repository_alias": "my-repo", "branch_name": "main"} '
+        'Returns: {"success": true, "from_branch": "develop", "to_branch": "main"}'
     ),
     "inputSchema": {
         "type": "object",
@@ -5920,11 +5977,12 @@ TOOL_REGISTRY["git_branch_switch"] = {
 TOOL_REGISTRY["git_branch_delete"] = {
     "name": "git_branch_delete",
     "description": (
-        "Delete a git branch (DESTRUCTIVE). "
+        "TL;DR: Delete a git branch (DESTRUCTIVE). "
         "USE CASES: (1) Delete merged feature branch, (2) Remove obsolete branch, (3) Clean up branches. "
         "SAFETY: Requires confirmation_token to prevent accidental deletion. Cannot delete current branch. "
         "PERMISSIONS: Requires repository:admin (destructive operation). "
-        'EXAMPLE: {"repository_alias": "my-repo", "branch_name": "old-feature", "confirmation_token": "CONFIRM_DELETE_BRANCH"}'
+        'EXAMPLE: {"repository_alias": "my-repo", "branch_name": "old-feature", "confirmation_token": "CONFIRM_DELETE_BRANCH"} '
+        'Returns: {"success": true, "deleted_branch": "old-feature"}'
     ),
     "inputSchema": {
         "type": "object",
@@ -5981,12 +6039,13 @@ TOOL_REGISTRY["git_branch_delete"] = {
 TOOL_REGISTRY["trigger_reindex"] = {
     "name": "trigger_reindex",
     "description": (
-        "Trigger manual re-indexing for specified index types. "
+        "TL;DR: Trigger manual re-indexing for specified index types. "
         "USE CASES: (1) Rebuild corrupted indexes, (2) Add new index types (e.g., SCIP), (3) Refresh indexes after bulk code changes. "
         "INDEX TYPES: semantic (embedding vectors), fts (full-text search), temporal (git history), scip (code intelligence). "
         "CLEAR FLAG: When clear=true, completely rebuilds from scratch (slower but thorough). When false, performs incremental update. "
         "PERMISSIONS: Requires repository:write. "
-        'EXAMPLE: {"repository_alias": "my-repo", "index_types": ["semantic", "fts"], "clear": false}'
+        'EXAMPLE: {"repository_alias": "my-repo", "index_types": ["semantic", "fts"], "clear": false} '
+        'Returns: {"success": true, "job_id": "abc123", "status": "started", "index_types": ["semantic", "fts"]}'
     ),
     "inputSchema": {
         "type": "object",
@@ -6040,11 +6099,12 @@ TOOL_REGISTRY["trigger_reindex"] = {
 TOOL_REGISTRY["get_index_status"] = {
     "name": "get_index_status",
     "description": (
-        "Query current index status for all index types in a repository. "
+        "TL;DR: Query current index status for all index types in a repository. "
         "USE CASES: (1) Check if indexes exist before querying, (2) Verify index freshness, (3) Monitor index health. "
         "RETURNS: Status for each index type (semantic, fts, temporal, scip) including: existence, file count, last updated timestamp, size. "
         "PERMISSIONS: Requires repository:read. "
-        'EXAMPLE: {"repository_alias": "my-repo"}'
+        'EXAMPLE: {"repository_alias": "my-repo"} '
+        'Returns: {"success": true, "semantic": {"exists": true, "document_count": 1500}, "fts": {"exists": true}, "scip": {"exists": false}}'
     ),
     "inputSchema": {
         "type": "object",
@@ -7528,7 +7588,7 @@ TOOL_REGISTRY["list_groups"] = {
 TOOL_REGISTRY["create_group"] = {
     "name": "create_group",
     "description": (
-        "Create a new custom group for organizing users and repository access. "
+        "TL;DR: Create a new custom group for organizing users and repository access. "
         "Custom groups can be assigned users and granted access to specific repositories. "
         "Default groups (admins, powerusers, users) cannot be created - they exist automatically.\n\n"
         "INPUTS:\n"
@@ -7539,7 +7599,9 @@ TOOL_REGISTRY["create_group"] = {
         "- name: Name of the created group\n\n"
         "ERRORS:\n"
         "- 'Group name already exists': Name must be unique\n"
-        "- 'Invalid group name': Name contains invalid characters"
+        "- 'Invalid group name': Name contains invalid characters\n\n"
+        'EXAMPLE: {"name": "backend-team", "description": "Backend developers"} '
+        'Returns: {"success": true, "group_id": "grp_abc123", "name": "backend-team"}'
     ),
     "inputSchema": {
         "type": "object",
@@ -7561,6 +7623,7 @@ TOOL_REGISTRY["create_group"] = {
 TOOL_REGISTRY["get_group"] = {
     "name": "get_group",
     "description": (
+        "TL;DR: Get detailed information about a specific group. "
         "Get detailed information about a specific group including its members and "
         "accessible repositories. Use this tool to see who belongs to a group and "
         "what repositories they can access.\n\n"
@@ -7573,7 +7636,9 @@ TOOL_REGISTRY["get_group"] = {
         "- members: Array of user IDs in the group\n"
         "- repos: Array of repository names accessible by the group\n\n"
         "ERRORS:\n"
-        "- 'Group not found': Invalid group_id"
+        "- 'Group not found': Invalid group_id\n\n"
+        'EXAMPLE: {"group_id": "grp_abc123"} '
+        'Returns: {"success": true, "id": "grp_abc123", "name": "backend-team", "members": ["alice", "bob"], "repos": ["backend-global"]}'
     ),
     "inputSchema": {
         "type": "object",
@@ -7591,6 +7656,7 @@ TOOL_REGISTRY["get_group"] = {
 TOOL_REGISTRY["update_group"] = {
     "name": "update_group",
     "description": (
+        "TL;DR: Update a custom group name and/or description. "
         "Update a custom group's name and/or description. "
         "Default groups (admins, powerusers, users) cannot be updated.\n\n"
         "INPUTS:\n"
@@ -7601,7 +7667,9 @@ TOOL_REGISTRY["update_group"] = {
         "ERRORS:\n"
         "- 'Cannot update default groups': Default groups are immutable\n"
         "- 'Group name already exists': Name must be unique\n"
-        "- 'Group not found': Invalid group_id"
+        "- 'Group not found': Invalid group_id\n\n"
+        'EXAMPLE: {"group_id": "grp_abc123", "name": "new-name"} '
+        'Returns: {"success": true, "group_id": "grp_abc123", "name": "new-name"}'
     ),
     "inputSchema": {
         "type": "object",
@@ -7627,6 +7695,7 @@ TOOL_REGISTRY["update_group"] = {
 TOOL_REGISTRY["delete_group"] = {
     "name": "delete_group",
     "description": (
+        "TL;DR: Delete a custom group (DESTRUCTIVE). "
         "Delete a custom group. Default groups (admins, powerusers, users) cannot be deleted. "
         "Groups with active members cannot be deleted - reassign users first.\n\n"
         "INPUTS:\n"
@@ -7636,7 +7705,8 @@ TOOL_REGISTRY["delete_group"] = {
         "ERRORS:\n"
         "- 'Cannot delete default group': Default groups are protected\n"
         "- 'Group has active users': Reassign users before deleting\n"
-        "- 'Group not found': Invalid group_id"
+        "- 'Group not found': Invalid group_id\n\n"
+        'EXAMPLE: {"group_id": "grp_abc123"} Returns: {"success": true}'
     ),
     "inputSchema": {
         "type": "object",
@@ -7654,6 +7724,7 @@ TOOL_REGISTRY["delete_group"] = {
 TOOL_REGISTRY["add_member_to_group"] = {
     "name": "add_member_to_group",
     "description": (
+        "TL;DR: Assign a user to a group. "
         "Assign a user to a group. Each user can only belong to one group at a time - "
         "this operation will move the user from their current group to the specified group.\n\n"
         "INPUTS:\n"
@@ -7663,7 +7734,8 @@ TOOL_REGISTRY["add_member_to_group"] = {
         "- success: Boolean indicating if assignment succeeded\n\n"
         "ERRORS:\n"
         "- 'Group not found': Invalid group_id\n"
-        "- 'User not found': Invalid user_id"
+        "- 'User not found': Invalid user_id\n\n"
+        'EXAMPLE: {"group_id": "grp_abc123", "user_id": "alice"} Returns: {"success": true}'
     ),
     "inputSchema": {
         "type": "object",
@@ -7840,6 +7912,7 @@ TOOL_REGISTRY["list_api_keys"] = {
 TOOL_REGISTRY["create_api_key"] = {
     "name": "create_api_key",
     "description": (
+        "TL;DR: Create a new API key for programmatic access. "
         "Create a new API key for the authenticated user. "
         "Returns the full key value (one-time display - save it immediately).\n\n"
         "USE CASES:\n"
@@ -7851,7 +7924,9 @@ TOOL_REGISTRY["create_api_key"] = {
         "- key_id: Unique identifier for the key\n"
         "- api_key: Full key value (SAVE THIS - shown only once)\n"
         "- description: Key description\n\n"
-        "SECURITY: The full api_key is returned only at creation. Store it securely."
+        "SECURITY: The full api_key is returned only at creation. Store it securely.\n\n"
+        'EXAMPLE: {"description": "CI/CD automation"} '
+        'Returns: {"success": true, "key_id": "key_xyz", "api_key": "cidx_sk_abc123...", "description": "CI/CD automation"}'
     ),
     "inputSchema": {
         "type": "object",
@@ -7869,6 +7944,7 @@ TOOL_REGISTRY["create_api_key"] = {
 TOOL_REGISTRY["delete_api_key"] = {
     "name": "delete_api_key",
     "description": (
+        "TL;DR: Delete an API key and immediately invalidate it. "
         "Delete an API key belonging to the authenticated user. "
         "The key will be immediately invalidated.\n\n"
         "USE CASES:\n"
@@ -7879,7 +7955,8 @@ TOOL_REGISTRY["delete_api_key"] = {
         "- key_id (required): The unique identifier of the key to delete\n\n"
         "RETURNS:\n"
         "- success: Boolean indicating if deletion succeeded\n\n"
-        "NOTE: You can only delete your own keys. Use list_api_keys to find key IDs."
+        "NOTE: You can only delete your own keys. Use list_api_keys to find key IDs.\n\n"
+        'EXAMPLE: {"key_id": "key_xyz"} Returns: {"success": true}'
     ),
     "inputSchema": {
         "type": "object",
@@ -7902,14 +7979,16 @@ TOOL_REGISTRY["delete_api_key"] = {
 TOOL_REGISTRY["list_mcp_credentials"] = {
     "name": "list_mcp_credentials",
     "description": (
-        "List all MCP credentials for the authenticated user. "
+        "TL;DR: List all MCP credentials for the authenticated user. "
         "Returns credential metadata (ID, description, created_at) but NOT the secret values.\n\n"
         "USE CASES:\n"
         "- View your existing MCP credentials\n"
         "- Find credential ID for deletion\n\n"
         "RETURNS:\n"
         "- credentials: Array of credential metadata objects\n\n"
-        "NOTE: Full credential values are only shown once at creation time."
+        "NOTE: Full credential values are only shown once at creation time.\n\n"
+        'EXAMPLE: {} '
+        'Returns: {"success": true, "credentials": [{"id": "cred_abc", "description": "Dev env", "created_at": "2024-01-15T10:00:00Z"}]}'
     ),
     "inputSchema": {
         "type": "object",
@@ -7922,7 +8001,7 @@ TOOL_REGISTRY["list_mcp_credentials"] = {
 TOOL_REGISTRY["create_mcp_credential"] = {
     "name": "create_mcp_credential",
     "description": (
-        "Create a new MCP credential for the authenticated user. "
+        "TL;DR: Create a new MCP credential for MCP client connections. "
         "Returns the full credential (one-time display - save it immediately).\n\n"
         "USE CASES:\n"
         "- Generate new MCP credential for MCP client connections\n"
@@ -7932,7 +8011,9 @@ TOOL_REGISTRY["create_mcp_credential"] = {
         "RETURNS:\n"
         "- credential_id: Unique identifier for the credential\n"
         "- credential: Full credential value (SAVE THIS - shown only once)\n\n"
-        "SECURITY: The full credential is returned only at creation. Store it securely."
+        "SECURITY: The full credential is returned only at creation. Store it securely.\n\n"
+        'EXAMPLE: {"description": "Dev environment"} '
+        'Returns: {"success": true, "credential_id": "cred_abc", "credential": "mcp_sk_xyz..."}'
     ),
     "inputSchema": {
         "type": "object",
