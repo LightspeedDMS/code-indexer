@@ -102,6 +102,8 @@ class ConfigService:
         assert config.web_security_config is not None
         # Story #3 - Phase 2: Assert P3 config objects (AC36)
         assert config.auth_config is not None
+        # Story #15 AC3: Assert ClaudeIntegrationConfig is not None
+        assert config.claude_integration_config is not None
 
         settings = {
             # Server settings
@@ -155,11 +157,15 @@ class ConfigService:
                 "required_char_classes": config.password_security.required_char_classes,
                 "min_entropy_bits": config.password_security.min_entropy_bits,
             },
-            # Claude CLI integration
+            # Claude CLI integration (Story #15 AC3: moved to claude_integration_config)
             "claude_cli": {
-                "anthropic_api_key": "sk-ant-***" if config.anthropic_api_key else None,
-                "max_concurrent_claude_cli": config.max_concurrent_claude_cli,
-                "description_refresh_interval_hours": config.description_refresh_interval_hours,
+                "anthropic_api_key": (
+                    "sk-ant-***"
+                    if config.claude_integration_config.anthropic_api_key
+                    else None
+                ),
+                "max_concurrent_claude_cli": config.claude_integration_config.max_concurrent_claude_cli,
+                "description_refresh_interval_hours": config.claude_integration_config.description_refresh_interval_hours,
             },
             # OIDC/SSO authentication
             "oidc": {
@@ -175,9 +181,9 @@ class ConfigService:
                 "enable_jit_provisioning": config.oidc_provider_config.enable_jit_provisioning,
                 "default_role": config.oidc_provider_config.default_role,
             },
-            # SCIP workspace cleanup (Story #647)
+            # SCIP workspace cleanup (Story #647, Story #15 AC2: moved to scip_config)
             "scip_cleanup": {
-                "scip_workspace_retention_days": config.scip_workspace_retention_days,
+                "scip_workspace_retention_days": config.scip_config.scip_workspace_retention_days,
             },
             # Telemetry configuration (Story #695)
             "telemetry": {
@@ -488,13 +494,15 @@ class ConfigService:
     def _update_claude_cli_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
-        """Update a Claude CLI setting."""
+        """Update a Claude CLI setting (Story #15 AC3: use claude_integration_config)."""
+        claude_config = config.claude_integration_config
+        assert claude_config is not None  # Guaranteed by ServerConfig.__post_init__
         if key == "anthropic_api_key":
-            config.anthropic_api_key = str(value) if value else None
+            claude_config.anthropic_api_key = str(value) if value else None
         elif key == "max_concurrent_claude_cli":
-            config.max_concurrent_claude_cli = int(value)
+            claude_config.max_concurrent_claude_cli = int(value)
         elif key == "description_refresh_interval_hours":
-            config.description_refresh_interval_hours = int(value)
+            claude_config.description_refresh_interval_hours = int(value)
         else:
             raise ValueError(f"Unknown claude_cli setting: {key}")
 
@@ -535,9 +543,11 @@ class ConfigService:
     def _update_scip_cleanup_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
-        """Update a SCIP cleanup setting (Story #647)."""
+        """Update a SCIP cleanup setting (Story #647, Story #15 AC2: use scip_config)."""
+        scip_config = config.scip_config
+        assert scip_config is not None  # Guaranteed by ServerConfig.__post_init__
         if key == "scip_workspace_retention_days":
-            config.scip_workspace_retention_days = int(value)
+            scip_config.scip_workspace_retention_days = int(value)
         else:
             raise ValueError(f"Unknown SCIP cleanup setting: {key}")
 
@@ -590,7 +600,9 @@ class ConfigService:
     ) -> None:
         """Update a file content limits setting (Story #3 - Configuration Consolidation)."""
         file_content_limits = config.file_content_limits_config
-        assert file_content_limits is not None  # Guaranteed by ServerConfig.__post_init__
+        assert (
+            file_content_limits is not None
+        )  # Guaranteed by ServerConfig.__post_init__
         if key == "max_tokens_per_request":
             file_content_limits.max_tokens_per_request = int(value)
         elif key == "chars_per_token":
@@ -644,9 +656,7 @@ class ConfigService:
         else:
             raise ValueError(f"Unknown health setting: {key}")
 
-    def _update_scip_setting(
-        self, config: ServerConfig, key: str, value: Any
-    ) -> None:
+    def _update_scip_setting(self, config: ServerConfig, key: str, value: Any) -> None:
         """Update a SCIP setting (Story #3 - Phase 2)."""
         scip = config.scip_config
         assert scip is not None  # Guaranteed by ServerConfig.__post_init__
@@ -750,9 +760,7 @@ class ConfigService:
         else:
             raise ValueError(f"Unknown web security setting: {key}")
 
-    def _update_auth_setting(
-        self, config: ServerConfig, key: str, value: Any
-    ) -> None:
+    def _update_auth_setting(self, config: ServerConfig, key: str, value: Any) -> None:
         """Update an auth setting (Story #3 - Phase 2, AC36)."""
         auth = config.auth_config
         assert auth is not None  # Guaranteed by ServerConfig.__post_init__

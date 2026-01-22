@@ -383,7 +383,54 @@ ruff check --fix src/ tests/        # Fix linting
 3. Verify `--help` matches implementation
 4. Fix errors, second verification run
 
-**Version Bumps**: Update README install instructions, release notes, all version references
+### Version Bump Checklist (MANDATORY - ALL FILES)
+
+**CRITICAL**: When bumping the version, ALL of the following files MUST be updated together. Missing any file causes version inconsistency.
+
+**Primary Source of Truth**:
+```
+src/code_indexer/__init__.py:9    # __version__ = "X.Y.Z" (pyproject.toml reads from here dynamically)
+```
+
+**Documentation Files (MUST UPDATE)**:
+```
+README.md:5                       # Version badge in header
+CHANGELOG.md                      # Add new version entry at top (## [X.Y.Z] - YYYY-MM-DD)
+RELEASE_NOTES.md:3                # Current Version: X.Y.Z header
+docs/architecture.md:301          # Server response example showing version
+docs/query-guide.md:739           # Verification scope version reference
+docs/query-guide.md:883           # Version Reference line
+```
+
+**Example Documentation (CHECK FOR OUTDATED VERSIONS)**:
+```
+docs/mcpb/setup.md                # Example JSON responses may show old versions
+docs/server-deployment.md         # Example configurations may show old versions
+```
+
+**Files that have SEPARATE versions (DO NOT CHANGE for CIDX version bump)**:
+```
+src/code_indexer/mcpb/__init__.py # MCPB has its own version (1.0.0), independent of CIDX
+src/code_indexer/server/app.py    # FastAPI OpenAPI spec version, not CIDX version
+test-fixtures/                    # Test fixture versions are test data, not release versions
+```
+
+**Version Bump Command Sequence**:
+```bash
+# 1. Update primary source
+# Edit src/code_indexer/__init__.py - change __version__
+
+# 2. Update documentation
+# Edit README.md, CHANGELOG.md, RELEASE_NOTES.md, docs/architecture.md, docs/query-guide.md
+
+# 3. Search for any remaining old version references
+grep -r "OLD_VERSION" --include="*.md" --include="*.py" .
+
+# 4. Verify
+python3 -c "from src.code_indexer import __version__; print(__version__)"
+```
+
+**VIOLATION = INCONSISTENT STATE**: Updating only some files creates version mismatch between CLI (`cidx --version`), server responses, and documentation.
 
 ---
 

@@ -213,9 +213,11 @@ class TestGitStateManagerPRCreation:
     def test_create_pr_after_fix_github_success(self, tmp_path):
         """AC1: Create GitHub PR after successful SCIP fix."""
         # ARRANGE
-        config = Mock(
+        # Story #15: enable_pr_creation moved to repository_config
+        repository_config = Mock(
             enable_pr_creation=True, default_branch="main", pr_base_branch="main"
         )
+        config = Mock(repository_config=repository_config)
         manager = GitStateManager(config=config)
 
         fix_description = "Fixed missing import statement in auth.py"
@@ -470,7 +472,9 @@ class TestGitStateManagerPRCreation:
     def test_create_pr_after_fix_disabled_in_config(self, tmp_path):
         """AC6: Skip PR creation if disabled in configuration."""
         # ARRANGE
-        config = Mock(enable_pr_creation=False)  # Disabled!
+        # Story #15: enable_pr_creation moved to repository_config
+        repository_config = Mock(enable_pr_creation=False)  # Disabled!
+        config = Mock(repository_config=repository_config)
         manager = GitStateManager(config=config)
 
         # ACT

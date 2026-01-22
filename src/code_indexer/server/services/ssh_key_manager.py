@@ -148,6 +148,10 @@ class SSHKeyManager:
         Returns:
             KeyMetadata for the created key
         """
+        # Track API call at service layer (Story #4 AC2)
+        from .api_metrics_service import api_metrics_service
+        api_metrics_service.increment_other_api_call()
+
         with self._get_lock():
             # Generate the key
             generated = self.key_generator.generate_key(
@@ -208,6 +212,10 @@ class SSHKeyManager:
         Returns:
             Updated KeyMetadata
         """
+        # Track API call at service layer (Story #4 AC2)
+        from .api_metrics_service import api_metrics_service
+        api_metrics_service.increment_other_api_call()
+
         with self._get_lock():
             if self._use_sqlite and self._sqlite_backend is not None:
                 # SQLite backend (Story #702)
@@ -277,6 +285,10 @@ class SSHKeyManager:
         Returns:
             True (always succeeds, idempotent operation)
         """
+        # Track API call at service layer (Story #4 AC2)
+        from .api_metrics_service import api_metrics_service
+        api_metrics_service.increment_other_api_call()
+
         with self._get_lock():
             if self._use_sqlite and self._sqlite_backend is not None:
                 # SQLite backend (Story #702)
@@ -339,6 +351,21 @@ class SSHKeyManager:
         Returns:
             KeyListResult with managed and unmanaged key lists
         """
+        # Track API call at service layer (Story #4 AC2)
+        from .api_metrics_service import api_metrics_service
+        api_metrics_service.increment_other_api_call()
+
+        return self._list_keys_internal()
+
+    def _list_keys_internal(self) -> KeyListResult:
+        """
+        Internal implementation of list_keys without API metrics tracking.
+
+        Used by _update_ssh_config() to avoid double-counting API calls.
+
+        Returns:
+            KeyListResult with managed and unmanaged key lists
+        """
         if self._use_sqlite and self._sqlite_backend is not None:
             # SQLite backend (Story #702)
             keys_data = self._sqlite_backend.list_keys()
@@ -376,6 +403,10 @@ class SSHKeyManager:
         Returns:
             Public key string
         """
+        # Track API call at service layer (Story #4 AC2)
+        from .api_metrics_service import api_metrics_service
+        api_metrics_service.increment_other_api_call()
+
         if self._use_sqlite and self._sqlite_backend is not None:
             # SQLite backend (Story #702)
             key_data = self._sqlite_backend.get_key(key_name)
@@ -405,7 +436,7 @@ class SSHKeyManager:
 
     def _update_ssh_config(self) -> None:
         """Update SSH config with all managed key-host mappings."""
-        all_keys = self.list_keys()
+        all_keys = self._list_keys_internal()
 
         entries: List[HostEntry] = []
         for metadata in all_keys.managed:

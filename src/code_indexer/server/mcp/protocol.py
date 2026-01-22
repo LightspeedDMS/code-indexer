@@ -194,13 +194,10 @@ async def handle_tools_call(
 
     handler = HANDLER_REGISTRY[tool_name]
 
-    # Story #4 AC2: Track "other" API calls for tools not already instrumented
-    # search_code tracks semantic_search/other_index_search, regex_search tracks regex_search
-    # All other tools should be counted as "other_api_calls"
-    tools_with_own_metrics = {"search_code", "regex_search"}
-    if tool_name not in tools_with_own_metrics:
-        from code_indexer.server.services.api_metrics_service import api_metrics_service
-        api_metrics_service.increment_other_api_call()
+    # NOTE: API metrics tracking moved to service layer (Story #4 AC2)
+    # Services (file_crud_service, ssh_key_manager, git_operations_service, etc.)
+    # track their own increment_other_api_call() calls to prevent double-counting.
+    # search_code tracks semantic_search/other_index_search, regex_search tracks regex_search.
 
     # Call handler with arguments
     # Special handling for handlers that need session_state (CRITICAL 1, 3 fix)

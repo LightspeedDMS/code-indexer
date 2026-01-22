@@ -291,6 +291,8 @@ class ScipConfig:
     scip_callchain_max_depth: int = 10
     # AC34: SCIP callchain limit (default 100, range 1-1000)
     scip_callchain_limit: int = 100
+    # Story #15 AC2: SCIP workspace retention (moved from ServerConfig, default 7 days)
+    scip_workspace_retention_days: int = 7
 
 
 @dataclass
@@ -393,6 +395,56 @@ class AuthConfig:
 
 
 @dataclass
+class IndexingConfig:
+    """
+    Indexing configuration (Story #15 - AC1).
+
+    Contains settings related to indexing operations that were previously
+    misplaced in ScipConfig. These settings are general indexing settings,
+    not specific to SCIP.
+    """
+
+    # Temporal index staleness threshold in days (moved from ScipConfig)
+    temporal_stale_threshold_days: int = 7
+    # General indexing timeout in seconds (moved from ScipConfig)
+    indexing_timeout_seconds: int = 3600
+
+
+@dataclass
+class ClaudeIntegrationConfig:
+    """
+    Claude CLI integration configuration (Story #15 - AC3).
+
+    Contains settings for Claude CLI integration that were previously
+    loose settings on ServerConfig.
+    """
+
+    # Anthropic API key for Claude CLI (moved from ServerConfig)
+    anthropic_api_key: Optional[str] = None
+    # Maximum concurrent Claude CLI processes (moved from ServerConfig)
+    max_concurrent_claude_cli: int = 4
+    # Refresh interval for description generation in hours (moved from ServerConfig)
+    description_refresh_interval_hours: int = 24
+
+
+@dataclass
+class RepositoryConfig:
+    """
+    Repository configuration (Story #15 - AC4).
+
+    Contains settings for repository operations and PR creation that were
+    previously loose settings on ServerConfig.
+    """
+
+    # Enable automatic PR creation after SCIP fixes (moved from ServerConfig)
+    enable_pr_creation: bool = True
+    # Default base branch for PRs (moved from ServerConfig)
+    pr_base_branch: str = "main"
+    # Default branch for repository operations (moved from ServerConfig)
+    default_branch: str = "main"
+
+
+@dataclass
 class ServerConfig:
     """
     Server configuration data structure.
@@ -435,18 +487,14 @@ class ServerConfig:
     # Story #3 - Phase 2: P3 settings (AC36)
     auth_config: Optional[AuthConfig] = None
 
-    # Claude CLI integration settings
-    anthropic_api_key: Optional[str] = None
-    max_concurrent_claude_cli: int = 4
-    description_refresh_interval_hours: int = 24
+    # Story #15 - Configuration Refactoring: Indexing settings
+    indexing_config: Optional[IndexingConfig] = None
 
-    # SCIP Workspace Cleanup settings (Story #647)
-    scip_workspace_retention_days: int = 7  # Default: 7 days
+    # Story #15 AC3 - Configuration Refactoring: Claude integration settings
+    claude_integration_config: Optional[ClaudeIntegrationConfig] = None
 
-    # PR Creation Configuration (Story #659)
-    enable_pr_creation: bool = True  # Enable automatic PR creation after SCIP fixes
-    pr_base_branch: str = "main"  # Default base branch for PRs
-    default_branch: str = "main"  # Default branch for repository operations
+    # Story #15 AC4 - Configuration Refactoring: Repository settings
+    repository_config: Optional[RepositoryConfig] = None
 
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
@@ -492,6 +540,15 @@ class ServerConfig:
         # Story #3 - Phase 2: Initialize P3 configs (AC36)
         if self.auth_config is None:
             self.auth_config = AuthConfig()
+        # Story #15 - Configuration Refactoring: Initialize indexing config
+        if self.indexing_config is None:
+            self.indexing_config = IndexingConfig()
+        # Story #15 AC3 - Configuration Refactoring: Initialize claude integration config
+        if self.claude_integration_config is None:
+            self.claude_integration_config = ClaudeIntegrationConfig()
+        # Story #15 AC4 - Configuration Refactoring: Initialize repository config
+        if self.repository_config is None:
+            self.repository_config = RepositoryConfig()
 
 
 class ServerConfigManager:
@@ -666,9 +723,7 @@ class ServerConfigManager:
             if "scip_config" in config_dict and isinstance(
                 config_dict["scip_config"], dict
             ):
-                config_dict["scip_config"] = ScipConfig(
-                    **config_dict["scip_config"]
-                )
+                config_dict["scip_config"] = ScipConfig(**config_dict["scip_config"])
 
             # Story #3 - Phase 2: Convert P2 config dicts (AC12-AC26)
             # Convert nested git_timeouts_config dict to GitTimeoutsConfig
@@ -708,8 +763,91 @@ class ServerConfigManager:
             if "auth_config" in config_dict and isinstance(
                 config_dict["auth_config"], dict
             ):
-                config_dict["auth_config"] = AuthConfig(
-                    **config_dict["auth_config"]
+                config_dict["auth_config"] = AuthConfig(**config_dict["auth_config"])
+
+            # Story #15 - Configuration Refactoring: Convert indexing_config
+            if "indexing_config" in config_dict and isinstance(
+                config_dict["indexing_config"], dict
+            ):
+                config_dict["indexing_config"] = IndexingConfig(
+                    **config_dict["indexing_config"]
+                )
+
+            # Story #15 AC2 Migration: Move scip_workspace_retention_days to scip_config
+            if "scip_workspace_retention_days" in config_dict:
+                retention_days = config_dict.pop("scip_workspace_retention_days")
+                if "scip_config" not in config_dict:
+                    config_dict["scip_config"] = {}
+                if isinstance(config_dict["scip_config"], dict):
+                    config_dict["scip_config"][
+                        "scip_workspace_retention_days"
+                    ] = retention_days
+                elif isinstance(config_dict["scip_config"], ScipConfig):
+                    config_dict["scip_config"].scip_workspace_retention_days = (
+                        retention_days
+                    )
+
+            # Story #15 AC2: Final conversion of scip_config after migration
+            # This handles the case where scip_config was created by migration above
+            if "scip_config" in config_dict and isinstance(
+                config_dict["scip_config"], dict
+            ):
+                config_dict["scip_config"] = ScipConfig(**config_dict["scip_config"])
+
+            # Story #15 AC3 Migration: Move Claude CLI settings to claude_integration_config
+            claude_settings_keys = [
+                "anthropic_api_key",
+                "max_concurrent_claude_cli",
+                "description_refresh_interval_hours",
+            ]
+            claude_settings = {}
+            for key in claude_settings_keys:
+                if key in config_dict:
+                    claude_settings[key] = config_dict.pop(key)
+            if claude_settings:
+                if "claude_integration_config" not in config_dict:
+                    config_dict["claude_integration_config"] = {}
+                if isinstance(config_dict["claude_integration_config"], dict):
+                    config_dict["claude_integration_config"].update(claude_settings)
+                elif isinstance(
+                    config_dict["claude_integration_config"], ClaudeIntegrationConfig
+                ):
+                    for key, value in claude_settings.items():
+                        setattr(config_dict["claude_integration_config"], key, value)
+
+            # Story #15 AC3: Convert claude_integration_config dict to ClaudeIntegrationConfig
+            if "claude_integration_config" in config_dict and isinstance(
+                config_dict["claude_integration_config"], dict
+            ):
+                config_dict["claude_integration_config"] = ClaudeIntegrationConfig(
+                    **config_dict["claude_integration_config"]
+                )
+
+            # Story #15 AC4 Migration: Move repository settings to repository_config
+            repo_settings_keys = [
+                "enable_pr_creation",
+                "pr_base_branch",
+                "default_branch",
+            ]
+            repo_settings = {}
+            for key in repo_settings_keys:
+                if key in config_dict:
+                    repo_settings[key] = config_dict.pop(key)
+            if repo_settings:
+                if "repository_config" not in config_dict:
+                    config_dict["repository_config"] = {}
+                if isinstance(config_dict["repository_config"], dict):
+                    config_dict["repository_config"].update(repo_settings)
+                elif isinstance(config_dict["repository_config"], RepositoryConfig):
+                    for key, value in repo_settings.items():
+                        setattr(config_dict["repository_config"], key, value)
+
+            # Story #15 AC4: Convert repository_config dict to RepositoryConfig
+            if "repository_config" in config_dict and isinstance(
+                config_dict["repository_config"], dict
+            ):
+                config_dict["repository_config"] = RepositoryConfig(
+                    **config_dict["repository_config"]
                 )
 
             return ServerConfig(**config_dict)
@@ -760,13 +898,15 @@ class ServerConfigManager:
         if log_level_env := os.environ.get("CIDX_LOG_LEVEL"):
             config.log_level = log_level_env.upper()
 
-        # SCIP workspace retention days override (Story #647 - AC1)
+        # SCIP workspace retention days override (Story #647 - AC1, Story #15 AC2: use scip_config)
         if retention_env := os.environ.get("CIDX_SCIP_WORKSPACE_RETENTION_DAYS"):
             try:
-                config.scip_workspace_retention_days = int(retention_env)
+                assert config.scip_config is not None  # Guaranteed by __post_init__
+                config.scip_config.scip_workspace_retention_days = int(retention_env)
             except ValueError:
+                assert config.scip_config is not None  # Guaranteed by __post_init__
                 logging.warning(
-                    f"Invalid CIDX_SCIP_WORKSPACE_RETENTION_DAYS environment variable value '{retention_env}'. Using default {config.scip_workspace_retention_days} days"
+                    f"Invalid CIDX_SCIP_WORKSPACE_RETENTION_DAYS environment variable value '{retention_env}'. Using default {config.scip_config.scip_workspace_retention_days} days"
                 )
 
         # Telemetry environment variable overrides (Story #695)
@@ -828,22 +968,26 @@ class ServerConfigManager:
                 f"Log level must be one of {valid_log_levels}, got {config.log_level}"
             )
 
-        # Validate max_concurrent_claude_cli
-        if config.max_concurrent_claude_cli < 1:
+        # Validate max_concurrent_claude_cli (Story #15 AC3: use claude_integration_config)
+        assert (
+            config.claude_integration_config is not None
+        )  # Guaranteed by __post_init__
+        if config.claude_integration_config.max_concurrent_claude_cli < 1:
             raise ValueError(
-                f"max_concurrent_claude_cli must be greater than 0, got {config.max_concurrent_claude_cli}"
+                f"max_concurrent_claude_cli must be greater than 0, got {config.claude_integration_config.max_concurrent_claude_cli}"
             )
 
-        # Validate SCIP workspace retention days (Story #647 - AC1)
-        if not (1 <= config.scip_workspace_retention_days <= 365):
+        # Validate SCIP workspace retention days (Story #647 - AC1, Story #15 AC2: use scip_config)
+        assert config.scip_config is not None  # Guaranteed by __post_init__
+        if not (1 <= config.scip_config.scip_workspace_retention_days <= 365):
             raise ValueError(
-                f"scip_workspace_retention_days must be between 1 and 365, got {config.scip_workspace_retention_days}"
+                f"scip_workspace_retention_days must be between 1 and 365, got {config.scip_config.scip_workspace_retention_days}"
             )
 
-        # Validate description_refresh_interval_hours
-        if config.description_refresh_interval_hours < 1:
+        # Validate description_refresh_interval_hours (Story #15 AC3: use claude_integration_config)
+        if config.claude_integration_config.description_refresh_interval_hours < 1:
             raise ValueError(
-                f"description_refresh_interval_hours must be greater than 0, got {config.description_refresh_interval_hours}"
+                f"description_refresh_interval_hours must be greater than 0, got {config.claude_integration_config.description_refresh_interval_hours}"
             )
 
         # Validate OIDC configuration
@@ -911,7 +1055,11 @@ class ServerConfigManager:
         # Validate file_content_limits_config (Story #3 - Phase 1, AC-M3, AC-M4)
         if config.file_content_limits_config:
             # Validate max_tokens_per_request (1000-50000 tokens range)
-            if not (1000 <= config.file_content_limits_config.max_tokens_per_request <= 50000):
+            if not (
+                1000
+                <= config.file_content_limits_config.max_tokens_per_request
+                <= 50000
+            ):
                 raise ValueError(
                     f"max_tokens_per_request must be between 1000 and 50000, got {config.file_content_limits_config.max_tokens_per_request}"
                 )
@@ -1011,7 +1159,9 @@ class ServerConfigManager:
                     f"max_retry_attempts must be between 1 and 10, got {config.error_handling_config.max_retry_attempts}"
                 )
             # AC18: base_retry_delay_seconds range 0.01-5.0
-            if not (0.01 <= config.error_handling_config.base_retry_delay_seconds <= 5.0):
+            if not (
+                0.01 <= config.error_handling_config.base_retry_delay_seconds <= 5.0
+            ):
                 raise ValueError(
                     f"base_retry_delay_seconds must be between 0.01 and 5.0, got {config.error_handling_config.base_retry_delay_seconds}"
                 )
@@ -1077,7 +1227,9 @@ class ServerConfigManager:
                     f"csrf_max_age_seconds must be between 60 and 3600, got {config.web_security_config.csrf_max_age_seconds}"
                 )
             # AC26: web_session_timeout_seconds range 1800-86400
-            if not (1800 <= config.web_security_config.web_session_timeout_seconds <= 86400):
+            if not (
+                1800 <= config.web_security_config.web_session_timeout_seconds <= 86400
+            ):
                 raise ValueError(
                     f"web_session_timeout_seconds must be between 1800 and 86400, got {config.web_security_config.web_session_timeout_seconds}"
                 )

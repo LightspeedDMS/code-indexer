@@ -14,6 +14,7 @@ Implements 5-point health checks per database:
 """
 
 import logging
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -22,6 +23,26 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _format_file_size(size_bytes: int) -> str:
+    """
+    Format a file size in bytes to a human-readable string.
+
+    Args:
+        size_bytes: Size in bytes
+
+    Returns:
+        Formatted string like "512 B", "45.2 KB", "128.5 MB", or "1.25 GB"
+    """
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
 
 
 class DatabaseHealthStatus(str, Enum):
@@ -55,22 +76,32 @@ class DatabaseHealthResult:
         Get tooltip text for honeycomb hover.
 
         Always shows display name and path.
+        Shows file size if file exists.
         Unhealthy databases also show the failed condition.
         """
         # Always include path in tooltip
-        base_tooltip = f"{self.display_name}\n{self.db_path}"
+        lines = [self.display_name, self.db_path]
+
+        # Add file size if file exists
+        try:
+            size_bytes = os.path.getsize(self.db_path)
+            lines.append(f"Size: {_format_file_size(size_bytes)}")
+        except (FileNotFoundError, OSError):
+            # File doesn't exist or can't be accessed - omit size line
+            pass
 
         if self.status == DatabaseHealthStatus.HEALTHY:
-            return base_tooltip
+            return "\n".join(lines)
 
         # Find first failed check to include in tooltip
         for check_name, result in self.checks.items():
             if not result.passed:
                 check_display = check_name.replace("_", " ").title()
                 error_info = result.error_message or "failed"
-                return f"{base_tooltip}\n{check_display}: {error_info}"
+                lines.append(f"{check_display}: {error_info}")
+                break
 
-        return base_tooltip
+        return "\n".join(lines)
 
 
 # Database file to display name mapping (central server databases only)
@@ -103,8 +134,6 @@ class DatabaseHealthService:
             server_dir: Path to server data directory. If None, uses
                        CIDX_SERVER_DATA_DIR env var or ~/.cidx-server
         """
-        import os
-
         if server_dir:
             self.server_dir = Path(server_dir)
         else:

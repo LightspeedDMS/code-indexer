@@ -3,6 +3,8 @@ Tests for ServerConfig persistence and validation (Story #546 - AC2).
 
 These tests follow TDD methodology - tests are written FIRST before implementation.
 All tests use real components following MESSI Rule #1: No mocks.
+
+Note: Story #15 moved Claude CLI settings to ClaudeIntegrationConfig.
 """
 
 import json
@@ -13,6 +15,7 @@ import pytest
 from src.code_indexer.server.utils.config_manager import (
     ServerConfig,
     ServerConfigManager,
+    ClaudeIntegrationConfig,
 )
 
 
@@ -31,11 +34,17 @@ class TestServerConfigSerialization:
         Given I create a ServerConfig with anthropic_api_key set
         When I serialize to JSON via ServerConfigManager
         Then the JSON includes the anthropic_api_key field
+
+        Note: Story #15 moved anthropic_api_key to ClaudeIntegrationConfig.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ServerConfigManager(tmpdir)
+            # Story #15: anthropic_api_key moved to claude_integration_config
             config = ServerConfig(
-                server_dir=tmpdir, anthropic_api_key="sk-ant-test-key-123"
+                server_dir=tmpdir,
+                claude_integration_config=ClaudeIntegrationConfig(
+                    anthropic_api_key="sk-ant-test-key-123"
+                ),
             )
 
             manager.save_config(config)
@@ -44,11 +53,16 @@ class TestServerConfigSerialization:
             with open(manager.config_file_path, "r") as f:
                 config_dict = json.load(f)
 
+            # Story #15: anthropic_api_key is nested in claude_integration_config
             assert (
-                "anthropic_api_key" in config_dict
-            ), "Serialized config should include anthropic_api_key"
+                "claude_integration_config" in config_dict
+            ), "Serialized config should include claude_integration_config"
             assert (
-                config_dict["anthropic_api_key"] == "sk-ant-test-key-123"
+                "anthropic_api_key" in config_dict["claude_integration_config"]
+            ), "Serialized config should include anthropic_api_key in claude_integration_config"
+            assert (
+                config_dict["claude_integration_config"]["anthropic_api_key"]
+                == "sk-ant-test-key-123"
             ), "Serialized anthropic_api_key should match original value"
 
     def test_serverconfig_serialization_includes_max_concurrent_claude_cli(self):
@@ -58,10 +72,18 @@ class TestServerConfigSerialization:
         Given I create a ServerConfig with max_concurrent_claude_cli set
         When I serialize to JSON via ServerConfigManager
         Then the JSON includes the max_concurrent_claude_cli field
+
+        Note: Story #15 moved max_concurrent_claude_cli to ClaudeIntegrationConfig.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ServerConfigManager(tmpdir)
-            config = ServerConfig(server_dir=tmpdir, max_concurrent_claude_cli=8)
+            # Story #15: max_concurrent_claude_cli moved to claude_integration_config
+            config = ServerConfig(
+                server_dir=tmpdir,
+                claude_integration_config=ClaudeIntegrationConfig(
+                    max_concurrent_claude_cli=8
+                ),
+            )
 
             manager.save_config(config)
 
@@ -69,11 +91,16 @@ class TestServerConfigSerialization:
             with open(manager.config_file_path, "r") as f:
                 config_dict = json.load(f)
 
+            # Story #15: max_concurrent_claude_cli is nested in claude_integration_config
             assert (
-                "max_concurrent_claude_cli" in config_dict
-            ), "Serialized config should include max_concurrent_claude_cli"
+                "claude_integration_config" in config_dict
+            ), "Serialized config should include claude_integration_config"
             assert (
-                config_dict["max_concurrent_claude_cli"] == 8
+                "max_concurrent_claude_cli" in config_dict["claude_integration_config"]
+            ), "Serialized config should include max_concurrent_claude_cli in claude_integration_config"
+            assert (
+                config_dict["claude_integration_config"]["max_concurrent_claude_cli"]
+                == 8
             ), "Serialized max_concurrent_claude_cli should match original value"
 
     def test_serverconfig_serialization_includes_description_refresh_interval_hours(
@@ -85,11 +112,17 @@ class TestServerConfigSerialization:
         Given I create a ServerConfig with description_refresh_interval_hours set
         When I serialize to JSON via ServerConfigManager
         Then the JSON includes the description_refresh_interval_hours field
+
+        Note: Story #15 moved description_refresh_interval_hours to ClaudeIntegrationConfig.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ServerConfigManager(tmpdir)
+            # Story #15: description_refresh_interval_hours moved to claude_integration_config
             config = ServerConfig(
-                server_dir=tmpdir, description_refresh_interval_hours=48
+                server_dir=tmpdir,
+                claude_integration_config=ClaudeIntegrationConfig(
+                    description_refresh_interval_hours=48
+                ),
             )
 
             manager.save_config(config)
@@ -98,11 +131,19 @@ class TestServerConfigSerialization:
             with open(manager.config_file_path, "r") as f:
                 config_dict = json.load(f)
 
+            # Story #15: description_refresh_interval_hours is nested in claude_integration_config
             assert (
-                "description_refresh_interval_hours" in config_dict
-            ), "Serialized config should include description_refresh_interval_hours"
+                "claude_integration_config" in config_dict
+            ), "Serialized config should include claude_integration_config"
             assert (
-                config_dict["description_refresh_interval_hours"] == 48
+                "description_refresh_interval_hours"
+                in config_dict["claude_integration_config"]
+            ), "Serialized config should include description_refresh_interval_hours in claude_integration_config"
+            assert (
+                config_dict["claude_integration_config"][
+                    "description_refresh_interval_hours"
+                ]
+                == 48
             ), "Serialized description_refresh_interval_hours should match original value"
 
 
@@ -121,6 +162,8 @@ class TestServerConfigBackwardCompatibility:
         Given I have an old config.json without anthropic_api_key
         When I load it via ServerConfigManager
         Then it loads successfully with anthropic_api_key = None
+
+        Note: Story #15 moved anthropic_api_key to ClaudeIntegrationConfig.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ServerConfigManager(tmpdir)
@@ -140,8 +183,9 @@ class TestServerConfigBackwardCompatibility:
             config = manager.load_config()
 
             assert config is not None, "Old config should load successfully"
+            # Story #15: anthropic_api_key moved to claude_integration_config
             assert (
-                config.anthropic_api_key is None
+                config.claude_integration_config.anthropic_api_key is None
             ), "Missing anthropic_api_key should default to None"
 
     def test_deserialize_old_config_without_max_concurrent_claude_cli(self):
@@ -151,6 +195,8 @@ class TestServerConfigBackwardCompatibility:
         Given I have an old config.json without max_concurrent_claude_cli
         When I load it via ServerConfigManager
         Then it loads successfully with max_concurrent_claude_cli = 4
+
+        Note: Story #15 moved max_concurrent_claude_cli to ClaudeIntegrationConfig.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ServerConfigManager(tmpdir)
@@ -170,8 +216,9 @@ class TestServerConfigBackwardCompatibility:
             config = manager.load_config()
 
             assert config is not None, "Old config should load successfully"
+            # Story #15: max_concurrent_claude_cli moved to claude_integration_config
             assert (
-                config.max_concurrent_claude_cli == 4
+                config.claude_integration_config.max_concurrent_claude_cli == 4
             ), "Missing max_concurrent_claude_cli should default to 4"
 
     def test_deserialize_old_config_without_description_refresh_interval_hours(self):
@@ -181,6 +228,8 @@ class TestServerConfigBackwardCompatibility:
         Given I have an old config.json without description_refresh_interval_hours
         When I load it via ServerConfigManager
         Then it loads successfully with description_refresh_interval_hours = 24
+
+        Note: Story #15 moved description_refresh_interval_hours to ClaudeIntegrationConfig.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ServerConfigManager(tmpdir)
@@ -200,8 +249,10 @@ class TestServerConfigBackwardCompatibility:
             config = manager.load_config()
 
             assert config is not None, "Old config should load successfully"
+            # Story #15: description_refresh_interval_hours moved to claude_integration_config
             assert (
-                config.description_refresh_interval_hours == 24
+                config.claude_integration_config.description_refresh_interval_hours
+                == 24
             ), "Missing description_refresh_interval_hours should default to 24"
 
     def test_roundtrip_serialization_preserves_new_fields(self):
@@ -211,15 +262,20 @@ class TestServerConfigBackwardCompatibility:
         Given I create a ServerConfig with all new fields set
         When I save and reload it
         Then all new fields are preserved
+
+        Note: Story #15 moved Claude CLI settings to ClaudeIntegrationConfig.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ServerConfigManager(tmpdir)
 
+            # Story #15: Claude CLI settings moved to claude_integration_config
             original_config = ServerConfig(
                 server_dir=tmpdir,
-                anthropic_api_key="sk-ant-test-key-123",
-                max_concurrent_claude_cli=8,
-                description_refresh_interval_hours=48,
+                claude_integration_config=ClaudeIntegrationConfig(
+                    anthropic_api_key="sk-ant-test-key-123",
+                    max_concurrent_claude_cli=8,
+                    description_refresh_interval_hours=48,
+                ),
             )
 
             # Save
@@ -229,14 +285,17 @@ class TestServerConfigBackwardCompatibility:
             loaded_config = manager.load_config()
 
             assert loaded_config is not None, "Config should reload successfully"
+            # Story #15: access via claude_integration_config
             assert (
-                loaded_config.anthropic_api_key == "sk-ant-test-key-123"
+                loaded_config.claude_integration_config.anthropic_api_key
+                == "sk-ant-test-key-123"
             ), "anthropic_api_key should be preserved"
             assert (
-                loaded_config.max_concurrent_claude_cli == 8
+                loaded_config.claude_integration_config.max_concurrent_claude_cli == 8
             ), "max_concurrent_claude_cli should be preserved"
             assert (
-                loaded_config.description_refresh_interval_hours == 48
+                loaded_config.claude_integration_config.description_refresh_interval_hours
+                == 48
             ), "description_refresh_interval_hours should be preserved"
 
 
@@ -255,8 +314,16 @@ class TestServerConfigValidation:
         Given I create a ServerConfig with max_concurrent_claude_cli = 0
         When I validate the config
         Then it raises ValueError
+
+        Note: Story #15 moved max_concurrent_claude_cli to ClaudeIntegrationConfig.
         """
-        config = ServerConfig(server_dir="/tmp/test", max_concurrent_claude_cli=0)
+        # Story #15: max_concurrent_claude_cli moved to claude_integration_config
+        config = ServerConfig(
+            server_dir="/tmp/test",
+            claude_integration_config=ClaudeIntegrationConfig(
+                max_concurrent_claude_cli=0
+            ),
+        )
 
         manager = ServerConfigManager("/tmp/test")
 
@@ -274,8 +341,16 @@ class TestServerConfigValidation:
         Given I create a ServerConfig with max_concurrent_claude_cli = -1
         When I validate the config
         Then it raises ValueError
+
+        Note: Story #15 moved max_concurrent_claude_cli to ClaudeIntegrationConfig.
         """
-        config = ServerConfig(server_dir="/tmp/test", max_concurrent_claude_cli=-1)
+        # Story #15: max_concurrent_claude_cli moved to claude_integration_config
+        config = ServerConfig(
+            server_dir="/tmp/test",
+            claude_integration_config=ClaudeIntegrationConfig(
+                max_concurrent_claude_cli=-1
+            ),
+        )
 
         manager = ServerConfigManager("/tmp/test")
 
@@ -293,9 +368,15 @@ class TestServerConfigValidation:
         Given I create a ServerConfig with description_refresh_interval_hours = 0
         When I validate the config
         Then it raises ValueError
+
+        Note: Story #15 moved description_refresh_interval_hours to ClaudeIntegrationConfig.
         """
+        # Story #15: description_refresh_interval_hours moved to claude_integration_config
         config = ServerConfig(
-            server_dir="/tmp/test", description_refresh_interval_hours=0
+            server_dir="/tmp/test",
+            claude_integration_config=ClaudeIntegrationConfig(
+                description_refresh_interval_hours=0
+            ),
         )
 
         manager = ServerConfigManager("/tmp/test")
@@ -314,9 +395,15 @@ class TestServerConfigValidation:
         Given I create a ServerConfig with description_refresh_interval_hours = -1
         When I validate the config
         Then it raises ValueError
+
+        Note: Story #15 moved description_refresh_interval_hours to ClaudeIntegrationConfig.
         """
+        # Story #15: description_refresh_interval_hours moved to claude_integration_config
         config = ServerConfig(
-            server_dir="/tmp/test", description_refresh_interval_hours=-1
+            server_dir="/tmp/test",
+            claude_integration_config=ClaudeIntegrationConfig(
+                description_refresh_interval_hours=-1
+            ),
         )
 
         manager = ServerConfigManager("/tmp/test")
@@ -335,8 +422,16 @@ class TestServerConfigValidation:
         Given I create a ServerConfig with max_concurrent_claude_cli = 4
         When I validate the config
         Then it passes without error
+
+        Note: Story #15 moved max_concurrent_claude_cli to ClaudeIntegrationConfig.
         """
-        config = ServerConfig(server_dir="/tmp/test", max_concurrent_claude_cli=4)
+        # Story #15: max_concurrent_claude_cli moved to claude_integration_config
+        config = ServerConfig(
+            server_dir="/tmp/test",
+            claude_integration_config=ClaudeIntegrationConfig(
+                max_concurrent_claude_cli=4
+            ),
+        )
 
         manager = ServerConfigManager("/tmp/test")
 
@@ -350,9 +445,15 @@ class TestServerConfigValidation:
         Given I create a ServerConfig with description_refresh_interval_hours = 24
         When I validate the config
         Then it passes without error
+
+        Note: Story #15 moved description_refresh_interval_hours to ClaudeIntegrationConfig.
         """
+        # Story #15: description_refresh_interval_hours moved to claude_integration_config
         config = ServerConfig(
-            server_dir="/tmp/test", description_refresh_interval_hours=24
+            server_dir="/tmp/test",
+            claude_integration_config=ClaudeIntegrationConfig(
+                description_refresh_interval_hours=24
+            ),
         )
 
         manager = ServerConfigManager("/tmp/test")

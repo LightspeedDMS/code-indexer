@@ -355,8 +355,10 @@ class TestDatabaseTooltips:
                 conn.commit()
             yield db_path
 
-    def test_healthy_database_tooltip_shows_only_name(self, healthy_db_path: Path):
-        """AC2: Healthy database tooltip shows only database name."""
+    def test_healthy_database_tooltip_shows_name_path_and_size(
+        self, healthy_db_path: Path
+    ):
+        """AC2: Healthy database tooltip shows name, path, and size (Story #18)."""
         from code_indexer.server.services.database_health_service import (
             DatabaseHealthService,
             DatabaseHealthStatus,
@@ -368,10 +370,15 @@ class TestDatabaseTooltips:
 
         assert result.status == DatabaseHealthStatus.HEALTHY
         tooltip = result.get_tooltip()
-        assert tooltip == "Main Server"
+        # New format: multi-line with display_name, db_path, and Size
+        assert "Main Server" in tooltip
+        assert str(healthy_db_path) in tooltip
+        assert "Size:" in tooltip
 
-    def test_unhealthy_database_tooltip_shows_failure(self, healthy_db_path: Path):
-        """AC3: Unhealthy database tooltip shows name AND failed condition."""
+    def test_unhealthy_database_tooltip_shows_name_path_and_error(
+        self, healthy_db_path: Path
+    ):
+        """AC3: Unhealthy database tooltip shows name, path, and error (Story #18)."""
         from code_indexer.server.services.database_health_service import (
             DatabaseHealthService,
             DatabaseHealthStatus,
@@ -384,8 +391,11 @@ class TestDatabaseTooltips:
 
         assert result.status == DatabaseHealthStatus.ERROR
         tooltip = result.get_tooltip()
+        # New format: multi-line with display_name, db_path, and error info
         assert "OAuth" in tooltip
-        assert " - " in tooltip
+        assert str(healthy_db_path) in tooltip
+        # Should have newline separators (not " - ")
+        assert "\n" in tooltip
 
 
 # =============================================================================

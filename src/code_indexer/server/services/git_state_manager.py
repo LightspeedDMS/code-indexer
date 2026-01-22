@@ -210,7 +210,8 @@ class GitStateManager:
             PRCreationResult with success status, PR URL, branch name, message
         """
         # AC6: Check if PR creation is enabled
-        if not self.config.enable_pr_creation:
+        # Story #15 AC4: enable_pr_creation moved to repository_config
+        if not self.config.repository_config.enable_pr_creation:
             logger.info(
                 "PR creation disabled in configuration",
                 extra={"correlation_id": get_correlation_id()},
@@ -492,7 +493,12 @@ class GitStateManager:
             f"**Files Modified:**\n" + "\n".join(f"- `{f}`" for f in files_modified)
         )
 
-        base_branch = getattr(self.config, "pr_base_branch", self.config.default_branch)
+        # Story #15 AC4: pr_base_branch and default_branch moved to repository_config
+        base_branch = getattr(
+            self.config.repository_config,
+            "pr_base_branch",
+            self.config.repository_config.default_branch,
+        )
 
         # Create PR/MR using platform-specific client
         client: Union[GitHubPRClient, GitLabPRClient]

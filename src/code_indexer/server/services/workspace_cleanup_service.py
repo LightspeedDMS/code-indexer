@@ -76,7 +76,8 @@ class WorkspaceCleanupService:
             job_manager: Background job manager for checking active jobs
             workspace_root: Root directory containing workspaces (default: /tmp)
         """
-        self.retention_days = config.scip_workspace_retention_days
+        # Story #15 AC2: scip_workspace_retention_days moved to scip_config
+        self.retention_days = config.scip_config.scip_workspace_retention_days
         self.job_manager = job_manager
         self.workspace_root = Path(workspace_root)
 

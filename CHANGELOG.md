@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.6.3] - 2026-01-22
+
+### Fixed
+
+- **API activity tracking coverage** - Comprehensive fix ensuring all API calls (REST/MCP) are tracked at service layer without double-counting (Story #4 AC2)
+  - Added `increment_other_api_call()` tracking to file_crud_service (3 methods: create_file, edit_file, delete_file)
+  - Added `increment_other_api_call()` tracking to git_operations_service (17 methods: all REST API wrappers)
+  - Added `increment_other_api_call()` tracking to ssh_key_manager (5 methods: create_key, assign_key_to_host, delete_key, list_keys, get_public_key)
+  - Removed edge tracking from MCP protocol.py to prevent double-counting
+  - Added comprehensive test coverage (11 tests) in test_api_metrics_tracking.py
+
+---
+
 ## [8.6.1] - 2026-01-22
 
 ### Fixed

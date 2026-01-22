@@ -90,6 +90,10 @@ class FileCRUDService:
             PermissionError: If path validation fails (security)
             CRUDOperationError: If creation fails
         """
+        # Track API call at service layer (Story #4 AC2)
+        from .api_metrics_service import api_metrics_service
+        api_metrics_service.increment_other_api_call()
+
         # Validate path security
         self._validate_crud_path(file_path, "create_file")
 
@@ -165,6 +169,10 @@ class FileCRUDService:
             PermissionError: If path validation fails
             CRUDOperationError: If edit fails
         """
+        # Track API call at service layer (Story #4 AC2)
+        from .api_metrics_service import api_metrics_service
+        api_metrics_service.increment_other_api_call()
+
         # Validate path security
         self._validate_crud_path(file_path, "edit_file")
 
@@ -251,6 +259,10 @@ class FileCRUDService:
             PermissionError: If path validation fails
             CRUDOperationError: If deletion fails
         """
+        # Track API call at service layer (Story #4 AC2)
+        from .api_metrics_service import api_metrics_service
+        api_metrics_service.increment_other_api_call()
+
         # Validate path security
         self._validate_crud_path(file_path, "delete_file")
 

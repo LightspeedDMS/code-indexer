@@ -2217,3 +2217,299 @@ class TestRESTWrapperMethods:
 
             assert result["success"] is True
             assert result["deleted_branch"] == "old-feature"
+
+
+class TestAPIMetricsTracking:
+    """Test Story #4 AC2: API metrics tracking at service layer."""
+
+    @pytest.fixture
+    def mock_activated_repo_manager(self):
+        """Mock ActivatedRepoManager for testing wrapper methods."""
+        with patch(
+            "code_indexer.server.repositories.activated_repo_manager.ActivatedRepoManager"
+        ) as mock_manager_class:
+            mock_instance = Mock()
+            mock_manager_class.return_value = mock_instance
+            mock_instance.get_activated_repo_path.return_value = "/path/to/repo"
+            yield mock_instance
+
+    def test_get_status_tracks_api_call(self, service, mock_activated_repo_manager):
+        """Test get_status calls api_metrics_service.increment_other_api_call()."""
+        service.activated_repo_manager = mock_activated_repo_manager
+
+        with patch.object(service, "git_status") as mock_git_status:
+            mock_git_status.return_value = {
+                "staged": [],
+                "unstaged": [],
+                "untracked": [],
+            }
+            with patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics:
+                service.get_status(repo_alias="test-repo", username="testuser")
+                mock_metrics.increment_other_api_call.assert_called_once()
+
+    def test_get_diff_tracks_api_call(self, service, mock_activated_repo_manager):
+        """Test get_diff calls api_metrics_service.increment_other_api_call()."""
+        service.activated_repo_manager = mock_activated_repo_manager
+
+        with patch.object(service, "git_diff") as mock_git_diff:
+            mock_git_diff.return_value = {
+                "diff_text": "",
+                "files_changed": 0,
+                "lines_returned": 0,
+                "total_lines": 0,
+                "has_more": False,
+                "next_offset": None,
+                "offset": 0,
+                "limit": None,
+            }
+            with patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics:
+                service.get_diff(repo_alias="test-repo", username="testuser")
+                mock_metrics.increment_other_api_call.assert_called_once()
+
+    def test_get_log_tracks_api_call(self, service, mock_activated_repo_manager):
+        """Test get_log calls api_metrics_service.increment_other_api_call()."""
+        service.activated_repo_manager = mock_activated_repo_manager
+
+        with patch.object(service, "git_log") as mock_git_log:
+            mock_git_log.return_value = {
+                "commits": [],
+                "commits_returned": 0,
+                "total_commits": 0,
+                "has_more": False,
+                "next_offset": None,
+                "offset": 0,
+                "limit": 10,
+            }
+            with patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics:
+                service.get_log(repo_alias="test-repo", username="testuser")
+                mock_metrics.increment_other_api_call.assert_called_once()
+
+    def test_stage_files_tracks_api_call(self, service, mock_activated_repo_manager):
+        """Test stage_files calls api_metrics_service.increment_other_api_call()."""
+        service.activated_repo_manager = mock_activated_repo_manager
+
+        with patch.object(service, "git_stage") as mock_git_stage:
+            mock_git_stage.return_value = {"success": True, "staged_files": []}
+            with patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics:
+                service.stage_files(
+                    repo_alias="test-repo", username="testuser", file_paths=[]
+                )
+                mock_metrics.increment_other_api_call.assert_called_once()
+
+    def test_unstage_files_tracks_api_call(self, service, mock_activated_repo_manager):
+        """Test unstage_files calls api_metrics_service.increment_other_api_call()."""
+        service.activated_repo_manager = mock_activated_repo_manager
+
+        with patch.object(service, "git_unstage") as mock_git_unstage:
+            mock_git_unstage.return_value = {"success": True, "unstaged_files": []}
+            with patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics:
+                service.unstage_files(
+                    repo_alias="test-repo", username="testuser", file_paths=[]
+                )
+                mock_metrics.increment_other_api_call.assert_called_once()
+
+    def test_create_commit_tracks_api_call(self, service, mock_activated_repo_manager):
+        """Test create_commit calls api_metrics_service.increment_other_api_call()."""
+        service.activated_repo_manager = mock_activated_repo_manager
+
+        with patch.object(service, "git_commit") as mock_git_commit:
+            mock_git_commit.return_value = {
+                "success": True,
+                "commit_hash": "abc123",
+                "message": "Test",
+                "author": "test@example.com",
+                "committer": "committer@example.com",
+            }
+            with patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics:
+                service.create_commit(
+                    repo_alias="test-repo",
+                    username="testuser",
+                    message="Test",
+                    user_email="test@example.com",
+                )
+                mock_metrics.increment_other_api_call.assert_called_once()
+
+    def test_push_to_remote_tracks_api_call(self, service, mock_activated_repo_manager):
+        """Test push_to_remote calls api_metrics_service.increment_other_api_call()."""
+        service.activated_repo_manager = mock_activated_repo_manager
+
+        with patch.object(service, "git_push") as mock_git_push:
+            mock_git_push.return_value = {"success": True, "pushed_commits": 0}
+            with patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics:
+                service.push_to_remote(repo_alias="test-repo", username="testuser")
+                mock_metrics.increment_other_api_call.assert_called_once()
+
+    def test_pull_from_remote_tracks_api_call(self, service, mock_activated_repo_manager):
+        """Test pull_from_remote calls api_metrics_service.increment_other_api_call()."""
+        service.activated_repo_manager = mock_activated_repo_manager
+
+        with patch.object(service, "git_pull") as mock_git_pull:
+            mock_git_pull.return_value = {
+                "success": True,
+                "updated_files": 0,
+                "conflicts": [],
+            }
+            with patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics:
+                service.pull_from_remote(repo_alias="test-repo", username="testuser")
+                mock_metrics.increment_other_api_call.assert_called_once()
+
+    def test_fetch_from_remote_tracks_api_call(
+        self, service, mock_activated_repo_manager
+    ):
+        """Test fetch_from_remote calls api_metrics_service.increment_other_api_call()."""
+        service.activated_repo_manager = mock_activated_repo_manager
+
+        with patch.object(service, "git_fetch") as mock_git_fetch:
+            mock_git_fetch.return_value = {"success": True, "fetched_refs": []}
+            with patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics:
+                service.fetch_from_remote(repo_alias="test-repo", username="testuser")
+                mock_metrics.increment_other_api_call.assert_called_once()
+
+    def test_reset_repository_tracks_api_call(
+        self, service, mock_activated_repo_manager
+    ):
+        """Test reset_repository calls api_metrics_service.increment_other_api_call()."""
+        service.activated_repo_manager = mock_activated_repo_manager
+
+        with patch.object(service, "git_reset") as mock_git_reset:
+            mock_git_reset.return_value = {
+                "success": True,
+                "reset_mode": "mixed",
+                "target_commit": "HEAD",
+            }
+            with patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics:
+                service.reset_repository(
+                    repo_alias="test-repo", username="testuser", mode="mixed"
+                )
+                mock_metrics.increment_other_api_call.assert_called_once()
+
+    def test_clean_repository_tracks_api_call(
+        self, service, mock_activated_repo_manager
+    ):
+        """Test clean_repository calls api_metrics_service.increment_other_api_call()."""
+        service.activated_repo_manager = mock_activated_repo_manager
+
+        with patch.object(service, "git_clean") as mock_git_clean:
+            mock_git_clean.return_value = {"requires_confirmation": True, "token": "ABC123"}
+            with patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics:
+                service.clean_repository(repo_alias="test-repo", username="testuser")
+                mock_metrics.increment_other_api_call.assert_called_once()
+
+    def test_abort_merge_tracks_api_call(self, service, mock_activated_repo_manager):
+        """Test abort_merge calls api_metrics_service.increment_other_api_call()."""
+        service.activated_repo_manager = mock_activated_repo_manager
+
+        with patch.object(service, "git_merge_abort") as mock_git_merge_abort:
+            mock_git_merge_abort.return_value = {"success": True, "aborted": True}
+            with patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics:
+                service.abort_merge(repo_alias="test-repo", username="testuser")
+                mock_metrics.increment_other_api_call.assert_called_once()
+
+    def test_checkout_file_tracks_api_call(self, service, mock_activated_repo_manager):
+        """Test checkout_file calls api_metrics_service.increment_other_api_call()."""
+        service.activated_repo_manager = mock_activated_repo_manager
+
+        with patch.object(service, "git_checkout_file") as mock_git_checkout_file:
+            mock_git_checkout_file.return_value = {
+                "success": True,
+                "restored_file": "test.py",
+            }
+            with patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics:
+                service.checkout_file(
+                    repo_alias="test-repo", username="testuser", file_paths=["test.py"]
+                )
+                mock_metrics.increment_other_api_call.assert_called_once()
+
+    def test_list_branches_tracks_api_call(self, service, mock_activated_repo_manager):
+        """Test list_branches calls api_metrics_service.increment_other_api_call()."""
+        service.activated_repo_manager = mock_activated_repo_manager
+
+        with patch.object(service, "git_branch_list") as mock_git_branch_list:
+            mock_git_branch_list.return_value = {
+                "current": "main",
+                "local": ["main"],
+                "remote": [],
+            }
+            with patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics:
+                service.list_branches(repo_alias="test-repo", username="testuser")
+                mock_metrics.increment_other_api_call.assert_called_once()
+
+    def test_create_branch_tracks_api_call(self, service, mock_activated_repo_manager):
+        """Test create_branch calls api_metrics_service.increment_other_api_call()."""
+        service.activated_repo_manager = mock_activated_repo_manager
+
+        with patch.object(service, "git_branch_create") as mock_git_branch_create:
+            mock_git_branch_create.return_value = {
+                "success": True,
+                "created_branch": "feature",
+            }
+            with patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics:
+                service.create_branch(
+                    repo_alias="test-repo", username="testuser", branch_name="feature"
+                )
+                mock_metrics.increment_other_api_call.assert_called_once()
+
+    def test_switch_branch_tracks_api_call(self, service, mock_activated_repo_manager):
+        """Test switch_branch calls api_metrics_service.increment_other_api_call()."""
+        service.activated_repo_manager = mock_activated_repo_manager
+
+        with patch.object(service, "git_branch_switch") as mock_git_branch_switch:
+            mock_git_branch_switch.return_value = {
+                "success": True,
+                "current_branch": "feature",
+                "previous_branch": "main",
+            }
+            with patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics:
+                service.switch_branch(
+                    repo_alias="test-repo", username="testuser", branch_name="feature"
+                )
+                mock_metrics.increment_other_api_call.assert_called_once()
+
+    def test_delete_branch_tracks_api_call(self, service, mock_activated_repo_manager):
+        """Test delete_branch calls api_metrics_service.increment_other_api_call()."""
+        service.activated_repo_manager = mock_activated_repo_manager
+
+        with patch.object(service, "git_branch_delete") as mock_git_branch_delete:
+            mock_git_branch_delete.return_value = {
+                "requires_confirmation": True,
+                "token": "DEL123",
+            }
+            with patch(
+                "code_indexer.server.services.api_metrics_service.api_metrics_service"
+            ) as mock_metrics:
+                service.delete_branch(
+                    repo_alias="test-repo", username="testuser", branch_name="old-feature"
+                )
+                mock_metrics.increment_other_api_call.assert_called_once()

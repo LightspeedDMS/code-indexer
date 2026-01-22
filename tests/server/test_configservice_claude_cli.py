@@ -84,13 +84,18 @@ class TestConfigServiceNewFields:
         Given I have a config with anthropic_api_key set
         When I call get_all_settings()
         Then anthropic_api_key shows as "sk-ant-***"
+
+        Note: Story #15 moved anthropic_api_key to ClaudeIntegrationConfig.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             service = ConfigService(tmpdir)
 
             # Set API key
+            # Story #15: anthropic_api_key moved to claude_integration_config
             config = service.get_config()
-            config.anthropic_api_key = "sk-ant-api03-test-key-123456789"
+            config.claude_integration_config.anthropic_api_key = (
+                "sk-ant-api03-test-key-123456789"
+            )
             service.config_manager.save_config(config)
 
             # Reload to get fresh settings
@@ -154,6 +159,8 @@ class TestConfigServiceNewFields:
         Given I create a ConfigService
         When I call update_setting("claude_cli", "anthropic_api_key", "sk-ant-...")
         Then the API key is updated and persisted (unmasked in storage)
+
+        Note: Story #15 moved anthropic_api_key to ClaudeIntegrationConfig.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             service = ConfigService(tmpdir)
@@ -163,9 +170,11 @@ class TestConfigServiceNewFields:
             )
 
             # Verify it's stored unmasked
+            # Story #15: anthropic_api_key moved to claude_integration_config
             config = service.get_config()
             assert (
-                config.anthropic_api_key == "sk-ant-api03-test-key-123"
+                config.claude_integration_config.anthropic_api_key
+                == "sk-ant-api03-test-key-123"
             ), "anthropic_api_key should be stored unmasked"
 
             # Verify get_all_settings masks it

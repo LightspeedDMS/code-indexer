@@ -5962,6 +5962,10 @@ def create_app() -> FastAPI:
                 if search_mode_actual in ["fts", "hybrid"] and fts_available:
                     # Execute FTS search
                     from ..services.tantivy_index_manager import TantivyIndexManager
+                    from ..services.api_metrics_service import api_metrics_service
+
+                    # Track FTS search at service layer (Story #4 AC2)
+                    api_metrics_service.increment_other_index_search()
 
                     try:
                         # repo_path is guaranteed to be set if fts_available is True
