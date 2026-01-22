@@ -280,17 +280,30 @@ class GitHubProvider(RepositoryProviderBase):
         # GitHub API limits per_page to 100
         effective_page_size = min(page_size, 100)
 
+        # Determine endpoint and params based on search (Story #16)
+        if search:
+            # Use search API for search queries
+            endpoint = "search/repositories"
+            params = {
+                "q": f"{search} in:name,description fork:true",
+                "page": page,
+                "per_page": effective_page_size,
+                "sort": "updated",
+                "order": "desc",
+            }
+        else:
+            # Use regular listing API
+            endpoint = "user/repos"
+            params = {
+                "page": page,
+                "per_page": effective_page_size,
+                "sort": "pushed",
+                "direction": "desc",
+                "affiliation": "owner,collaborator,organization_member",
+            }
+
         try:
-            response = self._make_api_request(
-                "user/repos",
-                params={
-                    "page": page,
-                    "per_page": effective_page_size,
-                    "sort": "pushed",
-                    "direction": "desc",
-                    "affiliation": "owner,collaborator,organization_member",
-                },
-            )
+            response = self._make_api_request(endpoint, params=params)
 
             # Check for rate limiting before raising for status
             self._check_rate_limit(response)
@@ -308,19 +321,30 @@ class GitHubProvider(RepositoryProviderBase):
         except httpx.RequestError as e:
             raise GitHubProviderError(f"GitHub API request failed: {e}") from e
 
-        # Parse response
-        repos = response.json()
+        # Parse response based on endpoint (Story #16)
+        response_data = response.json()
 
-        # Parse Link header for pagination
-        link_header = response.headers.get("Link", "")
-        total_pages = self._parse_link_header_for_last_page(link_header)
-
-        # GitHub doesn't provide total count in headers, estimate from pages
-        # If we're not on last page and there's a Link header, estimate
-        total_count = len(repos)
-        if total_pages > 1:
-            # Estimate based on page size and pages
-            total_count = total_pages * effective_page_size
+        if search:
+            # Search API returns {total_count, items: [...]}
+            repos = response_data.get("items", [])
+            total_count = response_data.get("total_count", 0)
+            # Calculate total_pages from total_count
+            total_pages = (
+                (total_count + effective_page_size - 1) // effective_page_size
+                if total_count > 0
+                else 1
+            )
+        else:
+            # Regular API returns [...]
+            repos = response_data
+            # Parse Link header for pagination
+            link_header = response.headers.get("Link", "")
+            total_pages = self._parse_link_header_for_last_page(link_header)
+            # GitHub doesn't provide total count in headers, estimate from pages
+            total_count = len(repos)
+            if total_pages > 1:
+                # Estimate based on page size and pages
+                total_count = total_pages * effective_page_size
 
         # Filter out already-indexed repositories
         repositories: List[DiscoveredRepository] = []
@@ -331,24 +355,8 @@ class GitHubProvider(RepositoryProviderBase):
             if not self._is_repo_indexed(https_url, ssh_url, indexed_urls):
                 repositories.append(self._parse_repository(repo))
 
-        # Apply search filter if provided
-        # Search matches against name, description, commit hash, and committer
-        if search:
-            search_lower = search.lower()
-            repositories = [
-                repo
-                for repo in repositories
-                if search_lower in repo.name.lower()
-                or (repo.description and search_lower in repo.description.lower())
-                or (
-                    repo.last_commit_hash
-                    and search_lower in repo.last_commit_hash.lower()
-                )
-                or (
-                    repo.last_commit_author
-                    and search_lower in repo.last_commit_author.lower()
-                )
-            ]
+        # Note: Client-side search filtering removed (Story #16)
+        # Server-side filtering via search API is used instead
 
         return RepositoryDiscoveryResult(
             repositories=repositories,

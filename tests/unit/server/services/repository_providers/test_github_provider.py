@@ -652,3 +652,231 @@ class TestGitHubProviderErrorHandling:
             "rate limit" in str(exc_info.value).lower()
             or "api" in str(exc_info.value).lower()
         )
+
+
+class TestGitHubProviderServerSideSearch:
+    """Tests for GitHub server-side search functionality (Story #16)."""
+
+    def _create_mock_response(self, json_data, status_code=200, headers=None):
+        """Helper to create mock HTTP response."""
+        mock_response = MagicMock()
+        mock_response.status_code = status_code
+        mock_response.headers = headers or {}
+        mock_response.json.return_value = json_data
+        mock_response.raise_for_status = MagicMock()
+        return mock_response
+
+    @pytest.mark.asyncio
+    async def test_search_uses_search_repositories_endpoint(self):
+        """Test that search uses /search/repositories endpoint."""
+        from code_indexer.server.services.repository_providers.github_provider import (
+            GitHubProvider,
+        )
+        from code_indexer.server.services.ci_token_manager import TokenData
+
+        token_manager = MagicMock()
+        token_manager.get_token.return_value = TokenData(
+            platform="github", token="ghp_test123", base_url=None
+        )
+        golden_repo_manager = MagicMock()
+        golden_repo_manager.list_golden_repos.return_value = []
+
+        provider = GitHubProvider(token_manager, golden_repo_manager)
+        captured_endpoint = None
+        captured_params = {}
+
+        def capture_request(endpoint, params=None):
+            nonlocal captured_endpoint, captured_params
+            captured_endpoint = endpoint
+            captured_params = params or {}
+            return self._create_mock_response(
+                {"total_count": 0, "incomplete_results": False, "items": []}
+            )
+
+        with patch.object(provider, "_make_api_request", side_effect=capture_request):
+            await provider.discover_repositories(
+                page=1, page_size=50, search="myproject"
+            )
+
+        assert captured_endpoint == "search/repositories"
+        assert "q" in captured_params
+        assert "myproject" in captured_params["q"]
+
+    @pytest.mark.asyncio
+    async def test_search_response_parsing_from_items_array(self):
+        """Test that search response parses repos from 'items' array."""
+        from code_indexer.server.services.repository_providers.github_provider import (
+            GitHubProvider,
+        )
+        from code_indexer.server.services.ci_token_manager import TokenData
+
+        token_manager = MagicMock()
+        token_manager.get_token.return_value = TokenData(
+            platform="github", token="ghp_test123", base_url=None
+        )
+        golden_repo_manager = MagicMock()
+        golden_repo_manager.list_golden_repos.return_value = []
+
+        provider = GitHubProvider(token_manager, golden_repo_manager)
+        search_response = {
+            "total_count": 1,
+            "items": [
+                {
+                    "full_name": "owner/myproject",
+                    "description": "Test",
+                    "clone_url": "https://github.com/owner/myproject.git",
+                    "ssh_url": "git@github.com:owner/myproject.git",
+                    "default_branch": "main",
+                    "pushed_at": "2024-01-15T10:30:00Z",
+                    "private": False,
+                }
+            ],
+        }
+
+        with patch.object(
+            provider,
+            "_make_api_request",
+            return_value=self._create_mock_response(search_response),
+        ):
+            result = await provider.discover_repositories(
+                page=1, page_size=50, search="myproject"
+            )
+
+        assert len(result.repositories) == 1
+        assert result.repositories[0].name == "owner/myproject"
+
+    @pytest.mark.asyncio
+    async def test_search_pagination_from_response_body(self):
+        """Test that search uses total_count from response for pagination."""
+        from code_indexer.server.services.repository_providers.github_provider import (
+            GitHubProvider,
+        )
+        from code_indexer.server.services.ci_token_manager import TokenData
+
+        token_manager = MagicMock()
+        token_manager.get_token.return_value = TokenData(
+            platform="github", token="ghp_test123", base_url=None
+        )
+        golden_repo_manager = MagicMock()
+        golden_repo_manager.list_golden_repos.return_value = []
+
+        provider = GitHubProvider(token_manager, golden_repo_manager)
+        search_response = {"total_count": 150, "incomplete_results": False, "items": []}
+
+        with patch.object(
+            provider,
+            "_make_api_request",
+            return_value=self._create_mock_response(search_response),
+        ):
+            result = await provider.discover_repositories(
+                page=1, page_size=50, search="myproject"
+            )
+
+        assert result.total_count == 150
+        assert result.total_pages == 3  # ceil(150/50)
+
+    @pytest.mark.asyncio
+    async def test_no_search_uses_user_repos_endpoint(self):
+        """Test that without search, /user/repos endpoint is used."""
+        from code_indexer.server.services.repository_providers.github_provider import (
+            GitHubProvider,
+        )
+        from code_indexer.server.services.ci_token_manager import TokenData
+
+        token_manager = MagicMock()
+        token_manager.get_token.return_value = TokenData(
+            platform="github", token="ghp_test123", base_url=None
+        )
+        golden_repo_manager = MagicMock()
+        golden_repo_manager.list_golden_repos.return_value = []
+
+        provider = GitHubProvider(token_manager, golden_repo_manager)
+        captured_endpoint = None
+
+        def capture_request(endpoint, params=None):
+            nonlocal captured_endpoint
+            captured_endpoint = endpoint
+            return self._create_mock_response([])
+
+        with patch.object(provider, "_make_api_request", side_effect=capture_request):
+            await provider.discover_repositories(page=1, page_size=50, search=None)
+
+        assert captured_endpoint == "user/repos"
+
+    @pytest.mark.asyncio
+    async def test_search_with_indexed_repo_exclusion(self):
+        """Test that indexed repos are excluded when search is provided."""
+        from code_indexer.server.services.repository_providers.github_provider import (
+            GitHubProvider,
+        )
+        from code_indexer.server.services.ci_token_manager import TokenData
+
+        token_manager = MagicMock()
+        token_manager.get_token.return_value = TokenData(
+            platform="github", token="ghp_test123", base_url=None
+        )
+        golden_repo_manager = MagicMock()
+        golden_repo_manager.list_golden_repos.return_value = [
+            {"repo_url": "https://github.com/owner/data-indexed.git"}
+        ]
+
+        provider = GitHubProvider(token_manager, golden_repo_manager)
+        search_response = {
+            "total_count": 2,
+            "items": [
+                {
+                    "full_name": "owner/data-indexed",
+                    "clone_url": "https://github.com/owner/data-indexed.git",
+                    "ssh_url": "git@github.com:owner/data-indexed.git",
+                    "default_branch": "main",
+                    "private": True,
+                },
+                {
+                    "full_name": "owner/data-services",
+                    "clone_url": "https://github.com/owner/data-services.git",
+                    "ssh_url": "git@github.com:owner/data-services.git",
+                    "default_branch": "main",
+                    "private": False,
+                },
+            ],
+        }
+
+        with patch.object(
+            provider,
+            "_make_api_request",
+            return_value=self._create_mock_response(search_response),
+        ):
+            result = await provider.discover_repositories(
+                page=1, page_size=50, search="data"
+            )
+
+        assert len(result.repositories) == 1
+        assert result.repositories[0].name == "owner/data-services"
+
+    @pytest.mark.asyncio
+    async def test_empty_search_string_uses_regular_endpoint(self):
+        """Test that empty search string uses /user/repos endpoint."""
+        from code_indexer.server.services.repository_providers.github_provider import (
+            GitHubProvider,
+        )
+        from code_indexer.server.services.ci_token_manager import TokenData
+
+        token_manager = MagicMock()
+        token_manager.get_token.return_value = TokenData(
+            platform="github", token="ghp_test123", base_url=None
+        )
+        golden_repo_manager = MagicMock()
+        golden_repo_manager.list_golden_repos.return_value = []
+
+        provider = GitHubProvider(token_manager, golden_repo_manager)
+        captured_endpoint = None
+
+        def capture_request(endpoint, params=None):
+            nonlocal captured_endpoint
+            captured_endpoint = endpoint
+            return self._create_mock_response([])
+
+        with patch.object(provider, "_make_api_request", side_effect=capture_request):
+            await provider.discover_repositories(page=1, page_size=50, search="")
+
+        assert captured_endpoint == "user/repos"

@@ -223,17 +223,20 @@ class GitLabProvider(RepositoryProviderBase):
         # Get indexed repos for filtering
         indexed_urls = self._get_indexed_canonical_urls()
 
+        # Build params for API request
+        params = {
+            "membership": "true",
+            "page": page,
+            "per_page": page_size,
+            "order_by": "last_activity_at",
+            "sort": "desc",
+        }
+        # Add search parameter for server-side filtering (Story #16)
+        if search:
+            params["search"] = search
+
         try:
-            response = self._make_api_request(
-                "projects",
-                params={
-                    "membership": "true",
-                    "page": page,
-                    "per_page": page_size,
-                    "order_by": "last_activity_at",
-                    "sort": "desc",
-                },
-            )
+            response = self._make_api_request("projects", params=params)
             response.raise_for_status()
         except httpx.TimeoutException as e:
             raise GitLabProviderError(f"GitLab API request timed out: {e}") from e
@@ -258,24 +261,8 @@ class GitLabProvider(RepositoryProviderBase):
             if not self._is_repo_indexed(https_url, ssh_url, indexed_urls):
                 repositories.append(self._parse_project(project))
 
-        # Apply search filter if provided
-        # Search matches against name, description, commit hash, and committer
-        if search:
-            search_lower = search.lower()
-            repositories = [
-                repo
-                for repo in repositories
-                if search_lower in repo.name.lower()
-                or (repo.description and search_lower in repo.description.lower())
-                or (
-                    repo.last_commit_hash
-                    and search_lower in repo.last_commit_hash.lower()
-                )
-                or (
-                    repo.last_commit_author
-                    and search_lower in repo.last_commit_author.lower()
-                )
-            ]
+        # Note: Client-side search filtering removed (Story #16)
+        # Server-side filtering via API `search` parameter is used instead
 
         return RepositoryDiscoveryResult(
             repositories=repositories,
