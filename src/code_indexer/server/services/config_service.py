@@ -157,11 +157,16 @@ class ConfigService:
                 "required_char_classes": config.password_security.required_char_classes,
                 "min_entropy_bits": config.password_security.min_entropy_bits,
             },
-            # Claude CLI integration (Story #15 AC3: moved to claude_integration_config)
+            # Claude CLI integration (Story #15 AC3, Story #20: moved to claude_integration_config)
             "claude_cli": {
                 "anthropic_api_key": (
-                    "sk-ant-***"
+                    config.claude_integration_config.anthropic_api_key[:10] + "***"
                     if config.claude_integration_config.anthropic_api_key
+                    else None
+                ),
+                "voyageai_api_key": (
+                    config.claude_integration_config.voyageai_api_key[:6] + "***"
+                    if config.claude_integration_config.voyageai_api_key
                     else None
                 ),
                 "max_concurrent_claude_cli": config.claude_integration_config.max_concurrent_claude_cli,

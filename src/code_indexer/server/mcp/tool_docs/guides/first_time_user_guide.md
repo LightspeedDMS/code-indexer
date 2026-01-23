@@ -30,9 +30,9 @@ Step 2: Discover available repositories
   list_global_repos() -> See all repositories you can search
 
 Step 3: Check repository capabilities
-  global_repo_status('repo-name-global') -> Check what indexes exist (semantic, FTS, temporal, SCIP)
+  global_repo_status(repository_alias='repo-name-global') -> Check what indexes exist (semantic, FTS, temporal, SCIP)
 
-Step 4: CRITICAL - Find the right repository (Don't skip this!)
+Step 4: CRITICAL - Find the right repository/repositories (Don't skip this!)
 
   IMPORTANT: If you don't know which repository contains the code you're looking for, DO NOT GUESS. Use cidx-meta-global first.
 
@@ -42,11 +42,13 @@ Step 4: CRITICAL - Find the right repository (Don't skip this!)
       search_code(query_text='authentication', repository_alias='cidx-meta-global', limit=5)
       -> Returns .md files describing which repos handle authentication
 
-  4b. Read the returned .md file to understand which repo to use
+  4b. Read the returned .md files - your topic may exist in MULTIPLE repositories
 
-  4c. THEN proceed to Step 5 with the correct repository
+  4c. Choose your next step based on results:
+      - ONE relevant repo found -> Proceed to Step 5 (single-repo search)
+      - MULTIPLE relevant repos found -> Proceed to WORKFLOW B (multi-repo search - RECOMMENDED)
 
-  WHY THIS MATTERS: Skipping this step leads to wasted time searching wrong repositories. cidx-meta-global prevents guesswork.
+  WHY THIS MATTERS: Skipping this step leads to wasted time searching wrong repositories. cidx-meta-global prevents guesswork and identifies ALL relevant codebases.
 
 Step 5: Run your first search (in the correct repository)
   search_code(query_text='authentication', repository_alias='backend-global', limit=5)
@@ -71,17 +73,33 @@ ESSENTIAL WORKFLOWS:
 
 WORKFLOW A - Unknown Repository (Discovery) - USE THIS FIRST:
 This is the MOST COMMON workflow. Always start here if unsure which repo to search.
-1. search_code('your topic', repository_alias='cidx-meta-global')
-2. Read returned .md file to identify relevant repo
-3. search_code('your topic', repository_alias='identified-repo-global')
+1. search_code(query_text='your topic', repository_alias='cidx-meta-global')
+2. Read returned .md file(s) to identify relevant repo(s)
+3. Based on results:
+   - One repo found -> search_code(query_text='your topic', repository_alias='identified-repo-global')
+   - Multiple repos found -> Use WORKFLOW B (RECOMMENDED)
 
-WORKFLOW B - Cross-Cutting Analysis (Multi-Repo Search):
-1. list_global_repos() to see available repos
+WORKFLOW B - Cross-Repo Exploration (RECOMMENDED for multi-repo scenarios):
+
+USE THIS WORKFLOW WHEN:
+- cidx-meta-global returned MULTIPLE relevant repositories
+- You need to explore/discover a concept across the codebase
+- You want to compare implementations across repos
+
+WHY MULTI-REPO IS PREFERRED OVER SEQUENTIAL SINGLE-REPO QUERIES:
+- Single query instead of N sequential queries (faster, less overhead)
+- Consistent scoring across all repositories (apples-to-apples comparison)
+- Unified results with source_repo attribution (easy to see distribution)
+- Parallel execution on server side (performance optimized)
+- Partial failure handling (one repo down doesn't block others)
+
+STEPS:
+1. Identify target repos (from cidx-meta discovery or list_global_repos())
 2. Choose aggregation strategy:
-   - aggregation_mode='per_repo': Distributes results evenly across repos (for comparison)
-   - aggregation_mode='global': Returns best matches regardless of source (for discovery)
+   - aggregation_mode='global' (default): Best matches by score (RECOMMENDED for discovery/exploration)
+   - aggregation_mode='per_repo': Equal representation per repo (best for comparison)
 3. Run multi-repo search:
-   search_code('topic', repository_alias=['repo1-global', 'repo2-global'], aggregation_mode='per_repo', limit=10)
+   search_code(query_text='topic', repository_alias=['repo1-global', 'repo2-global'], aggregation_mode='global', limit=10)
 4. Understand the results:
    - LIMIT BEHAVIOR: limit=10 with 3 repos returns 10 total (NOT 30). Per-repo mode distributes evenly.
    - CACHING: Large results return preview + cache_handle. Each result has its own handle.
@@ -89,12 +107,17 @@ WORKFLOW B - Cross-Cutting Analysis (Multi-Repo Search):
 5. For large results, fetch full content:
    get_cached_content(handle='uuid-from-result', page=0)
 
+SYNTAX OPTIONS:
+- Specific repos: repository_alias=['backend-global', 'frontend-global']
+- Wildcard ALL: repository_alias='*-global' (searches all global repos)
+- Pattern match: repository_alias='pch-*-global' (all repos matching pattern)
+
 TOOLS SUPPORTING MULTI-REPO: search_code, regex_search, git_log, git_search_commits, list_files
 
 WORKFLOW C - Deep Dive (Single Repo):
-Use when you KNOW which repo to search.
+Use when you KNOW which repo to search (or cidx-meta found only ONE relevant repo).
 1. list_global_repos() to find repo name
-2. search_code('topic', repository_alias='specific-repo-global')
+2. search_code(query_text='topic', repository_alias='specific-repo-global')
 3. get_file_content() to read full files
 4. Use SCIP tools for code navigation
 
@@ -122,3 +145,6 @@ A: You get partial results. Successful repos return results normally, failed rep
 
 Q: I don't know which repository to search - what do I do?
 A: Search cidx-meta-global FIRST! It contains descriptions of all repositories. See Step 4 above.
+
+Q: cidx-meta returned multiple relevant repos - what now?
+A: Use multi-repo search (WORKFLOW B). Pass all relevant repos as a list: search_code(query_text='topic', repository_alias=['repo1-global', 'repo2-global'], aggregation_mode='global'). DO NOT search them one-by-one.

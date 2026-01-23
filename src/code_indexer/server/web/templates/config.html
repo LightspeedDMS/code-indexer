@@ -62,9 +62,9 @@ function toggleEditMode(section) {
 }
 
 function cancelEdit(section) {
-    // Reset form to original values
+    // Reset form to original values (only if it's an actual form element)
     const form = document.getElementById('edit-form-' + section);
-    if (form) {
+    if (form && typeof form.reset === 'function') {
         form.reset();
     }
     toggleEditMode(section);

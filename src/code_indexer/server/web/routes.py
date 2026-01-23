@@ -4110,6 +4110,13 @@ def _get_current_config() -> dict:
     if not auth_config:
         auth_config = asdict(AuthConfig())
 
+    # Story #20: Provider API Keys (Anthropic/VoyageAI)
+    claude_cli_config = settings.get("claude_cli", {})
+    provider_api_keys_config = {
+        "anthropic_configured": bool(claude_cli_config.get("anthropic_api_key")),
+        "voyageai_configured": bool(claude_cli_config.get("voyageai_api_key")),
+    }
+
     # Convert to template-friendly format
     return {
         "server": settings["server"],
@@ -4135,6 +4142,8 @@ def _get_current_config() -> dict:
         "web_security": web_security_config,
         # Story #3 - Phase 2: P3 settings (AC36)
         "auth": auth_config,
+        # Story #20: Provider API Keys
+        "provider_api_keys": provider_api_keys_config,
     }
 
 

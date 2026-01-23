@@ -93,12 +93,12 @@ class ClaudeCliManager:
             extra={"correlation_id": get_correlation_id()},
         )
 
-    def sync_api_key(self) -> None:
+    def _ensure_api_key_synced(self) -> None:
         """
-        Sync API key to ~/.claude.json with file locking.
+        Ensure API key is synced using ApiKeySyncService (Story #20).
 
-        Uses exclusive file lock to ensure atomic writes.
-        Preserves existing fields in ~/.claude.json.
+        This is the preferred method for pre-use sync triggers.
+        Delegates to ApiKeySyncService for proper sync to all targets.
         """
         if not self._api_key:
             logger.debug(
@@ -107,6 +107,83 @@ class ClaudeCliManager:
             )
             return
 
+        try:
+            from code_indexer.server.services.api_key_management import (
+                ApiKeySyncService,
+            )
+
+            sync_service = ApiKeySyncService()
+            result = sync_service.sync_anthropic_key(self._api_key)
+
+            if result.success:
+                if not result.already_synced:
+                    logger.debug(
+                        "API key synced via ApiKeySyncService",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+            else:
+                logger.warning(
+                    f"API key sync failed: {result.error}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+        except Exception as e:
+            logger.error(
+                f"Failed to sync API key via ApiKeySyncService: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+    def sync_api_key(self) -> None:
+        """
+        Sync API key to ~/.claude.json and environment (Story #20).
+
+        Uses ApiKeySyncService for proper sync to all targets:
+        - ~/.claude.json (apiKey field)
+        - os.environ["ANTHROPIC_API_KEY"]
+        - systemd environment file
+
+        Legacy file locking approach preserved as fallback.
+        """
+        if not self._api_key:
+            logger.debug(
+                "No API key configured, skipping sync",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        # Use ApiKeySyncService for proper sync (Story #20)
+        try:
+            from code_indexer.server.services.api_key_management import (
+                ApiKeySyncService,
+            )
+
+            sync_service = ApiKeySyncService()
+            result = sync_service.sync_anthropic_key(self._api_key)
+
+            if result.success:
+                logger.debug(
+                    "API key synced via ApiKeySyncService",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return
+            else:
+                logger.warning(
+                    f"ApiKeySyncService sync failed: {result.error}, "
+                    "falling back to legacy sync",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+        except ImportError:
+            logger.debug(
+                "ApiKeySyncService not available, using legacy sync",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                f"ApiKeySyncService error: {e}, falling back to legacy sync",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        # Legacy fallback: direct file write with locking
         lock_path = Path.home() / ".claude.json.lock"
         json_path = Path.home() / ".claude.json"
 
@@ -129,7 +206,7 @@ class ClaudeCliManager:
                     existing["primaryApiKey"] = self._api_key
                     json_path.write_text(json.dumps(existing, indent=2))
                     logger.debug(
-                        f"API key synced to {json_path}",
+                        f"API key synced to {json_path} (legacy)",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 finally:
@@ -460,6 +537,9 @@ class ClaudeCliManager:
             callback: Callback function to invoke with result
         """
         try:
+            # Pre-use sync trigger: ensure API key is synced (Story #20)
+            self._ensure_api_key_synced()
+
             # Check CLI availability
             if not self.check_cli_available():
                 logger.warning(
@@ -469,7 +549,7 @@ class ClaudeCliManager:
                 callback(False, "Claude CLI not available")
                 return
 
-            # Sync API key before invocation
+            # Sync API key before invocation (redundant but kept for safety)
             self.sync_api_key()
 
             # Invoke Claude CLI (placeholder - actual implementation depends on use case)

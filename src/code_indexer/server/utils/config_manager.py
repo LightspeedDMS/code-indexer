@@ -413,14 +413,16 @@ class IndexingConfig:
 @dataclass
 class ClaudeIntegrationConfig:
     """
-    Claude CLI integration configuration (Story #15 - AC3).
+    Claude CLI integration configuration (Story #15 - AC3, Story #20).
 
     Contains settings for Claude CLI integration that were previously
-    loose settings on ServerConfig.
+    loose settings on ServerConfig, plus VoyageAI API key (Story #20).
     """
 
     # Anthropic API key for Claude CLI (moved from ServerConfig)
     anthropic_api_key: Optional[str] = None
+    # VoyageAI API key for embeddings (Story #20)
+    voyageai_api_key: Optional[str] = None
     # Maximum concurrent Claude CLI processes (moved from ServerConfig)
     max_concurrent_claude_cli: int = 4
     # Refresh interval for description generation in hours (moved from ServerConfig)

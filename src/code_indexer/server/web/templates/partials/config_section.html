@@ -1877,3 +1877,447 @@
         </form>
     </article>
 </details>
+
+<!-- Provider API Keys Section (Story #20) -->
+<details class="config-section" id="section-provider-api-keys">
+    <summary>
+        <h2>Provider API Keys</h2>
+    </summary>
+    <article>
+        <p class="section-description">
+            Configure API keys for external AI providers. These keys are used for code intelligence features.
+        </p>
+
+        <!-- Status Display -->
+        <div id="display-provider-api-keys">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Anthropic API Key</td>
+                        <td class="config-value">
+                            {% if config.provider_api_keys.anthropic_configured %}
+                            <span class="status-badge status-configured">Configured</span>
+                            {% else %}
+                            <span class="status-badge status-not-configured">Not Configured</span>
+                            {% endif %}
+                        </td>
+                        <td class="config-actions">
+                            {% if config.provider_api_keys.anthropic_configured %}
+                            <button type="button" class="outline small" onclick="testConfiguredAnthropicKey()">Test</button>
+                            <span id="anthropic-display-status" class="key-status"></span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">VoyageAI API Key</td>
+                        <td class="config-value">
+                            {% if config.provider_api_keys.voyageai_configured %}
+                            <span class="status-badge status-configured">Configured</span>
+                            {% else %}
+                            <span class="status-badge status-not-configured">Not Configured</span>
+                            {% endif %}
+                        </td>
+                        <td class="config-actions">
+                            {% if config.provider_api_keys.voyageai_configured %}
+                            <button type="button" class="outline small" onclick="testConfiguredVoyageAIKey()">Test</button>
+                            <span id="voyageai-display-status" class="key-status"></span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('provider-api-keys')">Edit Keys</button>
+            </div>
+        </div>
+
+        <!-- Edit Mode -->
+        <div id="edit-form-provider-api-keys" style="display: none;">
+            <div id="provider-api-keys-message"></div>
+
+            <!-- Anthropic API Key -->
+            <fieldset>
+                <legend>Anthropic API Key</legend>
+                <div class="form-grid">
+                    <label for="anthropic-api-key">
+                        API Key
+                        <input type="password" id="anthropic-api-key" name="anthropic_api_key"
+                               placeholder="sk-ant-..." autocomplete="off">
+                        <small>Format: sk-ant-... (minimum 40 characters)</small>
+                    </label>
+                </div>
+                <div class="form-actions-inline">
+                    <button type="button" class="primary small" onclick="saveAnthropicKey()">Save Key</button>
+                    <button type="button" class="outline small" onclick="testAnthropicKey()">Test Connectivity</button>
+                    {% if config.provider_api_keys.anthropic_configured %}
+                    <button type="button" class="contrast small" onclick="clearAnthropicKey()">Clear</button>
+                    {% endif %}
+                    <span id="anthropic-status" class="key-status"></span>
+                </div>
+            </fieldset>
+
+            <!-- VoyageAI API Key -->
+            <fieldset>
+                <legend>VoyageAI API Key</legend>
+                <div class="form-grid">
+                    <label for="voyageai-api-key">
+                        API Key
+                        <input type="password" id="voyageai-api-key" name="voyageai_api_key"
+                               placeholder="pa-..." autocomplete="off">
+                        <small>Format: pa-... (minimum 20 characters)</small>
+                    </label>
+                </div>
+                <div class="form-actions-inline">
+                    <button type="button" class="primary small" onclick="saveVoyageAIKey()">Save Key</button>
+                    <button type="button" class="outline small" onclick="testVoyageAIKey()">Test Connectivity</button>
+                    {% if config.provider_api_keys.voyageai_configured %}
+                    <button type="button" class="contrast small" onclick="clearVoyageAIKey()">Clear</button>
+                    {% endif %}
+                    <span id="voyageai-status" class="key-status"></span>
+                </div>
+            </fieldset>
+
+            <div class="form-actions">
+                <button type="button" class="secondary" onclick="cancelEdit('provider-api-keys')">Close</button>
+            </div>
+        </div>
+    </article>
+</details>
+
+<script>
+// Provider API Keys JavaScript (Story #20)
+
+// Test configured keys (without editing) - uses server's stored key
+async function testConfiguredAnthropicKey() {
+    const statusSpan = document.getElementById('anthropic-display-status');
+    statusSpan.textContent = 'Testing...';
+    statusSpan.className = 'key-status';
+
+    try {
+        const response = await fetch('/api/api-keys/anthropic/test-configured', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            statusSpan.textContent = 'Connected (' + data.response_time_ms + 'ms)';
+            statusSpan.className = 'key-status success';
+        } else {
+            statusSpan.textContent = data.error || 'Connection failed';
+            statusSpan.className = 'key-status error';
+        }
+    } catch (error) {
+        statusSpan.textContent = 'Error: ' + error.message;
+        statusSpan.className = 'key-status error';
+    }
+}
+
+async function testConfiguredVoyageAIKey() {
+    const statusSpan = document.getElementById('voyageai-display-status');
+    statusSpan.textContent = 'Testing...';
+    statusSpan.className = 'key-status';
+
+    try {
+        const response = await fetch('/api/api-keys/voyageai/test-configured', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            statusSpan.textContent = 'Connected (' + data.response_time_ms + 'ms)';
+            statusSpan.className = 'key-status success';
+        } else {
+            statusSpan.textContent = data.error || 'Connection failed';
+            statusSpan.className = 'key-status error';
+        }
+    } catch (error) {
+        statusSpan.textContent = 'Error: ' + error.message;
+        statusSpan.className = 'key-status error';
+    }
+}
+
+async function saveAnthropicKey() {
+    const keyInput = document.getElementById('anthropic-api-key');
+    const statusSpan = document.getElementById('anthropic-status');
+    const apiKey = keyInput.value.trim();
+
+    if (!apiKey) {
+        statusSpan.textContent = 'Please enter an API key';
+        statusSpan.className = 'key-status error';
+        return;
+    }
+
+    statusSpan.textContent = 'Saving...';
+    statusSpan.className = 'key-status';
+
+    try {
+        const response = await fetch('/api/api-keys/anthropic', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ api_key: apiKey })
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+            statusSpan.textContent = data.already_synced ? 'Already configured' : 'Saved successfully';
+            statusSpan.className = 'key-status success';
+            keyInput.value = '';
+            // Refresh status display
+            setTimeout(() => location.reload(), 1000);
+        } else {
+            statusSpan.textContent = data.detail || 'Save failed';
+            statusSpan.className = 'key-status error';
+        }
+    } catch (error) {
+        statusSpan.textContent = 'Network error';
+        statusSpan.className = 'key-status error';
+    }
+}
+
+async function testAnthropicKey() {
+    const keyInput = document.getElementById('anthropic-api-key');
+    const statusSpan = document.getElementById('anthropic-status');
+    const apiKey = keyInput.value.trim();
+
+    if (!apiKey) {
+        statusSpan.textContent = 'Please enter an API key to test';
+        statusSpan.className = 'key-status error';
+        return;
+    }
+
+    statusSpan.textContent = 'Testing connectivity...';
+    statusSpan.className = 'key-status';
+
+    try {
+        const response = await fetch('/api/api-keys/anthropic/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ api_key: apiKey })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            if (data.success) {
+                statusSpan.textContent = `Connected (${data.response_time_ms}ms)`;
+                statusSpan.className = 'key-status success';
+            } else {
+                statusSpan.textContent = data.error || 'Connection failed';
+                statusSpan.className = 'key-status error';
+            }
+        } else {
+            statusSpan.textContent = data.detail || 'Test failed';
+            statusSpan.className = 'key-status error';
+        }
+    } catch (error) {
+        statusSpan.textContent = 'Network error';
+        statusSpan.className = 'key-status error';
+    }
+}
+
+async function saveVoyageAIKey() {
+    const keyInput = document.getElementById('voyageai-api-key');
+    const statusSpan = document.getElementById('voyageai-status');
+    const apiKey = keyInput.value.trim();
+
+    if (!apiKey) {
+        statusSpan.textContent = 'Please enter an API key';
+        statusSpan.className = 'key-status error';
+        return;
+    }
+
+    statusSpan.textContent = 'Saving...';
+    statusSpan.className = 'key-status';
+
+    try {
+        const response = await fetch('/api/api-keys/voyageai', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ api_key: apiKey })
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+            statusSpan.textContent = data.already_synced ? 'Already configured' : 'Saved successfully';
+            statusSpan.className = 'key-status success';
+            keyInput.value = '';
+            // Refresh status display
+            setTimeout(() => location.reload(), 1000);
+        } else {
+            statusSpan.textContent = data.detail || 'Save failed';
+            statusSpan.className = 'key-status error';
+        }
+    } catch (error) {
+        statusSpan.textContent = 'Network error';
+        statusSpan.className = 'key-status error';
+    }
+}
+
+async function testVoyageAIKey() {
+    const keyInput = document.getElementById('voyageai-api-key');
+    const statusSpan = document.getElementById('voyageai-status');
+    const apiKey = keyInput.value.trim();
+
+    if (!apiKey) {
+        statusSpan.textContent = 'Please enter an API key to test';
+        statusSpan.className = 'key-status error';
+        return;
+    }
+
+    statusSpan.textContent = 'Testing connectivity...';
+    statusSpan.className = 'key-status';
+
+    try {
+        const response = await fetch('/api/api-keys/voyageai/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ api_key: apiKey })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            if (data.success) {
+                statusSpan.textContent = `Connected (${data.response_time_ms}ms)`;
+                statusSpan.className = 'key-status success';
+            } else {
+                statusSpan.textContent = data.error || 'Connection failed';
+                statusSpan.className = 'key-status error';
+            }
+        } else {
+            statusSpan.textContent = data.detail || 'Test failed';
+            statusSpan.className = 'key-status error';
+        }
+    } catch (error) {
+        statusSpan.textContent = 'Network error';
+        statusSpan.className = 'key-status error';
+    }
+}
+
+async function clearAnthropicKey() {
+    if (!confirm('Are you sure you want to clear the Anthropic API key? This will remove it from the server configuration.')) {
+        return;
+    }
+
+    const statusSpan = document.getElementById('anthropic-status');
+    statusSpan.textContent = 'Clearing...';
+    statusSpan.className = 'key-status';
+
+    try {
+        const response = await fetch('/api/api-keys/anthropic', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include'
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+            statusSpan.textContent = data.message;
+            statusSpan.className = 'key-status success';
+            // Refresh to update display
+            setTimeout(() => location.reload(), 1000);
+        } else {
+            statusSpan.textContent = data.detail || 'Clear failed';
+            statusSpan.className = 'key-status error';
+        }
+    } catch (error) {
+        statusSpan.textContent = 'Network error';
+        statusSpan.className = 'key-status error';
+    }
+}
+
+async function clearVoyageAIKey() {
+    if (!confirm('Are you sure you want to clear the VoyageAI API key? This will remove it from the server configuration.')) {
+        return;
+    }
+
+    const statusSpan = document.getElementById('voyageai-status');
+    statusSpan.textContent = 'Clearing...';
+    statusSpan.className = 'key-status';
+
+    try {
+        const response = await fetch('/api/api-keys/voyageai', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include'
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+            statusSpan.textContent = data.message;
+            statusSpan.className = 'key-status success';
+            // Refresh to update display
+            setTimeout(() => location.reload(), 1000);
+        } else {
+            statusSpan.textContent = data.detail || 'Clear failed';
+            statusSpan.className = 'key-status error';
+        }
+    } catch (error) {
+        statusSpan.textContent = 'Network error';
+        statusSpan.className = 'key-status error';
+    }
+}
+</script>
+
+<style>
+/* Provider API Keys styles (Story #20) */
+.status-badge {
+    display: inline-block;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+.status-configured {
+    background-color: #d4edda;
+    color: #155724;
+}
+.status-not-configured {
+    background-color: #f8d7da;
+    color: #721c24;
+}
+.section-description {
+    margin-bottom: 1rem;
+    color: #666;
+}
+.form-actions-inline {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+}
+.form-actions-inline .small {
+    padding: 0.25rem 0.75rem;
+    font-size: 0.85rem;
+}
+.key-status {
+    font-size: 0.85rem;
+    margin-left: 0.5rem;
+}
+.key-status.success {
+    color: #155724;
+}
+.key-status.error {
+    color: #721c24;
+}
+fieldset {
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+fieldset legend {
+    font-weight: 600;
+    padding: 0 0.5rem;
+}
+</style>

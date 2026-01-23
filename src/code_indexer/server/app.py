@@ -82,6 +82,7 @@ from .routers.indexing import router as indexing_router
 from .routers.cache import router as cache_router
 from .routers.delegation_callbacks import router as delegation_callbacks_router
 from .routers.maintenance_router import router as maintenance_router
+from .routers.api_keys import router as api_keys_router
 from .services.maintenance_service import get_maintenance_state
 from .routers.groups import (
     router as groups_router,
@@ -2363,6 +2364,38 @@ def create_app() -> FastAPI:
             )
             # Set payload_cache to None so handlers know it's unavailable
             app.state.payload_cache = None
+
+        # Startup: Auto-seed API keys if server config is blank (Story #20)
+        logger.info(
+            "Server startup: Checking API key auto-seeding",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.startup.api_key_seeding import (
+                seed_api_keys_on_startup,
+            )
+
+            seeding_result = seed_api_keys_on_startup(config_service)
+
+            if seeding_result["anthropic_seeded"] or seeding_result["voyageai_seeded"]:
+                logger.info(
+                    f"API key auto-seeding completed: "
+                    f"anthropic={seeding_result['anthropic_seeded']}, "
+                    f"voyageai={seeding_result['voyageai_seeded']}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.info(
+                    "API key auto-seeding: No keys needed seeding",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
+        except Exception as e:
+            # Log error but don't block server startup
+            logger.warning(
+                f"Failed to auto-seed API keys on startup: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
 
         # Startup: Initialize MCP Session cleanup (Story #731)
         session_registry = None
@@ -7641,6 +7674,7 @@ def create_app() -> FastAPI:
     app.include_router(audit_router)
     app.include_router(delegation_callbacks_router)
     app.include_router(maintenance_router)
+    app.include_router(api_keys_router)
 
     # Mount Web Admin UI routes and static files
     from fastapi.staticfiles import StaticFiles
