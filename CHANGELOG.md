@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.6.4] - 2026-01-22
+
+### Fixed
+
+- **SCIP Audit database initialization on fresh install** - Fixed RED/error status on dashboard for fresh CIDX server installations (Story #19)
+  - Added eager initialization of scip_audit.db during server startup (before health checks)
+  - Created new startup/database_init.py module with initialize_scip_audit_database() function
+  - Modified app.py to call initialization at startup (lines 2720-2731)
+  - Schema matches SCIPAuditRepository._init_database() exactly
+  - Non-blocking initialization (logs warning on failure, doesn't crash server)
+  - All 7 databases now show HEALTHY status on fresh install without manual intervention
+  - Added 9 comprehensive unit tests with 100% coverage
+  - Manual E2E testing validated fresh install, schema validation, restart persistence, and idempotency
+
+---
+
 ## [8.6.3] - 2026-01-22
 
 ### Fixed

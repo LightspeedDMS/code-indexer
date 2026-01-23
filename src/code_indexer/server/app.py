@@ -2716,6 +2716,23 @@ def create_app() -> FastAPI:
         db_path=oauth_db_path, issuer=None, user_manager=user_manager
     )
 
+    # Story #19: Initialize SCIP audit database eagerly at startup
+    # This ensures scip_audit.db exists before health checks run,
+    # preventing RED status on fresh installs.
+    from .startup.database_init import initialize_scip_audit_database
+
+    scip_audit_path = initialize_scip_audit_database(server_data_dir)
+    if scip_audit_path:
+        logger.info(
+            f"SCIP audit database initialized: {scip_audit_path}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+    else:
+        logger.warning(
+            "SCIP audit database initialization failed (non-blocking)",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
     # Load server configuration for resource limits and timeouts
     from .utils.config_manager import ServerConfigManager
 
