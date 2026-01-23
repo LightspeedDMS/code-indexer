@@ -29,10 +29,10 @@
             <h3>Create Golden Repositories</h3>
             <button type="button" class="close-btn" aria-label="Close" onclick="closeBatchModal()">&times;</button>
         </header>
-        <p>The following repositories will be added as golden repos:</p>
-        <ul id="batch-repo-list" class="batch-repo-list">
-            <!-- Populated dynamically -->
-        </ul>
+        <p>Select the branch to use for each repository:</p>
+        <div id="batch-repo-list" class="batch-repo-list">
+            <!-- Populated dynamically with branch dropdowns -->
+        </div>
         <footer>
             <button onclick="closeBatchModal()" class="outline">Cancel</button>
             <button onclick="executeBatchCreate()" class="primary" id="execute-batch-btn">
@@ -158,7 +158,7 @@ function clearSelection() {
     updateSelectionUI();
 }
 
-function showCreateDialog() {
+async function showCreateDialog() {
     var modal = document.getElementById('batch-create-modal');
     var list = document.getElementById('batch-repo-list');
     var countSpan = document.getElementById('batch-count');
@@ -174,15 +174,147 @@ function showCreateDialog() {
         return;
     }
 
+    // Clear and show loading state
     list.innerHTML = '';
+    countSpan.textContent = selectedRepos.size;
+
+    // Build initial list with loading spinners
     selectedRepos.forEach(function(data, url) {
-        var li = document.createElement('li');
-        li.textContent = data.platform.toUpperCase() + ': ' + data.name + ' (' + data.branch + ')';
-        list.appendChild(li);
+        var item = document.createElement('div');
+        item.className = 'batch-repo-item';
+        item.dataset.url = url;
+        item.innerHTML =
+            '<div class="repo-info">' +
+                '<span class="repo-platform">' + data.platform.toUpperCase() + '</span>' +
+                '<span class="repo-name">' + data.name + '</span>' +
+            '</div>' +
+            '<div class="branch-select-container">' +
+                '<span class="branch-loading">Loading branches...</span>' +
+            '</div>';
+        list.appendChild(item);
     });
 
-    countSpan.textContent = selectedRepos.size;
     modal.showModal();
+
+    // Fetch branches for all selected repos
+    await fetchBranchesForSelectedRepos();
+}
+
+async function fetchBranchesForSelectedRepos() {
+    // Build request with all selected repos
+    var repos = [];
+    selectedRepos.forEach(function(data, url) {
+        repos.push({
+            clone_url: url,
+            platform: data.platform
+        });
+    });
+
+    if (repos.length === 0) return;
+
+    try {
+        var response = await fetch('/admin/api/discovery/branches', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ repos: repos })
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to fetch branches: ' + response.status);
+        }
+
+        var results = await response.json();
+
+        // Update each repo item with branches or error
+        selectedRepos.forEach(function(data, url) {
+            var result = results[url];
+            updateRepoBranchDropdown(url, data, result);
+        });
+
+    } catch (error) {
+        console.error('Error fetching branches:', error);
+        // Show error for all repos
+        selectedRepos.forEach(function(data, url) {
+            updateRepoBranchDropdown(url, data, {
+                branches: [],
+                default_branch: null,
+                error: error.message
+            });
+        });
+    }
+}
+
+function updateRepoBranchDropdown(url, repoData, branchResult) {
+    var item = document.querySelector('.batch-repo-item[data-url="' + CSS.escape(url) + '"]');
+    if (!item) return;
+
+    var container = item.querySelector('.branch-select-container');
+    if (!container) return;
+
+    if (branchResult.error) {
+        // Show error with fallback to default branch
+        container.innerHTML =
+            '<div class="branch-error">' +
+                '<span class="error-msg" title="' + branchResult.error + '">Error loading branches</span>' +
+                '<span class="branch-fallback">Using: ' + repoData.branch + '</span>' +
+            '</div>';
+    } else if (branchResult.branches.length === 0) {
+        // No branches found, use default
+        container.innerHTML =
+            '<span class="branch-fallback">Branch: ' + repoData.branch + '</span>';
+    } else {
+        // Show dropdown with branches
+        var select = document.createElement('select');
+        select.className = 'branch-select';
+        select.dataset.url = url;
+        select.onchange = function() { onBranchChange(url, this.value); };
+
+        // Determine which branch to select by default
+        var defaultBranch = branchResult.default_branch || repoData.branch;
+
+        branchResult.branches.forEach(function(branch) {
+            var option = document.createElement('option');
+            option.value = branch;
+            option.textContent = branch;
+            if (branch === defaultBranch) {
+                option.selected = true;
+            }
+            select.appendChild(option);
+        });
+
+        // If default branch not in list, add it at top
+        if (defaultBranch && !branchResult.branches.includes(defaultBranch)) {
+            var option = document.createElement('option');
+            option.value = defaultBranch;
+            option.textContent = defaultBranch + ' (default)';
+            option.selected = true;
+            select.insertBefore(option, select.firstChild);
+        }
+
+        container.innerHTML = '';
+        container.appendChild(select);
+
+        // Update selectedRepos with the selected branch
+        var selectedBranch = select.value;
+        if (selectedBranch !== repoData.branch) {
+            selectedRepos.set(url, {
+                ...repoData,
+                branch: selectedBranch
+            });
+        }
+    }
+}
+
+function onBranchChange(url, newBranch) {
+    var data = selectedRepos.get(url);
+    if (data) {
+        selectedRepos.set(url, {
+            ...data,
+            branch: newBranch
+        });
+    }
 }
 
 function closeBatchModal() {
@@ -331,15 +463,87 @@ function loadGitHubPage(page, pageSize) {
 }
 
 .batch-repo-list {
-    max-height: 300px;
+    max-height: 400px;
     overflow-y: auto;
     margin: 1rem 0;
-    padding-left: 1.5rem;
+    padding: 0;
 }
 
-.batch-repo-list li {
-    padding: 0.25rem 0;
+.batch-repo-item {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    padding: 0.75rem;
+    border-bottom: 1px solid var(--muted-border-color, #e0e0e0);
+    gap: 0.5rem;
+}
+
+.batch-repo-item:last-child {
+    border-bottom: none;
+}
+
+.repo-info {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+}
+
+.repo-platform {
+    font-size: 0.75rem;
+    color: var(--muted-color, #666);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.repo-name {
+    font-weight: 500;
+    word-break: break-all;
+    line-height: 1.3;
+}
+
+.branch-select-container {
+    width: 100%;
+}
+
+.branch-loading {
+    color: var(--muted-color, #666);
+    font-size: 0.85rem;
+    font-style: italic;
+}
+
+.branch-select {
+    width: 100%;
+    padding: 0.4rem 0.6rem;
     font-size: 0.9rem;
+    border: 1px solid var(--muted-border-color, #ccc);
+    border-radius: 4px;
+    background-color: var(--background-color, #fff);
+    color: var(--color, #1a1a1a);
+    cursor: pointer;
+}
+
+.branch-select:focus {
+    outline: none;
+    border-color: var(--primary, #1976d2);
+    box-shadow: 0 0 0 2px var(--primary-focus, rgba(25, 118, 210, 0.2));
+}
+
+.branch-error {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.25rem;
+}
+
+.branch-error .error-msg {
+    color: var(--del-color, #dc3545);
+    font-size: 0.8rem;
+    cursor: help;
+}
+
+.branch-fallback {
+    font-size: 0.85rem;
+    color: var(--muted-color, #666);
 }
 
 #batch-create-modal footer {

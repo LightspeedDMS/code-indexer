@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.6.6] - 2026-01-23
+
+### Added
+
+- **Auto-Discovery Branch Selection for Private Repositories** (Story #21)
+  - SSH URL to HTTPS conversion with embedded credentials for git ls-remote
+  - GitLab uses `oauth2:<token>` format, GitHub uses `<token>` format
+  - Automatic credential retrieval from CITokenManager based on platform
+  - Vertical layout for branch selection dialog (repo name on top, dropdown below)
+
+### Fixed
+
+- **Security: Credential leakage prevention** - Removed `exc_info=True` from error logging to prevent credentials appearing in stack traces
+- **Security: HTTP credential rejection** - Credentials not sent over unencrypted HTTP connections
+- **Platform detection accuracy** - Uses hostname extraction instead of substring matching to prevent false positives
+- **Branch dropdown readability** - Fixed light gray text color on dropdown selected value
+
+---
+
 ## [8.6.5] - 2026-01-23
 
 ### Fixed

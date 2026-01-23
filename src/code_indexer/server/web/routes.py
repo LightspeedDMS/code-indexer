@@ -5183,6 +5183,125 @@ async def github_repos_partial(
         )
 
 
+# =============================================================================
+# Discovery Branches API Endpoint (Story #21)
+# =============================================================================
+
+
+@web_router.post("/api/discovery/branches")
+async def fetch_discovery_branches(request: Request):
+    """
+    Fetch branches for remote repositories during auto-discovery.
+
+    This endpoint fetches available branches from remote git repositories
+    and filters out issue-tracker pattern branches (e.g., SCM-1234, PROJ-567).
+
+    Request body:
+        {
+            "repos": [
+                {"clone_url": "https://github.com/org/repo.git", "platform": "github"},
+                {"clone_url": "https://gitlab.com/org/repo.git", "platform": "gitlab"}
+            ]
+        }
+
+    Response:
+        {
+            "https://github.com/org/repo.git": {
+                "branches": ["main", "develop", "feature/login"],
+                "default_branch": "main",
+                "error": null
+            },
+            "https://gitlab.com/org/repo.git": {
+                "branches": [],
+                "default_branch": null,
+                "error": "Repository not found"
+            }
+        }
+    """
+    # Require admin authentication
+    session = _require_admin_session(request)
+    if not session:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Authentication required"},
+        )
+
+    try:
+        # Parse request body
+        body = await request.json()
+        repos = body.get("repos", [])
+
+        if not isinstance(repos, list):
+            return JSONResponse(
+                status_code=422,
+                content={"error": "repos must be a list"},
+            )
+
+        # Import and use RemoteBranchService
+        from ..services.remote_branch_service import RemoteBranchService
+
+        service = RemoteBranchService()
+
+        # Get token manager to retrieve stored credentials
+        token_manager = _get_token_manager()
+
+        # Build requests and fetch branches
+        results = {}
+        for repo in repos:
+            clone_url = repo.get("clone_url")
+            platform = repo.get("platform", "github")
+
+            if not clone_url:
+                results[str(repo)] = {
+                    "branches": [],
+                    "default_branch": None,
+                    "error": "Missing clone_url",
+                }
+                continue
+
+            # Retrieve credentials based on platform
+            credentials = None
+            if platform == "gitlab":
+                token_data = token_manager.get_token("gitlab")
+                if token_data:
+                    credentials = token_data.token
+            elif platform == "github":
+                token_data = token_manager.get_token("github")
+                if token_data:
+                    credentials = token_data.token
+
+            # Fetch branches for this repo with credentials
+            result = service.fetch_remote_branches(
+                clone_url=clone_url,
+                platform=platform,
+                credentials=credentials,
+            )
+
+            results[clone_url] = {
+                "branches": result.branches,
+                "default_branch": result.default_branch,
+                "error": result.error,
+            }
+
+        return JSONResponse(content=results)
+
+    except json.JSONDecodeError:
+        return JSONResponse(
+            status_code=422,
+            content={"error": "Invalid JSON in request body"},
+        )
+    except Exception as e:
+        logger.error(
+            f"Error fetching discovery branches: {e}",
+            exc_info=True,
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Internal server error: {str(e)}"},
+        )
+
+
 @web_router.get("/config", response_class=HTMLResponse)
 async def config_page(request: Request):
     """Configuration management page - view and edit CIDX configuration."""
