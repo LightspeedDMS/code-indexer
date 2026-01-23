@@ -600,6 +600,54 @@ Contains sensitive deployment information for test environments:
 
 Consult this file when deploying to test environments.
 
+### Running Local CIDX Server
+
+**CORRECT COMMAND** (from project root directory):
+
+```bash
+# Start server (runs on port 8000)
+PYTHONPATH=./src python3 -m uvicorn code_indexer.server.app:app --host 0.0.0.0 --port 8000
+
+# Run in background
+PYTHONPATH=./src python3 -m uvicorn code_indexer.server.app:app --host 0.0.0.0 --port 8000 &
+```
+
+**WHY THIS COMMAND**:
+- `PYTHONPATH=./src` - Required because code_indexer is not installed as a package in development
+- `python3 -m uvicorn` - Uses the Python environment that has fastapi/uvicorn installed (system uvicorn may use different Python)
+- `code_indexer.server.app:app` - The FastAPI app object in the server module
+- `--host 0.0.0.0` - Listen on all interfaces (needed for external access)
+- `--port 8000` - Standard port for local development
+
+**VERIFICATION**:
+```bash
+# Check if server is running
+curl -s http://localhost:8000/docs | head -5  # Should return Swagger HTML
+
+# Test MCP endpoint (public, no auth)
+curl -s -X POST http://localhost:8000/mcp-public \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}'
+# Should return: {"jsonrpc": "2.0", "result": {"serverInfo": {"name": "Neo", ...}}}
+```
+
+**STOPPING THE SERVER**:
+```bash
+# Find and kill uvicorn process
+pkill -f "uvicorn code_indexer.server.app"
+
+# Or find PID and kill
+ps aux | grep uvicorn | grep -v grep
+kill <PID>
+```
+
+**COMMON ERRORS**:
+- `ModuleNotFoundError: No module named 'code_indexer'` - Missing `PYTHONPATH=./src`
+- `ModuleNotFoundError: No module named 'fastapi'` - Using wrong uvicorn; use `python3 -m uvicorn`
+- Server exits immediately with no output - Check if port 8000 is already in use
+
+**RECORDED**: 2026-01-23 - After repeated trial and error finding correct startup command.
+
 ### Claude CLI Integration
 
 **NO FALLBACKS** - Research and propose solutions, no cheating

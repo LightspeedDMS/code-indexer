@@ -113,6 +113,8 @@ class ConfigService:
                 "workers": config.workers,
                 "log_level": config.log_level,
                 "jwt_expiration_minutes": config.jwt_expiration_minutes,
+                # Story #22 - Configurable service display name
+                "service_display_name": config.service_display_name,
             },
             # Cache settings
             "cache": {
@@ -398,6 +400,9 @@ class ConfigService:
             config.log_level = str(value).upper()
         elif key == "jwt_expiration_minutes":
             config.jwt_expiration_minutes = int(value)
+        # Story #22 - Configurable service display name
+        elif key == "service_display_name":
+            config.service_display_name = str(value)
         else:
             raise ValueError(f"Unknown server setting: {key}")
 

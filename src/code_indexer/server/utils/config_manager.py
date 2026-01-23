@@ -461,6 +461,8 @@ class ServerConfig:
     workers: int = 4
     jwt_expiration_minutes: int = 10
     log_level: str = "INFO"
+    # Story #22 - Configurable service display name for MCP protocol
+    service_display_name: str = "Neo"
     password_security: Optional[PasswordSecurityConfig] = None
     resource_config: Optional[ServerResourceConfig] = None
     cache_config: Optional[CacheConfig] = None

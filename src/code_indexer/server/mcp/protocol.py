@@ -16,6 +16,7 @@ from code_indexer.server.auth.dependencies import (
 )
 from code_indexer.server.auth import dependencies as auth_deps
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.services.config_service import get_config_service
 from sse_starlette.sse import EventSourceResponse
 import asyncio
 import uuid
@@ -248,10 +249,13 @@ async def process_jsonrpc_request(
             # - Enhanced OAuth 2.0 integration with resource parameter (RFC 8707)
             # - Server-initiated user input via elicitation/create requests
             # Current implementation status: Updated version only, features pending audit
+            # Story #22: Use configured service_display_name, fallback to "Neo"
+            config = get_config_service().get_config()
+            display_name = config.service_display_name or "Neo"
             result = {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "CIDX", "version": __version__},
+                "serverInfo": {"name": display_name, "version": __version__},
             }
             return create_jsonrpc_response(result, request_id)
         elif method == "notifications/initialized":
@@ -543,11 +547,14 @@ async def process_public_jsonrpc_request(
 
     try:
         if method == "initialize":
+            # Story #22: Use configured service_display_name, fallback to "Neo"
+            config = get_config_service().get_config()
+            display_name = config.service_display_name or "Neo"
             return create_jsonrpc_response(
                 {
                     "protocolVersion": "2025-06-18",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "CIDX", "version": __version__},
+                    "serverInfo": {"name": display_name, "version": __version__},
                 },
                 request_id,
             )

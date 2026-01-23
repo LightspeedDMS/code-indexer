@@ -37,6 +37,13 @@
                         <td class="config-value">{{ config.server.jwt_expiration_minutes }}</td>
                         <td class="config-note"></td>
                     </tr>
+                    <tr>
+                        <td class="config-label">Service Display Name</td>
+                        <td class="config-value">{{ config.server.service_display_name }}</td>
+                        <td class="config-note">
+                            <small>Name shown in MCP protocol (default: Neo)</small>
+                        </td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -77,6 +84,11 @@
                 <label for="server-jwt-expiration">
                     JWT Expiration (minutes)
                     <input type="number" id="server-jwt-expiration" name="jwt_expiration_minutes" value="{{ config.server.jwt_expiration_minutes }}" min="1">
+                </label>
+                <label for="server-display-name">
+                    Service Display Name
+                    <input type="text" id="server-display-name" name="service_display_name" value="{{ config.server.service_display_name }}" placeholder="Neo">
+                    <small>Name shown in MCP protocol (default: Neo)</small>
                 </label>
             </div>
             <div class="form-actions">

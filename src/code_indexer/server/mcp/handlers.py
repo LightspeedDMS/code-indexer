@@ -23,6 +23,7 @@ from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.auth import dependencies
 from code_indexer.server.utils.registry_factory import get_server_global_registry
 from code_indexer.server import app as app_module
+from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.ssh_key_manager import (
     SSHKeyManager,
     KeyNotFoundError,
@@ -5181,9 +5182,15 @@ async def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
+        # Story #22: Add server identity with a.k.a. line
+        config = get_config_service().get_config()
+        display_name = config.service_display_name or "Neo"
+        server_identity = f"This server is CIDX (a.k.a. {display_name})."
+
         return _mcp_response(
             {
                 "success": True,
+                "server_identity": server_identity,
                 "total_tools": len(tools_summary),
                 "category_filter": category_filter,
                 "tools": tools_summary,

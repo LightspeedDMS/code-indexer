@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.6.7] - 2026-01-23
+
+### Added
+
+- **Configurable Service Display Name** (Story #22)
+  - New `service_display_name` configuration field with default value "Neo"
+  - MCP protocol `serverInfo.name` now uses configured display name
+  - Quick reference tool shows "This server is CIDX (a.k.a. {name})." identity line
+  - Web UI configuration screen includes Service Display Name input field
+  - Empty string fallback to default "Neo" for robustness
+  - 23 new unit tests covering config, protocol, and handler changes
+
+### Changed
+
+- **CLAUDE.md documentation** - Added "Running Local CIDX Server" section with correct startup command
+
+---
+
 ## [8.6.6] - 2026-01-23
 
 ### Added

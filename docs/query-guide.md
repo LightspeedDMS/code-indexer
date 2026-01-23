@@ -736,7 +736,7 @@ cidx query "anything" --time-range-all --quiet
 
 **Status**: FACT-CHECKED (2025-01-20)
 
-**Verification Scope**: All technical claims, parameter specifications, performance metrics, and code examples validated against CIDX implementation v8.6.6.
+**Verification Scope**: All technical claims, parameter specifications, performance metrics, and code examples validated against CIDX implementation v8.6.7.
 
 ### Corrections Made
 
@@ -880,7 +880,7 @@ cidx query "anything" --time-range-all --quiet
 
 **Fact-checker**: Claude Opus 4.5 (fact-checking agent)
 **Verification Date**: 2025-01-20
-**Version Reference**: v8.6.6
+**Version Reference**: v8.6.7
 
 ---
 
