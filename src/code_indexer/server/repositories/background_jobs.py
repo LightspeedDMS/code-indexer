@@ -18,7 +18,7 @@ from typing import Dict, Any, Optional, Callable, TYPE_CHECKING, List
 from dataclasses import dataclass, asdict
 
 if TYPE_CHECKING:
-    from code_indexer.server.utils.config_manager import ServerResourceConfig
+    from code_indexer.server.utils.config_manager import ServerResourceConfig, BackgroundJobsConfig
     from code_indexer.server.storage.sqlite_backends import BackgroundJobsSqliteBackend
 
 
@@ -75,6 +75,7 @@ class BackgroundJobManager:
         resource_config: Optional["ServerResourceConfig"] = None,
         use_sqlite: bool = False,
         db_path: Optional[str] = None,
+        background_jobs_config: Optional["BackgroundJobsConfig"] = None,
     ):
         """Initialize enhanced background job manager.
 
@@ -83,12 +84,15 @@ class BackgroundJobManager:
             resource_config: Resource configuration (limits, timeouts)
             use_sqlite: Whether to use SQLite backend instead of JSON file
             db_path: Path to SQLite database file (required if use_sqlite=True)
+            background_jobs_config: Background jobs configuration (concurrency limits)
         """
         self.jobs: Dict[str, BackgroundJob] = {}
         self._lock = threading.Lock()
         self._executor = None
         self._running_jobs: Dict[str, threading.Thread] = {}
         self._job_queue: queue.PriorityQueue = queue.PriorityQueue()
+        # Story #26: Queue for pending jobs waiting for a slot
+        self._pending_job_queue: queue.Queue = queue.Queue()
 
         # Persistence settings
         self.storage_path = storage_path
@@ -112,10 +116,27 @@ class BackgroundJobManager:
             resource_config = ServerResourceConfig()
         self.resource_config = resource_config
 
+        # Story #26: Background jobs configuration (concurrency limits)
+        if background_jobs_config is None:
+            from code_indexer.server.utils.config_manager import BackgroundJobsConfig
+
+            background_jobs_config = BackgroundJobsConfig()
+        self._background_jobs_config = background_jobs_config
+
+        # Story #26: Semaphore for limiting concurrent job execution
+        self._job_semaphore = threading.Semaphore(
+            self._background_jobs_config.max_concurrent_background_jobs
+        )
+
         # Load persisted jobs
         self._load_jobs()
 
         # Background job manager initialized silently
+
+    @property
+    def max_concurrent_jobs(self) -> int:
+        """Get the maximum number of concurrent background jobs (Story #26)."""
+        return self._background_jobs_config.max_concurrent_background_jobs
 
     def submit_job(
         self,
@@ -360,7 +381,10 @@ class BackgroundJobManager:
         self, job_id: str, func: Callable[[], Dict[str, Any]], args: tuple, kwargs: dict
     ) -> None:
         """
-        Execute a background job with cancellation support.
+        Execute a background job with cancellation support and concurrency limiting.
+
+        Story #26: Jobs wait for a semaphore slot before transitioning to RUNNING.
+        Jobs stay in PENDING state until a slot is available.
 
         Args:
             job_id: Job ID
@@ -368,22 +392,28 @@ class BackgroundJobManager:
             args: Function arguments
             kwargs: Function keyword arguments
         """
-        with self._lock:
-            job = self.jobs[job_id]
-            if job.cancelled:
-                job.status = JobStatus.CANCELLED
-                job.completed_at = datetime.now(timezone.utc)
-                self._persist_jobs()
-                return
-
-            job.status = JobStatus.RUNNING
-            job.started_at = datetime.now(timezone.utc)
-            job.progress = 10
-            self._persist_jobs()
-
-        logging.info(f"Starting background job {job_id}")
+        # Story #26: Wait for a slot in the semaphore (blocks if limit reached)
+        # Job remains in PENDING state while waiting
+        logging.debug(f"Job {job_id} waiting for execution slot (current limit: {self.max_concurrent_jobs})")
+        self._job_semaphore.acquire()
 
         try:
+            # Now we have a slot - check if job was cancelled while waiting
+            with self._lock:
+                job = self.jobs[job_id]
+                if job.cancelled:
+                    job.status = JobStatus.CANCELLED
+                    job.completed_at = datetime.now(timezone.utc)
+                    self._persist_jobs()
+                    return
+
+                job.status = JobStatus.RUNNING
+                job.started_at = datetime.now(timezone.utc)
+                job.progress = 10
+                self._persist_jobs()
+
+            logging.info(f"Starting background job {job_id}")
+
             # Create progress callback function
             def progress_callback(progress: int):
                 with self._lock:
@@ -457,6 +487,8 @@ class BackgroundJobManager:
                 self._persist_jobs()
 
         finally:
+            # Story #26: Release semaphore slot to allow another job to run
+            self._job_semaphore.release()
             # Clean up running job reference
             with self._lock:
                 self._running_jobs.pop(job_id, None)
@@ -584,6 +616,51 @@ class BackgroundJobManager:
             return sum(
                 1 for job in self.jobs.values() if job.status == JobStatus.FAILED
             )
+
+    def get_running_job_count(self) -> int:
+        """
+        Get count of currently running jobs (Story #26).
+
+        This is an alias for get_active_job_count for consistency with
+        the concurrency limiting feature naming.
+
+        Returns:
+            Number of running jobs
+        """
+        return self.get_active_job_count()
+
+    def get_queued_job_count(self) -> int:
+        """
+        Get count of jobs waiting in queue for a slot (Story #26).
+
+        This is an alias for get_pending_job_count for consistency with
+        the concurrency limiting feature naming.
+
+        Returns:
+            Number of pending/queued jobs
+        """
+        return self.get_pending_job_count()
+
+    def get_job_queue_metrics(self) -> Dict[str, int]:
+        """
+        Get combined job queue metrics (Story #26).
+
+        Returns:
+            Dictionary with running_count, queued_count, and max_concurrent
+        """
+        with self._lock:
+            running_count = sum(
+                1 for job in self.jobs.values() if job.status == JobStatus.RUNNING
+            )
+            queued_count = sum(
+                1 for job in self.jobs.values() if job.status == JobStatus.PENDING
+            )
+
+        return {
+            "running_count": running_count,
+            "queued_count": queued_count,
+            "max_concurrent": self.max_concurrent_jobs,
+        }
 
     def shutdown(self) -> None:
         """

@@ -3,6 +3,18 @@ name: remove_repo_from_group
 category: admin
 required_permission: manage_users
 tl_dr: Revoke a group's access to a single repository.
+inputSchema:
+  type: object
+  properties:
+    group_id:
+      type: string
+      description: The unique identifier of the group
+    repo_name:
+      type: string
+      description: The repository name to revoke access from
+  required:
+  - group_id
+  - repo_name
 ---
 
 Revoke a group's access to a single repository. Users in the group will no longer be able to query this repository.

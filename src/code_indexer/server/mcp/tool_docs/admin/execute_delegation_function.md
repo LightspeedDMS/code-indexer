@@ -3,6 +3,38 @@ name: execute_delegation_function
 category: admin
 required_permission: query_repos
 tl_dr: Execute a delegation function by delegating to Claude Server.
+inputSchema:
+  type: object
+  properties:
+    function_name:
+      type: string
+      description: Name of the delegation function to execute
+    parameters:
+      type: object
+      description: Parameter values for the function template
+      additionalProperties: true
+    prompt:
+      type: string
+      description: User's additional prompt/query to include
+  required:
+  - function_name
+  - parameters
+  - prompt
+  additionalProperties: false
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: True if job was created and started
+    job_id:
+      type: string
+      description: ID of the created job for async polling
+    error:
+      type: string
+      description: Error message if operation failed
+  required:
+  - success
 ---
 
 Execute a delegation function by delegating to Claude Server. Creates an async job that can be polled for results. 

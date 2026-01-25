@@ -28,6 +28,87 @@ from ..services.config_service import ConfigService
 logger = logging.getLogger(__name__)
 
 
+def trigger_catchup_on_api_key_save(api_key: Optional[str]) -> bool:
+    """
+    Trigger immediate catch-up processing when API key is saved.
+
+    Updates the global ClaudeCliManager with the new API key and triggers
+    catch-up processing in a background thread to process any repos that
+    were registered before the API key was configured.
+
+    Args:
+        api_key: The new API key (must be non-empty to trigger catch-up)
+
+    Returns:
+        True if catch-up was triggered, False if skipped (no manager or invalid key)
+
+    Story #23 AC3: Immediate Catch-Up Trigger on API Key Save
+    """
+    import threading
+    from ..services.claude_cli_manager import get_claude_cli_manager
+    from ..middleware.correlation import get_correlation_id
+
+    # Validate key
+    if not api_key:
+        logger.debug("Skipping catch-up trigger: no API key provided")
+        return False
+
+    # Get global manager
+    manager = get_claude_cli_manager()
+    if manager is None:
+        logger.warning(
+            "Cannot trigger catch-up: ClaudeCliManager not initialized",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return False
+
+    # Update the manager's API key
+    manager.update_api_key(api_key)
+
+    # Trigger catch-up in background thread
+    def run_catchup():
+        try:
+            logger.info(
+                "Starting immediate catch-up processing after API key save",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            result = manager.process_all_fallbacks()
+            if result.processed:
+                logger.info(
+                    f"Catch-up completed: processed {len(result.processed)} repos",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            elif result.error:
+                logger.warning(
+                    f"Catch-up partially completed: {result.error}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.info(
+                    "Catch-up completed: no repos needed processing",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+        except Exception as e:
+            logger.error(
+                f"Catch-up processing failed: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+    catchup_thread = threading.Thread(
+        target=run_catchup,
+        name="ImmediateCatchupProcessor",
+        daemon=True,
+    )
+    catchup_thread.start()
+
+    logger.info(
+        "API key updated, immediate catch-up triggered in background",
+        extra={"correlation_id": get_correlation_id()},
+    )
+    return True
+
+
 # Request/Response Models
 class SaveApiKeyRequest(BaseModel):
     """Request to save an API key."""
@@ -168,20 +249,12 @@ async def save_anthropic_key(
     config.claude_integration_config.anthropic_api_key = request.api_key
     config_service.config_manager.save_config(config)
 
-    # Trigger meta-description reconciliation (Story #20)
-    # Set flag to trigger catch-up processing when CLI is next used
+    # Trigger immediate catch-up processing (Story #23, AC3)
+    # This replaces the old flag-based deferred reconciliation (Story #20)
     try:
-        from ..services.claude_cli_manager import get_claude_cli_manager
-
-        cli_manager = get_claude_cli_manager()
-        if cli_manager:
-            # Mark that CLI was unavailable so next success triggers catch-up
-            cli_manager._cli_was_unavailable = True
-            logger.info(
-                "Marked Claude CLI for meta-description reconciliation on next use"
-            )
+        trigger_catchup_on_api_key_save(request.api_key)
     except Exception as e:
-        logger.debug(f"Could not trigger meta-description reconciliation: {e}")
+        logger.debug(f"Could not trigger immediate catch-up: {e}")
 
     return SaveApiKeyResponse(
         success=True,

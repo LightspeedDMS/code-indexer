@@ -64,12 +64,17 @@ def get_multi_search_service() -> MultiSearchService:
     """
     Get or create MultiSearchService instance.
 
+    Uses ConfigService for configuration (Story #25) instead of environment variables.
+
     Returns:
         MultiSearchService instance
     """
     global _multi_search_service
     if _multi_search_service is None:
-        config = MultiSearchConfig.from_env()
+        from ..services.config_service import get_config_service
+
+        config_service = get_config_service()
+        config = MultiSearchConfig.from_config(config_service)
         _multi_search_service = MultiSearchService(config)
     return _multi_search_service
 

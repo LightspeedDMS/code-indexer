@@ -2,8 +2,61 @@
 name: list_repositories
 category: repos
 required_permission: query_repos
-tl_dr: List repositories YOU have activated (user-specific workspaces), distinct from
-  global shared repositories.
+tl_dr: List repositories YOU have activated (user-specific workspaces), distinct from global shared repositories.
+inputSchema:
+  type: object
+  properties: {}
+  required: []
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: Whether operation succeeded
+    repositories:
+      type: array
+      description: Combined list of activated and global repositories
+      items:
+        type: object
+        description: Normalized repository information (activated or global)
+        properties:
+          user_alias:
+            type: string
+            description: User-visible repository alias (queryable name). For global repos, ends with '-global' suffix
+          golden_repo_alias:
+            type: string
+            description: Base golden repository name (without -global suffix)
+          current_branch:
+            type:
+            - string
+            - 'null'
+            description: Active branch for activated repos, null for global repos (read-only snapshots)
+          is_global:
+            type: boolean
+            description: True if globally accessible shared repo, false if user-activated repo
+          repo_url:
+            type:
+            - string
+            - 'null'
+            description: Repository URL (for global repos)
+          last_refresh:
+            type:
+            - string
+            - 'null'
+            description: ISO 8601 timestamp of last index refresh
+          index_path:
+            type: string
+            description: Filesystem path to repository index
+          created_at:
+            type:
+            - string
+            - 'null'
+            description: ISO 8601 timestamp when repository was added
+    error:
+      type: string
+      description: Error message if failed
+  required:
+  - success
 ---
 
 TL;DR: List repositories YOU have activated (user-specific workspaces), distinct from global shared repositories.

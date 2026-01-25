@@ -104,6 +104,10 @@ class ConfigService:
         assert config.auth_config is not None
         # Story #15 AC3: Assert ClaudeIntegrationConfig is not None
         assert config.claude_integration_config is not None
+        # Story #25: Assert MultiSearchLimitsConfig is not None
+        assert config.multi_search_limits_config is not None
+        # Story #26: Assert BackgroundJobsConfig is not None
+        assert config.background_jobs_config is not None
 
         settings = {
             # Server settings
@@ -281,6 +285,29 @@ class ConfigService:
             "auth": {
                 "oauth_extension_threshold_hours": config.auth_config.oauth_extension_threshold_hours,
             },
+            # Story #25/29 - Multi-search limits configuration (includes omni settings)
+            "multi_search": {
+                "multi_search_max_workers": config.multi_search_limits_config.multi_search_max_workers,
+                "multi_search_timeout_seconds": config.multi_search_limits_config.multi_search_timeout_seconds,
+                "scip_multi_max_workers": config.multi_search_limits_config.scip_multi_max_workers,
+                "scip_multi_timeout_seconds": config.multi_search_limits_config.scip_multi_timeout_seconds,
+                # Story #29: Omni settings merged from OmniSearchConfig
+                "omni_max_workers": config.multi_search_limits_config.omni_max_workers,
+                "omni_per_repo_timeout_seconds": config.multi_search_limits_config.omni_per_repo_timeout_seconds,
+                "omni_cache_max_entries": config.multi_search_limits_config.omni_cache_max_entries,
+                "omni_cache_ttl_seconds": config.multi_search_limits_config.omni_cache_ttl_seconds,
+                "omni_default_limit": config.multi_search_limits_config.omni_default_limit,
+                "omni_max_limit": config.multi_search_limits_config.omni_max_limit,
+                "omni_default_aggregation_mode": config.multi_search_limits_config.omni_default_aggregation_mode,
+                "omni_max_results_per_repo": config.multi_search_limits_config.omni_max_results_per_repo,
+                "omni_max_total_results_before_aggregation": config.multi_search_limits_config.omni_max_total_results_before_aggregation,
+                "omni_pattern_metacharacters": config.multi_search_limits_config.omni_pattern_metacharacters,
+            },
+            # Story #26 - Background jobs configuration, Story #27 - SubprocessExecutor max_workers
+            "background_jobs": {
+                "max_concurrent_background_jobs": config.background_jobs_config.max_concurrent_background_jobs,
+                "subprocess_max_workers": config.background_jobs_config.subprocess_max_workers,
+            },
         }
 
         return settings
@@ -362,6 +389,12 @@ class ConfigService:
         # Story #3 - Phase 2: P3 categories (AC36)
         elif category == "auth":
             self._update_auth_setting(config, key, value)
+        # Story #25/29 - Multi-search limits (includes omni settings)
+        elif category == "multi_search":
+            self._update_multi_search_setting(config, key, value)
+        # Story #26 - Background jobs
+        elif category == "background_jobs":
+            self._update_background_jobs_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
 
@@ -778,6 +811,58 @@ class ConfigService:
             auth.oauth_extension_threshold_hours = int(value)
         else:
             raise ValueError(f"Unknown auth setting: {key}")
+
+    def _update_multi_search_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a multi_search setting (Story #25, Story #29)."""
+        multi_search = config.multi_search_limits_config
+        assert multi_search is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "multi_search_max_workers":
+            multi_search.multi_search_max_workers = int(value)
+        elif key == "multi_search_timeout_seconds":
+            multi_search.multi_search_timeout_seconds = int(value)
+        elif key == "scip_multi_max_workers":
+            multi_search.scip_multi_max_workers = int(value)
+        elif key == "scip_multi_timeout_seconds":
+            multi_search.scip_multi_timeout_seconds = int(value)
+        # Story #29: Omni settings merged from OmniSearchConfig
+        elif key == "omni_max_workers":
+            multi_search.omni_max_workers = int(value)
+        elif key == "omni_per_repo_timeout_seconds":
+            multi_search.omni_per_repo_timeout_seconds = int(value)
+        elif key == "omni_cache_max_entries":
+            multi_search.omni_cache_max_entries = int(value)
+        elif key == "omni_cache_ttl_seconds":
+            multi_search.omni_cache_ttl_seconds = int(value)
+        elif key == "omni_default_limit":
+            multi_search.omni_default_limit = int(value)
+        elif key == "omni_max_limit":
+            multi_search.omni_max_limit = int(value)
+        elif key == "omni_default_aggregation_mode":
+            multi_search.omni_default_aggregation_mode = str(value)
+        elif key == "omni_max_results_per_repo":
+            multi_search.omni_max_results_per_repo = int(value)
+        elif key == "omni_max_total_results_before_aggregation":
+            multi_search.omni_max_total_results_before_aggregation = int(value)
+        elif key == "omni_pattern_metacharacters":
+            multi_search.omni_pattern_metacharacters = str(value)
+        else:
+            raise ValueError(f"Unknown multi_search setting: {key}")
+
+    def _update_background_jobs_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a background_jobs setting (Story #26, Story #27)."""
+        background_jobs = config.background_jobs_config
+        assert background_jobs is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "max_concurrent_background_jobs":
+            background_jobs.max_concurrent_background_jobs = int(value)
+        elif key == "subprocess_max_workers":
+            # Story #27: SubprocessExecutor max_workers configuration
+            background_jobs.subprocess_max_workers = int(value)
+        else:
+            raise ValueError(f"Unknown background jobs setting: {key}")
 
     def save_all_settings(self, settings: Dict[str, Dict[str, Any]]) -> None:
         """

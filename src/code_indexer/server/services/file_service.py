@@ -557,12 +557,13 @@ class FileListingService:
         username: str,
         offset: Optional[int] = None,
         limit: Optional[int] = None,
+        skip_truncation: bool = False,
     ) -> Dict[str, Any]:
         """Get content of a specific file from repository with optional pagination.
 
         CRITICAL BEHAVIOR CHANGE: When offset and limit are both None, returns FIRST CHUNK ONLY
         (not entire file) to prevent LLM context window exhaustion. Token limits are enforced
-        in all cases.
+        in all cases, UNLESS skip_truncation=True.
 
         Args:
             repository_alias: Repository user alias
@@ -570,6 +571,9 @@ class FileListingService:
             username: Username owning the repository
             offset: 1-indexed line number to start reading from (default: 1)
             limit: Maximum number of lines to return (default: None = token-limited chunk)
+            skip_truncation: If True, bypasses line limits and token-based truncation.
+                Use this when the caller will apply its own truncation (e.g., MCP handlers
+                using TruncationHelper for cache_handle support). Default: False.
 
         Returns:
             Dict with 'content' and 'metadata' keys. Metadata includes pagination info:
@@ -607,38 +611,82 @@ class FileListingService:
         effective_offset = offset if offset is not None else 1
         start_index = max(0, effective_offset - 1)
 
-        # Story #686: Apply line-based limits IN ADDITION to token limits
-        # The stricter of (line limit, token limit) wins
-        if limit is None:
-            # No user-specified limit: apply default max lines
-            effective_limit = self.DEFAULT_MAX_LINES
+        # Story #33 Fix: skip_truncation bypasses line limits and token truncation
+        # This allows MCP handlers to get full content and apply TruncationHelper
+        # for proper cache_handle support
+        if skip_truncation:
+            # Return all lines from offset to end (or respect user-specified limit only)
+            if limit is not None:
+                # User specified limit is still respected (pagination boundary)
+                end_index = start_index + limit
+                selected_lines = all_lines[start_index:end_index]
+            else:
+                # No limit: return all remaining lines
+                selected_lines = all_lines[start_index:]
+
+            # Build content string (NO token truncation)
+            content = "".join(selected_lines)
+
+            # Calculate returned_lines from content
+            returned_lines = content.count("\n") + (
+                1 if content and not content.endswith("\n") else 0
+            )
+
+            # Calculate has_more: true if more content exists after returned lines
+            last_returned_line = effective_offset + returned_lines - 1
+            has_more = last_returned_line < total_lines
+
+            # Calculate next_offset for pagination
+            next_offset = effective_offset + returned_lines if has_more else None
+
+            # Build token metadata without truncation
+            file_limits = self._get_file_content_limits_config()
+            estimated_tokens = len(content) // file_limits.chars_per_token
+            token_metadata = {
+                "estimated_tokens": estimated_tokens,
+                "max_tokens_per_request": file_limits.max_tokens_per_request,
+                "truncated": False,
+                "truncated_at_line": None,
+                "requires_pagination": has_more,
+                "pagination_hint": f"More content available. Use offset={next_offset} to continue reading." if has_more else None,
+            }
+
+            enforced_content = content
         else:
-            # User specified limit: cap at max allowed
-            effective_limit = min(limit, self.MAX_ALLOWED_LIMIT)
+            # Original behavior: Apply line-based limits and token truncation
 
-        # Apply the effective limit
-        end_index = start_index + effective_limit
-        selected_lines = all_lines[start_index:end_index]
+            # Story #686: Apply line-based limits IN ADDITION to token limits
+            # The stricter of (line limit, token limit) wins
+            if limit is None:
+                # No user-specified limit: apply default max lines
+                effective_limit = self.DEFAULT_MAX_LINES
+            else:
+                # User specified limit: cap at max allowed
+                effective_limit = min(limit, self.MAX_ALLOWED_LIMIT)
 
-        # Build content string
-        content = "".join(selected_lines)
+            # Apply the effective limit
+            end_index = start_index + effective_limit
+            selected_lines = all_lines[start_index:end_index]
 
-        # Apply token enforcement (may truncate content further)
-        enforced_content, token_metadata = self._enforce_token_limits(
-            content, total_lines, effective_offset
-        )
+            # Build content string
+            content = "".join(selected_lines)
 
-        # Calculate returned_lines from enforced content
-        returned_lines = enforced_content.count("\n") + (
-            1 if enforced_content and not enforced_content.endswith("\n") else 0
-        )
+            # Apply token enforcement (may truncate content further)
+            enforced_content, token_metadata = self._enforce_token_limits(
+                content, total_lines, effective_offset
+            )
 
-        # Calculate has_more: true if more content exists after returned lines
-        last_returned_line = effective_offset + returned_lines - 1
-        has_more = last_returned_line < total_lines
+            # Calculate returned_lines from enforced content
+            returned_lines = enforced_content.count("\n") + (
+                1 if enforced_content and not enforced_content.endswith("\n") else 0
+            )
 
-        # Story #686: Calculate next_offset for pagination
-        next_offset = effective_offset + returned_lines if has_more else None
+            # Calculate has_more: true if more content exists after returned lines
+            last_returned_line = effective_offset + returned_lines - 1
+            has_more = last_returned_line < total_lines
+
+            # Story #686: Calculate next_offset for pagination
+            next_offset = effective_offset + returned_lines if has_more else None
 
         # Story #7 AC2: Compute content_hash from FULL file content for optimistic locking
         # Hash must be of entire file (not just paginated portion) so clients can
@@ -678,6 +726,7 @@ class FileListingService:
         file_path: str,
         offset: Optional[int] = None,
         limit: Optional[int] = None,
+        skip_truncation: bool = False,
     ) -> Dict[str, Any]:
         """Get content of a specific file from a direct filesystem path (for global repos).
 
@@ -686,13 +735,16 @@ class FileListingService:
 
         CRITICAL BEHAVIOR CHANGE: When offset and limit are both None, returns FIRST CHUNK ONLY
         (not entire file) to prevent LLM context window exhaustion. Token limits are enforced
-        in all cases.
+        in all cases, UNLESS skip_truncation=True.
 
         Args:
             repo_path: Direct filesystem path to repository root
             file_path: Relative path to file within repository
             offset: 1-indexed line number to start reading from (default: 1)
             limit: Maximum number of lines to return (default: None = token-limited chunk)
+            skip_truncation: If True, bypasses line limits and token-based truncation.
+                Use this when the caller will apply its own truncation (e.g., MCP handlers
+                using TruncationHelper for cache_handle support). Default: False.
 
         Returns:
             Dict with 'content' and 'metadata' keys. Metadata includes pagination info:
@@ -733,38 +785,82 @@ class FileListingService:
         effective_offset = offset if offset is not None else 1
         start_index = max(0, effective_offset - 1)
 
-        # Story #686: Apply line-based limits IN ADDITION to token limits
-        # The stricter of (line limit, token limit) wins
-        if limit is None:
-            # No user-specified limit: apply default max lines
-            effective_limit = self.DEFAULT_MAX_LINES
+        # Story #33 Fix: skip_truncation bypasses line limits and token truncation
+        # This allows MCP handlers to get full content and apply TruncationHelper
+        # for proper cache_handle support
+        if skip_truncation:
+            # Return all lines from offset to end (or respect user-specified limit only)
+            if limit is not None:
+                # User specified limit is still respected (pagination boundary)
+                end_index = start_index + limit
+                selected_lines = all_lines[start_index:end_index]
+            else:
+                # No limit: return all remaining lines
+                selected_lines = all_lines[start_index:]
+
+            # Build content string (NO token truncation)
+            content = "".join(selected_lines)
+
+            # Calculate returned_lines from content
+            returned_lines = content.count("\n") + (
+                1 if content and not content.endswith("\n") else 0
+            )
+
+            # Calculate has_more: true if more content exists after returned lines
+            last_returned_line = effective_offset + returned_lines - 1
+            has_more = last_returned_line < total_lines
+
+            # Calculate next_offset for pagination
+            next_offset = effective_offset + returned_lines if has_more else None
+
+            # Build token metadata without truncation
+            file_limits = self._get_file_content_limits_config()
+            estimated_tokens = len(content) // file_limits.chars_per_token
+            token_metadata = {
+                "estimated_tokens": estimated_tokens,
+                "max_tokens_per_request": file_limits.max_tokens_per_request,
+                "truncated": False,
+                "truncated_at_line": None,
+                "requires_pagination": has_more,
+                "pagination_hint": f"More content available. Use offset={next_offset} to continue reading." if has_more else None,
+            }
+
+            enforced_content = content
         else:
-            # User specified limit: cap at max allowed
-            effective_limit = min(limit, self.MAX_ALLOWED_LIMIT)
+            # Original behavior: Apply line-based limits and token truncation
 
-        # Apply the effective limit
-        end_index = start_index + effective_limit
-        selected_lines = all_lines[start_index:end_index]
+            # Story #686: Apply line-based limits IN ADDITION to token limits
+            # The stricter of (line limit, token limit) wins
+            if limit is None:
+                # No user-specified limit: apply default max lines
+                effective_limit = self.DEFAULT_MAX_LINES
+            else:
+                # User specified limit: cap at max allowed
+                effective_limit = min(limit, self.MAX_ALLOWED_LIMIT)
 
-        # Build content string
-        content = "".join(selected_lines)
+            # Apply the effective limit
+            end_index = start_index + effective_limit
+            selected_lines = all_lines[start_index:end_index]
 
-        # Apply token enforcement (may truncate content further)
-        enforced_content, token_metadata = self._enforce_token_limits(
-            content, total_lines, effective_offset
-        )
+            # Build content string
+            content = "".join(selected_lines)
 
-        # Calculate returned_lines from enforced content
-        returned_lines = enforced_content.count("\n") + (
-            1 if enforced_content and not enforced_content.endswith("\n") else 0
-        )
+            # Apply token enforcement (may truncate content further)
+            enforced_content, token_metadata = self._enforce_token_limits(
+                content, total_lines, effective_offset
+            )
 
-        # Calculate has_more: true if more content exists after returned lines
-        last_returned_line = effective_offset + returned_lines - 1
-        has_more = last_returned_line < total_lines
+            # Calculate returned_lines from enforced content
+            returned_lines = enforced_content.count("\n") + (
+                1 if enforced_content and not enforced_content.endswith("\n") else 0
+            )
 
-        # Story #686: Calculate next_offset for pagination
-        next_offset = effective_offset + returned_lines if has_more else None
+            # Calculate has_more: true if more content exists after returned lines
+            last_returned_line = effective_offset + returned_lines - 1
+            has_more = last_returned_line < total_lines
+
+            # Story #686: Calculate next_offset for pagination
+            next_offset = effective_offset + returned_lines if has_more else None
 
         # Build metadata with pagination info
         stat_info = full_file_path.stat()

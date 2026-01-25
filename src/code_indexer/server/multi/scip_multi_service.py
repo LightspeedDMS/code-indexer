@@ -45,15 +45,15 @@ class SCIPMultiService:
     Threading Strategy:
     - ThreadPoolExecutor for parallel SCIP queries (I/O bound operations)
     - Each repository query runs in separate thread
-    - Timeout: 30s default for all queries (configurable)
+    - Default: 2 workers, 30s timeout (configurable via Web UI, Story #25)
     """
 
-    def __init__(self, max_workers: int = 10, query_timeout_seconds: int = 30):
+    def __init__(self, max_workers: int = 2, query_timeout_seconds: int = 30):
         """
         Initialize SCIP multi-repository service.
 
         Args:
-            max_workers: Maximum number of concurrent threads (default: 10)
+            max_workers: Maximum number of concurrent threads (default: 2 per resource audit)
             query_timeout_seconds: Timeout for each repository query (default: 30)
         """
         self.max_workers = max_workers

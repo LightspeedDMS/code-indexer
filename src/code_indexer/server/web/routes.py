@@ -255,11 +255,9 @@ async def dashboard(request: Request):
         session.username, session.role
     )
 
-    # Story #712 AC1-AC4: Get database health for honeycomb visualization
-    from ..services.database_health_service import DatabaseHealthService
-
-    db_health_service = DatabaseHealthService()
-    database_health = db_health_service.get_all_database_health()
+    # Story #30 AC5: Health section is now lazy-loaded via HTMX
+    # No need to fetch database_health here - it will be loaded
+    # asynchronously via /admin/partials/dashboard-health endpoint
 
     return templates.TemplateResponse(
         "dashboard.html",
@@ -269,7 +267,6 @@ async def dashboard(request: Request):
             "current_page": "dashboard",
             "show_nav": True,
             "health": dashboard_data.health,
-            "database_health": database_health,
             "job_counts": dashboard_data.job_counts,
             "repo_counts": dashboard_data.repo_counts,
             "recent_jobs": dashboard_data.recent_jobs,
@@ -284,19 +281,25 @@ async def dashboard_health_partial(request: Request):
 
     Returns HTML fragment for htmx partial updates.
     Story #712 AC1-AC4: Includes database health honeycomb data.
+    Story #30 AC6: Uses cached database health (60s TTL) while
+    system metrics (CPU, memory, disk, network) remain real-time.
     """
     session = _require_admin_session(request)
     if not session:
         return _create_login_redirect(request)
 
     dashboard_service = _get_dashboard_service()
+    # System metrics are always real-time (AC3)
     health_data = dashboard_service.get_health_partial()
 
-    # Story #712 AC1-AC4: Get database health for honeycomb visualization
-    from ..services.database_health_service import DatabaseHealthService
+    # Story #30 AC6: Use cached database health (60s TTL)
+    # Story #30 Bug Fix: Use singleton to ensure cache is shared across requests.
+    # Previously, creating new DatabaseHealthService() on each request meant the
+    # instance-level cache was always empty.
+    from ..services.database_health_service import get_database_health_service
 
-    db_health_service = DatabaseHealthService()
-    database_health = db_health_service.get_all_database_health()
+    db_health_service = get_database_health_service()
+    database_health = db_health_service.get_all_database_health_cached()
 
     return templates.TemplateResponse(
         "partials/dashboard_health.html",
@@ -4027,6 +4030,8 @@ def _get_current_config() -> dict:
         WebSecurityConfig,
         # Story #3 - Phase 2: P3 settings (AC36)
         AuthConfig,
+        # Story #32 - Unified content limits configuration
+        ContentLimitsConfig,
     )
     from dataclasses import asdict
 
@@ -4144,6 +4149,14 @@ def _get_current_config() -> dict:
         "auth": auth_config,
         # Story #20: Provider API Keys
         "provider_api_keys": provider_api_keys_config,
+        # Story #25: Multi-search limits configuration
+        "multi_search": settings.get("multi_search", {}),
+        # Story #26: Background jobs configuration
+        "background_jobs": settings.get("background_jobs", {}),
+        # Story #28: Omni-search configuration
+        "omni_search": settings.get("omni_search", {}),
+        # Story #32: Unified content limits configuration
+        "content_limits": settings.get("content_limits", asdict(ContentLimitsConfig())),
     }
 
 
@@ -4892,6 +4905,197 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             except (ValueError, TypeError):
                 return "OAuth Extension Threshold must be a valid number"
 
+    elif section == "multi_search":
+        # Story #25: Multi-search limits configuration
+        # Validate worker counts (1-50 range)
+        for field in ["multi_search_max_workers", "scip_multi_max_workers"]:
+            value = data.get(field)
+            if value is not None:
+                try:
+                    val_int = int(value)
+                    if val_int < 1 or val_int > 50:
+                        return f"{field} must be between 1 and 50"
+                except (ValueError, TypeError):
+                    return f"{field} must be a valid number"
+
+        # Validate timeout values (5-600 range)
+        for field in ["multi_search_timeout_seconds", "scip_multi_timeout_seconds"]:
+            value = data.get(field)
+            if value is not None:
+                try:
+                    val_int = int(value)
+                    if val_int < 5 or val_int > 600:
+                        return f"{field} must be between 5 and 600 seconds"
+                except (ValueError, TypeError):
+                    return f"{field} must be a valid number"
+
+    elif section == "background_jobs":
+        # Story #26: Background jobs configuration
+        max_concurrent = data.get("max_concurrent_background_jobs")
+        if max_concurrent is not None:
+            try:
+                val_int = int(max_concurrent)
+                if val_int < 1 or val_int > 100:
+                    return "Max Concurrent Background Jobs must be between 1 and 100"
+            except (ValueError, TypeError):
+                return "Max Concurrent Background Jobs must be a valid number"
+
+        # Story #27: Subprocess max workers configuration
+        subprocess_workers = data.get("subprocess_max_workers")
+        if subprocess_workers is not None:
+            try:
+                val_int = int(subprocess_workers)
+                if val_int < 1 or val_int > 50:
+                    return "Subprocess Max Workers must be between 1 and 50"
+            except (ValueError, TypeError):
+                return "Subprocess Max Workers must be a valid number"
+
+    elif section == "omni_search":
+        # Story #28: Omni-search configuration
+        max_workers = data.get("max_workers")
+        if max_workers is not None:
+            try:
+                val_int = int(max_workers)
+                if val_int < 1 or val_int > 100:
+                    return "Max Workers must be between 1 and 100"
+            except (ValueError, TypeError):
+                return "Max Workers must be a valid number"
+
+        per_repo_timeout = data.get("per_repo_timeout_seconds")
+        if per_repo_timeout is not None:
+            try:
+                val_int = int(per_repo_timeout)
+                if val_int < 1 or val_int > 3600:
+                    return "Per Repo Timeout must be between 1 and 3600 seconds"
+            except (ValueError, TypeError):
+                return "Per Repo Timeout must be a valid number"
+
+        cache_max_entries = data.get("cache_max_entries")
+        if cache_max_entries is not None:
+            try:
+                val_int = int(cache_max_entries)
+                if val_int < 1 or val_int > 10000:
+                    return "Cache Max Entries must be between 1 and 10000"
+            except (ValueError, TypeError):
+                return "Cache Max Entries must be a valid number"
+
+        cache_ttl = data.get("cache_ttl_seconds")
+        if cache_ttl is not None:
+            try:
+                val_int = int(cache_ttl)
+                if val_int < 1 or val_int > 86400:
+                    return "Cache TTL must be between 1 and 86400 seconds"
+            except (ValueError, TypeError):
+                return "Cache TTL must be a valid number"
+
+        default_limit = data.get("default_limit")
+        if default_limit is not None:
+            try:
+                val_int = int(default_limit)
+                if val_int < 1 or val_int > 1000:
+                    return "Default Limit must be between 1 and 1000"
+            except (ValueError, TypeError):
+                return "Default Limit must be a valid number"
+
+        max_limit = data.get("max_limit")
+        if max_limit is not None:
+            try:
+                val_int = int(max_limit)
+                if val_int < 1 or val_int > 10000:
+                    return "Max Limit must be between 1 and 10000"
+            except (ValueError, TypeError):
+                return "Max Limit must be a valid number"
+
+        aggregation_mode = data.get("default_aggregation_mode")
+        if aggregation_mode is not None:
+            if aggregation_mode not in ("global", "per_repo"):
+                return "Default Aggregation Mode must be 'global' or 'per_repo'"
+
+        max_results_per_repo = data.get("max_results_per_repo")
+        if max_results_per_repo is not None:
+            try:
+                val_int = int(max_results_per_repo)
+                if val_int < 1 or val_int > 10000:
+                    return "Max Results Per Repo must be between 1 and 10000"
+            except (ValueError, TypeError):
+                return "Max Results Per Repo must be a valid number"
+
+        max_total_results = data.get("max_total_results_before_aggregation")
+        if max_total_results is not None:
+            try:
+                val_int = int(max_total_results)
+                if val_int < 1 or val_int > 100000:
+                    return "Max Total Results Before Aggregation must be between 1 and 100000"
+            except (ValueError, TypeError):
+                return "Max Total Results Before Aggregation must be a valid number"
+
+        # pattern_metacharacters - no validation (string)
+
+    elif section == "content_limits":
+        # Story #32: Unified content limits configuration
+        chars_per_token = data.get("chars_per_token")
+        if chars_per_token is not None:
+            try:
+                val_int = int(chars_per_token)
+                if val_int < 1 or val_int > 10:
+                    return "Chars Per Token must be between 1 and 10"
+            except (ValueError, TypeError):
+                return "Chars Per Token must be a valid number"
+
+        file_content_max_tokens = data.get("file_content_max_tokens")
+        if file_content_max_tokens is not None:
+            try:
+                val_int = int(file_content_max_tokens)
+                if val_int < 1000 or val_int > 200000:
+                    return "File Content Max Tokens must be between 1000 and 200000"
+            except (ValueError, TypeError):
+                return "File Content Max Tokens must be a valid number"
+
+        git_diff_max_tokens = data.get("git_diff_max_tokens")
+        if git_diff_max_tokens is not None:
+            try:
+                val_int = int(git_diff_max_tokens)
+                if val_int < 1000 or val_int > 200000:
+                    return "Git Diff Max Tokens must be between 1000 and 200000"
+            except (ValueError, TypeError):
+                return "Git Diff Max Tokens must be a valid number"
+
+        git_log_max_tokens = data.get("git_log_max_tokens")
+        if git_log_max_tokens is not None:
+            try:
+                val_int = int(git_log_max_tokens)
+                if val_int < 1000 or val_int > 200000:
+                    return "Git Log Max Tokens must be between 1000 and 200000"
+            except (ValueError, TypeError):
+                return "Git Log Max Tokens must be a valid number"
+
+        search_result_max_tokens = data.get("search_result_max_tokens")
+        if search_result_max_tokens is not None:
+            try:
+                val_int = int(search_result_max_tokens)
+                if val_int < 1000 or val_int > 200000:
+                    return "Search Result Max Tokens must be between 1000 and 200000"
+            except (ValueError, TypeError):
+                return "Search Result Max Tokens must be a valid number"
+
+        cache_ttl_seconds = data.get("cache_ttl_seconds")
+        if cache_ttl_seconds is not None:
+            try:
+                val_int = int(cache_ttl_seconds)
+                if val_int < 60:
+                    return "Cache TTL must be at least 60 seconds"
+            except (ValueError, TypeError):
+                return "Cache TTL must be a valid number"
+
+        cache_max_entries = data.get("cache_max_entries")
+        if cache_max_entries is not None:
+            try:
+                val_int = int(cache_max_entries)
+                if val_int < 100 or val_int > 100000:
+                    return "Cache Max Entries must be between 100 and 100000"
+            except (ValueError, TypeError):
+                return "Cache Max Entries must be a valid number"
+
     return None
 
 
@@ -5459,6 +5663,14 @@ async def update_config_section(
         "web_security",
         # Story #3 - Phase 2: P3 settings (AC36)
         "auth",
+        # Story #25 - Multi-search limits configuration
+        "multi_search",
+        # Story #26 - Background jobs configuration
+        "background_jobs",
+        # Story #28 - Omni-search configuration
+        "omni_search",
+        # Story #32 - Unified content limits configuration
+        "content_limits",
     ]
     if section not in valid_sections:
         return _create_config_page_response(

@@ -338,6 +338,86 @@ class DeploymentExecutor:
             )
             return False
 
+    def _ensure_workers_config(self) -> bool:
+        """Ensure systemd service has --workers 4 configured.
+
+        Story #30 AC4: Updates existing systemd service file to add
+        --workers 4 if missing. This enables concurrent request handling.
+
+        Returns:
+            True if config is correct or was updated, False on error
+        """
+        service_path = Path(f"/etc/systemd/system/{self.service_name}.service")
+
+        try:
+            if not service_path.exists():
+                logger.warning(
+                    f"Service file not found: {service_path}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True  # Not an error if service doesn't exist yet
+
+            content = service_path.read_text()
+
+            # Check if --workers is already configured
+            if "--workers" in content:
+                logger.debug(
+                    "Workers config already present in service file",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            # Add --workers 4 to ExecStart line
+            if "ExecStart=" in content and "uvicorn" in content:
+                # Find ExecStart line and add --workers 4
+                lines = content.split("\n")
+                updated_lines = []
+                modified = False
+
+                for line in lines:
+                    if line.startswith("ExecStart=") and "uvicorn" in line:
+                        # Add --workers 4 before any newline
+                        line = line.rstrip() + " --workers 4"
+                        modified = True
+                    updated_lines.append(line)
+
+                if modified:
+                    new_content = "\n".join(updated_lines)
+                    # Write via sudo
+                    result = subprocess.run(
+                        ["sudo", "tee", str(service_path)],
+                        input=new_content,
+                        capture_output=True,
+                        text=True,
+                    )
+
+                    if result.returncode != 0:
+                        logger.error(
+                            f"Failed to update service file: {result.stderr}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                        return False
+
+                    # Reload systemd
+                    subprocess.run(
+                        ["sudo", "systemctl", "daemon-reload"],
+                        capture_output=True,
+                    )
+
+                    logger.info(
+                        "Added --workers 4 to service file",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+
+            return True
+
+        except Exception as e:
+            logger.error(
+                f"Error checking workers config: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
     def execute(self) -> bool:
         """Execute complete deployment: git pull + pip install.
 
@@ -364,6 +444,9 @@ class DeploymentExecutor:
                 extra={"correlation_id": get_correlation_id()},
             )
             return False
+
+        # Step 3: Story #30 AC4 - Ensure workers config
+        self._ensure_workers_config()
 
         logger.info(
             "Deployment execution completed successfully",

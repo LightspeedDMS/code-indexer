@@ -37,12 +37,26 @@ def get_scip_multi_service() -> SCIPMultiService:
     """
     Get or create SCIPMultiService instance.
 
+    Uses ConfigService for configuration (Story #25) instead of defaults.
+    Reads scip_multi_max_workers and scip_multi_timeout_seconds from
+    the Web UI Configuration system.
+
     Returns:
         SCIPMultiService instance
     """
     global _scip_multi_service
     if _scip_multi_service is None:
-        _scip_multi_service = SCIPMultiService()
+        from ..services.config_service import get_config_service
+
+        config_service = get_config_service()
+        server_config = config_service.get_config()
+        multi_search_limits = server_config.multi_search_limits_config
+        assert multi_search_limits is not None  # Guaranteed by ServerConfig.__post_init__
+
+        _scip_multi_service = SCIPMultiService(
+            max_workers=multi_search_limits.scip_multi_max_workers,
+            query_timeout_seconds=multi_search_limits.scip_multi_timeout_seconds,
+        )
     return _scip_multi_service
 
 

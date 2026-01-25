@@ -1,7 +1,9 @@
 """
 Tests for omni-search integration into MCP layer.
 
-Tests polymorphic repository_alias parameter and routing to OmniSearchService.
+Tests polymorphic repository_alias parameter and routing to MultiSearchService.
+
+Story #36: Updated to use MultiSearchService delegation pattern.
 """
 
 import pytest
@@ -20,13 +22,6 @@ def mock_user():
         role=UserRole.NORMAL_USER,
         created_at=datetime.now(),
     )
-
-
-@pytest.fixture
-def mock_omni_service():
-    """Mock OmniSearchService."""
-    with patch("code_indexer.server.mcp.handlers.OmniSearchService") as mock:
-        yield mock
 
 
 @pytest.fixture
@@ -67,9 +62,7 @@ class TestOmniSearchDetection:
         assert result["content"][0]["type"] == "text"
 
     @pytest.mark.asyncio
-    async def test_array_repository_alias_routes_to_omni_search(
-        self, mock_user, mock_omni_service
-    ):
+    async def test_array_repository_alias_routes_to_omni_search(self, mock_user):
         """Omni-search when repository_alias is an array."""
         params = {
             "query_text": "authentication",
@@ -77,17 +70,7 @@ class TestOmniSearchDetection:
             "limit": 10,
         }
 
-        # Mock OmniSearchService
-        mock_service_instance = Mock()
-        mock_service_instance.search.return_value = {
-            "cursor": "abc123",
-            "total_results": 5,
-            "total_repos_searched": 2,
-            "results": [],
-            "errors": {},
-        }
-        mock_omni_service.return_value = mock_service_instance
-
+        # Story #36: Just mock _omni_search_code to verify routing
         with patch("code_indexer.server.mcp.handlers._omni_search_code") as mock_omni:
             mock_omni.return_value = _mcp_response(
                 {
@@ -334,11 +317,20 @@ class TestOmniSearchErrorHandling:
 
 
 class TestOmniSearchAggregation:
-    """Test aggregation mode behavior in omni-search."""
+    """Test aggregation mode behavior in omni-search.
+
+    Story #36: Updated to mock MultiSearchService instead of search_code.
+    """
 
     @pytest.mark.asyncio
     async def test_per_repo_aggregation_distributes_proportionally(self, mock_user):
         """Per-repo mode takes proportional results from each repo."""
+        from unittest.mock import AsyncMock
+        from code_indexer.server.multi.models import (
+            MultiSearchResponse,
+            MultiSearchMetadata,
+        )
+
         params = {
             "query_text": "authentication",
             "repository_alias": ["repo1", "repo2"],
@@ -346,77 +338,98 @@ class TestOmniSearchAggregation:
             "limit": 10,
         }
 
-        # Mock search_code to return results from two repos
-        async def mock_search(search_params, user):
-            repo = search_params["repository_alias"]
-            if repo == "repo1":
-                results = [
-                    {"similarity_score": 0.95, "file_path": "repo1/file1.py"},
-                    {"similarity_score": 0.90, "file_path": "repo1/file2.py"},
-                    {"similarity_score": 0.85, "file_path": "repo1/file3.py"},
-                    {"similarity_score": 0.80, "file_path": "repo1/file4.py"},
-                    {"similarity_score": 0.75, "file_path": "repo1/file5.py"},
-                    {"similarity_score": 0.70, "file_path": "repo1/file6.py"},
-                ]
-            else:  # repo2
-                results = [
-                    {"similarity_score": 0.92, "file_path": "repo2/file1.py"},
-                    {"similarity_score": 0.88, "file_path": "repo2/file2.py"},
-                    {"similarity_score": 0.82, "file_path": "repo2/file3.py"},
-                    {"similarity_score": 0.78, "file_path": "repo2/file4.py"},
-                    {"similarity_score": 0.72, "file_path": "repo2/file5.py"},
-                    {"similarity_score": 0.68, "file_path": "repo2/file6.py"},
-                ]
-            return _mcp_response(
-                {
-                    "success": True,
-                    "results": {
-                        "results": results,
-                        "total_results": len(results),
-                    },
-                }
-            )
+        # Mock MultiSearchService to return results grouped by repo
+        # Use 'score' field which is what the service returns
+        service_results = {
+            "repo1": [
+                {"score": 0.95, "file_path": "repo1/file1.py", "content": ""},
+                {"score": 0.90, "file_path": "repo1/file2.py", "content": ""},
+                {"score": 0.85, "file_path": "repo1/file3.py", "content": ""},
+                {"score": 0.80, "file_path": "repo1/file4.py", "content": ""},
+                {"score": 0.75, "file_path": "repo1/file5.py", "content": ""},
+                {"score": 0.70, "file_path": "repo1/file6.py", "content": ""},
+            ],
+            "repo2": [
+                {"score": 0.92, "file_path": "repo2/file1.py", "content": ""},
+                {"score": 0.88, "file_path": "repo2/file2.py", "content": ""},
+                {"score": 0.82, "file_path": "repo2/file3.py", "content": ""},
+                {"score": 0.78, "file_path": "repo2/file4.py", "content": ""},
+                {"score": 0.72, "file_path": "repo2/file5.py", "content": ""},
+                {"score": 0.68, "file_path": "repo2/file6.py", "content": ""},
+            ],
+        }
 
         with patch(
             "code_indexer.server.mcp.handlers._expand_wildcard_patterns"
         ) as mock_expand:
-            # Return patterns unchanged (no wildcard expansion needed for literal names)
             mock_expand.side_effect = lambda patterns: patterns
 
             with patch(
-                "code_indexer.server.mcp.handlers.search_code", side_effect=mock_search
-            ):
-                from code_indexer.server.mcp.handlers import _omni_search_code
+                "code_indexer.server.mcp.handlers.get_config_service"
+            ) as mock_config:
+                mock_service = Mock()
+                mock_config_obj = Mock()
+                mock_limits = Mock()
+                mock_limits.omni_max_workers = 4
+                mock_limits.omni_per_repo_timeout_seconds = 30
+                mock_config_obj.multi_search_limits_config = mock_limits
+                mock_service.get_config.return_value = mock_config_obj
+                mock_config.return_value = mock_service
 
-                result = await _omni_search_code(params, mock_user)
+                with patch(
+                    "code_indexer.server.multi.multi_search_service.MultiSearchService"
+                ) as mock_service_class:
+                    mock_svc = Mock()
+                    mock_response = MultiSearchResponse(
+                        results=service_results,
+                        metadata=MultiSearchMetadata(
+                            total_results=12,
+                            total_repos_searched=2,
+                            execution_time_ms=100,
+                        ),
+                        errors=None,
+                    )
+                    mock_svc.search = AsyncMock(return_value=mock_response)
+                    mock_service_class.return_value = mock_svc
 
-                import json
+                    from code_indexer.server.mcp.handlers import _omni_search_code
 
-                response_data = json.loads(result["content"][0]["text"])
+                    result = await _omni_search_code(params, mock_user)
 
-                assert response_data["success"] is True
-                final_results = response_data["results"]["results"]
+                    import json
 
-                # With limit=10 and 2 repos, should take 5 from each repo
-                assert len(final_results) == 10
+                    response_data = json.loads(result["content"][0]["text"])
 
-                # Count results from each repo
-                repo1_results = [
-                    r for r in final_results if r.get("source_repo") == "repo1"
-                ]
-                repo2_results = [
-                    r for r in final_results if r.get("source_repo") == "repo2"
-                ]
+                    assert response_data["success"] is True
+                    final_results = response_data["results"]["results"]
 
-                assert len(repo1_results) == 5
-                assert len(repo2_results) == 5
+                    # With limit=10 and 2 repos, should take 5 from each repo
+                    assert len(final_results) == 10
 
-                # Verify each repo's results are sorted by score (highest first)
-                repo1_scores = [r["similarity_score"] for r in repo1_results]
-                assert repo1_scores == sorted(repo1_scores, reverse=True)
+                    # Count results from each repo
+                    repo1_results = [
+                        r for r in final_results if r.get("source_repo") == "repo1"
+                    ]
+                    repo2_results = [
+                        r for r in final_results if r.get("source_repo") == "repo2"
+                    ]
 
-                repo2_scores = [r["similarity_score"] for r in repo2_results]
-                assert repo2_scores == sorted(repo2_scores, reverse=True)
+                    assert len(repo1_results) == 5
+                    assert len(repo2_results) == 5
+
+                    # Verify each repo's results are sorted by score (highest first)
+                    # Note: handler normalizes 'score' to 'similarity_score'
+                    repo1_scores = [
+                        r.get("similarity_score", r.get("score", 0))
+                        for r in repo1_results
+                    ]
+                    assert repo1_scores == sorted(repo1_scores, reverse=True)
+
+                    repo2_scores = [
+                        r.get("similarity_score", r.get("score", 0))
+                        for r in repo2_results
+                    ]
+                    assert repo2_scores == sorted(repo2_scores, reverse=True)
 
 
 class TestOmniSearchJsonStringArrayParsing:

@@ -42,43 +42,41 @@ class TestSCIPDefinitionTool:
         """Should return MCP-compliant response with definition results."""
         from code_indexer.server.mcp.handlers import scip_definition
 
-        mock_result = QueryResult(
-            symbol="com.example.UserService",
-            project="/path/to/project1",
-            file_path="src/services/user_service.py",
-            line=10,
-            column=5,
-            kind="definition",
-            relationship=None,
-            context=None,
-        )
-
         params = {"symbol": "UserService", "exact": False}
 
-        with patch("code_indexer.scip.query.primitives.SCIPQueryEngine") as MockEngine:
-            mock_engine = Mock()
-            mock_engine.find_definition.return_value = [mock_result]
-            MockEngine.return_value = mock_engine
+        # Mock SCIPQueryService (Story #40 refactoring)
+        mock_service = Mock()
+        mock_service.find_definition.return_value = [
+            {
+                "symbol": "com.example.UserService",
+                "project": "/path/to/project1",
+                "file_path": "src/services/user_service.py",
+                "line": 10,
+                "column": 5,
+                "kind": "definition",
+                "relationship": None,
+                "context": None,
+            }
+        ]
 
-            with patch(
-                "code_indexer.server.mcp.handlers._find_scip_files"
-            ) as mock_find:
-                mock_find.return_value = mock_scip_files
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
+            response = await scip_definition(params, mock_user)
 
-                response = await scip_definition(params, mock_user)
+            # Verify MCP-compliant response structure
+            assert "content" in response
+            assert len(response["content"]) == 1
+            assert response["content"][0]["type"] == "text"
 
-                # Verify MCP-compliant response structure
-                assert "content" in response
-                assert len(response["content"]) == 1
-                assert response["content"][0]["type"] == "text"
-
-                # Parse JSON response
-                data = json.loads(response["content"][0]["text"])
-                assert data["success"] is True
-                assert data["symbol"] == "UserService"
-                assert data["total_results"] >= 1
-                assert len(data["results"]) >= 1
-                assert data["results"][0]["kind"] == "definition"
+            # Parse JSON response
+            data = json.loads(response["content"][0]["text"])
+            assert data["success"] is True
+            assert data["symbol"] == "UserService"
+            assert data["total_results"] >= 1
+            assert len(data["results"]) >= 1
+            assert data["results"][0]["kind"] == "definition"
 
 
 class TestSCIPReferencesTool:
@@ -91,35 +89,33 @@ class TestSCIPReferencesTool:
         """Should return MCP-compliant response with reference results."""
         from code_indexer.server.mcp.handlers import scip_references
 
-        mock_ref = QueryResult(
-            symbol="com.example.UserService",
-            project="/path/to/project1",
-            file_path="src/auth/handler.py",
-            line=15,
-            column=10,
-            kind="reference",
-            relationship="call",
-            context=None,
-        )
-
         params = {"symbol": "UserService", "limit": 100, "exact": False}
 
-        with patch("code_indexer.scip.query.primitives.SCIPQueryEngine") as MockEngine:
-            mock_engine = Mock()
-            mock_engine.find_references.return_value = [mock_ref]
-            MockEngine.return_value = mock_engine
+        # Mock SCIPQueryService (Story #40 refactoring)
+        mock_service = Mock()
+        mock_service.find_references.return_value = [
+            {
+                "symbol": "com.example.UserService",
+                "project": "/path/to/project1",
+                "file_path": "src/auth/handler.py",
+                "line": 15,
+                "column": 10,
+                "kind": "reference",
+                "relationship": "call",
+                "context": None,
+            }
+        ]
 
-            with patch(
-                "code_indexer.server.mcp.handlers._find_scip_files"
-            ) as mock_find:
-                mock_find.return_value = mock_scip_files
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
+            response = await scip_references(params, mock_user)
 
-                response = await scip_references(params, mock_user)
-
-                assert "content" in response
-                data = json.loads(response["content"][0]["text"])
-                assert data["success"] is True
-                assert data["results"][0]["kind"] == "reference"
+            assert "content" in response
+            data = json.loads(response["content"][0]["text"])
+            assert data["success"] is True
+            assert data["results"][0]["kind"] == "reference"
 
 
 class TestSCIPDependenciesTool:
@@ -132,43 +128,41 @@ class TestSCIPDependenciesTool:
         """Should return MCP-compliant response with dependency results."""
         from code_indexer.server.mcp.handlers import scip_dependencies
 
-        mock_dep = QueryResult(
-            symbol="com.example.Database",
-            project="/path/to/project1",
-            file_path="src/services/user_service.py",
-            line=5,
-            column=0,
-            kind="dependency",
-            relationship="import",
-            context=None,
-        )
-
         params = {"symbol": "UserService", "exact": False}
 
-        with patch("code_indexer.scip.query.primitives.SCIPQueryEngine") as MockEngine:
-            mock_engine = Mock()
-            mock_engine.get_dependencies.return_value = [mock_dep]
-            MockEngine.return_value = mock_engine
+        # Mock SCIPQueryService (Story #40 refactoring)
+        mock_service = Mock()
+        mock_service.get_dependencies.return_value = [
+            {
+                "symbol": "com.example.Database",
+                "project": "/path/to/project1",
+                "file_path": "src/services/user_service.py",
+                "line": 5,
+                "column": 0,
+                "kind": "dependency",
+                "relationship": "import",
+                "context": None,
+            }
+        ]
 
-            with patch(
-                "code_indexer.server.mcp.handlers._find_scip_files"
-            ) as mock_find:
-                mock_find.return_value = mock_scip_files
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
+            response = await scip_dependencies(params, mock_user)
 
-                response = await scip_dependencies(params, mock_user)
+            # Verify MCP-compliant response structure
+            assert "content" in response
+            assert len(response["content"]) == 1
+            assert response["content"][0]["type"] == "text"
 
-                # Verify MCP-compliant response structure
-                assert "content" in response
-                assert len(response["content"]) == 1
-                assert response["content"][0]["type"] == "text"
-
-                # Parse JSON response
-                data = json.loads(response["content"][0]["text"])
-                assert data["success"] is True
-                assert data["symbol"] == "UserService"
-                assert data["total_results"] >= 1
-                assert len(data["results"]) >= 1
-                assert data["results"][0]["kind"] == "dependency"
+            # Parse JSON response
+            data = json.loads(response["content"][0]["text"])
+            assert data["success"] is True
+            assert data["symbol"] == "UserService"
+            assert data["total_results"] >= 1
+            assert len(data["results"]) >= 1
+            assert data["results"][0]["kind"] == "dependency"
 
 
 class TestSCIPDependentsTool:
@@ -181,43 +175,41 @@ class TestSCIPDependentsTool:
         """Should return MCP-compliant response with dependent results."""
         from code_indexer.server.mcp.handlers import scip_dependents
 
-        mock_dependent = QueryResult(
-            symbol="com.example.AuthHandler",
-            project="/path/to/project1",
-            file_path="src/auth/handler.py",
-            line=20,
-            column=5,
-            kind="dependent",
-            relationship="uses",
-            context=None,
-        )
-
         params = {"symbol": "UserService", "exact": False}
 
-        with patch("code_indexer.scip.query.primitives.SCIPQueryEngine") as MockEngine:
-            mock_engine = Mock()
-            mock_engine.get_dependents.return_value = [mock_dependent]
-            MockEngine.return_value = mock_engine
+        # Mock SCIPQueryService (Story #40 refactoring)
+        mock_service = Mock()
+        mock_service.get_dependents.return_value = [
+            {
+                "symbol": "com.example.AuthHandler",
+                "project": "/path/to/project1",
+                "file_path": "src/auth/handler.py",
+                "line": 20,
+                "column": 5,
+                "kind": "dependent",
+                "relationship": "uses",
+                "context": None,
+            }
+        ]
 
-            with patch(
-                "code_indexer.server.mcp.handlers._find_scip_files"
-            ) as mock_find:
-                mock_find.return_value = mock_scip_files
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
+            response = await scip_dependents(params, mock_user)
 
-                response = await scip_dependents(params, mock_user)
+            # Verify MCP-compliant response structure
+            assert "content" in response
+            assert len(response["content"]) == 1
+            assert response["content"][0]["type"] == "text"
 
-                # Verify MCP-compliant response structure
-                assert "content" in response
-                assert len(response["content"]) == 1
-                assert response["content"][0]["type"] == "text"
-
-                # Parse JSON response
-                data = json.loads(response["content"][0]["text"])
-                assert data["success"] is True
-                assert data["symbol"] == "UserService"
-                assert data["total_results"] >= 1
-                assert len(data["results"]) >= 1
-                assert data["results"][0]["kind"] == "dependent"
+            # Parse JSON response
+            data = json.loads(response["content"][0]["text"])
+            assert data["success"] is True
+            assert data["symbol"] == "UserService"
+            assert data["total_results"] >= 1
+            assert len(data["results"]) >= 1
+            assert data["results"][0]["kind"] == "dependent"
 
 
 class TestSCIPImpactTool:
@@ -227,52 +219,42 @@ class TestSCIPImpactTool:
     async def test_scip_impact_returns_mcp_response(self, mock_user, tmp_path):
         """Should return MCP-compliant response with impact analysis results."""
         from code_indexer.server.mcp.handlers import scip_impact
-        from code_indexer.scip.query.composites import (
-            ImpactAnalysisResult,
-            AffectedSymbol,
-            AffectedFile,
-        )
-        from pathlib import Path
-
-        mock_impact_result = ImpactAnalysisResult(
-            target_symbol="com.example.UserService",
-            target_location=None,
-            depth_analyzed=3,
-            affected_symbols=[
-                AffectedSymbol(
-                    symbol="com.example.AuthHandler",
-                    file_path=Path("src/auth/handler.py"),
-                    line=20,
-                    column=5,
-                    depth=1,
-                    relationship="call",
-                    chain=["com.example.UserService", "com.example.AuthHandler"],
-                )
-            ],
-            affected_files=[
-                AffectedFile(
-                    path=Path("src/auth/handler.py"),
-                    project="project1",
-                    affected_symbol_count=1,
-                    min_depth=1,
-                    max_depth=1,
-                )
-            ],
-            truncated=False,
-            total_affected=1,
-        )
 
         params = {"symbol": "UserService", "depth": 3}
 
-        with (
-            patch("code_indexer.scip.query.composites.analyze_impact") as mock_analyze,
-            patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_scip_dir"
-            ) as mock_get_dir,
-        ):
-            mock_analyze.return_value = mock_impact_result
-            mock_get_dir.return_value = Path("/fake/golden/repos")
+        # Mock SCIPQueryService (Story #40 refactoring)
+        mock_service = Mock()
+        mock_service.analyze_impact.return_value = {
+            "target_symbol": "com.example.UserService",
+            "depth_analyzed": 3,
+            "total_affected": 1,
+            "truncated": False,
+            "affected_symbols": [
+                {
+                    "symbol": "com.example.AuthHandler",
+                    "file_path": "src/auth/handler.py",
+                    "line": 20,
+                    "column": 5,
+                    "depth": 1,
+                    "relationship": "call",
+                    "chain": ["com.example.UserService", "com.example.AuthHandler"],
+                }
+            ],
+            "affected_files": [
+                {
+                    "path": "src/auth/handler.py",
+                    "project": "project1",
+                    "affected_symbol_count": 1,
+                    "min_depth": 1,
+                    "max_depth": 1,
+                }
+            ],
+        }
 
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
             response = await scip_impact(params, mock_user)
 
             # Verify MCP-compliant response structure
@@ -297,33 +279,23 @@ class TestSCIPCallChainTool:
     async def test_scip_callchain_returns_mcp_response(self, mock_user):
         """Should return MCP-compliant response with call chain results."""
         from code_indexer.server.mcp.handlers import scip_callchain
-        from code_indexer.scip.query.backends import CallChain
-        from pathlib import Path
-
-        # Handler uses primitive backend API (backends.CallChain with List[str] path)
-        mock_chain = CallChain(
-            path=["Controller", "Service", "Database"],  # List of symbol names
-            length=3,
-            has_cycle=False,
-        )
 
         params = {"from_symbol": "Controller", "to_symbol": "Database"}
 
-        with (
-            patch("code_indexer.server.mcp.handlers._find_scip_files") as mock_find,
-            patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine"
-            ) as mock_engine_class,
+        # Mock SCIPQueryService (Story #40 refactoring)
+        mock_service = Mock()
+        mock_service.trace_callchain.return_value = [
+            {
+                "path": ["Controller", "Service", "Database"],
+                "length": 3,
+                "has_cycle": False,
+            }
+        ]
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
         ):
-            mock_find.return_value = [Path("/fake/path/index.scip")]
-
-            # Mock SCIPQueryEngine instance and backend
-            mock_engine = Mock()
-            mock_backend = Mock()
-            mock_backend.trace_call_chain.return_value = [mock_chain]
-            mock_engine.backend = mock_backend
-            mock_engine_class.return_value = mock_engine
-
             response = await scip_callchain(params, mock_user)
 
             assert "content" in response
@@ -341,52 +313,41 @@ class TestSCIPContextTool:
     async def test_scip_context_returns_mcp_response(self, mock_user):
         """Should return MCP-compliant response with smart context results."""
         from code_indexer.server.mcp.handlers import scip_context
-        from code_indexer.scip.query.composites import (
-            SmartContextResult,
-            ContextFile,
-            ContextSymbol,
-        )
-        from pathlib import Path
-
-        mock_result = SmartContextResult(
-            target_symbol="UserService",
-            summary="Read these 1 file(s)",
-            files=[
-                ContextFile(
-                    path=Path("src/service.py"),
-                    project="backend",
-                    relevance_score=0.9,
-                    symbols=[
-                        ContextSymbol(
-                            name="UserService",
-                            kind="class",
-                            relationship="definition",
-                            line=10,
-                            column=0,
-                            relevance=1.0,
-                        )
-                    ],
-                    read_priority=1,
-                )
-            ],
-            total_files=1,
-            total_symbols=1,
-            avg_relevance=0.9,
-        )
 
         params = {"symbol": "UserService"}
 
-        with (
-            patch(
-                "code_indexer.scip.query.composites.get_smart_context"
-            ) as mock_context,
-            patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_scip_dir"
-            ) as mock_get_dir,
-        ):
-            mock_context.return_value = mock_result
-            mock_get_dir.return_value = Path("/fake/golden/repos")
+        # Mock SCIPQueryService (Story #40 refactoring)
+        mock_service = Mock()
+        mock_service.get_context.return_value = {
+            "target_symbol": "UserService",
+            "summary": "Read these 1 file(s)",
+            "files": [
+                {
+                    "path": "src/service.py",
+                    "project": "backend",
+                    "relevance_score": 0.9,
+                    "symbols": [
+                        {
+                            "name": "UserService",
+                            "kind": "class",
+                            "relationship": "definition",
+                            "line": 10,
+                            "column": 0,
+                            "relevance": 1.0,
+                        }
+                    ],
+                    "read_priority": 1,
+                }
+            ],
+            "total_files": 1,
+            "total_symbols": 1,
+            "avg_relevance": 0.9,
+        }
 
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
             response = await scip_context(params, mock_user)
 
             assert "content" in response

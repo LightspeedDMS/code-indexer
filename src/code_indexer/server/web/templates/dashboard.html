@@ -21,9 +21,16 @@
 
 <p>Welcome, <strong>{{ username }}</strong>!</p>
 
-<!-- System Health Section -->
-<section id="health-section" class="dashboard-section">
-    {% include "partials/dashboard_health.html" %}
+<!-- System Health Section - Story #30 AC5: HTMX lazy-load -->
+<section id="health-section" class="dashboard-section"
+    hx-get="/admin/partials/dashboard-health"
+    hx-trigger="load"
+    hx-swap="innerHTML">
+    <!-- Loading indicator shown until HTMX fetches health data -->
+    <div class="loading-indicator">
+        <h2>System Health</h2>
+        <p>Loading health data...</p>
+    </div>
 </section>
 
 <!-- Statistics Section -->

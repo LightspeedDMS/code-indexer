@@ -11,7 +11,11 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from code_indexer.server.services.claude_cli_manager import ClaudeCliManager
+from code_indexer.server.services.claude_cli_manager import (
+    get_claude_cli_manager,
+    ClaudeCliManager,
+)
+from code_indexer.server.services.config_service import get_config_service
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +67,19 @@ def on_repo_added(
         )
         return
 
-    # Check CLI availability
-    cli_manager = ClaudeCliManager()
+    # Use global ClaudeCliManager singleton (Story #23, AC4)
+    # This ensures consistent API key handling and avoids creating multiple instances
+    cli_manager = get_claude_cli_manager()
+
+    # Fallback when global manager not initialized
+    if cli_manager is None:
+        logger.info(
+            f"ClaudeCliManager not initialized, using README fallback for {repo_name}"
+        )
+        _create_readme_fallback(Path(clone_path), repo_name, cidx_meta_path)
+        return
+
+    # Check CLI availability using global manager
     if not cli_manager.check_cli_available():
         logger.info(f"Claude CLI unavailable, using README fallback for {repo_name}")
         _create_readme_fallback(Path(clone_path), repo_name, cidx_meta_path)

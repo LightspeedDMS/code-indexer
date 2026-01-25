@@ -136,12 +136,16 @@ class TestClaudeIntegrationConfig:
         assert config.anthropic_api_key is None
 
     def test_claude_integration_config_has_max_concurrent_claude_cli(self):
-        """AC3: ClaudeIntegrationConfig should have max_concurrent_claude_cli field."""
+        """AC3: ClaudeIntegrationConfig should have max_concurrent_claude_cli field.
+
+        Note: Story #24 changed default from 4 to 2 for resource-constrained systems.
+        """
         from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
 
         config = ClaudeIntegrationConfig()
         assert hasattr(config, "max_concurrent_claude_cli")
-        assert config.max_concurrent_claude_cli == 4
+        # Story #24: Default changed from 4 to 2 for resource-constrained systems
+        assert config.max_concurrent_claude_cli == 2
 
     def test_claude_integration_config_has_description_refresh_interval_hours(self):
         """AC3: ClaudeIntegrationConfig should have description_refresh_interval_hours."""

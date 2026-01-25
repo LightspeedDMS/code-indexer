@@ -6,6 +6,7 @@ Provides:
 - Atomic API key synchronization with file locking
 - Configurable worker pool for concurrency control
 - CLI availability checking with caching
+- Global singleton pattern for server-wide manager access (Story #23)
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
@@ -19,9 +20,13 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, List, Tuple
+from typing import Callable, Optional, List, Tuple, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
+
+# Module-level singleton for global manager access (Story #23, AC1)
+_global_cli_manager: Optional["ClaudeCliManager"] = None
+_global_cli_manager_lock = threading.Lock()
 
 
 @dataclass
@@ -42,13 +47,13 @@ class ClaudeCliManager:
     - Configurable worker pool for concurrency control
     """
 
-    def __init__(self, api_key: Optional[str] = None, max_workers: int = 4):
+    def __init__(self, api_key: Optional[str] = None, max_workers: int = 2):
         """
         Initialize ClaudeCliManager with worker pool.
 
         Args:
             api_key: Anthropic API key to sync to ~/.claude.json
-            max_workers: Number of worker threads (default 4)
+            max_workers: Number of worker threads (default 2, Story #24)
         """
         self._api_key = api_key
         self._max_workers = max_workers
@@ -441,6 +446,19 @@ class ClaudeCliManager:
                 f"Re-index failed: {e}", extra={"correlation_id": get_correlation_id()}
             )
 
+    def update_api_key(self, api_key: Optional[str]) -> None:
+        """
+        Update the API key for this manager (Story #23, AC3).
+
+        Args:
+            api_key: New Anthropic API key, or None to clear
+        """
+        self._api_key = api_key
+        logger.info(
+            f"API key updated (key {'set' if api_key else 'cleared'})",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
     def _on_cli_success(self) -> None:
         """Called when CLI invocation succeeds. Triggers catch-up if first success."""
         with self._cli_state_lock:
@@ -568,3 +586,69 @@ class ClaudeCliManager:
                 extra={"correlation_id": get_correlation_id()},
             )
             callback(False, str(e))
+
+
+# Module-level singleton functions (Story #23, AC1)
+
+
+def get_claude_cli_manager() -> Optional[ClaudeCliManager]:
+    """
+    Get the global ClaudeCliManager singleton.
+
+    Returns:
+        The global ClaudeCliManager instance if initialized, None otherwise.
+
+    Note:
+        This function is thread-safe and returns None (not raising an exception)
+        if the manager has not been initialized yet. Callers should handle the
+        None case gracefully.
+    """
+    return _global_cli_manager
+
+
+def initialize_claude_cli_manager(
+    api_key: Optional[str],
+    meta_dir: Path,
+    max_workers: int = 2,
+) -> ClaudeCliManager:
+    """
+    Initialize the global ClaudeCliManager singleton.
+
+    Thread-safe initialization that creates the singleton only once.
+    Subsequent calls return the existing instance.
+
+    Args:
+        api_key: Anthropic API key for Claude CLI (may be None if not yet configured)
+        meta_dir: Path to the cidx-meta directory for fallback scanning
+        max_workers: Number of worker threads (default 2)
+
+    Returns:
+        The global ClaudeCliManager instance
+
+    Note:
+        This should be called during server startup from server_lifecycle_manager.py.
+        If called multiple times, returns the existing instance without modification.
+    """
+    global _global_cli_manager
+
+    # Fast path: already initialized
+    if _global_cli_manager is not None:
+        return _global_cli_manager
+
+    # Thread-safe initialization
+    with _global_cli_manager_lock:
+        # Double-check locking pattern
+        if _global_cli_manager is not None:
+            return _global_cli_manager
+
+        # Create the singleton instance
+        manager = ClaudeCliManager(api_key=api_key, max_workers=max_workers)
+        manager.set_meta_dir(meta_dir)
+        _global_cli_manager = manager
+
+        logger.info(
+            f"Global ClaudeCliManager initialized with meta_dir={meta_dir}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+    return _global_cli_manager

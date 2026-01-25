@@ -3,6 +3,54 @@ name: list_global_repos
 category: repos
 required_permission: query_repos
 tl_dr: List all globally accessible repositories.
+inputSchema:
+  type: object
+  properties: {}
+  required: []
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: Whether operation succeeded
+    repos:
+      type: array
+      description: List of global repositories (normalized schema)
+      items:
+        type: object
+        properties:
+          user_alias:
+            type: string
+            description: Global repository alias (ends with '-global')
+          golden_repo_alias:
+            type: string
+            description: Base repository name
+          is_global:
+            type: boolean
+            description: Always true for global repos
+          repo_url:
+            type:
+            - string
+            - 'null'
+            description: Repository URL
+          last_refresh:
+            type:
+            - string
+            - 'null'
+            description: ISO 8601 last refresh timestamp
+          index_path:
+            type: string
+            description: Filesystem path to index
+          created_at:
+            type:
+            - string
+            - 'null'
+            description: ISO 8601 creation timestamp
+    error:
+      type: string
+      description: Error message if failed
+  required:
+  - success
 ---
 
 List all globally accessible repositories. REPOSITORY STATES: Discovered (from discover_repositories, not yet indexed) -> Golden/Global (after add_golden_repo, immediately queryable as '{name}-global') -> Activated (optional, via activate_repository for branch selection or composites). TERMINOLOGY: Golden repositories are admin-registered source repos. Global repositories are the publicly queryable versions accessible via '{name}-global' alias. SPECIAL: 'cidx-meta-global' is the meta-directory catalog containing descriptions of ALL repositories. DISCOVERY: Before calling this tool, search cidx-meta-global to discover which repositories are relevant (search_code('topic', repository_alias='cidx-meta-global')). Use list_global_repos() only when explicitly asked for the repo list or to verify a repo exists. DISCOVERY WORKFLOW: (1) Query cidx-meta-global to discover which repositories contain content on your topic, (2) then query those specific repositories for detailed code. Example: search_code('authentication', repository_alias='cidx-meta-global') returns repositories that handle authentication, then search_code('OAuth implementation', repository_alias='backend-api-global') for actual code. STATUS: All listed global repos are ready for querying immediately; use global_repo_status for detailed info. TYPICAL WORKFLOW: (1) search cidx-meta-global to discover relevant repos, (2) search specific repositories identified, (3) use list_global_repos only if needed to verify repo exists. WHEN NOT TO USE: (1) Need detailed status of ONE repo (temporal support, refresh times) -> use global_repo_status instead, (2) Want to search code -> use search_code with repository_alias, (3) Looking for repo descriptions -> search cidx-meta-global first.

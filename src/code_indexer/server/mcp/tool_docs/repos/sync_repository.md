@@ -3,6 +3,33 @@ name: sync_repository
 category: repos
 required_permission: activate_repos
 tl_dr: Synchronize an activated repository with its golden repository source.
+inputSchema:
+  type: object
+  properties:
+    user_alias:
+      type: string
+      description: User alias of repository
+  required:
+  - user_alias
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: Whether operation succeeded
+    job_id:
+      type:
+      - string
+      - 'null'
+      description: Background job ID for tracking sync progress
+    message:
+      type: string
+      description: Human-readable status message
+    error:
+      type: string
+      description: Error message if failed
+  required:
+  - success
 ---
 
 TL;DR: Synchronize an activated repository with its golden repository source. Pulls latest changes from the golden repo and optionally re-indexes to reflect updates.

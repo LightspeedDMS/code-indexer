@@ -38,7 +38,9 @@ Environment="ANTHROPIC_API_KEY=__ANTHROPIC_API_KEY__"
 # Environment="GOLDEN_REPOS_DIR=__USER_HOME__/.cidx-server/golden-repos"
 
 # Start server with uvicorn
-ExecStart=/usr/bin/python3 -m uvicorn code_indexer.server.app:app --host __HOST__ --port __PORT__
+# Story #30 AC4: Use 4 workers for concurrent request handling
+# This prevents the server from blocking all requests during slow health checks
+ExecStart=/usr/bin/python3 -m uvicorn code_indexer.server.app:app --host __HOST__ --port __PORT__ --workers 4
 
 # Restart policy
 Restart=always

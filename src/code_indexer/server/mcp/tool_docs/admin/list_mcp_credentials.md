@@ -3,6 +3,10 @@ name: list_mcp_credentials
 category: admin
 required_permission: query_repos
 tl_dr: List all MCP credentials for the authenticated user.
+inputSchema:
+  type: object
+  properties: {}
+  required: []
 ---
 
 TL;DR: List all MCP credentials for the authenticated user. Returns credential metadata (ID, description, created_at) but NOT the secret values.

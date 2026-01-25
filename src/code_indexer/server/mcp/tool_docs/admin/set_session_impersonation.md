@@ -2,8 +2,33 @@
 name: set_session_impersonation
 category: admin
 required_permission: query_repos
-tl_dr: '[ADMIN ONLY] Set or clear session impersonation to execute queries on behalf
-  of another user.'
+tl_dr: '[ADMIN ONLY] Set or clear session impersonation to execute queries on behalf of another user.'
+inputSchema:
+  type: object
+  properties:
+    username:
+      type:
+      - string
+      - 'null'
+      description: Username to impersonate, or null/omitted to clear impersonation. When set, all subsequent tool calls in
+        this session will use this user's permissions instead of your ADMIN permissions.
+  required: []
+outputSchema:
+  type: object
+  properties:
+    status:
+      type: string
+      description: Operation status ('ok' on success)
+    impersonating:
+      type:
+      - string
+      - 'null'
+      description: Username currently being impersonated, or null if no impersonation is active
+    error:
+      type: string
+      description: Error message if operation failed
+  required:
+  - status
 ---
 
 TL;DR: [ADMIN ONLY] Set or clear session impersonation to execute queries on behalf of another user. 

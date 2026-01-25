@@ -3,6 +3,23 @@ name: get_tool_categories
 category: guides
 required_permission: null
 tl_dr: Get organized list of all available MCP tools grouped by category.
+inputSchema:
+  type: object
+  properties: {}
+  required: []
+outputSchema:
+  type: object
+  properties:
+    categories:
+      type: object
+      description: Tools organized by category
+      additionalProperties:
+        type: array
+        items:
+          type: string
+    total_tools:
+      type: integer
+      description: Total number of tools available
 ---
 
 TL;DR: Get organized list of all available MCP tools grouped by category. Use this to discover what tools are available and what each category offers.

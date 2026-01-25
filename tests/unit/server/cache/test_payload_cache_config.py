@@ -3,11 +3,9 @@
 Story #679: S1 - Semantic Search with Payload Control (Foundation)
 AC1: Configuration Parameters
 
-These tests follow TDD methodology - written BEFORE implementation.
+Story #32: Removed environment variable configuration. All configuration
+must come from Web UI configuration system (ServerConfig).
 """
-
-import os
-from unittest.mock import patch
 
 
 class TestPayloadCacheConfig:
@@ -40,42 +38,32 @@ class TestPayloadCacheConfig:
         assert config.cache_ttl_seconds == 300
         assert config.cleanup_interval_seconds == 30
 
-    def test_env_override_preview_size(self):
-        """Test CIDX_PREVIEW_SIZE_CHARS environment variable override."""
+    def test_from_server_config_uses_cache_config_values(self):
+        """Test that from_server_config uses values from CacheConfig."""
+        from code_indexer.server.cache.payload_cache import PayloadCacheConfig
+        from code_indexer.server.utils.config_manager import CacheConfig
+
+        cache_config = CacheConfig(
+            payload_preview_size_chars=3000,
+            payload_max_fetch_size_chars=6000,
+            payload_cache_ttl_seconds=1200,
+            payload_cleanup_interval_seconds=90,
+        )
+
+        config = PayloadCacheConfig.from_server_config(cache_config)
+
+        assert config.preview_size_chars == 3000
+        assert config.max_fetch_size_chars == 6000
+        assert config.cache_ttl_seconds == 1200
+        assert config.cleanup_interval_seconds == 90
+
+    def test_from_server_config_with_none_uses_defaults(self):
+        """Test that from_server_config with None cache_config uses defaults."""
         from code_indexer.server.cache.payload_cache import PayloadCacheConfig
 
-        with patch.dict(os.environ, {"CIDX_PREVIEW_SIZE_CHARS": "3000"}):
-            config = PayloadCacheConfig.from_env()
-            assert config.preview_size_chars == 3000
+        config = PayloadCacheConfig.from_server_config(None)
 
-    def test_env_override_max_fetch_size(self):
-        """Test CIDX_MAX_FETCH_SIZE_CHARS environment variable override."""
-        from code_indexer.server.cache.payload_cache import PayloadCacheConfig
-
-        with patch.dict(os.environ, {"CIDX_MAX_FETCH_SIZE_CHARS": "10000"}):
-            config = PayloadCacheConfig.from_env()
-            assert config.max_fetch_size_chars == 10000
-
-    def test_env_override_cache_ttl(self):
-        """Test CIDX_CACHE_TTL_SECONDS environment variable override."""
-        from code_indexer.server.cache.payload_cache import PayloadCacheConfig
-
-        with patch.dict(os.environ, {"CIDX_CACHE_TTL_SECONDS": "1800"}):
-            config = PayloadCacheConfig.from_env()
-            assert config.cache_ttl_seconds == 1800
-
-    def test_env_override_cleanup_interval(self):
-        """Test CIDX_CLEANUP_INTERVAL_SECONDS environment variable override."""
-        from code_indexer.server.cache.payload_cache import PayloadCacheConfig
-
-        with patch.dict(os.environ, {"CIDX_CLEANUP_INTERVAL_SECONDS": "120"}):
-            config = PayloadCacheConfig.from_env()
-            assert config.cleanup_interval_seconds == 120
-
-    def test_env_override_invalid_values_use_defaults(self):
-        """Test that invalid env values fall back to defaults."""
-        from code_indexer.server.cache.payload_cache import PayloadCacheConfig
-
-        with patch.dict(os.environ, {"CIDX_PREVIEW_SIZE_CHARS": "invalid"}):
-            config = PayloadCacheConfig.from_env()
-            assert config.preview_size_chars == 2000  # Default
+        assert config.preview_size_chars == 2000
+        assert config.max_fetch_size_chars == 5000
+        assert config.cache_ttl_seconds == 900
+        assert config.cleanup_interval_seconds == 60

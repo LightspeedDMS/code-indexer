@@ -2,8 +2,45 @@
 name: activate_repository
 category: repos
 required_permission: activate_repos
-tl_dr: Create a user-specific repository workspace for editing files, working on non-default
-  branches, or combining multiple repos into a composite.
+tl_dr: Create a user-specific repository workspace for editing files, working on non-default branches, or combining multiple
+  repos into a composite.
+inputSchema:
+  type: object
+  properties:
+    golden_repo_alias:
+      type: string
+      description: Golden repository alias (for single repo)
+    golden_repo_aliases:
+      type: array
+      items:
+        type: string
+      description: Multiple golden repos (for composite)
+    branch_name:
+      type: string
+      description: Branch to activate (optional)
+    user_alias:
+      type: string
+      description: User-defined alias (optional)
+  required: []
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: Whether operation succeeded
+    job_id:
+      type:
+      - string
+      - 'null'
+      description: Background job ID for tracking activation progress
+    message:
+      type: string
+      description: Human-readable status message
+    error:
+      type: string
+      description: Error message if failed
+  required:
+  - success
 ---
 
 TL;DR: Create a user-specific repository workspace for editing files, working on non-default branches, or combining multiple repos into a composite.

@@ -323,19 +323,20 @@ class TestScipDefinitionPayloadTruncation:
 
         large_context = "x" * 5000
 
-        # Mock the SCIP engine and files
-        mock_result = Mock()
-        mock_result.symbol = "MyClass"
-        mock_result.project = "/src"
-        mock_result.file_path = "/src/main.py"
-        mock_result.line = 42
-        mock_result.column = 0
-        mock_result.kind = "class"
-        mock_result.relationship = "definition"
-        mock_result.context = large_context
-
-        mock_engine = Mock()
-        mock_engine.find_definition = Mock(return_value=[mock_result])
+        # Story #40: Mock SCIPQueryService instead of _find_scip_files
+        mock_service = Mock()
+        mock_service.find_definition.return_value = [
+            {
+                "symbol": "MyClass",
+                "project": "/src",
+                "file_path": "/src/main.py",
+                "line": 42,
+                "column": 0,
+                "kind": "class",
+                "relationship": "definition",
+                "context": large_context,
+            }
+        ]
 
         # Set up store() mock for truncation (AsyncMock imported at line 12)
         mock_payload_cache.store = AsyncMock(return_value="uuid-def-123")
@@ -345,15 +346,11 @@ class TestScipDefinitionPayloadTruncation:
                 "code_indexer.server.mcp.handlers.app_module.app.state"
             ) as mock_state,
             patch(
-                "code_indexer.server.mcp.handlers._find_scip_files"
-            ) as mock_find_files,
-            patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
-                return_value=mock_engine,
+                "code_indexer.server.mcp.handlers._get_scip_query_service",
+                return_value=mock_service,
             ),
         ):
             mock_state.payload_cache = mock_payload_cache
-            mock_find_files.return_value = [Mock()]  # One mock SCIP file
 
             result = await scip_definition({"symbol": "MyClass"}, mock_user)
 
@@ -382,19 +379,20 @@ class TestScipReferencesPayloadTruncation:
 
         large_context = "x" * 5000
 
-        # Mock the SCIP engine and files
-        mock_result = Mock()
-        mock_result.symbol = "MyClass"
-        mock_result.project = "/src"
-        mock_result.file_path = "/src/caller.py"
-        mock_result.line = 100
-        mock_result.column = 5
-        mock_result.kind = "reference"
-        mock_result.relationship = "call"
-        mock_result.context = large_context
-
-        mock_engine = Mock()
-        mock_engine.find_references = Mock(return_value=[mock_result])
+        # Story #40: Mock SCIPQueryService instead of _find_scip_files
+        mock_service = Mock()
+        mock_service.find_references.return_value = [
+            {
+                "symbol": "MyClass",
+                "project": "/src",
+                "file_path": "/src/caller.py",
+                "line": 100,
+                "column": 5,
+                "kind": "reference",
+                "relationship": "call",
+                "context": large_context,
+            }
+        ]
 
         # Set up store() mock for truncation (AsyncMock imported at line 12)
         mock_payload_cache.store = AsyncMock(return_value="uuid-ref-123")
@@ -404,15 +402,11 @@ class TestScipReferencesPayloadTruncation:
                 "code_indexer.server.mcp.handlers.app_module.app.state"
             ) as mock_state,
             patch(
-                "code_indexer.server.mcp.handlers._find_scip_files"
-            ) as mock_find_files,
-            patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
-                return_value=mock_engine,
+                "code_indexer.server.mcp.handlers._get_scip_query_service",
+                return_value=mock_service,
             ),
         ):
             mock_state.payload_cache = mock_payload_cache
-            mock_find_files.return_value = [Mock()]
 
             result = await scip_references({"symbol": "MyClass"}, mock_user)
 
@@ -439,18 +433,20 @@ class TestScipDependenciesPayloadTruncation:
 
         large_context = "x" * 5000
 
-        mock_result = Mock()
-        mock_result.symbol = "Dependency"
-        mock_result.project = "/src"
-        mock_result.file_path = "/src/dep.py"
-        mock_result.line = 50
-        mock_result.column = 0
-        mock_result.kind = "class"
-        mock_result.relationship = "import"
-        mock_result.context = large_context
-
-        mock_engine = Mock()
-        mock_engine.get_dependencies = Mock(return_value=[mock_result])
+        # Story #40: Mock SCIPQueryService instead of _find_scip_files
+        mock_service = Mock()
+        mock_service.get_dependencies.return_value = [
+            {
+                "symbol": "Dependency",
+                "project": "/src",
+                "file_path": "/src/dep.py",
+                "line": 50,
+                "column": 0,
+                "kind": "class",
+                "relationship": "import",
+                "context": large_context,
+            }
+        ]
 
         # Set up store() mock for truncation (AsyncMock imported at line 12)
         mock_payload_cache.store = AsyncMock(return_value="uuid-dep-123")
@@ -460,15 +456,11 @@ class TestScipDependenciesPayloadTruncation:
                 "code_indexer.server.mcp.handlers.app_module.app.state"
             ) as mock_state,
             patch(
-                "code_indexer.server.mcp.handlers._find_scip_files"
-            ) as mock_find_files,
-            patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
-                return_value=mock_engine,
+                "code_indexer.server.mcp.handlers._get_scip_query_service",
+                return_value=mock_service,
             ),
         ):
             mock_state.payload_cache = mock_payload_cache
-            mock_find_files.return_value = [Mock()]
 
             result = await scip_dependencies({"symbol": "MyClass"}, mock_user)
 
@@ -493,18 +485,20 @@ class TestScipDependentsPayloadTruncation:
 
         large_context = "x" * 5000
 
-        mock_result = Mock()
-        mock_result.symbol = "Dependent"
-        mock_result.project = "/src"
-        mock_result.file_path = "/src/user.py"
-        mock_result.line = 75
-        mock_result.column = 0
-        mock_result.kind = "class"
-        mock_result.relationship = "uses"
-        mock_result.context = large_context
-
-        mock_engine = Mock()
-        mock_engine.get_dependents = Mock(return_value=[mock_result])
+        # Story #40: Mock SCIPQueryService instead of _find_scip_files
+        mock_service = Mock()
+        mock_service.get_dependents.return_value = [
+            {
+                "symbol": "Dependent",
+                "project": "/src",
+                "file_path": "/src/user.py",
+                "line": 75,
+                "column": 0,
+                "kind": "class",
+                "relationship": "uses",
+                "context": large_context,
+            }
+        ]
 
         # Set up store() mock for truncation (AsyncMock imported at line 12)
         mock_payload_cache.store = AsyncMock(return_value="uuid-dpt-123")
@@ -514,15 +508,11 @@ class TestScipDependentsPayloadTruncation:
                 "code_indexer.server.mcp.handlers.app_module.app.state"
             ) as mock_state,
             patch(
-                "code_indexer.server.mcp.handlers._find_scip_files"
-            ) as mock_find_files,
-            patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
-                return_value=mock_engine,
+                "code_indexer.server.mcp.handlers._get_scip_query_service",
+                return_value=mock_service,
             ),
         ):
             mock_state.payload_cache = mock_payload_cache
-            mock_find_files.return_value = [Mock()]
 
             result = await scip_dependents({"symbol": "MyClass"}, mock_user)
 

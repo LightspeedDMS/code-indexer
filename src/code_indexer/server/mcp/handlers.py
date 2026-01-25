@@ -117,6 +117,32 @@ def _get_query_tracker():
     return getattr(app_module.app.state, "query_tracker", None)
 
 
+def _get_scip_query_service():
+    """Get SCIPQueryService instance for SCIP handlers.
+
+    Creates a SCIPQueryService configured with:
+    - golden_repos_dir: From app.state (server configuration)
+    - access_filtering_service: From app.state (for user-based repository filtering)
+
+    Returns:
+        SCIPQueryService instance ready for use by SCIP handlers
+
+    Raises:
+        RuntimeError: If golden_repos_dir is not configured
+    """
+    from code_indexer.server.services.scip_query_service import SCIPQueryService
+
+    golden_repos_dir = _get_golden_repos_dir()
+    access_filtering_service = getattr(
+        app_module.app.state, "access_filtering_service", None
+    )
+
+    return SCIPQueryService(
+        golden_repos_dir=golden_repos_dir,
+        access_filtering_service=access_filtering_service,
+    )
+
+
 async def _apply_payload_truncation(
     results: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -726,8 +752,14 @@ async def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any
 
     Called when repository_alias is an array of repository names.
     Aggregates results from all specified repos, sorted by score.
+
+    Story #36: Refactored to use MultiSearchService.search() for parallel execution
+    instead of inline asyncio.gather implementation.
     """
-    import json as json_module
+    from collections import defaultdict
+    from ..multi.multi_search_config import MultiSearchConfig
+    from ..multi.multi_search_service import MultiSearchService
+    from ..multi.models import MultiSearchRequest
 
     repo_aliases = params.get("repository_alias", [])
     repo_aliases = _expand_wildcard_patterns(repo_aliases)
@@ -748,43 +780,70 @@ async def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any
             }
         )
 
+    # Story #36: Get config from ConfigService for MultiSearchService
+    # Use MultiSearchConfig.from_config() to ensure MCP and REST use unified settings:
+    # - multi_search_max_workers (unified)
+    # - multi_search_timeout_seconds (unified)
+    # NOT the MCP-specific omni_max_workers/omni_per_repo_timeout_seconds.
+    config_service = get_config_service()
+    config = MultiSearchConfig.from_config(config_service)
+
+    # Story #36: Map MCP search_mode to MultiSearchRequest search_type
+    search_mode = params.get("search_mode", "semantic")
+    search_type = search_mode if search_mode in ["semantic", "fts", "regex"] else "semantic"
+    # Handle temporal queries - map to temporal search_type
+    if _is_temporal_query(params):
+        search_type = "temporal"
+
+    # Story #36: Create MultiSearchRequest from MCP params
+    request = MultiSearchRequest(
+        repositories=repo_aliases,
+        query=params.get("query_text", ""),
+        search_type=search_type,
+        limit=limit,
+        min_score=params.get("min_score"),
+        language=params.get("language"),
+        path_filter=params.get("path_filter"),
+    )
+
+    # Story #36: Delegate to MultiSearchService for parallel execution
+    service = MultiSearchService(config)
+    try:
+        response = await service.search(request)
+    except Exception as e:
+        logger.warning(
+            f"MultiSearchService failed: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response(
+            {
+                "success": True,
+                "results": {
+                    "cursor": "",
+                    "total_results": 0,
+                    "total_repos_searched": 0,
+                    "results": [],
+                    "errors": {"service_error": str(e)},
+                },
+            }
+        )
+
+    # Story #36: Convert MultiSearchResponse (grouped by repo) to flat list with source_repo
     all_results = []
-    errors = {}
-    repos_searched = 0
+    for repo_alias, repo_results in response.results.items():
+        for result in repo_results:
+            result["source_repo"] = repo_alias
+            # Normalize score field name for consistency
+            if "score" in result and "similarity_score" not in result:
+                result["similarity_score"] = result["score"]
+            all_results.append(result)
 
-    for repo_alias in repo_aliases:
-        try:
-            # Build single-repo params and call existing search_code
-            single_params = dict(params)
-            single_params["repository_alias"] = repo_alias
-
-            single_result = await search_code(single_params, user)
-
-            # Parse the MCP response to extract results
-            content = single_result.get("content", [])
-            if content and content[0].get("type") == "text":
-                result_data = json_module.loads(content[0]["text"])
-                if result_data.get("success"):
-                    repos_searched += 1
-                    results_list = result_data.get("results", {}).get("results", [])
-                    # Tag each result with source repo
-                    for r in results_list:
-                        r["source_repo"] = repo_alias
-                    all_results.extend(results_list)
-                else:
-                    errors[repo_alias] = result_data.get("error", "Unknown error")
-        except Exception as e:
-            errors[repo_alias] = str(e)
-            logger.warning(
-                f"Omni-search failed for {repo_alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+    errors = response.errors or {}
+    repos_searched = response.metadata.total_repos_searched
 
     # Aggregate results based on mode
     if aggregation_mode == "per_repo":
         # Per-repo mode: take proportional results from each repo
-        from collections import defaultdict
-
         results_by_repo = defaultdict(list)
         for r in all_results:
             results_by_repo[r.get("source_repo", "unknown")].append(r)
@@ -792,7 +851,7 @@ async def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any
         # Sort each repo's results by score
         for repo in results_by_repo:
             results_by_repo[repo].sort(
-                key=lambda x: x.get("similarity_score", 0), reverse=True
+                key=lambda x: x.get("similarity_score", x.get("score", 0)), reverse=True
             )
 
         # Take proportional results from each repo
@@ -809,7 +868,9 @@ async def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any
             final_results = []
     else:
         # Global mode: sort all by score, take top N
-        all_results.sort(key=lambda x: x.get("similarity_score", 0), reverse=True)
+        all_results.sort(
+            key=lambda x: x.get("similarity_score", x.get("score", 0)), reverse=True
+        )
         final_results = all_results[:limit]
 
     # Get response_format parameter (default to "flat" for backward compatibility)
@@ -817,7 +878,6 @@ async def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any
 
     # Story #683: Apply payload truncation to aggregated multi-repo results
     # This ensures consistency with REST API which calls _apply_multi_truncation()
-    search_mode = params.get("search_mode", "semantic")
     if final_results:
         if search_mode in ["fts", "hybrid"]:
             final_results = await _apply_fts_payload_truncation(final_results)
@@ -1595,33 +1655,90 @@ async def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]
                 return _mcp_response(error_envelope)
 
             # Use resolved path for file_service with pagination parameters
+            # Story #33 Fix: Use skip_truncation=True so TruncationHelper handles
+            # truncation with cache_handle support (avoids double truncation)
             result = app_module.file_service.get_file_content_by_path(
                 repo_path=target_path,
                 file_path=file_path,
                 offset=offset,
                 limit=limit,
+                skip_truncation=True,
             )
         else:
             # Call file_service with pagination parameters
+            # Story #33 Fix: Use skip_truncation=True so TruncationHelper handles
+            # truncation with cache_handle support (avoids double truncation)
             result = app_module.file_service.get_file_content(
                 repository_alias=repository_alias,
                 file_path=file_path,
                 username=user.username,
                 offset=offset,
                 limit=limit,
+                skip_truncation=True,
             )
 
-        # MCP spec: content must be array of content blocks
+        # Story #33: Apply token-based truncation with cache handle support
         file_content = result.get("content", "")
+        metadata = result.get("metadata", {})
+
+        # Get payload cache and content limits config
+        payload_cache = getattr(app_module.app.state, "payload_cache", None)
+        config_service = get_config_service()
+        content_limits = config_service.get_config().content_limits_config
+
+        # Apply truncation if cache is available
+        cache_handle = None
+        truncated = False
+        total_tokens = 0
+        preview_tokens = 0
+        total_pages = 0
+        has_more = False
+
+        if payload_cache is not None and file_content and content_limits is not None:
+            from code_indexer.server.cache.truncation_helper import TruncationHelper
+
+            truncation_helper = TruncationHelper(payload_cache, content_limits)
+            truncation_result = await truncation_helper.truncate_and_cache(
+                content=file_content,
+                content_type="file",
+            )
+
+            file_content = truncation_result.preview
+            cache_handle = truncation_result.cache_handle
+            truncated = truncation_result.truncated
+            total_tokens = truncation_result.original_tokens
+            preview_tokens = truncation_result.preview_tokens
+            total_pages = truncation_result.total_pages
+            has_more = truncation_result.has_more
+
+        # MCP spec: content must be array of content blocks
         content_blocks = (
             [{"type": "text", "text": file_content}] if file_content else []
         )
+
+        # Story #33: Add truncation fields to metadata for backward compatibility.
+        # Note: cache_handle, truncated, total_pages, has_more appear in BOTH metadata
+        # and top-level response.
+        # - Metadata location: For clients that parse nested metadata object
+        # - Top-level location: For clients that expect flat response structure
+        # This duplication ensures backward compatibility with existing clients (AC4).
+        metadata["cache_handle"] = cache_handle
+        metadata["truncated"] = truncated
+        metadata["total_tokens"] = total_tokens
+        metadata["preview_tokens"] = preview_tokens
+        metadata["total_pages"] = total_pages
+        metadata["has_more"] = has_more
 
         return _mcp_response(
             {
                 "success": True,
                 "content": content_blocks,
-                "metadata": result.get("metadata", {}),
+                "metadata": metadata,
+                # Duplicate at top level for flat response structure clients
+                "cache_handle": cache_handle,
+                "truncated": truncated,
+                "total_pages": total_pages,
+                "has_more": has_more,
             }
         )
     except Exception as e:
@@ -2545,10 +2662,13 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
 
         # Get search limits configuration from consolidated config
         config_service = get_config_service()
-        search_limits = config_service.get_config().search_limits_config
+        config = config_service.get_config()
+        search_limits = config.search_limits_config
+        # Story #27: Get subprocess_max_workers from background_jobs_config
+        subprocess_max_workers = config.background_jobs_config.subprocess_max_workers
 
         # Create service and execute search with timeout protection
-        service = RegexSearchService(repo_path)
+        service = RegexSearchService(repo_path, subprocess_max_workers=subprocess_max_workers)
         result = await service.search(
             pattern=pattern,
             path=args.get("path"),
@@ -3048,7 +3168,12 @@ async def _omni_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 
 async def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for git_log tool - retrieve commit history from a repository."""
+    """Handler for git_log tool - retrieve commit history from a repository.
+
+    Story #35: When log exceeds git_log_max_tokens, stores full log in
+    PayloadCache and returns cache_handle for paginated retrieval.
+    """
+    import json as json_module
     from pathlib import Path
     from code_indexer.global_repos.git_operations import GitOperationsService
 
@@ -3104,12 +3229,60 @@ async def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             for c in result.commits
         ]
 
+        # Story #35: Build full log result for potential caching
+        full_log_data = {
+            "commits": commits,
+            "total_count": result.total_count,
+        }
+
+        # Story #35: Apply token-based truncation with cache handle support
+        # Get payload cache and content limits config
+        payload_cache = getattr(app_module.app.state, "payload_cache", None)
+        config_service = get_config_service()
+        content_limits = config_service.get_config().content_limits_config
+
+        # Initialize truncation fields
+        cache_handle = None
+        truncated = False
+        total_tokens = 0
+        preview_tokens = 0
+        total_pages = 0
+        has_more = False
+
+        # Serialize log result to JSON for token counting and caching
+        log_json = json_module.dumps(full_log_data)
+
+        if payload_cache is not None and log_json and content_limits is not None:
+            from code_indexer.server.cache.truncation_helper import TruncationHelper
+
+            truncation_helper = TruncationHelper(payload_cache, content_limits)
+            truncation_result = await truncation_helper.truncate_and_cache(
+                content=log_json,
+                content_type="log",
+            )
+
+            cache_handle = truncation_result.cache_handle
+            truncated = truncation_result.truncated
+            total_tokens = truncation_result.original_tokens
+            preview_tokens = truncation_result.preview_tokens
+            total_pages = truncation_result.total_pages
+            has_more = truncation_result.has_more
+
+            # Note: We still return all commits in the response for backward compatibility.
+            # The cache_handle allows clients to retrieve the full serialized JSON if needed.
+
         return _mcp_response(
             {
                 "success": True,
                 "commits": commits,
                 "total_count": result.total_count,
-                "truncated": result.truncated,
+                # Story #35: Truncation metadata fields
+                "cache_handle": cache_handle,
+                "truncated": truncated,
+                "total_tokens": total_tokens,
+                "preview_tokens": preview_tokens,
+                "total_pages": total_pages,
+                "has_more": has_more,
             }
         )
 
@@ -3366,8 +3539,14 @@ HANDLER_REGISTRY["git_file_at_revision"] = handle_git_file_at_revision
 
 
 # Story #555: Git Diff and Blame handlers
+# Story #34: Git Diff Returns Cache Handle on Truncation
 async def handle_git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for git_diff tool - get diff between revisions."""
+    """Handler for git_diff tool - get diff between revisions.
+
+    Story #34: When diff exceeds git_diff_max_tokens, stores full diff in
+    PayloadCache and returns cache_handle for paginated retrieval.
+    """
+    import json as json_module
     from pathlib import Path
     from code_indexer.global_repos.git_operations import GitOperationsService
 
@@ -3426,6 +3605,52 @@ async def handle_git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             for f in result.files
         ]
 
+        # Story #34: Build full diff result for potential caching
+        full_diff_data = {
+            "from_revision": result.from_revision,
+            "to_revision": result.to_revision,
+            "files": files,
+            "total_insertions": result.total_insertions,
+            "total_deletions": result.total_deletions,
+            "stat_summary": result.stat_summary,
+        }
+
+        # Story #34: Apply token-based truncation with cache handle support
+        # Get payload cache and content limits config
+        payload_cache = getattr(app_module.app.state, "payload_cache", None)
+        config_service = get_config_service()
+        content_limits = config_service.get_config().content_limits_config
+
+        # Initialize truncation fields
+        cache_handle = None
+        truncated = False
+        total_tokens = 0
+        preview_tokens = 0
+        total_pages = 0
+        has_more = False
+
+        # Serialize diff result to JSON for token counting and caching
+        diff_json = json_module.dumps(full_diff_data)
+
+        if payload_cache is not None and diff_json and content_limits is not None:
+            from code_indexer.server.cache.truncation_helper import TruncationHelper
+
+            truncation_helper = TruncationHelper(payload_cache, content_limits)
+            truncation_result = await truncation_helper.truncate_and_cache(
+                content=diff_json,
+                content_type="diff",
+            )
+
+            cache_handle = truncation_result.cache_handle
+            truncated = truncation_result.truncated
+            total_tokens = truncation_result.original_tokens
+            preview_tokens = truncation_result.preview_tokens
+            total_pages = truncation_result.total_pages
+            has_more = truncation_result.has_more
+
+            # Note: We still return all files in the response for backward compatibility.
+            # The cache_handle allows clients to retrieve the full serialized JSON if needed.
+
         return _mcp_response(
             {
                 "success": True,
@@ -3435,6 +3660,13 @@ async def handle_git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "total_insertions": result.total_insertions,
                 "total_deletions": result.total_deletions,
                 "stat_summary": result.stat_summary,
+                # Story #34: Truncation metadata fields
+                "cache_handle": cache_handle,
+                "truncated": truncated,
+                "total_tokens": total_tokens,
+                "preview_tokens": preview_tokens,
+                "total_pages": total_pages,
+                "has_more": has_more,
             }
         )
 
@@ -4294,56 +4526,8 @@ HANDLER_REGISTRY["cidx_ssh_key_assign_host"] = handle_ssh_key_assign_host
 
 
 # SCIP Call Graph Query Handlers
-
-
-def _get_golden_repos_scip_dir() -> Optional[Path]:
-    """Get golden repos directory for SCIP file discovery.
-
-    Composite query functions (analyze_impact, trace_call_chain, get_smart_context)
-    expect a directory path and will glob for **/*.scip files within it.
-
-    For non-composite handlers (scip_definition, scip_references, etc.),
-    they will need to glob the returned directory themselves.
-
-    Returns:
-        Path to golden repos directory, or None if not configured/doesn't exist
-    """
-    try:
-        golden_repos_dir = _get_golden_repos_dir()
-    except RuntimeError:
-        return None
-
-    golden_repos_path = Path(golden_repos_dir)
-    return golden_repos_path if golden_repos_path.exists() else None
-
-
-def _find_scip_files(repository_alias: Optional[str] = None) -> List[Path]:
-    """Find all .scip.db files across golden repositories.
-
-    Args:
-        repository_alias: Optional repository name to filter results
-
-    Returns:
-        List of Path objects pointing to .scip.db files, or empty list if none found
-    """
-    golden_repos_path = _get_golden_repos_scip_dir()
-    if not golden_repos_path:
-        return []
-
-    scip_files: List[Path] = []
-    for repo_dir in golden_repos_path.iterdir():
-        if not repo_dir.is_dir():
-            continue
-
-        # Filter by repository_alias if provided
-        if repository_alias and repo_dir.name != repository_alias:
-            continue
-
-        scip_dir = repo_dir / ".code-indexer" / "scip"
-        if scip_dir.exists():
-            scip_files.extend(scip_dir.glob("**/*.scip.db"))
-
-    return scip_files
+# Story #40: All SCIP handlers now delegate to SCIPQueryService via _get_scip_query_service()
+# The legacy _get_golden_repos_scip_dir() and _find_scip_files() functions have been removed.
 
 
 async def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -4360,8 +4544,6 @@ async def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Returns:
         MCP-compliant response with definition results
     """
-    from code_indexer.scip.query.primitives import SCIPQueryEngine, QueryResult
-
     try:
         symbol = params.get("symbol")
         exact = params.get("exact", False)
@@ -4373,49 +4555,18 @@ async def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 {"success": False, "error": "symbol parameter is required"}
             )
 
-        scip_files = _find_scip_files(repository_alias=repository_alias)
+        # Delegate to SCIPQueryService (Story #40)
+        service = _get_scip_query_service()
+        results_dicts = service.find_definition(
+            symbol=symbol,
+            exact=exact,
+            repository_alias=repository_alias,
+            username=user.username,
+        )
 
-        if not scip_files:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "No SCIP indexes found. Generate indexes with 'cidx scip generate' or ensure golden repos have SCIP indexes.",
-                    "results": [],
-                }
-            )
-
-        all_results: List[QueryResult] = []
-
-        for scip_file in scip_files:
-            try:
-                engine = SCIPQueryEngine(scip_file)
-                results = engine.find_definition(symbol, exact=exact)
-
-                if project:
-                    results = [r for r in results if project in r.project]
-
-                all_results.extend(results)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to query SCIP file {scip_file}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-                continue
-
-        # Convert QueryResult objects to dicts
-        results_dicts = [
-            {
-                "symbol": r.symbol,
-                "project": r.project,
-                "file_path": r.file_path,
-                "line": r.line,
-                "column": r.column,
-                "kind": r.kind,
-                "relationship": r.relationship,
-                "context": r.context,
-            }
-            for r in all_results
-        ]
+        # Apply project filter if specified (backward compatibility)
+        if project:
+            results_dicts = [r for r in results_dicts if project in r.get("project", "")]
 
         # Story #685: Apply SCIP payload truncation to context fields
         results_dicts = await _apply_scip_payload_truncation(results_dicts)
@@ -4451,8 +4602,6 @@ async def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Returns:
         MCP-compliant response with reference results
     """
-    from code_indexer.scip.query.primitives import SCIPQueryEngine, QueryResult
-
     try:
         symbol = params.get("symbol")
         limit = params.get("limit", 100)
@@ -4465,53 +4614,19 @@ async def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 {"success": False, "error": "symbol parameter is required"}
             )
 
-        scip_files = _find_scip_files(repository_alias=repository_alias)
+        # Delegate to SCIPQueryService (Story #40)
+        service = _get_scip_query_service()
+        results_dicts = service.find_references(
+            symbol=symbol,
+            limit=limit,
+            exact=exact,
+            repository_alias=repository_alias,
+            username=user.username,
+        )
 
-        if not scip_files:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "No SCIP indexes found. Generate indexes with 'cidx scip generate' or ensure golden repos have SCIP indexes.",
-                    "results": [],
-                }
-            )
-
-        all_results: List[QueryResult] = []
-
-        for scip_file in scip_files:
-            try:
-                engine = SCIPQueryEngine(scip_file)
-                results = engine.find_references(symbol, limit=limit, exact=exact)
-
-                if project:
-                    results = [r for r in results if project in r.project]
-
-                all_results.extend(results)
-
-                if len(all_results) >= limit:
-                    all_results = all_results[:limit]
-                    break
-            except Exception as e:
-                logger.warning(
-                    f"Failed to query SCIP file {scip_file}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-                continue
-
-        # Convert QueryResult objects to dicts
-        results_dicts = [
-            {
-                "symbol": r.symbol,
-                "project": r.project,
-                "file_path": r.file_path,
-                "line": r.line,
-                "column": r.column,
-                "kind": r.kind,
-                "relationship": r.relationship,
-                "context": r.context,
-            }
-            for r in all_results
-        ]
+        # Apply project filter if specified (backward compatibility)
+        if project:
+            results_dicts = [r for r in results_dicts if project in r.get("project", "")]
 
         # Story #685: Apply SCIP payload truncation to context fields
         results_dicts = await _apply_scip_payload_truncation(results_dicts)
@@ -4538,6 +4653,7 @@ async def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any
     Args:
         params: Dictionary containing:
             - symbol: Symbol name to search for
+            - depth: Optional depth limit (default 1)
             - exact: Optional boolean for exact match
             - project: Optional project filter
             - repository_alias: Optional repository name to filter SCIP indexes
@@ -4546,8 +4662,6 @@ async def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any
     Returns:
         MCP-compliant response with dependency results
     """
-    from code_indexer.scip.query.primitives import SCIPQueryEngine, QueryResult
-
     try:
         symbol = params.get("symbol")
         depth = params.get("depth", 1)
@@ -4560,49 +4674,19 @@ async def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any
                 {"success": False, "error": "symbol parameter is required"}
             )
 
-        scip_files = _find_scip_files(repository_alias=repository_alias)
+        # Delegate to SCIPQueryService (Story #40)
+        service = _get_scip_query_service()
+        results_dicts = service.get_dependencies(
+            symbol=symbol,
+            depth=depth,
+            exact=exact,
+            repository_alias=repository_alias,
+            username=user.username,
+        )
 
-        if not scip_files:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "No SCIP indexes found. Generate indexes with 'cidx scip generate' or ensure golden repos have SCIP indexes.",
-                    "results": [],
-                }
-            )
-
-        all_results: List[QueryResult] = []
-
-        for scip_file in scip_files:
-            try:
-                engine = SCIPQueryEngine(scip_file)
-                results = engine.get_dependencies(symbol, depth=depth, exact=exact)
-
-                if project:
-                    results = [r for r in results if project in r.project]
-
-                all_results.extend(results)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to query SCIP file {scip_file}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-                continue
-
-        # Convert QueryResult objects to dicts
-        results_dicts = [
-            {
-                "symbol": r.symbol,
-                "project": r.project,
-                "file_path": r.file_path,
-                "line": r.line,
-                "column": r.column,
-                "kind": r.kind,
-                "relationship": r.relationship,
-                "context": r.context,
-            }
-            for r in all_results
-        ]
+        # Apply project filter if specified (backward compatibility)
+        if project:
+            results_dicts = [r for r in results_dicts if project in r.get("project", "")]
 
         # Story #685: Apply SCIP payload truncation to context fields
         results_dicts = await _apply_scip_payload_truncation(results_dicts)
@@ -4629,6 +4713,7 @@ async def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Args:
         params: Dictionary containing:
             - symbol: Symbol name to search for
+            - depth: Optional depth limit (default 1)
             - exact: Optional boolean for exact match
             - project: Optional project filter
             - repository_alias: Optional repository name to filter SCIP indexes
@@ -4637,8 +4722,6 @@ async def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Returns:
         MCP-compliant response with dependent results
     """
-    from code_indexer.scip.query.primitives import SCIPQueryEngine, QueryResult
-
     try:
         symbol = params.get("symbol")
         depth = params.get("depth", 1)
@@ -4651,49 +4734,19 @@ async def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 {"success": False, "error": "symbol parameter is required"}
             )
 
-        scip_files = _find_scip_files(repository_alias=repository_alias)
+        # Delegate to SCIPQueryService (Story #40)
+        service = _get_scip_query_service()
+        results_dicts = service.get_dependents(
+            symbol=symbol,
+            depth=depth,
+            exact=exact,
+            repository_alias=repository_alias,
+            username=user.username,
+        )
 
-        if not scip_files:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "No SCIP indexes found. Generate indexes with 'cidx scip generate' or ensure golden repos have SCIP indexes.",
-                    "results": [],
-                }
-            )
-
-        all_results: List[QueryResult] = []
-
-        for scip_file in scip_files:
-            try:
-                engine = SCIPQueryEngine(scip_file)
-                results = engine.get_dependents(symbol, depth=depth, exact=exact)
-
-                if project:
-                    results = [r for r in results if project in r.project]
-
-                all_results.extend(results)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to query SCIP file {scip_file}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-                continue
-
-        # Convert QueryResult objects to dicts
-        results_dicts = [
-            {
-                "symbol": r.symbol,
-                "project": r.project,
-                "file_path": r.file_path,
-                "line": r.line,
-                "column": r.column,
-                "kind": r.kind,
-                "relationship": r.relationship,
-                "context": r.context,
-            }
-            for r in all_results
-        ]
+        # Apply project filter if specified (backward compatibility)
+        if project:
+            results_dicts = [r for r in results_dicts if project in r.get("project", "")]
 
         # Story #685: Apply SCIP payload truncation to context fields
         results_dicts = await _apply_scip_payload_truncation(results_dicts)
@@ -4721,66 +4774,35 @@ async def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         params: Dictionary containing:
             - symbol: Symbol name to analyze
             - depth: Optional traversal depth (default 3, max 10)
-            - project: Optional project filter
+            - repository_alias: Optional repository name to filter SCIP indexes
         user: Authenticated user (for permission checking)
 
     Returns:
         MCP-compliant response with impact analysis results
     """
-    from code_indexer.scip.query.composites import analyze_impact
-
     try:
         symbol = params.get("symbol")
         depth = params.get("depth", 3)
-        project = params.get("project")
+        repository_alias = params.get("repository_alias")
 
         if not symbol:
             return _mcp_response(
                 {"success": False, "error": "symbol parameter is required"}
             )
 
-        golden_repos_dir = _get_golden_repos_scip_dir()
-
-        if not golden_repos_dir:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "No SCIP indexes found. Generate indexes with 'cidx scip generate' or ensure golden repos have SCIP indexes.",
-                    "results": [],
-                }
-            )
-
-        result = analyze_impact(symbol, golden_repos_dir, depth=depth, project=project)
+        # Delegate to SCIPQueryService (Story #40)
+        service = _get_scip_query_service()
+        result = service.analyze_impact(
+            symbol=symbol,
+            depth=depth,
+            repository_alias=repository_alias,
+            username=user.username,
+        )
 
         return _mcp_response(
             {
                 "success": True,
-                "target_symbol": result.target_symbol,
-                "depth_analyzed": result.depth_analyzed,
-                "total_affected": result.total_affected,
-                "truncated": result.truncated,
-                "affected_symbols": [
-                    {
-                        "symbol": s.symbol,
-                        "file_path": str(s.file_path),
-                        "line": s.line,
-                        "column": s.column,
-                        "depth": s.depth,
-                        "relationship": s.relationship,
-                        "chain": s.chain,
-                    }
-                    for s in result.affected_symbols
-                ],
-                "affected_files": [
-                    {
-                        "path": str(f.path),
-                        "project": f.project,
-                        "affected_symbol_count": f.affected_symbol_count,
-                        "min_depth": f.min_depth,
-                        "max_depth": f.max_depth,
-                    }
-                    for f in result.affected_files
-                ],
+                **result,
             }
         )
     except Exception as e:
@@ -4805,16 +4827,12 @@ async def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             - from_symbol: Starting symbol
             - to_symbol: Target symbol
             - max_depth: Optional maximum chain length (default 10, max 10)
-            - project: Optional project filter
             - repository_alias: Optional repository name to filter SCIP indexes
         user: Authenticated user (for permission checking)
 
     Returns:
         MCP-compliant response with call chain results
     """
-    from code_indexer.scip.query.primitives import SCIPQueryEngine
-    from code_indexer.scip.query.backends import CallChain
-
     try:
         from_symbol = params.get("from_symbol")
         to_symbol = params.get("to_symbol")
@@ -4846,64 +4864,39 @@ async def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
-        # Validate and clamp max_depth to safe range
+        # Validate and clamp max_depth to safe range [1, 10]
         if max_depth < 1:
             max_depth = 1
         elif max_depth > 10:
             max_depth = 10
 
-        scip_files = _find_scip_files(repository_alias=repository_alias)
+        # Delegate to SCIPQueryService (Story #40)
+        service = _get_scip_query_service()
+        all_chains = service.trace_callchain(
+            from_symbol=from_symbol,
+            to_symbol=to_symbol,
+            max_depth=max_depth,
+            limit=100,
+            repository_alias=repository_alias,
+            username=user.username,
+        )
 
-        if not scip_files:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "No SCIP indexes found. Generate indexes with 'cidx scip generate' or ensure golden repos have SCIP indexes.",
-                    "chains": [],
-                }
-            )
-
-        # Collect chains from all SCIP files
-        all_chains: List[CallChain] = []
-        max_depth_reached = False
-
-        for scip_file in scip_files:
-            try:
-                engine = SCIPQueryEngine(scip_file)
-                chains = engine.backend.trace_call_chain(
-                    from_symbol, to_symbol, max_depth=max_depth, limit=100
-                )
-                all_chains.extend(chains)
-
-                # Check if any chain reached max depth
-                for chain in chains:
-                    if chain.length >= max_depth:
-                        max_depth_reached = True
-
-            except Exception as e:
-                logger.warning(
-                    f"Failed to trace call chain in {scip_file}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-                continue
-
-        # Deduplicate chains by converting to set of path tuples
-        # Note: chain.path is List[str] (from backends.CallChain), not List[CallStep]
+        # Deduplicate chains by path
         unique_chains_map = {}
         for chain in all_chains:
-            # Create key from symbol names (path is already List[str])
-            path_key = tuple(chain.path)
+            path_key = tuple(chain.get("path", []))
             if path_key not in unique_chains_map:
                 unique_chains_map[path_key] = chain
 
         unique_chains = list(unique_chains_map.values())
 
-        # Note: Project filtering not supported because backends.CallChain.path
-        # contains only symbol names (List[str]), not file paths.
-        # To enable project filtering, would need to query symbol locations separately.
+        # Check if any chain reached max depth
+        max_depth_reached = any(
+            chain.get("length", 0) >= max_depth for chain in unique_chains
+        )
 
         # Sort by length (shortest first)
-        unique_chains.sort(key=lambda c: c.length)
+        unique_chains.sort(key=lambda c: c.get("length", 0))
 
         # Limit to maximum return size (100 chains)
         MAX_CALL_CHAINS_RETURNED = 100
@@ -4914,10 +4907,7 @@ async def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         diagnostic = None
         if len(unique_chains) == 0:
             diagnostic = f"No call chains found from '{from_symbol}' to '{to_symbol}'. "
-            if not scip_files:
-                diagnostic += "No SCIP indexes found for the specified repository."
-            else:
-                diagnostic += "Verify symbol names exist in the codebase. Try using simple class or method names."
+            diagnostic += "Verify symbol names exist in the codebase. Try using simple class or method names."
 
         return _mcp_response(
             {
@@ -4927,16 +4917,10 @@ async def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "total_chains_found": len(unique_chains),
                 "truncated": truncated,
                 "max_depth_reached": max_depth_reached,
-                "scip_files_searched": len(scip_files),
+                # Note: scip_files_searched not available via service API
+                "scip_files_searched": 0,
                 "repository_filter": repository_alias if repository_alias else "all",
-                "chains": [
-                    {
-                        "length": chain.length,
-                        "path": chain.path,  # List[str] of symbol names
-                        "has_cycle": chain.has_cycle,
-                    }
-                    for chain in returned_chains
-                ],
+                "chains": returned_chains,
                 "diagnostic": diagnostic,
             }
         )
@@ -4956,68 +4940,37 @@ async def scip_context(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             - symbol: Symbol name to analyze
             - limit: Optional maximum files to return (default 20, max 100)
             - min_score: Optional minimum relevance score (default 0.0, range 0.0-1.0)
-            - project: Optional project filter
+            - repository_alias: Optional repository name to filter SCIP indexes
         user: Authenticated user (for permission checking)
 
     Returns:
         MCP-compliant response with smart context results
     """
-    from code_indexer.scip.query.composites import get_smart_context
-
     try:
         symbol = params.get("symbol")
         limit = params.get("limit", 20)
         min_score = params.get("min_score", 0.0)
-        project = params.get("project")
+        repository_alias = params.get("repository_alias")
 
         if not symbol:
             return _mcp_response(
                 {"success": False, "error": "symbol parameter is required"}
             )
 
-        golden_repos_dir = _get_golden_repos_scip_dir()
-
-        if not golden_repos_dir:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "No SCIP indexes found. Generate indexes with 'cidx scip generate' or ensure golden repos have SCIP indexes.",
-                    "files": [],
-                }
-            )
-
-        result = get_smart_context(
-            symbol, golden_repos_dir, limit=limit, min_score=min_score, project=project
+        # Delegate to SCIPQueryService (Story #40)
+        service = _get_scip_query_service()
+        result = service.get_context(
+            symbol=symbol,
+            limit=limit,
+            min_score=min_score,
+            repository_alias=repository_alias,
+            username=user.username,
         )
 
         return _mcp_response(
             {
                 "success": True,
-                "target_symbol": result.target_symbol,
-                "summary": result.summary,
-                "total_files": result.total_files,
-                "total_symbols": result.total_symbols,
-                "avg_relevance": result.avg_relevance,
-                "files": [
-                    {
-                        "path": str(f.path),
-                        "project": f.project,
-                        "relevance_score": f.relevance_score,
-                        "read_priority": f.read_priority,
-                        "symbols": [
-                            {
-                                "name": s.name,
-                                "kind": s.kind,
-                                "relationship": s.relationship,
-                                "line": s.line,
-                                "column": s.column,
-                                "relevance": s.relevance,
-                            }
-                            for s in f.symbols
-                        ],
-                    }
-                    for f in result.files
-                ],
+                **result,
             }
         )
     except Exception as e:
@@ -6414,114 +6367,33 @@ HANDLER_REGISTRY["first_time_user_guide"] = first_time_user_guide
 
 
 async def get_tool_categories(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for get_tool_categories tool - returns tools organized by category."""
-    from .tools import TOOL_REGISTRY
+    """Handler for get_tool_categories tool - returns tools organized by category.
 
-    # Define tool categories and their members
-    # Each tool gets a short one-line description extracted from its full description
-    tool_categories = {
-        "SEARCH & DISCOVERY": [
-            "search_code",
-            "regex_search",
-            "browse_directory",
-            "directory_tree",
-            "get_file_content",
-            "list_global_repos",
-            "global_repo_status",
-        ],
-        "GIT HISTORY & EXPLORATION": [
-            "git_log",
-            "git_show_commit",
-            "git_file_at_revision",
-            "git_diff",
-            "git_blame",
-            "git_file_history",
-            "git_search_commits",
-            "git_search_diffs",
-        ],
-        "GIT OPERATIONS": [
-            "git_status",
-            "git_stage",
-            "git_unstage",
-            "git_commit",
-            "git_push",
-            "git_pull",
-            "git_fetch",
-            "git_reset",
-            "git_clean",
-            "git_merge_abort",
-            "git_checkout_file",
-            "git_branch_list",
-            "git_branch_create",
-            "git_branch_switch",
-            "git_branch_delete",
-        ],
-        "FILE CRUD": [
-            "create_file",
-            "edit_file",
-            "delete_file",
-        ],
-        "SCIP CODE INTELLIGENCE": [
-            "scip_definition",
-            "scip_references",
-            "scip_dependencies",
-            "scip_dependents",
-            "scip_impact",
-            "scip_callchain",
-            "scip_context",
-        ],
-        "REPOSITORY MANAGEMENT": [
-            "activate_repository",
-            "deactivate_repository",
-            "list_activated_repos",
-            "trigger_reindex",
-            "get_index_status",
-        ],
-        "SYSTEM & ADMIN": [
-            "whoami",
-            "authenticate",
-            "cidx_ssh_key_create",
-            "cidx_ssh_key_list",
-            "cidx_ssh_key_delete",
-            "cidx_ssh_key_show_public",
-            "cidx_ssh_key_assign_host",
-        ],
-        "HELP & GUIDANCE": [
-            "first_time_user_guide",
-            "get_tool_categories",
-            "cidx_quick_reference",
-        ],
-    }
+    Uses ToolDocLoader to dynamically build categories from markdown documentation
+    files, ensuring all tools are included (not just a hardcoded subset).
+    """
+    from pathlib import Path
+    from .tool_doc_loader import ToolDocLoader
 
-    def get_short_description(tool_name: str) -> str:
-        """Extract short description from tool's full description."""
-        tool_def = TOOL_REGISTRY.get(tool_name, {})
-        description = str(tool_def.get("description", ""))
-        # Extract TL;DR if present, otherwise first sentence
-        if "TL;DR:" in description:
-            tldr_start = description.index("TL;DR:") + 6
-            tldr_end = description.find(".", tldr_start)
-            if tldr_end > tldr_start:
-                return description[tldr_start : tldr_end + 1].strip()
-        # Fall back to first sentence
-        first_sentence_end = description.find(".")
-        if first_sentence_end > 0:
-            return description[: first_sentence_end + 1].strip()
-        return description[:100].strip() if description else "No description available"
+    # Load tool categories dynamically from markdown files
+    docs_dir = Path(__file__).parent / "tool_docs"
+    loader = ToolDocLoader(docs_dir)
+    tool_categories = loader.get_tools_by_category()
 
-    # Build categorized response
+    # Build categorized response with formatted output
     categories = {}
     total_tools = 0
 
-    for category_name, tool_names in tool_categories.items():
+    for category_name, tools in tool_categories.items():
+        # Format category name for display (uppercase)
+        display_name = category_name.upper()
         category_tools = []
-        for tool_name in tool_names:
-            if tool_name in TOOL_REGISTRY:
-                short_desc = get_short_description(tool_name)
-                category_tools.append(f"{tool_name} - {short_desc}")
-                total_tools += 1
+        for tool_info in tools:
+            # Format as "tool_name - tl_dr description"
+            category_tools.append(f"{tool_info['name']} - {tool_info['tl_dr']}")
+            total_tools += 1
         if category_tools:
-            categories[category_name] = category_tools
+            categories[display_name] = category_tools
 
     return _mcp_response(
         {

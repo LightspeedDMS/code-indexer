@@ -1,13 +1,14 @@
 """Unit tests for _omni_search_code explicit truncation after aggregation.
 
 Bug Fix for Story #683: MCP _omni_search_code Missing Payload Truncation
+Story #36: Updated to work with MultiSearchService delegation pattern.
 
 TDD methodology: Tests written BEFORE the fix is implemented.
 """
 
 import json
 import pytest
-from unittest.mock import patch
+from unittest.mock import patch, Mock, AsyncMock
 
 
 @pytest.fixture
@@ -39,40 +40,39 @@ def setup_payload_cache(cache_100_chars):
         app_module.app.state.payload_cache = original
 
 
-def _make_mock_result(file_path: str, content: str, score: float) -> dict:
-    """Create a mock MCP search result."""
-    return {
-        "content": [
-            {
-                "type": "text",
-                "text": json.dumps(
-                    {
-                        "success": True,
-                        "results": {
-                            "results": [
-                                {
-                                    "file_path": file_path,
-                                    "content": content,
-                                    "similarity_score": score,
-                                }
-                            ]
-                        },
-                    }
-                ),
-            }
-        ]
-    }
+@pytest.fixture
+def mock_config_service():
+    """Mock ConfigService with multi_search_limits_config."""
+    from code_indexer.server.mcp import handlers
+
+    with patch.object(handlers, "get_config_service") as mock:
+        mock_service = Mock()
+        mock_config = Mock()
+        mock_limits = Mock()
+        mock_limits.omni_max_workers = 4
+        mock_limits.omni_per_repo_timeout_seconds = 30
+        mock_config.multi_search_limits_config = mock_limits
+        mock_service.get_config.return_value = mock_config
+        mock.return_value = mock_service
+        yield mock
 
 
 class TestOmniSearchAppliesTruncation:
-    """Tests verifying _omni_search_code applies truncation after aggregation."""
+    """Tests verifying _omni_search_code applies truncation after aggregation.
+
+    Story #36: Updated to mock MultiSearchService instead of search_code.
+    """
 
     @pytest.mark.asyncio
     async def test_semantic_truncation_applied_to_aggregated_results(
-        self, setup_payload_cache, mock_user
+        self, setup_payload_cache, mock_user, mock_config_service
     ):
         """_omni_search_code applies _apply_payload_truncation for semantic mode."""
         from code_indexer.server.mcp import handlers
+        from code_indexer.server.multi.models import (
+            MultiSearchResponse,
+            MultiSearchMetadata,
+        )
 
         truncation_calls = []
         original_fn = handlers._apply_payload_truncation
@@ -81,14 +81,20 @@ class TestOmniSearchAppliesTruncation:
             truncation_calls.append(len(results))
             return await original_fn(results)
 
-        async def mock_search(params, user):
-            repo = params.get("repository_alias")
-            if repo == "repo-alpha-global":
-                return _make_mock_result("/src/a.py", "A" * 200, 0.92)
-            return _make_mock_result("/src/b.py", "B" * 200, 0.88)
+        # Mock MultiSearchService to return results
+        service_results = {
+            "repo-alpha-global": [
+                {"file_path": "/src/a.py", "content": "A" * 200, "score": 0.92}
+            ],
+            "repo-beta-global": [
+                {"file_path": "/src/b.py", "content": "B" * 200, "score": 0.88}
+            ],
+        }
 
         with (
-            patch.object(handlers, "search_code", side_effect=mock_search),
+            patch(
+                "code_indexer.server.multi.multi_search_service.MultiSearchService"
+            ) as mock_service_class,
             patch.object(
                 handlers, "_apply_payload_truncation", side_effect=tracking_fn
             ),
@@ -96,9 +102,20 @@ class TestOmniSearchAppliesTruncation:
                 handlers, "_expand_wildcard_patterns", side_effect=lambda x: x
             ),
         ):
+            mock_service = Mock()
+            mock_response = MultiSearchResponse(
+                results=service_results,
+                metadata=MultiSearchMetadata(
+                    total_results=2, total_repos_searched=2, execution_time_ms=100
+                ),
+                errors=None,
+            )
+            mock_service.search = AsyncMock(return_value=mock_response)
+            mock_service_class.return_value = mock_service
+
             params = {
                 "repository_alias": ["repo-alpha-global", "repo-beta-global"],
-                "query": "test",
+                "query_text": "test",
                 "search_mode": "semantic",
                 "limit": 10,
             }
@@ -109,10 +126,14 @@ class TestOmniSearchAppliesTruncation:
 
     @pytest.mark.asyncio
     async def test_fts_truncation_applied_for_fts_mode(
-        self, setup_payload_cache, mock_user
+        self, setup_payload_cache, mock_user, mock_config_service
     ):
         """_omni_search_code applies _apply_fts_payload_truncation for FTS mode."""
         from code_indexer.server.mcp import handlers
+        from code_indexer.server.multi.models import (
+            MultiSearchResponse,
+            MultiSearchMetadata,
+        )
 
         truncation_calls = []
         original_fn = handlers._apply_fts_payload_truncation
@@ -121,11 +142,17 @@ class TestOmniSearchAppliesTruncation:
             truncation_calls.append(len(results))
             return await original_fn(results)
 
-        async def mock_search(params, user):
-            return _make_mock_result("/src/a.py", "S" * 200, 0.92)
+        # Mock MultiSearchService to return results
+        service_results = {
+            "repo-alpha-global": [
+                {"file_path": "/src/a.py", "code_snippet": "S" * 200, "score": 0.92}
+            ],
+        }
 
         with (
-            patch.object(handlers, "search_code", side_effect=mock_search),
+            patch(
+                "code_indexer.server.multi.multi_search_service.MultiSearchService"
+            ) as mock_service_class,
             patch.object(
                 handlers, "_apply_fts_payload_truncation", side_effect=tracking_fn
             ),
@@ -133,9 +160,20 @@ class TestOmniSearchAppliesTruncation:
                 handlers, "_expand_wildcard_patterns", side_effect=lambda x: x
             ),
         ):
+            mock_service = Mock()
+            mock_response = MultiSearchResponse(
+                results=service_results,
+                metadata=MultiSearchMetadata(
+                    total_results=1, total_repos_searched=1, execution_time_ms=50
+                ),
+                errors=None,
+            )
+            mock_service.search = AsyncMock(return_value=mock_response)
+            mock_service_class.return_value = mock_service
+
             params = {
                 "repository_alias": ["repo-alpha-global"],
-                "query": "test",
+                "query_text": "test",
                 "search_mode": "fts",
                 "limit": 10,
             }

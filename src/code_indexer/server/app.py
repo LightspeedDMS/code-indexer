@@ -2397,6 +2397,83 @@ def create_app() -> FastAPI:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+        # Startup: Initialize ClaudeCliManager singleton (Story #23)
+        logger.info(
+            "Server startup: Initializing ClaudeCliManager",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.startup.claude_cli_startup import (
+                initialize_claude_manager_on_startup,
+            )
+
+            # Get fresh config (may have been updated by API key seeding)
+            server_config = config_service.get_config()
+
+            claude_init_result = initialize_claude_manager_on_startup(
+                golden_repos_dir=str(golden_repos_dir),
+                server_config=server_config,
+            )
+
+            if claude_init_result:
+                logger.info(
+                    "ClaudeCliManager initialization completed",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.warning(
+                    "ClaudeCliManager initialization failed (smart descriptions may be unavailable)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
+        except Exception as e:
+            # Log error but don't block server startup
+            logger.warning(
+                f"Failed to initialize ClaudeCliManager on startup: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        # Startup: Initialize Scheduled Catch-Up Service (Story #23, AC6)
+        scheduled_catchup_service = None
+        logger.info(
+            "Server startup: Checking scheduled catch-up service",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.scheduled_catchup_service import (
+                ScheduledCatchupService,
+            )
+
+            # Get config for scheduled catch-up settings
+            server_config = config_service.get_config()
+            claude_config = server_config.claude_integration_config
+
+            scheduled_catchup_service = ScheduledCatchupService(
+                enabled=claude_config.scheduled_catchup_enabled,
+                interval_minutes=claude_config.scheduled_catchup_interval_minutes,
+            )
+            scheduled_catchup_service.start()
+            app.state.scheduled_catchup_service = scheduled_catchup_service
+
+            if claude_config.scheduled_catchup_enabled:
+                logger.info(
+                    f"Scheduled catch-up service started "
+                    f"(interval: {claude_config.scheduled_catchup_interval_minutes} minutes)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.info(
+                    "Scheduled catch-up service is disabled (can be enabled in Web UI)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
+        except Exception as e:
+            # Log error but don't block server startup
+            logger.warning(
+                f"Failed to initialize scheduled catch-up service: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
         # Startup: Initialize MCP Session cleanup (Story #731)
         session_registry = None
         logger.info(

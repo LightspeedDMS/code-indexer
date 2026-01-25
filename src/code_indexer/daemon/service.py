@@ -193,10 +193,14 @@ class CIDXDaemonService(Service):
                     # Results returned without staleness metadata
 
         # Convert to plain dict for RPyC serialization (avoid netref issues)
-        return dict(
+        response = dict(
             results=list(results) if results else [],
             timing=dict(timing_info) if timing_info else {},
         )
+        # Propagate error to CLI if present in timing_info
+        if timing_info and "error" in timing_info:
+            response["error"] = timing_info["error"]
+        return response
 
     def exposed_query_fts(
         self, project_path: str, query: str, **kwargs
@@ -1595,7 +1599,8 @@ class CIDXDaemonService(Service):
             import traceback
 
             logger.error(traceback.format_exc())
-            return [], {}
+            # Return error in timing_info so it can be propagated to CLI
+            return [], {"error": str(e)}
 
     def _execute_fts_search(
         self, project_path: str, query: str, **kwargs

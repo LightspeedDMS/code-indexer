@@ -2,6 +2,9 @@
 
 Tests verify that SCIP handlers search golden repos directory instead of Path.cwd()
 and handle missing SCIP indexes appropriately.
+
+Story #40: After refactoring, handlers use SCIPQueryService instead of _find_scip_files.
+These tests now verify SCIPQueryService.find_scip_files() directly.
 """
 
 import json
@@ -9,15 +12,18 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-# Import the internal helper function for testing
-from code_indexer.server.mcp.handlers import _find_scip_files
+from code_indexer.server.services.scip_query_service import SCIPQueryService
 
 
-class TestFindScipFilesGoldenRepos:
-    """Tests for _find_scip_files() golden repos directory search."""
+class TestSCIPQueryServiceFindScipFiles:
+    """Tests for SCIPQueryService.find_scip_files() golden repos directory search.
+
+    Story #40: These tests were updated to test SCIPQueryService directly
+    instead of the removed _find_scip_files function from handlers.py.
+    """
 
     def test_find_scip_files_searches_golden_repos(self, tmp_path: Path) -> None:
-        """Verify _find_scip_files() searches golden repos directory, not Path.cwd()."""
+        """Verify SCIPQueryService.find_scip_files() searches golden repos directory."""
         # Setup: Create mock golden repos structure
         golden_repos_dir = tmp_path / "golden-repos"
         repo1_scip = golden_repos_dir / "repo1" / ".code-indexer" / "scip"
@@ -31,59 +37,35 @@ class TestFindScipFilesGoldenRepos:
         scip_file1.write_text("mock scip data 1")
         scip_file2.write_text("mock scip data 2")
 
-        # Mock _get_golden_repos_dir to return our test directory
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-        ) as mock_get_golden:
-            mock_get_golden.return_value = str(golden_repos_dir)
+        # Create service with our test directory
+        service = SCIPQueryService(golden_repos_dir=golden_repos_dir)
 
-            # Execute
-            scip_files = _find_scip_files()
+        # Execute
+        scip_files = service.find_scip_files()
 
-            # Verify: Should find both .scip.db files from golden repos
-            assert len(scip_files) == 2
-            scip_file_paths = {str(f) for f in scip_files}
-            assert str(scip_file1) in scip_file_paths
-            assert str(scip_file2) in scip_file_paths
-
-    def test_find_scip_files_returns_empty_when_no_golden_repos_dir(
-        self, tmp_path: Path
-    ) -> None:
-        """Verify _find_scip_files() returns empty list when golden_repos_dir not configured."""
-        # Mock _get_golden_repos_dir to raise RuntimeError (not configured)
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-        ) as mock_get_golden:
-            mock_get_golden.side_effect = RuntimeError(
-                "golden_repos_dir not configured"
-            )
-
-            # Execute
-            scip_files = _find_scip_files()
-
-            # Verify: Should return empty list, not crash
-            assert scip_files == []
+        # Verify: Should find both .scip.db files from golden repos
+        assert len(scip_files) == 2
+        scip_file_paths = {str(f) for f in scip_files}
+        assert str(scip_file1) in scip_file_paths
+        assert str(scip_file2) in scip_file_paths
 
     def test_find_scip_files_returns_empty_when_golden_repos_dir_not_exists(
         self, tmp_path: Path
     ) -> None:
-        """Verify _find_scip_files() returns empty list when golden_repos_dir doesn't exist."""
+        """Verify SCIPQueryService.find_scip_files() returns empty list when dir doesn't exist."""
         nonexistent_dir = tmp_path / "nonexistent"
 
-        # Mock _get_golden_repos_dir to return nonexistent directory
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-        ) as mock_get_golden:
-            mock_get_golden.return_value = str(nonexistent_dir)
+        # Create service with nonexistent directory
+        service = SCIPQueryService(golden_repos_dir=nonexistent_dir)
 
-            # Execute
-            scip_files = _find_scip_files()
+        # Execute
+        scip_files = service.find_scip_files()
 
-            # Verify: Should return empty list
-            assert scip_files == []
+        # Verify: Should return empty list
+        assert scip_files == []
 
     def test_find_scip_files_handles_nested_scip_files(self, tmp_path: Path) -> None:
-        """Verify _find_scip_files() finds nested .scip.db files using glob(**/*.scip.db)."""
+        """Verify SCIPQueryService.find_scip_files() finds nested .scip.db files."""
         # Setup: Create nested structure
         golden_repos_dir = tmp_path / "golden-repos"
         repo_scip = golden_repos_dir / "repo1" / ".code-indexer" / "scip"
@@ -96,22 +78,19 @@ class TestFindScipFilesGoldenRepos:
         scip_file1.write_text("mock scip data 1")
         scip_file2.write_text("mock scip data 2")
 
-        # Mock _get_golden_repos_dir
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-        ) as mock_get_golden:
-            mock_get_golden.return_value = str(golden_repos_dir)
+        # Create service
+        service = SCIPQueryService(golden_repos_dir=golden_repos_dir)
 
-            # Execute
-            scip_files = _find_scip_files()
+        # Execute
+        scip_files = service.find_scip_files()
 
-            # Verify: Should find both files
-            assert len(scip_files) == 2
+        # Verify: Should find both files
+        assert len(scip_files) == 2
 
     def test_find_scip_files_ignores_non_directory_entries(
         self, tmp_path: Path
     ) -> None:
-        """Verify _find_scip_files() skips non-directory entries in golden repos."""
+        """Verify SCIPQueryService.find_scip_files() skips non-directory entries."""
         # Setup: Create golden repos with file and directory
         golden_repos_dir = tmp_path / "golden-repos"
         golden_repos_dir.mkdir(parents=True)
@@ -126,21 +105,18 @@ class TestFindScipFilesGoldenRepos:
         scip_file = repo_scip / "index.scip.db"
         scip_file.write_text("mock scip data")
 
-        # Mock _get_golden_repos_dir
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-        ) as mock_get_golden:
-            mock_get_golden.return_value = str(golden_repos_dir)
+        # Create service
+        service = SCIPQueryService(golden_repos_dir=golden_repos_dir)
 
-            # Execute
-            scip_files = _find_scip_files()
+        # Execute
+        scip_files = service.find_scip_files()
 
-            # Verify: Should only find the one valid .scip.db file
-            assert len(scip_files) == 1
-            assert str(scip_files[0]) == str(scip_file)
+        # Verify: Should only find the one valid .scip.db file
+        assert len(scip_files) == 1
+        assert scip_files[0] == scip_file
 
     def test_find_scip_files_filters_by_repository_alias(self, tmp_path: Path) -> None:
-        """Verify _find_scip_files(repository_alias) only returns SCIP files from specified repo."""
+        """Verify SCIPQueryService.find_scip_files(repository_alias) filters correctly."""
         # Setup: Create mock golden repos structure with multiple repos
         golden_repos_dir = tmp_path / "golden-repos"
         repo1_scip = golden_repos_dir / "repo1" / ".code-indexer" / "scip"
@@ -154,197 +130,289 @@ class TestFindScipFilesGoldenRepos:
         scip_file1.write_text("mock scip data 1")
         scip_file2.write_text("mock scip data 2")
 
-        # Mock _get_golden_repos_dir to return our test directory
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-        ) as mock_get_golden:
-            mock_get_golden.return_value = str(golden_repos_dir)
+        # Create service
+        service = SCIPQueryService(golden_repos_dir=golden_repos_dir)
 
-            # Execute: Query with repository_alias="repo1"
-            scip_files = _find_scip_files(repository_alias="repo1")
+        # Execute: Query with repository_alias="repo1"
+        scip_files = service.find_scip_files(repository_alias="repo1")
 
-            # Verify: Should only find repo1's .scip.db file, not repo2's
-            assert len(scip_files) == 1
-            assert str(scip_files[0]) == str(scip_file1)
-            assert str(scip_file2) not in [str(f) for f in scip_files]
+        # Verify: Should only find repo1's .scip.db file, not repo2's
+        assert len(scip_files) == 1
+        assert scip_files[0] == scip_file1
+        assert scip_file2 not in scip_files
 
 
 class TestScipHandlersErrorHandling:
-    """Tests for SCIP handlers error handling when no indexes exist."""
+    """Tests for SCIP handlers error handling when no indexes exist.
+
+    Story #40: Updated to mock _get_scip_query_service instead of _find_scip_files.
+    Handlers now delegate to SCIPQueryService for SCIP file discovery.
+    """
+
+    def _create_mock_service_returning_empty(self) -> MagicMock:
+        """Create a mock SCIPQueryService that returns empty results."""
+        mock_service = MagicMock()
+        mock_service.find_scip_files.return_value = []
+        mock_service.find_definition.return_value = []
+        mock_service.find_references.return_value = []
+        mock_service.get_dependencies.return_value = []
+        mock_service.get_dependents.return_value = []
+        mock_service.analyze_impact.return_value = {
+            "target_symbol": "",
+            "depth_analyzed": 0,
+            "total_affected": 0,
+            "truncated": False,
+            "affected_symbols": [],
+            "affected_files": [],
+        }
+        mock_service.trace_callchain.return_value = []
+        mock_service.get_context.return_value = {
+            "target_symbol": "",
+            "summary": "",
+            "files": [],
+            "total_files": 0,
+            "total_symbols": 0,
+            "avg_relevance": 0.0,
+        }
+        return mock_service
 
     @pytest.mark.asyncio
-    async def test_scip_definition_returns_error_when_no_indexes(self) -> None:
-        """Verify scip_definition returns error when _find_scip_files() returns empty."""
+    async def test_scip_definition_returns_empty_when_no_indexes(self) -> None:
+        """Verify scip_definition returns empty results when service finds no indexes."""
         from code_indexer.server.mcp.handlers import scip_definition
 
-        # Mock _find_scip_files to return empty list
-        with patch("code_indexer.server.mcp.handlers._find_scip_files") as mock_find:
-            mock_find.return_value = []
+        mock_service = self._create_mock_service_returning_empty()
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
 
-            # Mock user
-            mock_user = MagicMock()
-
-            # Execute
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
             params = {"symbol": "some_function"}
             result = await scip_definition(params, mock_user)
 
-            # Verify: Should return error, not empty results
+            # Verify: Should return success with empty results
             content = result.get("content", [])
             assert len(content) > 0
             data = json.loads(content[0]["text"])
-            assert data["success"] is False
-            assert "No SCIP indexes found" in data["error"]
-            assert "cidx scip generate" in data["error"]
+            assert data["success"] is True
+            assert data["total_results"] == 0
+            assert data["results"] == []
 
     @pytest.mark.asyncio
-    async def test_scip_definition_uses_repository_alias(self) -> None:
-        """Verify scip_definition passes repository_alias parameter to _find_scip_files()."""
+    async def test_scip_definition_passes_repository_alias_to_service(self) -> None:
+        """Verify scip_definition passes repository_alias parameter to service."""
         from code_indexer.server.mcp.handlers import scip_definition
 
-        with patch("code_indexer.server.mcp.handlers._find_scip_files") as mock_find:
-            mock_find.return_value = []
-            mock_user = MagicMock()
+        mock_service = self._create_mock_service_returning_empty()
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
             params = {"symbol": "some_function", "repository_alias": "test-repo"}
             await scip_definition(params, mock_user)
 
-            # Verify _find_scip_files was called with repository_alias
-            mock_find.assert_called_once_with(repository_alias="test-repo")
+            # Verify service.find_definition was called with repository_alias
+            mock_service.find_definition.assert_called_once_with(
+                symbol="some_function",
+                exact=False,
+                repository_alias="test-repo",
+                username="testuser",
+            )
 
     @pytest.mark.asyncio
-    async def test_scip_references_returns_error_when_no_indexes(self) -> None:
-        """Verify scip_references returns error when _find_scip_files() returns empty."""
+    async def test_scip_references_returns_empty_when_no_indexes(self) -> None:
+        """Verify scip_references returns empty results when service finds no indexes."""
         from code_indexer.server.mcp.handlers import scip_references
 
-        with patch("code_indexer.server.mcp.handlers._find_scip_files") as mock_find:
-            mock_find.return_value = []
-            mock_user = MagicMock()
+        mock_service = self._create_mock_service_returning_empty()
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
             params = {"symbol": "some_function"}
             result = await scip_references(params, mock_user)
 
             content = result.get("content", [])
             assert len(content) > 0
             data = json.loads(content[0]["text"])
-            assert data["success"] is False
-            assert "No SCIP indexes found" in data["error"]
+            assert data["success"] is True
+            assert data["total_results"] == 0
 
     @pytest.mark.asyncio
-    async def test_scip_references_uses_repository_alias(self) -> None:
-        """Verify scip_references passes repository_alias parameter to _find_scip_files()."""
+    async def test_scip_references_passes_repository_alias_to_service(self) -> None:
+        """Verify scip_references passes repository_alias parameter to service."""
         from code_indexer.server.mcp.handlers import scip_references
 
-        with patch("code_indexer.server.mcp.handlers._find_scip_files") as mock_find:
-            mock_find.return_value = []
-            mock_user = MagicMock()
+        mock_service = self._create_mock_service_returning_empty()
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
             params = {"symbol": "some_function", "repository_alias": "test-repo"}
             await scip_references(params, mock_user)
 
-            # Verify _find_scip_files was called with repository_alias
-            mock_find.assert_called_once_with(repository_alias="test-repo")
+            # Verify service.find_references was called with repository_alias
+            mock_service.find_references.assert_called_once()
+            call_kwargs = mock_service.find_references.call_args[1]
+            assert call_kwargs["repository_alias"] == "test-repo"
+            assert call_kwargs["username"] == "testuser"
 
     @pytest.mark.asyncio
-    async def test_scip_dependencies_returns_error_when_no_indexes(self) -> None:
-        """Verify scip_dependencies returns error when _find_scip_files() returns empty."""
+    async def test_scip_dependencies_returns_empty_when_no_indexes(self) -> None:
+        """Verify scip_dependencies returns empty results when service finds no indexes."""
         from code_indexer.server.mcp.handlers import scip_dependencies
 
-        with patch("code_indexer.server.mcp.handlers._find_scip_files") as mock_find:
-            mock_find.return_value = []
-            mock_user = MagicMock()
+        mock_service = self._create_mock_service_returning_empty()
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
             params = {"symbol": "some_function"}
             result = await scip_dependencies(params, mock_user)
 
             content = result.get("content", [])
             assert len(content) > 0
             data = json.loads(content[0]["text"])
-            assert data["success"] is False
-            assert "No SCIP indexes found" in data["error"]
+            assert data["success"] is True
+            assert data["total_results"] == 0
 
     @pytest.mark.asyncio
-    async def test_scip_dependencies_uses_repository_alias(self) -> None:
-        """Verify scip_dependencies passes repository_alias parameter to _find_scip_files()."""
+    async def test_scip_dependencies_passes_repository_alias_to_service(self) -> None:
+        """Verify scip_dependencies passes repository_alias parameter to service."""
         from code_indexer.server.mcp.handlers import scip_dependencies
 
-        with patch("code_indexer.server.mcp.handlers._find_scip_files") as mock_find:
-            mock_find.return_value = []
-            mock_user = MagicMock()
+        mock_service = self._create_mock_service_returning_empty()
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
             params = {"symbol": "some_function", "repository_alias": "test-repo"}
             await scip_dependencies(params, mock_user)
 
-            # Verify _find_scip_files was called with repository_alias
-            mock_find.assert_called_once_with(repository_alias="test-repo")
+            # Verify service.get_dependencies was called with repository_alias
+            mock_service.get_dependencies.assert_called_once()
+            call_kwargs = mock_service.get_dependencies.call_args[1]
+            assert call_kwargs["repository_alias"] == "test-repo"
+            assert call_kwargs["username"] == "testuser"
 
     @pytest.mark.asyncio
-    async def test_scip_dependents_returns_error_when_no_indexes(self) -> None:
-        """Verify scip_dependents returns error when _find_scip_files() returns empty."""
+    async def test_scip_dependents_returns_empty_when_no_indexes(self) -> None:
+        """Verify scip_dependents returns empty results when service finds no indexes."""
         from code_indexer.server.mcp.handlers import scip_dependents
 
-        with patch("code_indexer.server.mcp.handlers._find_scip_files") as mock_find:
-            mock_find.return_value = []
-            mock_user = MagicMock()
+        mock_service = self._create_mock_service_returning_empty()
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
             params = {"symbol": "some_function"}
             result = await scip_dependents(params, mock_user)
 
             content = result.get("content", [])
             assert len(content) > 0
             data = json.loads(content[0]["text"])
-            assert data["success"] is False
-            assert "No SCIP indexes found" in data["error"]
+            assert data["success"] is True
+            assert data["total_results"] == 0
 
     @pytest.mark.asyncio
-    async def test_scip_dependents_uses_repository_alias(self) -> None:
-        """Verify scip_dependents passes repository_alias parameter to _find_scip_files()."""
+    async def test_scip_dependents_passes_repository_alias_to_service(self) -> None:
+        """Verify scip_dependents passes repository_alias parameter to service."""
         from code_indexer.server.mcp.handlers import scip_dependents
 
-        with patch("code_indexer.server.mcp.handlers._find_scip_files") as mock_find:
-            mock_find.return_value = []
-            mock_user = MagicMock()
+        mock_service = self._create_mock_service_returning_empty()
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
             params = {"symbol": "some_function", "repository_alias": "test-repo"}
             await scip_dependents(params, mock_user)
 
-            # Verify _find_scip_files was called with repository_alias
-            mock_find.assert_called_once_with(repository_alias="test-repo")
+            # Verify service.get_dependents was called with repository_alias
+            mock_service.get_dependents.assert_called_once()
+            call_kwargs = mock_service.get_dependents.call_args[1]
+            assert call_kwargs["repository_alias"] == "test-repo"
+            assert call_kwargs["username"] == "testuser"
 
     @pytest.mark.asyncio
-    async def test_scip_impact_returns_error_when_no_indexes(self) -> None:
-        """Verify scip_impact returns error when _find_scip_files() returns empty."""
+    async def test_scip_impact_returns_empty_when_no_indexes(self) -> None:
+        """Verify scip_impact returns empty results when service finds no indexes."""
         from code_indexer.server.mcp.handlers import scip_impact
 
-        with patch("code_indexer.server.mcp.handlers._find_scip_files") as mock_find:
-            mock_find.return_value = []
-            mock_user = MagicMock()
+        mock_service = self._create_mock_service_returning_empty()
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
             params = {"symbol": "some_function"}
             result = await scip_impact(params, mock_user)
 
             content = result.get("content", [])
             assert len(content) > 0
             data = json.loads(content[0]["text"])
-            assert data["success"] is False
-            assert "No SCIP indexes found" in data["error"]
+            assert data["success"] is True
+            assert data["total_affected"] == 0
 
     @pytest.mark.asyncio
-    async def test_scip_callchain_returns_error_when_no_indexes(self) -> None:
-        """Verify scip_callchain returns error when _find_scip_files() returns empty."""
+    async def test_scip_callchain_returns_empty_when_no_indexes(self) -> None:
+        """Verify scip_callchain returns empty results when service finds no indexes."""
         from code_indexer.server.mcp.handlers import scip_callchain
 
-        with patch("code_indexer.server.mcp.handlers._find_scip_files") as mock_find:
-            mock_find.return_value = []
-            mock_user = MagicMock()
+        mock_service = self._create_mock_service_returning_empty()
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
             params = {"from_symbol": "func1", "to_symbol": "func2"}
             result = await scip_callchain(params, mock_user)
 
             content = result.get("content", [])
             assert len(content) > 0
             data = json.loads(content[0]["text"])
-            assert data["success"] is False
-            assert "No SCIP indexes found" in data["error"]
+            assert data["success"] is True
+            assert data["total_chains_found"] == 0
 
     @pytest.mark.asyncio
-    async def test_scip_callchain_uses_repository_alias(self) -> None:
-        """Verify scip_callchain passes repository_alias parameter to _find_scip_files()."""
+    async def test_scip_callchain_passes_repository_alias_to_service(self) -> None:
+        """Verify scip_callchain passes repository_alias parameter to service."""
         from code_indexer.server.mcp.handlers import scip_callchain
 
-        with patch("code_indexer.server.mcp.handlers._find_scip_files") as mock_find:
-            mock_find.return_value = []
-            mock_user = MagicMock()
+        mock_service = self._create_mock_service_returning_empty()
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
             params = {
                 "from_symbol": "func1",
                 "to_symbol": "func2",
@@ -352,227 +420,199 @@ class TestScipHandlersErrorHandling:
             }
             await scip_callchain(params, mock_user)
 
-            # Verify _find_scip_files was called with repository_alias
-            mock_find.assert_called_once_with(repository_alias="test-repo")
+            # Verify service.trace_callchain was called with repository_alias
+            mock_service.trace_callchain.assert_called_once()
+            call_kwargs = mock_service.trace_callchain.call_args[1]
+            assert call_kwargs["repository_alias"] == "test-repo"
+            assert call_kwargs["username"] == "testuser"
 
     @pytest.mark.asyncio
-    async def test_scip_context_returns_error_when_no_indexes(self) -> None:
-        """Verify scip_context returns error when _find_scip_files() returns empty."""
+    async def test_scip_context_returns_empty_when_no_indexes(self) -> None:
+        """Verify scip_context returns empty results when service finds no indexes."""
         from code_indexer.server.mcp.handlers import scip_context
 
-        with patch("code_indexer.server.mcp.handlers._find_scip_files") as mock_find:
-            mock_find.return_value = []
-            mock_user = MagicMock()
+        mock_service = self._create_mock_service_returning_empty()
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
             params = {"symbol": "some_function"}
             result = await scip_context(params, mock_user)
 
             content = result.get("content", [])
             assert len(content) > 0
             data = json.loads(content[0]["text"])
-            assert data["success"] is False
-            assert "No SCIP indexes found" in data["error"]
+            assert data["success"] is True
+            assert data["total_files"] == 0
 
 
 class TestScipCompositeHandlersGoldenReposDirectory:
-    """Tests verifying composite handlers pass golden repos directory to composite functions."""
+    """Tests verifying composite handlers delegate to SCIPQueryService.
+
+    Story #40: Updated to mock _get_scip_query_service and verify handlers
+    delegate to service methods with correct parameters.
+    """
 
     @pytest.mark.asyncio
-    async def test_scip_impact_uses_golden_repos_directory(
-        self, tmp_path: Path
-    ) -> None:
-        """Verify scip_impact passes golden repos directory to analyze_impact()."""
+    async def test_scip_impact_delegates_to_service(self) -> None:
+        """Verify scip_impact delegates to SCIPQueryService.analyze_impact()."""
         from code_indexer.server.mcp.handlers import scip_impact
 
-        # Create golden repos structure with SCIP files
-        golden_repos_dir = tmp_path / "golden-repos"
-        repo1_scip = golden_repos_dir / "repo1" / ".code-indexer" / "scip"
-        repo1_scip.mkdir(parents=True)
-        (repo1_scip / "index.scip.db").write_text("mock")
+        # Create mock service with expected response
+        mock_service = MagicMock()
+        mock_service.analyze_impact.return_value = {
+            "target_symbol": "test",
+            "depth_analyzed": 2,
+            "total_affected": 0,
+            "truncated": False,
+            "affected_symbols": [],
+            "affected_files": [],
+        }
+
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-        ) as mock_get_golden:
-            mock_get_golden.return_value = str(golden_repos_dir)
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
+            result = await scip_impact({"symbol": "test", "depth": 2}, mock_user)
 
-            with patch(
-                "code_indexer.scip.query.composites.analyze_impact"
-            ) as mock_analyze:
-                # Mock successful result
-                from code_indexer.scip.query.composites import ImpactAnalysisResult
+            # Verify service.analyze_impact was called with correct params
+            mock_service.analyze_impact.assert_called_once_with(
+                symbol="test",
+                depth=2,
+                repository_alias=None,
+                username="testuser",
+            )
 
-                mock_result = ImpactAnalysisResult(
-                    target_symbol="test",
-                    target_location=None,
-                    depth_analyzed=2,
-                    affected_symbols=[],
-                    affected_files=[],
-                    truncated=False,
-                    total_affected=0,
-                )
-                mock_analyze.return_value = mock_result
-
-                # Execute
-                mock_user = MagicMock()
-                await scip_impact({"symbol": "test", "depth": 2}, mock_user)
-
-                # Verify analyze_impact was called with golden_repos_dir
-                assert mock_analyze.called
-                call_args = mock_analyze.call_args
-                scip_dir_arg = call_args[0][1]  # Second positional arg
-
-                # Should NOT be Path.cwd()
-                assert str(scip_dir_arg) != str(Path.cwd() / ".code-indexer" / "scip")
-                # Should be golden repos directory
-                assert Path(scip_dir_arg) == golden_repos_dir
-                # Should contain SCIP files
-                assert list(Path(scip_dir_arg).glob("**/*.scip.db"))
+            # Verify response
+            content = result.get("content", [])
+            assert len(content) > 0
+            data = json.loads(content[0]["text"])
+            assert data["success"] is True
+            assert data["target_symbol"] == "test"
+            assert data["depth_analyzed"] == 2
 
     @pytest.mark.asyncio
-    async def test_scip_callchain_uses_golden_repos_directory(
-        self, tmp_path: Path
-    ) -> None:
-        """Verify scip_callchain uses _find_scip_files pattern to search golden repos."""
+    async def test_scip_callchain_delegates_to_service(self) -> None:
+        """Verify scip_callchain delegates to SCIPQueryService.trace_callchain()."""
         from code_indexer.server.mcp.handlers import scip_callchain
 
-        # Create golden repos structure with SCIP files
-        golden_repos_dir = tmp_path / "golden-repos"
-        repo1_scip = golden_repos_dir / "repo1" / ".code-indexer" / "scip"
-        repo1_scip.mkdir(parents=True)
-        scip_file = repo1_scip / "index.scip.db"
+        # Create mock service with expected response
+        mock_service = MagicMock()
+        mock_service.trace_callchain.return_value = [
+            {"path": ["func1", "intermediate", "func2"], "length": 3, "has_cycle": False}
+        ]
 
-        with patch("code_indexer.server.mcp.handlers._find_scip_files") as mock_find:
-            # Mock _find_scip_files to return our test file
-            mock_find.return_value = [scip_file]
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
 
-            with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine"
-            ) as mock_engine_class:
-                # Mock SCIPQueryEngine and backend
-                mock_engine = MagicMock()
-                mock_backend = MagicMock()
-                mock_backend.trace_call_chain.return_value = []  # Empty chains
-                mock_engine.backend = mock_backend
-                mock_engine_class.return_value = mock_engine
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
+            result = await scip_callchain(
+                {"from_symbol": "func1", "to_symbol": "func2"}, mock_user
+            )
 
-                # Execute
-                mock_user = MagicMock()
-                await scip_callchain(
-                    {"from_symbol": "func1", "to_symbol": "func2"}, mock_user
-                )
+            # Verify service.trace_callchain was called
+            mock_service.trace_callchain.assert_called_once()
+            call_kwargs = mock_service.trace_callchain.call_args[1]
+            assert call_kwargs["from_symbol"] == "func1"
+            assert call_kwargs["to_symbol"] == "func2"
+            assert call_kwargs["username"] == "testuser"
 
-                # Verify _find_scip_files was called (searches golden repos)
-                assert mock_find.called
-                mock_find.assert_called_once_with(repository_alias=None)
-
-                # Verify SCIPQueryEngine was created with SCIP file from golden repos
-                assert mock_engine_class.called
-                mock_engine_class.assert_called_once_with(scip_file)
-
-                # Verify backend.trace_call_chain was called
-                assert mock_backend.trace_call_chain.called
+            # Verify response
+            content = result.get("content", [])
+            assert len(content) > 0
+            data = json.loads(content[0]["text"])
+            assert data["success"] is True
+            assert data["total_chains_found"] == 1
 
     @pytest.mark.asyncio
-    async def test_scip_callchain_clamps_max_depth_to_10(self, tmp_path: Path) -> None:
+    async def test_scip_callchain_clamps_max_depth_to_10(self) -> None:
         """Verify scip_callchain clamps max_depth to 10 when user passes value > 10.
 
         Bug: User passes max_depth=15 via MCP, handler passes it unclamped to
-        backend.trace_call_chain(), which raises ValueError because it only accepts max_depth <= 10.
+        service, which may raise ValueError because it only accepts max_depth <= 10.
 
         Fix: Handler should validate/clamp max_depth to [1, 10] range before calling
-        backend to provide early validation and clearer error handling.
+        service to provide early validation and clearer error handling.
         """
         from code_indexer.server.mcp.handlers import scip_callchain
 
-        # Create golden repos structure with SCIP files
-        golden_repos_dir = tmp_path / "golden-repos"
-        repo1_scip = golden_repos_dir / "repo1" / ".code-indexer" / "scip"
-        repo1_scip.mkdir(parents=True)
-        scip_file = repo1_scip / "index.scip.db"
+        mock_service = MagicMock()
+        mock_service.trace_callchain.return_value = []
 
-        with patch("code_indexer.server.mcp.handlers._find_scip_files") as mock_find:
-            # Mock _find_scip_files to return our test file
-            mock_find.return_value = [scip_file]
-
-            with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine"
-            ) as mock_engine_class:
-                # Mock SCIPQueryEngine and backend
-                mock_engine = MagicMock()
-                mock_backend = MagicMock()
-                mock_backend.trace_call_chain.return_value = []  # Empty chains
-                mock_engine.backend = mock_backend
-                mock_engine_class.return_value = mock_engine
-
-                # Execute with max_depth=15 (exceeds limit)
-                mock_user = MagicMock()
-                result = await scip_callchain(
-                    {"from_symbol": "func1", "to_symbol": "func2", "max_depth": 15},
-                    mock_user,
-                )
-
-                # Should succeed (no exception)
-                content = result.get("content", [])
-                assert len(content) > 0
-                data = json.loads(content[0]["text"])
-                assert data["success"] is True
-
-                # Verify backend.trace_call_chain was called with clamped max_depth <= 10
-                assert mock_backend.trace_call_chain.called
-                call_args = mock_backend.trace_call_chain.call_args
-                max_depth_arg = call_args[1].get("max_depth")  # Keyword arg
-                assert (
-                    max_depth_arg <= 10
-                ), f"Expected max_depth <= 10, got {max_depth_arg}"
-
-    @pytest.mark.asyncio
-    async def test_scip_context_uses_golden_repos_directory(
-        self, tmp_path: Path
-    ) -> None:
-        """Verify scip_context passes golden repos directory to get_smart_context()."""
-        from code_indexer.server.mcp.handlers import scip_context
-
-        # Create golden repos structure with SCIP files
-        golden_repos_dir = tmp_path / "golden-repos"
-        repo1_scip = golden_repos_dir / "repo1" / ".code-indexer" / "scip"
-        repo1_scip.mkdir(parents=True)
-        (repo1_scip / "index.scip.db").write_text("mock")
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
 
         with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-        ) as mock_get_golden:
-            mock_get_golden.return_value = str(golden_repos_dir)
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
+            # Execute with max_depth=15 (exceeds limit)
+            result = await scip_callchain(
+                {"from_symbol": "func1", "to_symbol": "func2", "max_depth": 15},
+                mock_user,
+            )
 
-            with patch(
-                "code_indexer.scip.query.composites.get_smart_context"
-            ) as mock_context:
-                # Mock successful result
-                from code_indexer.scip.query.composites import SmartContextResult
+            # Should succeed (no exception)
+            content = result.get("content", [])
+            assert len(content) > 0
+            data = json.loads(content[0]["text"])
+            assert data["success"] is True
 
-                mock_result = SmartContextResult(
-                    target_symbol="test",
-                    summary="Test summary",
-                    total_files=0,
-                    total_symbols=0,
-                    avg_relevance=0.0,
-                    files=[],
-                )
-                mock_context.return_value = mock_result
+            # Verify service.trace_callchain was called with clamped max_depth <= 10
+            mock_service.trace_callchain.assert_called_once()
+            call_kwargs = mock_service.trace_callchain.call_args[1]
+            max_depth_arg = call_kwargs.get("max_depth")
+            assert (
+                max_depth_arg <= 10
+            ), f"Expected max_depth <= 10, got {max_depth_arg}"
 
-                # Execute
-                mock_user = MagicMock()
-                await scip_context({"symbol": "test"}, mock_user)
+    @pytest.mark.asyncio
+    async def test_scip_context_delegates_to_service(self) -> None:
+        """Verify scip_context delegates to SCIPQueryService.get_context()."""
+        from code_indexer.server.mcp.handlers import scip_context
 
-                # Verify get_smart_context was called with golden_repos_dir
-                assert mock_context.called
-                call_args = mock_context.call_args
-                scip_dir_arg = call_args[0][1]  # Second positional arg
+        # Create mock service with expected response
+        mock_service = MagicMock()
+        mock_service.get_context.return_value = {
+            "target_symbol": "test",
+            "summary": "Test summary",
+            "files": [],
+            "total_files": 0,
+            "total_symbols": 0,
+            "avg_relevance": 0.0,
+        }
 
-                # Should NOT be Path.cwd()
-                assert str(scip_dir_arg) != str(Path.cwd() / ".code-indexer" / "scip")
-                # Should be golden repos directory
-                assert Path(scip_dir_arg) == golden_repos_dir
-                # Should contain SCIP files
-                assert list(Path(scip_dir_arg).glob("**/*.scip.db"))
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
+            result = await scip_context({"symbol": "test"}, mock_user)
+
+            # Verify service.get_context was called with correct params
+            mock_service.get_context.assert_called_once()
+            call_kwargs = mock_service.get_context.call_args[1]
+            assert call_kwargs["symbol"] == "test"
+            assert call_kwargs["username"] == "testuser"
+
+            # Verify response
+            content = result.get("content", [])
+            assert len(content) > 0
+            data = json.loads(content[0]["text"])
+            assert data["success"] is True
+            assert data["target_symbol"] == "test"
+            assert data["total_files"] == 0
 
 
 class TestScipCallchainSymbolValidation:
@@ -656,54 +696,45 @@ class TestScipCallchainSymbolValidation:
 
 
 class TestScipCallchainEnhancedResponse:
-    """Tests for enhanced scip_callchain response format with diagnostics."""
+    """Tests for enhanced scip_callchain response format with diagnostics.
+
+    Story #40: Updated to mock _get_scip_query_service instead of _find_scip_files.
+    """
 
     @pytest.mark.asyncio
-    async def test_scip_callchain_includes_diagnostic_when_no_chains_found(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_scip_callchain_includes_diagnostic_when_no_chains_found(self) -> None:
         """Verify scip_callchain includes diagnostic message when 0 chains found."""
         from code_indexer.server.mcp.handlers import scip_callchain
 
-        # Create golden repos structure with SCIP files
-        golden_repos_dir = tmp_path / "golden-repos"
-        repo1_scip = golden_repos_dir / "repo1" / ".code-indexer" / "scip"
-        repo1_scip.mkdir(parents=True)
-        scip_file = repo1_scip / "index.scip.db"
+        # Create mock service that returns empty chains
+        mock_service = MagicMock()
+        mock_service.trace_callchain.return_value = []
 
-        with patch("code_indexer.server.mcp.handlers._find_scip_files") as mock_find:
-            mock_find.return_value = [scip_file]
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
 
-            with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine"
-            ) as mock_engine_class:
-                # Mock SCIPQueryEngine to return empty chains
-                mock_engine = MagicMock()
-                mock_backend = MagicMock()
-                mock_backend.trace_call_chain.return_value = []
-                mock_engine.backend = mock_backend
-                mock_engine_class.return_value = mock_engine
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
+            result = await scip_callchain(
+                {"from_symbol": "func1", "to_symbol": "func2"}, mock_user
+            )
 
-                # Execute
-                mock_user = MagicMock()
-                result = await scip_callchain(
-                    {"from_symbol": "func1", "to_symbol": "func2"}, mock_user
-                )
-
-                # Verify response includes diagnostic information
-                content = result.get("content", [])
-                assert len(content) > 0
-                data = json.loads(content[0]["text"])
-                assert data["success"] is True
-                assert data["total_chains_found"] == 0
-                assert "scip_files_searched" in data
-                assert data["scip_files_searched"] >= 0
-                assert "repository_filter" in data
-                assert "diagnostic" in data
-                assert data["diagnostic"] is not None
-                assert "No call chains found" in data["diagnostic"]
-                assert "func1" in data["diagnostic"]
-                assert "func2" in data["diagnostic"]
+            # Verify response includes diagnostic information
+            content = result.get("content", [])
+            assert len(content) > 0
+            data = json.loads(content[0]["text"])
+            assert data["success"] is True
+            assert data["total_chains_found"] == 0
+            assert "scip_files_searched" in data
+            assert data["scip_files_searched"] >= 0
+            assert "repository_filter" in data
+            assert "diagnostic" in data
+            assert data["diagnostic"] is not None
+            assert "No call chains found" in data["diagnostic"]
+            assert "func1" in data["diagnostic"]
+            assert "func2" in data["diagnostic"]
 
 
 class TestScipHandlerRegistration:

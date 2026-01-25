@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.6.9] - 2026-01-25
+
+### Added
+
+- **SCIPQueryService - Unified SCIP Query Layer** (Epic #37)
+  - New `SCIPQueryService` class providing centralized SCIP file discovery and query execution
+  - 7 query methods: `find_definition`, `find_references`, `get_dependencies`, `get_dependents`, `analyze_impact`, `trace_callchain`, `get_context`
+  - Access control integration via `username` parameter for group-based repository filtering
+  - 43 unit tests for service with 97% coverage
+  - 24 parity and consolidation tests verifying MCP/REST identical behavior
+
+### Changed
+
+- **MCP SCIP Handlers** - Refactored to thin wrappers delegating to SCIPQueryService
+- **REST SCIP Routes** - Refactored to thin wrappers delegating to SCIPQueryService
+- **MCP/REST Parity** - Both interfaces now call same service methods, guaranteeing identical results
+
+### Removed
+
+- **Duplicate `_find_scip_files()`** - Removed from both handlers.py and scip_queries.py
+- **9 duplicate helper functions** - Removed from scip_queries.py (access control, filtering, conversion)
+- **Net code reduction**: ~300 lines removed through consolidation
+
+---
+
+## [8.6.8] - 2026-01-23
+
+### Added
+
+- **Consolidated Multi-Repo Search Implementation** (Story #29)
+  - MCP `_omni_search_code()` now uses parallel execution via `asyncio.gather()` instead of sequential loop
+  - OmniSearchConfig merged into MultiSearchLimitsConfig with `omni_` prefixed fields
+  - All 24 Web UI configuration sections now have explanatory documentation paragraphs
+  - Comprehensive technical debt audit report documenting other codebase duplications
+
+### Removed
+
+- **OmniSearchConfig class** - Settings consolidated into MultiSearchLimitsConfig
+- **Duplicate "Cross-Repo (Omni) Search Settings"** Web UI section - Now unified under "Multi-Search Settings"
+
+### Changed
+
+- **MultiSearchLimitsConfig** now includes 10 additional `omni_` prefixed fields migrated from OmniSearchConfig
+- **Config migration logic** automatically converts old `omni_search_config` to new `multi_search_limits_config` format
+
+### Documentation
+
+- **Technical Debt Audit Report** at `reports/troubleshooting/tech_debt_audit_story29.md`
+  - Documents 5 duplicate service implementations (HIGH: _get_repository_path in 4 files)
+  - Identifies 4 environment variable policy violations in cache modules
+  - Provides prioritized recommendations for future consolidation work
+
+---
+
 ## [8.6.7] - 2026-01-23
 
 ### Added

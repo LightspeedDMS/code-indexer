@@ -30,6 +30,14 @@ class FrontmatterValidationError(Exception):
 
 
 @dataclass
+class CategoryMeta:
+    """Metadata for a tool category."""
+
+    name: str
+    description: str
+
+
+@dataclass
 class ToolDoc:
     """Parsed tool documentation from a markdown file."""
 
@@ -40,6 +48,8 @@ class ToolDoc:
     description: str
     quick_reference: bool = False
     parameters: Optional[Dict[str, str]] = None
+    inputSchema: Optional[Dict[str, Any]] = None
+    outputSchema: Optional[Dict[str, Any]] = None
 
 
 class ToolDocLoader:
@@ -81,6 +91,43 @@ class ToolDocLoader:
         self._loaded = True
         return self._cache
 
+    def _load_category_meta(self, category_dir: Path) -> Optional[CategoryMeta]:
+        """Load _category.yaml from a category directory.
+
+        Args:
+            category_dir: Path to the category directory
+
+        Returns:
+            CategoryMeta if _category.yaml exists, None otherwise.
+            Returns fallback CategoryMeta with directory name if YAML parsing fails.
+        """
+        meta_file = category_dir / "_category.yaml"
+        if not meta_file.exists():
+            return None
+
+        try:
+            content = meta_file.read_text(encoding="utf-8")
+        except OSError:
+            # Treat read errors as missing file
+            return None
+
+        try:
+            data = yaml.safe_load(content)
+        except yaml.YAMLError:
+            # On malformed YAML, return fallback with directory name
+            return CategoryMeta(
+                name=category_dir.name,
+                description="",
+            )
+
+        if not isinstance(data, dict):
+            data = {}
+
+        return CategoryMeta(
+            name=data.get("name", category_dir.name),
+            description=data.get("description", ""),
+        )
+
     def _parse_md_file(self, md_file: Path) -> ToolDoc:
         """Parse a markdown file with YAML frontmatter."""
         content = md_file.read_text(encoding="utf-8")
@@ -117,6 +164,8 @@ class ToolDocLoader:
             description=body,
             quick_reference=frontmatter.get("quick_reference", False),
             parameters=frontmatter.get("parameters"),
+            inputSchema=frontmatter.get("inputSchema"),
+            outputSchema=frontmatter.get("outputSchema"),
         )
 
     def get_description(self, tool_name: str) -> str:
@@ -170,3 +219,114 @@ class ToolDocLoader:
                 lines.append(f"  {tool.name} - {tool.tl_dr}")
 
         return "\n".join(lines)
+
+    def build_tool_registry(self) -> Dict[str, Dict[str, Any]]:
+        """Build TOOL_REGISTRY from loaded tool docs.
+
+        Returns a dictionary matching the TOOL_REGISTRY format used in tools.py.
+        Only includes tools that have an inputSchema defined (excludes guides).
+
+        Returns:
+            Dict mapping tool names to their definitions with name, description,
+            inputSchema, and required_permission.
+        """
+        if not self._loaded:
+            self.load_all_docs()
+
+        registry: Dict[str, Dict[str, Any]] = {}
+        for name, doc in self._cache.items():
+            if doc.inputSchema is None:
+                continue  # Skip tools without inputSchema (like guides)
+            tool_def = {
+                "name": name,
+                "description": doc.description,
+                "inputSchema": doc.inputSchema,
+                "required_permission": doc.required_permission,
+            }
+            # Include outputSchema if present (for documentation purposes)
+            if doc.outputSchema is not None:
+                tool_def["outputSchema"] = doc.outputSchema
+            registry[name] = tool_def
+        return registry
+
+    def get_tools_by_category(self) -> Dict[str, List[Dict[str, str]]]:
+        """Get all tools grouped by category with tl_dr descriptions.
+
+        Returns tools organized by their category, with each tool represented
+        as a dict containing 'name' and 'tl_dr' fields. Only includes tools
+        that have an inputSchema (excludes documentation-only entries).
+
+        Returns:
+            Dict mapping category names to lists of tool info dicts.
+        """
+        if not self._loaded:
+            self.load_all_docs()
+
+        by_category: Dict[str, List[Dict[str, str]]] = {}
+        for doc in self._cache.values():
+            if doc.inputSchema is None:
+                continue  # Skip non-tool docs (guides without schema)
+            if doc.category not in by_category:
+                by_category[doc.category] = []
+            by_category[doc.category].append({
+                "name": doc.name,
+                "tl_dr": doc.tl_dr
+            })
+        return by_category
+
+    def get_category_overview(self) -> List[Dict[str, Any]]:
+        """Get overview of all categories with descriptions and key tools.
+
+        Returns a list of category info dicts sorted alphabetically by name.
+        Only includes categories that have at least one tool with inputSchema.
+
+        Returns:
+            List of dicts, each containing:
+            - name: Category name
+            - description: Category description from _category.yaml (or empty string)
+            - key_tools: Tools with quick_reference: true first, otherwise first 3 alphabetically
+            - tool_count: Total number of tools in category
+        """
+        if not self._loaded:
+            self.load_all_docs()
+
+        # Group tools by category (only tools with inputSchema)
+        tools_by_category: Dict[str, List[ToolDoc]] = {}
+        for doc in self._cache.values():
+            if doc.inputSchema is None:
+                continue  # Skip guides without inputSchema
+            if doc.category not in tools_by_category:
+                tools_by_category[doc.category] = []
+            tools_by_category[doc.category].append(doc)
+
+        # Build category overview
+        overview: List[Dict[str, Any]] = []
+        for category_dir in self.docs_dir.iterdir():
+            if not category_dir.is_dir():
+                continue
+
+            category_name = category_dir.name
+            if category_name not in tools_by_category:
+                continue  # Skip categories without tools
+
+            # Load category metadata
+            meta = self._load_category_meta(category_dir)
+            description = meta.description if meta else ""
+
+            # Get key tools: prefer quick_reference tools, fallback to first 3 alphabetically
+            tools = tools_by_category[category_name]
+            quick_ref_tools = [t for t in tools if t.quick_reference]
+            if quick_ref_tools:
+                key_tools = sorted([t.name for t in quick_ref_tools])
+            else:
+                key_tools = sorted([t.name for t in tools])[:3]
+
+            overview.append({
+                "name": category_name,
+                "description": description,
+                "key_tools": key_tools,
+                "tool_count": len(tools),
+            })
+
+        # Sort by category name
+        return sorted(overview, key=lambda x: x["name"])

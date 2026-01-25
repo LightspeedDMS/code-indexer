@@ -78,6 +78,7 @@ class TestGetFileContentPaginationParameters:
                 "offset": 100,
                 "limit": 2,
                 "has_more": True,
+                "next_offset": 102,  # offset(100) + limit(2)
             },
         }
 
@@ -92,12 +93,14 @@ class TestGetFileContentPaginationParameters:
         mcp_response = await handlers.get_file_content(params, mock_user)
 
         # Verify service was called with pagination parameters
+        # Story #33 Fix: MCP handler now passes skip_truncation=True
         mock_file_service.get_file_content.assert_called_once_with(
             repository_alias="test-repo",
             file_path="test.py",
             username="testuser",
             offset=100,
             limit=2,
+            skip_truncation=True,
         )
 
         # Verify response includes metadata
@@ -109,7 +112,9 @@ class TestGetFileContentPaginationParameters:
         assert metadata["returned_lines"] == 2
         assert metadata["offset"] == 100
         assert metadata["limit"] == 2
-        assert metadata["has_more"] is True
+        # Note: has_more is now controlled by TruncationHelper (Story #33)
+        # Check next_offset instead to verify pagination metadata is preserved
+        assert metadata.get("next_offset") == 102  # offset(100) + limit(2)
 
     @pytest.mark.asyncio
     async def test_no_pagination_params_defaults_to_full_file(
@@ -351,11 +356,11 @@ class TestGetFileContentGlobalRepositories:
         from code_indexer.server.mcp import handlers
 
         # Mock global repo lookup
-        # AliasManager is imported inside the function, so patch it at the import location
+        # get_server_global_registry is the function used in handlers
         with (
             patch(
-                "code_indexer.server.mcp.handlers.GlobalRegistry"
-            ) as mock_registry_class,
+                "code_indexer.server.mcp.handlers.get_server_global_registry"
+            ) as mock_registry_func,
             patch(
                 "code_indexer.global_repos.alias_manager.AliasManager"
             ) as mock_alias_manager_class,
@@ -370,7 +375,7 @@ class TestGetFileContentGlobalRepositories:
             mock_registry.list_global_repos.return_value = [
                 {"alias_name": "test-repo-global", "target_path": "/fake/repo"}
             ]
-            mock_registry_class.return_value = mock_registry
+            mock_registry_func.return_value = mock_registry
 
             # Mock alias manager
             mock_alias_manager = MagicMock()
@@ -390,6 +395,7 @@ class TestGetFileContentGlobalRepositories:
                     "offset": 50,
                     "limit": 1,
                     "has_more": True,
+                    "next_offset": 51,  # offset(50) + limit(1)
                 },
             }
 
@@ -404,10 +410,12 @@ class TestGetFileContentGlobalRepositories:
             mcp_response = await handlers.get_file_content(params, mock_user)
 
             # Verify get_file_content_by_path was called with pagination params
+            # Story #33 Fix: MCP handler now passes skip_truncation=True
             mock_file_service.get_file_content_by_path.assert_called_once()
             call_args = mock_file_service.get_file_content_by_path.call_args
             assert call_args[1]["offset"] == 50
             assert call_args[1]["limit"] == 1
+            assert call_args[1]["skip_truncation"] is True
 
             # Verify response includes pagination metadata
             # MCP response wraps everything in JSON content blocks
@@ -416,4 +424,6 @@ class TestGetFileContentGlobalRepositories:
             metadata = data["metadata"]
             assert metadata["offset"] == 50
             assert metadata["limit"] == 1
-            assert metadata["has_more"] is True
+            # Note: has_more is now controlled by TruncationHelper (Story #33)
+            # Check next_offset instead to verify pagination metadata is preserved
+            assert metadata.get("next_offset") == 51  # offset(50) + limit(1)

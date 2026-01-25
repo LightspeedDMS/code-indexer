@@ -53,10 +53,10 @@ class TestClaudeCliManagerInitialization:
         manager.shutdown()
 
     def test_default_max_workers(self):
-        """ClaudeCliManager defaults to 4 workers if not specified."""
+        """Story #24: ClaudeCliManager defaults to 2 workers for resource-constrained systems."""
         manager = ClaudeCliManager(api_key="test-key")
 
-        assert len(manager._worker_threads) == 4
+        assert len(manager._worker_threads) == 2
 
         manager.shutdown()
 

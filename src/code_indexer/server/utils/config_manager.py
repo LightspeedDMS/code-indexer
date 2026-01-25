@@ -53,7 +53,7 @@ class CacheConfig:
 class ReindexingConfig:
     """Reindexing trigger and analysis configuration."""
 
-    change_percentage_threshold: float = 10.0
+    change_percentage_threshold: float = 80.0
     accuracy_threshold: float = 0.85
     max_index_age_days: int = 30
     batch_size: int = 100
@@ -97,22 +97,6 @@ class ServerResourceConfig:
 
     # NOTE: Artificial resource limits (max_golden_repos, max_repo_size_bytes, max_jobs_per_user)
     # have been REMOVED from the codebase. They were nonsensical limitations that served no purpose.
-
-
-@dataclass
-class OmniSearchConfig:
-    """Omni-Search configuration for cross-repository search."""
-
-    max_workers: int = 10
-    per_repo_timeout_seconds: int = 300
-    cache_max_entries: int = 100
-    cache_ttl_seconds: int = 300
-    default_limit: int = 10
-    max_limit: int = 1000
-    default_aggregation_mode: str = "global"
-    max_results_per_repo: int = 100
-    max_total_results_before_aggregation: int = 10000
-    pattern_metacharacters: str = "*?[]^$+|"
 
 
 @dataclass
@@ -413,20 +397,26 @@ class IndexingConfig:
 @dataclass
 class ClaudeIntegrationConfig:
     """
-    Claude CLI integration configuration (Story #15 - AC3, Story #20).
+    Claude CLI integration configuration (Story #15 - AC3, Story #20, Story #23).
 
     Contains settings for Claude CLI integration that were previously
-    loose settings on ServerConfig, plus VoyageAI API key (Story #20).
+    loose settings on ServerConfig, plus VoyageAI API key (Story #20),
+    and scheduled catch-up settings (Story #23 - AC6).
     """
 
     # Anthropic API key for Claude CLI (moved from ServerConfig)
     anthropic_api_key: Optional[str] = None
     # VoyageAI API key for embeddings (Story #20)
     voyageai_api_key: Optional[str] = None
-    # Maximum concurrent Claude CLI processes (moved from ServerConfig)
-    max_concurrent_claude_cli: int = 4
+    # Maximum concurrent Claude CLI processes (Story #24: default 2 for resource-constrained systems)
+    max_concurrent_claude_cli: int = 2
     # Refresh interval for description generation in hours (moved from ServerConfig)
     description_refresh_interval_hours: int = 24
+    # Scheduled catch-up settings (Story #23 - AC6)
+    # Enable scheduled background catch-up for repos with fallback descriptions
+    scheduled_catchup_enabled: bool = False
+    # Interval in minutes for scheduled catch-up scanning (default: 60 = 1 hour)
+    scheduled_catchup_interval_minutes: int = 60
 
 
 @dataclass
@@ -444,6 +434,109 @@ class RepositoryConfig:
     pr_base_branch: str = "main"
     # Default branch for repository operations (moved from ServerConfig)
     default_branch: str = "main"
+
+
+@dataclass
+class MultiSearchLimitsConfig:
+    """
+    Multi-search limits configuration (Story #25, Story #29 - Consolidation).
+
+    Configures worker limits and timeouts for MultiSearchService, SCIPMultiService,
+    and Omni-Search (cross-repository search). Story #29 consolidated OmniSearchConfig
+    into this class to eliminate duplicate multi-repo search implementations.
+
+    Now configurable via Web UI Configuration system under "Multi-Search Settings".
+
+    Default values per resource audit recommendation: 2 workers (not 10).
+    """
+
+    # MultiSearchService settings
+    # Default 2 workers per resource audit (was 10)
+    multi_search_max_workers: int = 2
+    # Default 30 seconds timeout
+    multi_search_timeout_seconds: int = 30
+
+    # SCIPMultiService settings
+    # Default 2 workers per resource audit (was 10)
+    scip_multi_max_workers: int = 2
+    # Default 30 seconds timeout
+    scip_multi_timeout_seconds: int = 30
+
+    # Story #29: Omni-Search settings (merged from OmniSearchConfig)
+    # These control MCP cross-repository search behavior
+    # Prefixed with omni_ to distinguish from standard multi-search settings
+    omni_max_workers: int = 10
+    omni_per_repo_timeout_seconds: int = 300
+    omni_cache_max_entries: int = 100
+    omni_cache_ttl_seconds: int = 300
+    omni_default_limit: int = 10
+    omni_max_limit: int = 1000
+    omni_default_aggregation_mode: str = "global"
+    omni_max_results_per_repo: int = 100
+    omni_max_total_results_before_aggregation: int = 10000
+    omni_pattern_metacharacters: str = "*?[]^$+|"
+
+
+@dataclass
+class BackgroundJobsConfig:
+    """
+    Background jobs configuration (Story #26 - Bug Fix, Story #27).
+
+    Configures concurrent job limits for BackgroundJobManager to prevent
+    resource exhaustion when many jobs are submitted simultaneously.
+    Now configurable via Web UI Configuration system.
+
+    Default value per resource audit recommendation: 5 concurrent jobs.
+    Story #27: Also configures SubprocessExecutor max_workers.
+    """
+
+    # Maximum number of concurrent background jobs (default: 5)
+    # Jobs exceeding this limit stay in PENDING until a slot is available
+    max_concurrent_background_jobs: int = 5
+
+    # Story #27: Maximum concurrent workers for SubprocessExecutor (default: 2)
+    # Controls parallelism of subprocess-based operations like regex search
+    # Default 2 per resource audit recommendation (was hardcoded to 1)
+    subprocess_max_workers: int = 2
+
+
+@dataclass
+class ContentLimitsConfig:
+    """
+    Unified content limits configuration (Story #32).
+
+    Consolidates all content truncation-related settings into a single configuration
+    section. All limits use tokens as the primary unit for consistency.
+
+    This replaces scattered settings from:
+    - FileContentLimitsConfig (max_tokens_per_request, chars_per_token)
+    - CacheConfig payload settings (cache_ttl_seconds)
+    - Various hardcoded limits throughout the codebase
+    """
+
+    # Token conversion factor
+    # Typical ratio for source code is ~4 characters per token
+    chars_per_token: int = 4
+
+    # File content limits (tokens)
+    # Maximum tokens for file content retrieval operations
+    file_content_max_tokens: int = 50000
+
+    # Git operation limits (tokens)
+    # Maximum tokens for git diff output
+    git_diff_max_tokens: int = 50000
+    # Maximum tokens for git log output
+    git_log_max_tokens: int = 50000
+
+    # Search result limits (tokens)
+    # Maximum tokens per search result
+    search_result_max_tokens: int = 50000
+
+    # Cache settings
+    # Time-to-live for cached content in seconds (default: 1 hour)
+    cache_ttl_seconds: int = 3600
+    # Maximum cache entries before cleanup (default: 10000)
+    cache_max_entries: int = 10000
 
 
 @dataclass
@@ -467,7 +560,6 @@ class ServerConfig:
     resource_config: Optional[ServerResourceConfig] = None
     cache_config: Optional[CacheConfig] = None
     reindexing_config: Optional[ReindexingConfig] = None
-    omni_search_config: Optional[OmniSearchConfig] = None
     auto_watch_config: Optional[AutoWatchConfig] = None
     oidc_provider_config: Optional[OIDCProviderConfig] = None
     telemetry_config: Optional[TelemetryConfig] = None
@@ -500,6 +592,15 @@ class ServerConfig:
     # Story #15 AC4 - Configuration Refactoring: Repository settings
     repository_config: Optional[RepositoryConfig] = None
 
+    # Story #25 - Multi-search limits configuration
+    multi_search_limits_config: Optional[MultiSearchLimitsConfig] = None
+
+    # Story #26 - Background jobs configuration
+    background_jobs_config: Optional[BackgroundJobsConfig] = None
+
+    # Story #32 - Unified content limits configuration
+    content_limits_config: Optional[ContentLimitsConfig] = None
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:
@@ -510,8 +611,6 @@ class ServerConfig:
             self.cache_config = CacheConfig()
         if self.reindexing_config is None:
             self.reindexing_config = ReindexingConfig()
-        if self.omni_search_config is None:
-            self.omni_search_config = OmniSearchConfig()
         if self.auto_watch_config is None:
             self.auto_watch_config = AutoWatchConfig()
         if self.oidc_provider_config is None:
@@ -553,6 +652,15 @@ class ServerConfig:
         # Story #15 AC4 - Configuration Refactoring: Initialize repository config
         if self.repository_config is None:
             self.repository_config = RepositoryConfig()
+        # Story #25 - Initialize multi-search limits config
+        if self.multi_search_limits_config is None:
+            self.multi_search_limits_config = MultiSearchLimitsConfig()
+        # Story #26 - Initialize background jobs config
+        if self.background_jobs_config is None:
+            self.background_jobs_config = BackgroundJobsConfig()
+        # Story #32 - Initialize content limits config
+        if self.content_limits_config is None:
+            self.content_limits_config = ContentLimitsConfig()
 
 
 class ServerConfigManager:
@@ -643,6 +751,37 @@ class ServerConfigManager:
                     **config_dict["resource_config"]
                 )
 
+            # Story #32: Migration from old config format to content_limits_config
+            # Must run BEFORE any conversions so we can read raw dict values
+            if "content_limits_config" not in config_dict:
+                migrated_config = {}
+
+                # Migrate from file_content_limits_config
+                if "file_content_limits_config" in config_dict:
+                    old_file_limits = config_dict["file_content_limits_config"]
+                    if isinstance(old_file_limits, dict):
+                        if "chars_per_token" in old_file_limits:
+                            migrated_config["chars_per_token"] = old_file_limits[
+                                "chars_per_token"
+                            ]
+                        if "max_tokens_per_request" in old_file_limits:
+                            migrated_config["file_content_max_tokens"] = old_file_limits[
+                                "max_tokens_per_request"
+                            ]
+
+                # Migrate from cache_config payload settings
+                if "cache_config" in config_dict:
+                    old_cache = config_dict["cache_config"]
+                    if isinstance(old_cache, dict):
+                        if "payload_cache_ttl_seconds" in old_cache:
+                            migrated_config["cache_ttl_seconds"] = old_cache[
+                                "payload_cache_ttl_seconds"
+                            ]
+
+                # Create content_limits_config with migrated values
+                if migrated_config:
+                    config_dict["content_limits_config"] = migrated_config
+
             # Convert nested cache_config dict to CacheConfig
             if "cache_config" in config_dict and isinstance(
                 config_dict["cache_config"], dict
@@ -657,13 +796,31 @@ class ServerConfigManager:
                     **config_dict["reindexing_config"]
                 )
 
-            # Convert nested omni_search_config dict to OmniSearchConfig
+            # Story #29: Migrate old omni_search_config to multi_search_limits_config
             if "omni_search_config" in config_dict and isinstance(
                 config_dict["omni_search_config"], dict
             ):
-                config_dict["omni_search_config"] = OmniSearchConfig(
-                    **config_dict["omni_search_config"]
-                )
+                old_omni = config_dict.pop("omni_search_config")
+                # Initialize multi_search_limits_config dict if needed
+                if "multi_search_limits_config" not in config_dict:
+                    config_dict["multi_search_limits_config"] = {}
+                if isinstance(config_dict["multi_search_limits_config"], dict):
+                    # Map old field names to new omni_ prefixed names
+                    field_mapping = {
+                        "max_workers": "omni_max_workers",
+                        "per_repo_timeout_seconds": "omni_per_repo_timeout_seconds",
+                        "cache_max_entries": "omni_cache_max_entries",
+                        "cache_ttl_seconds": "omni_cache_ttl_seconds",
+                        "default_limit": "omni_default_limit",
+                        "max_limit": "omni_max_limit",
+                        "default_aggregation_mode": "omni_default_aggregation_mode",
+                        "max_results_per_repo": "omni_max_results_per_repo",
+                        "max_total_results_before_aggregation": "omni_max_total_results_before_aggregation",
+                        "pattern_metacharacters": "omni_pattern_metacharacters",
+                    }
+                    for old_key, new_key in field_mapping.items():
+                        if old_key in old_omni:
+                            config_dict["multi_search_limits_config"][new_key] = old_omni[old_key]
 
             # Convert nested oidc_provider_config dict to OIDCProviderConfig
             if "oidc_provider_config" in config_dict and isinstance(
@@ -852,6 +1009,31 @@ class ServerConfigManager:
             ):
                 config_dict["repository_config"] = RepositoryConfig(
                     **config_dict["repository_config"]
+                )
+
+            # Story #25: Convert multi_search_limits_config dict to MultiSearchLimitsConfig
+            if "multi_search_limits_config" in config_dict and isinstance(
+                config_dict["multi_search_limits_config"], dict
+            ):
+                config_dict["multi_search_limits_config"] = MultiSearchLimitsConfig(
+                    **config_dict["multi_search_limits_config"]
+                )
+
+            # Story #26: Convert background_jobs_config dict to BackgroundJobsConfig
+            if "background_jobs_config" in config_dict and isinstance(
+                config_dict["background_jobs_config"], dict
+            ):
+                config_dict["background_jobs_config"] = BackgroundJobsConfig(
+                    **config_dict["background_jobs_config"]
+                )
+
+            # Story #32: Convert content_limits_config dict to ContentLimitsConfig
+            # (Migration from old format happens earlier, before file_content_limits_config conversion)
+            if "content_limits_config" in config_dict and isinstance(
+                config_dict["content_limits_config"], dict
+            ):
+                config_dict["content_limits_config"] = ContentLimitsConfig(
+                    **config_dict["content_limits_config"]
                 )
 
             return ServerConfig(**config_dict)
@@ -1244,6 +1426,128 @@ class ServerConfigManager:
             if not (1 <= config.auth_config.oauth_extension_threshold_hours <= 24):
                 raise ValueError(
                     f"oauth_extension_threshold_hours must be between 1 and 24, got {config.auth_config.oauth_extension_threshold_hours}"
+                )
+
+        # Validate multi_search_limits_config (Story #25, Story #29)
+        if config.multi_search_limits_config:
+            # multi_search_max_workers range 1-50
+            if not (1 <= config.multi_search_limits_config.multi_search_max_workers <= 50):
+                raise ValueError(
+                    f"multi_search_max_workers must be between 1 and 50, got {config.multi_search_limits_config.multi_search_max_workers}"
+                )
+            # multi_search_timeout_seconds range 5-600
+            if not (5 <= config.multi_search_limits_config.multi_search_timeout_seconds <= 600):
+                raise ValueError(
+                    f"multi_search_timeout_seconds must be between 5 and 600, got {config.multi_search_limits_config.multi_search_timeout_seconds}"
+                )
+            # scip_multi_max_workers range 1-50
+            if not (1 <= config.multi_search_limits_config.scip_multi_max_workers <= 50):
+                raise ValueError(
+                    f"scip_multi_max_workers must be between 1 and 50, got {config.multi_search_limits_config.scip_multi_max_workers}"
+                )
+            # scip_multi_timeout_seconds range 5-600
+            if not (5 <= config.multi_search_limits_config.scip_multi_timeout_seconds <= 600):
+                raise ValueError(
+                    f"scip_multi_timeout_seconds must be between 5 and 600, got {config.multi_search_limits_config.scip_multi_timeout_seconds}"
+                )
+
+            # Story #29: Validate omni settings (merged from OmniSearchConfig)
+            # omni_max_workers range 1-100
+            if not (1 <= config.multi_search_limits_config.omni_max_workers <= 100):
+                raise ValueError(
+                    f"omni_max_workers must be between 1 and 100, got {config.multi_search_limits_config.omni_max_workers}"
+                )
+            # omni_per_repo_timeout_seconds range 1-3600
+            if not (1 <= config.multi_search_limits_config.omni_per_repo_timeout_seconds <= 3600):
+                raise ValueError(
+                    f"omni_per_repo_timeout_seconds must be between 1 and 3600, got {config.multi_search_limits_config.omni_per_repo_timeout_seconds}"
+                )
+            # omni_cache_max_entries range 1-10000
+            if not (1 <= config.multi_search_limits_config.omni_cache_max_entries <= 10000):
+                raise ValueError(
+                    f"omni_cache_max_entries must be between 1 and 10000, got {config.multi_search_limits_config.omni_cache_max_entries}"
+                )
+            # omni_cache_ttl_seconds range 1-86400
+            if not (1 <= config.multi_search_limits_config.omni_cache_ttl_seconds <= 86400):
+                raise ValueError(
+                    f"omni_cache_ttl_seconds must be between 1 and 86400, got {config.multi_search_limits_config.omni_cache_ttl_seconds}"
+                )
+            # omni_default_limit range 1-1000
+            if not (1 <= config.multi_search_limits_config.omni_default_limit <= 1000):
+                raise ValueError(
+                    f"omni_default_limit must be between 1 and 1000, got {config.multi_search_limits_config.omni_default_limit}"
+                )
+            # omni_max_limit range 1-10000
+            if not (1 <= config.multi_search_limits_config.omni_max_limit <= 10000):
+                raise ValueError(
+                    f"omni_max_limit must be between 1 and 10000, got {config.multi_search_limits_config.omni_max_limit}"
+                )
+            # omni_default_aggregation_mode must be "global" or "per_repo"
+            valid_omni_modes = {"global", "per_repo"}
+            if config.multi_search_limits_config.omni_default_aggregation_mode not in valid_omni_modes:
+                raise ValueError(
+                    f"omni_default_aggregation_mode must be one of {valid_omni_modes}, got {config.multi_search_limits_config.omni_default_aggregation_mode}"
+                )
+            # omni_max_results_per_repo range 1-10000
+            if not (1 <= config.multi_search_limits_config.omni_max_results_per_repo <= 10000):
+                raise ValueError(
+                    f"omni_max_results_per_repo must be between 1 and 10000, got {config.multi_search_limits_config.omni_max_results_per_repo}"
+                )
+            # omni_max_total_results_before_aggregation range 1-100000
+            if not (1 <= config.multi_search_limits_config.omni_max_total_results_before_aggregation <= 100000):
+                raise ValueError(
+                    f"omni_max_total_results_before_aggregation must be between 1 and 100000, got {config.multi_search_limits_config.omni_max_total_results_before_aggregation}"
+                )
+
+        # Validate background_jobs_config (Story #26, Story #27)
+        if config.background_jobs_config:
+            # max_concurrent_background_jobs range 1-100
+            if not (1 <= config.background_jobs_config.max_concurrent_background_jobs <= 100):
+                raise ValueError(
+                    f"max_concurrent_background_jobs must be between 1 and 100, got {config.background_jobs_config.max_concurrent_background_jobs}"
+                )
+            # Story #27: subprocess_max_workers range 1-50
+            if not (1 <= config.background_jobs_config.subprocess_max_workers <= 50):
+                raise ValueError(
+                    f"subprocess_max_workers must be between 1 and 50, got {config.background_jobs_config.subprocess_max_workers}"
+                )
+
+        # Validate content_limits_config (Story #32)
+        if config.content_limits_config:
+            # chars_per_token range 1-10
+            if not (1 <= config.content_limits_config.chars_per_token <= 10):
+                raise ValueError(
+                    f"chars_per_token must be between 1 and 10, got {config.content_limits_config.chars_per_token}"
+                )
+            # file_content_max_tokens range 1000-200000
+            if not (1000 <= config.content_limits_config.file_content_max_tokens <= 200000):
+                raise ValueError(
+                    f"file_content_max_tokens must be between 1000 and 200000, got {config.content_limits_config.file_content_max_tokens}"
+                )
+            # git_diff_max_tokens range 1000-200000
+            if not (1000 <= config.content_limits_config.git_diff_max_tokens <= 200000):
+                raise ValueError(
+                    f"git_diff_max_tokens must be between 1000 and 200000, got {config.content_limits_config.git_diff_max_tokens}"
+                )
+            # git_log_max_tokens range 1000-200000
+            if not (1000 <= config.content_limits_config.git_log_max_tokens <= 200000):
+                raise ValueError(
+                    f"git_log_max_tokens must be between 1000 and 200000, got {config.content_limits_config.git_log_max_tokens}"
+                )
+            # search_result_max_tokens range 1000-200000
+            if not (1000 <= config.content_limits_config.search_result_max_tokens <= 200000):
+                raise ValueError(
+                    f"search_result_max_tokens must be between 1000 and 200000, got {config.content_limits_config.search_result_max_tokens}"
+                )
+            # cache_ttl_seconds minimum 60 seconds
+            if config.content_limits_config.cache_ttl_seconds < 60:
+                raise ValueError(
+                    f"cache_ttl_seconds must be >= 60, got {config.content_limits_config.cache_ttl_seconds}"
+                )
+            # cache_max_entries range 100-100000
+            if not (100 <= config.content_limits_config.cache_max_entries <= 100000):
+                raise ValueError(
+                    f"cache_max_entries must be between 100 and 100000, got {config.content_limits_config.cache_max_entries}"
                 )
 
     def create_server_directories(self) -> None:

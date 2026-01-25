@@ -8,7 +8,6 @@ Provides SQLite-based caching for large content with TTL-based eviction.
 import asyncio
 import logging
 import math
-import os
 import threading
 import time
 import uuid
@@ -49,6 +48,9 @@ class PayloadCacheConfig:
         max_fetch_size_chars: Maximum chars per page when fetching (default 5000)
         cache_ttl_seconds: Time-to-live for cache entries in seconds (default 900)
         cleanup_interval_seconds: Interval between cleanup runs in seconds (default 60)
+
+    Story #32: Environment variable configuration has been removed.
+    All configuration MUST come from the Web UI configuration system (ServerConfig).
     """
 
     preview_size_chars: int = 2000
@@ -57,128 +59,30 @@ class PayloadCacheConfig:
     cleanup_interval_seconds: int = 60
 
     @classmethod
-    def from_env(cls) -> "PayloadCacheConfig":
-        """Create config from environment variables with fallback to defaults.
-
-        Environment variables:
-            CIDX_PREVIEW_SIZE_CHARS: Override preview_size_chars
-            CIDX_MAX_FETCH_SIZE_CHARS: Override max_fetch_size_chars
-            CIDX_CACHE_TTL_SECONDS: Override cache_ttl_seconds
-            CIDX_CLEANUP_INTERVAL_SECONDS: Override cleanup_interval_seconds
-
-        Returns:
-            PayloadCacheConfig with values from env or defaults
-        """
-        config = cls()
-
-        # Preview size override
-        if preview_env := os.environ.get("CIDX_PREVIEW_SIZE_CHARS"):
-            try:
-                config.preview_size_chars = int(preview_env)
-            except ValueError:
-                logger.warning(
-                    f"Invalid CIDX_PREVIEW_SIZE_CHARS '{preview_env}', using default"
-                )
-
-        # Max fetch size override
-        if fetch_env := os.environ.get("CIDX_MAX_FETCH_SIZE_CHARS"):
-            try:
-                config.max_fetch_size_chars = int(fetch_env)
-            except ValueError:
-                logger.warning(
-                    f"Invalid CIDX_MAX_FETCH_SIZE_CHARS '{fetch_env}', using default"
-                )
-
-        # Cache TTL override
-        if ttl_env := os.environ.get("CIDX_CACHE_TTL_SECONDS"):
-            try:
-                config.cache_ttl_seconds = int(ttl_env)
-            except ValueError:
-                logger.warning(
-                    f"Invalid CIDX_CACHE_TTL_SECONDS '{ttl_env}', using default"
-                )
-
-        # Cleanup interval override
-        if cleanup_env := os.environ.get("CIDX_CLEANUP_INTERVAL_SECONDS"):
-            try:
-                config.cleanup_interval_seconds = int(cleanup_env)
-            except ValueError:
-                logger.warning(
-                    f"Invalid CIDX_CLEANUP_INTERVAL_SECONDS '{cleanup_env}', using default"
-                )
-
-        return config
-
-    @classmethod
     def from_server_config(
         cls, cache_config: Optional["CacheConfig"]
     ) -> "PayloadCacheConfig":
-        """Create config from server CacheConfig with environment variable overrides.
+        """Create config from server CacheConfig.
 
-        Priority: Environment variables > Server config > Defaults
+        Story #32: Environment variable overrides have been removed.
+        All configuration comes from Web UI/ServerConfig only.
 
         Args:
             cache_config: CacheConfig from server configuration (can be None)
 
-        Environment variables (override server config):
-            CIDX_PREVIEW_SIZE_CHARS: Override preview_size_chars
-            CIDX_MAX_FETCH_SIZE_CHARS: Override max_fetch_size_chars
-            CIDX_CACHE_TTL_SECONDS: Override cache_ttl_seconds
-            CIDX_CLEANUP_INTERVAL_SECONDS: Override cleanup_interval_seconds
-
         Returns:
-            PayloadCacheConfig with values from server config or defaults,
-            with environment variable overrides applied
+            PayloadCacheConfig with values from server config or defaults
         """
-        # Start with server config values or defaults
+        # Use server config values or defaults
         if cache_config is not None:
-            config = cls(
+            return cls(
                 preview_size_chars=cache_config.payload_preview_size_chars,
                 max_fetch_size_chars=cache_config.payload_max_fetch_size_chars,
                 cache_ttl_seconds=cache_config.payload_cache_ttl_seconds,
                 cleanup_interval_seconds=cache_config.payload_cleanup_interval_seconds,
             )
         else:
-            config = cls()  # Use class defaults
-
-        # Apply environment variable overrides (same logic as from_env)
-        if preview_env := os.environ.get("CIDX_PREVIEW_SIZE_CHARS"):
-            try:
-                config.preview_size_chars = int(preview_env)
-            except ValueError:
-                logger.warning(
-                    f"Invalid CIDX_PREVIEW_SIZE_CHARS '{preview_env}', "
-                    "using server config value"
-                )
-
-        if fetch_env := os.environ.get("CIDX_MAX_FETCH_SIZE_CHARS"):
-            try:
-                config.max_fetch_size_chars = int(fetch_env)
-            except ValueError:
-                logger.warning(
-                    f"Invalid CIDX_MAX_FETCH_SIZE_CHARS '{fetch_env}', "
-                    "using server config value"
-                )
-
-        if ttl_env := os.environ.get("CIDX_CACHE_TTL_SECONDS"):
-            try:
-                config.cache_ttl_seconds = int(ttl_env)
-            except ValueError:
-                logger.warning(
-                    f"Invalid CIDX_CACHE_TTL_SECONDS '{ttl_env}', "
-                    "using server config value"
-                )
-
-        if cleanup_env := os.environ.get("CIDX_CLEANUP_INTERVAL_SECONDS"):
-            try:
-                config.cleanup_interval_seconds = int(cleanup_env)
-            except ValueError:
-                logger.warning(
-                    f"Invalid CIDX_CLEANUP_INTERVAL_SECONDS '{cleanup_env}', "
-                    "using server config value"
-                )
-
-        return config
+            return cls()  # Use class defaults
 
 
 class PayloadCache:

@@ -24,9 +24,9 @@ from ..models.api_models import (
 )
 from ...config import ConfigManager
 from .database_health_service import (
-    DatabaseHealthService,
     DatabaseHealthStatus,
     DatabaseHealthResult,
+    get_database_health_service,
 )
 from .config_service import get_config_service
 
@@ -136,7 +136,9 @@ class HealthCheckService:
         system_info = self._get_system_info()
 
         # Story #727 AC1: Get all database health via DatabaseHealthService
-        db_health_service = DatabaseHealthService()
+        # Story #30 Bug Fix: Use singleton to ensure cache is available even when
+        # using the uncached method. Health endpoint uses uncached for real-time data.
+        db_health_service = get_database_health_service()
         database_health = db_health_service.get_all_database_health()
 
         # Determine overall health status with all indicators (Story #727)

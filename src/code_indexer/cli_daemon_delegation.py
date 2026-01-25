@@ -221,6 +221,18 @@ def _display_results(results, query_time: float = 0) -> None:
     # Import full display function from daemon fast path
     from .cli_daemon_fast import _display_results as fast_display_results
 
+    # Check for error in response (e.g., VoyageAI API key errors)
+    if isinstance(results, dict) and "error" in results:
+        error_msg = results["error"]
+        console.print(f"[red]Search failed: {error_msg}[/red]")
+        # Provide actionable guidance for API key errors
+        if "VOYAGE_API_KEY" in error_msg or "VoyageAI" in error_msg:
+            console.print(
+                "[yellow]Hint: Set the VOYAGE_API_KEY environment variable "
+                "with a valid VoyageAI API key.[/yellow]"
+            )
+        return
+
     # Handle both list and dict formats
     if isinstance(results, list):
         result_list = results

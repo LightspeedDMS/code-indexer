@@ -45,7 +45,7 @@ class TestOnRepoAdded:
         # Create a README.md to analyze
         (clone_path / "README.md").write_text("# Test Repo\nA test repository")
 
-        # Mock ClaudeCliManager to be available
+        # Mock global ClaudeCliManager singleton (Story #23 AC4)
         mock_cli_manager = MagicMock()
         mock_cli_manager.check_cli_available.return_value = True
 
@@ -53,7 +53,7 @@ class TestOnRepoAdded:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=0)
             with patch(
-                "code_indexer.global_repos.meta_description_hook.ClaudeCliManager",
+                "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
                 return_value=mock_cli_manager,
             ):
                 on_repo_added(

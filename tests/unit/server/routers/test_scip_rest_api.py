@@ -1,90 +1,86 @@
-"""Unit tests for SCIP REST API router."""
+"""Unit tests for SCIP REST API router.
+
+Story #41: Updated tests to use SCIPQueryService delegation pattern.
+"""
 
 import pytest
-from pathlib import Path
+from datetime import datetime, timezone
 from fastapi.testclient import TestClient
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, AsyncMock
 
-from code_indexer.scip.query.primitives import QueryResult
-
-
-@pytest.fixture
-def mock_scip_dir(tmp_path):
-    """Create a temporary SCIP directory with test .scip files."""
-    scip_dir = tmp_path / ".code-indexer" / "scip"
-    scip_dir.mkdir(parents=True)
-
-    # Create test .scip files
-    (scip_dir / "project1.scip").touch()
-    (scip_dir / "project2.scip").touch()
-
-    return scip_dir
+from code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.server.auth.dependencies import get_current_user
 
 
 @pytest.fixture
-def mock_query_results():
-    """Mock QueryResult objects for testing."""
-    return [
-        QueryResult(
-            symbol="com.example.UserService",
-            project="/path/to/project1",
-            file_path="src/services/user_service.py",
-            line=10,
-            column=5,
-            kind="definition",
-            relationship=None,
-            context=None,
-        ),
-        QueryResult(
-            symbol="com.example.UserService",
-            project="/path/to/project2",
-            file_path="src/auth/handler.py",
-            line=25,
-            column=8,
-            kind="definition",
-            relationship=None,
-            context=None,
-        ),
-    ]
+def mock_user() -> User:
+    """Create a mock user for testing."""
+    return User(
+        username="testuser",
+        email="test@example.com",
+        full_name="Test User",
+        role=UserRole.NORMAL_USER,
+        password_hash="hashed_password",
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+@pytest.fixture
+def mock_scip_service():
+    """Create a mock SCIPQueryService."""
+    service = Mock()
+    return service
+
+
+@pytest.fixture
+def test_client(mock_user):
+    """Create a test client with auth mocked."""
+    from code_indexer.server.app import app
+
+    # Override auth dependency to return mock user
+    app.dependency_overrides[get_current_user] = lambda: mock_user
+
+    client = TestClient(app)
+    yield client
+
+    # Clean up overrides
+    app.dependency_overrides.clear()
 
 
 class TestDefinitionEndpoint:
     """Tests for /scip/definition endpoint."""
 
     def test_definition_endpoint_returns_results(
-        self, mock_scip_dir, mock_query_results
+        self, test_client, mock_scip_service
     ):
-        """Should query all .scip files and return aggregated definition results."""
-        # Import here to avoid circular imports during test collection
-        from code_indexer.server.app import app
-        from code_indexer.server.routers.scip_queries import router
+        """Should call SCIPQueryService and return aggregated definition results."""
+        # Mock service to return definition results
+        mock_scip_service.find_definition.return_value = [
+            {
+                "symbol": "com.example.UserService",
+                "project": "/path/to/project1",
+                "file_path": "src/services/user_service.py",
+                "line": 10,
+                "column": 5,
+                "kind": "definition",
+                "relationship": None,
+                "context": None,
+            }
+        ]
 
-        # Include router in app
-        app.include_router(router)
-        client = TestClient(app)
-
-        # Mock SCIPQueryEngine to return test results
         with patch(
-            "code_indexer.server.routers.scip_queries.SCIPQueryEngine"
-        ) as MockEngine:
-            mock_engine_instance = Mock()
-            mock_engine_instance.find_definition.return_value = mock_query_results[:1]
-            MockEngine.return_value = mock_engine_instance
-
-            # Mock _find_scip_files to return our test .scip files
-            mock_scip_files = [
-                mock_scip_dir / "project1.scip",
-                mock_scip_dir / "project2.scip",
-            ]
+            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            return_value=mock_scip_service,
+        ):
             with patch(
-                "code_indexer.server.routers.scip_queries._find_scip_files"
-            ) as mock_find:
-                mock_find.return_value = mock_scip_files
+                "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
+                new_callable=AsyncMock,
+            ) as mock_truncate:
+                mock_truncate.return_value = (
+                    mock_scip_service.find_definition.return_value
+                )
+                response = test_client.get("/scip/definition?symbol=UserService")
 
-                # Make request
-                response = client.get("/scip/definition?symbol=UserService")
-
-                # Assertions
                 assert response.status_code == 200
                 data = response.json()
 
@@ -107,42 +103,35 @@ class TestDefinitionEndpoint:
 class TestReferencesEndpoint:
     """Tests for /scip/references endpoint."""
 
-    def test_references_endpoint_returns_results(self, mock_scip_dir):
-        """Should query all .scip files and return aggregated reference results."""
-        from code_indexer.server.app import app
-        from code_indexer.server.routers.scip_queries import router
-
-        app.include_router(router)
-        client = TestClient(app)
-
-        # Create mock reference results
-        mock_refs = [
-            QueryResult(
-                symbol="com.example.UserService",
-                project="/path/to/project1",
-                file_path="src/auth/handler.py",
-                line=15,
-                column=10,
-                kind="reference",
-                relationship="call",
-                context=None,
-            )
+    def test_references_endpoint_returns_results(self, test_client, mock_scip_service):
+        """Should call SCIPQueryService and return aggregated reference results."""
+        mock_scip_service.find_references.return_value = [
+            {
+                "symbol": "com.example.UserService",
+                "project": "/path/to/project1",
+                "file_path": "src/auth/handler.py",
+                "line": 15,
+                "column": 10,
+                "kind": "reference",
+                "relationship": "call",
+                "context": None,
+            }
         ]
 
         with patch(
-            "code_indexer.server.routers.scip_queries.SCIPQueryEngine"
-        ) as MockEngine:
-            mock_engine_instance = Mock()
-            mock_engine_instance.find_references.return_value = mock_refs
-            MockEngine.return_value = mock_engine_instance
-
-            mock_scip_files = [mock_scip_dir / "project1.scip"]
+            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            return_value=mock_scip_service,
+        ):
             with patch(
-                "code_indexer.server.routers.scip_queries._find_scip_files"
-            ) as mock_find:
-                mock_find.return_value = mock_scip_files
-
-                response = client.get("/scip/references?symbol=UserService&limit=100")
+                "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
+                new_callable=AsyncMock,
+            ) as mock_truncate:
+                mock_truncate.return_value = (
+                    mock_scip_service.find_references.return_value
+                )
+                response = test_client.get(
+                    "/scip/references?symbol=UserService&limit=100"
+                )
 
                 assert response.status_code == 200
                 data = response.json()
@@ -157,41 +146,37 @@ class TestReferencesEndpoint:
 class TestDependenciesEndpoint:
     """Tests for /scip/dependencies endpoint."""
 
-    def test_dependencies_endpoint_returns_results(self, mock_scip_dir):
-        """Should query all .scip files and return aggregated dependency results."""
-        from code_indexer.server.app import app
-        from code_indexer.server.routers.scip_queries import router
-
-        app.include_router(router)
-        client = TestClient(app)
-
-        mock_deps = [
-            QueryResult(
-                symbol="com.example.Database",
-                project="/path/to/project1",
-                file_path="src/services/user_service.py",
-                line=5,
-                column=0,
-                kind="dependency",
-                relationship="import",
-                context=None,
-            )
+    def test_dependencies_endpoint_returns_results(
+        self, test_client, mock_scip_service
+    ):
+        """Should call SCIPQueryService and return aggregated dependency results."""
+        mock_scip_service.get_dependencies.return_value = [
+            {
+                "symbol": "com.example.Database",
+                "project": "/path/to/project1",
+                "file_path": "src/services/user_service.py",
+                "line": 5,
+                "column": 0,
+                "kind": "dependency",
+                "relationship": "import",
+                "context": None,
+            }
         ]
 
         with patch(
-            "code_indexer.server.routers.scip_queries.SCIPQueryEngine"
-        ) as MockEngine:
-            mock_engine_instance = Mock()
-            mock_engine_instance.get_dependencies.return_value = mock_deps
-            MockEngine.return_value = mock_engine_instance
-
-            mock_scip_files = [mock_scip_dir / "project1.scip"]
+            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            return_value=mock_scip_service,
+        ):
             with patch(
-                "code_indexer.server.routers.scip_queries._find_scip_files"
-            ) as mock_find:
-                mock_find.return_value = mock_scip_files
-
-                response = client.get("/scip/dependencies?symbol=UserService&depth=1")
+                "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
+                new_callable=AsyncMock,
+            ) as mock_truncate:
+                mock_truncate.return_value = (
+                    mock_scip_service.get_dependencies.return_value
+                )
+                response = test_client.get(
+                    "/scip/dependencies?symbol=UserService&depth=1"
+                )
 
                 assert response.status_code == 200
                 data = response.json()
@@ -206,41 +191,35 @@ class TestDependenciesEndpoint:
 class TestDependentsEndpoint:
     """Tests for /scip/dependents endpoint."""
 
-    def test_dependents_endpoint_returns_results(self, mock_scip_dir):
-        """Should query all .scip files and return aggregated dependent results."""
-        from code_indexer.server.app import app
-        from code_indexer.server.routers.scip_queries import router
-
-        app.include_router(router)
-        client = TestClient(app)
-
-        mock_dependents = [
-            QueryResult(
-                symbol="com.example.AuthHandler",
-                project="/path/to/project1",
-                file_path="src/auth/handler.py",
-                line=20,
-                column=5,
-                kind="dependent",
-                relationship="call",
-                context=None,
-            )
+    def test_dependents_endpoint_returns_results(self, test_client, mock_scip_service):
+        """Should call SCIPQueryService and return aggregated dependent results."""
+        mock_scip_service.get_dependents.return_value = [
+            {
+                "symbol": "com.example.AuthHandler",
+                "project": "/path/to/project1",
+                "file_path": "src/auth/handler.py",
+                "line": 20,
+                "column": 5,
+                "kind": "dependent",
+                "relationship": "call",
+                "context": None,
+            }
         ]
 
         with patch(
-            "code_indexer.server.routers.scip_queries.SCIPQueryEngine"
-        ) as MockEngine:
-            mock_engine_instance = Mock()
-            mock_engine_instance.get_dependents.return_value = mock_dependents
-            MockEngine.return_value = mock_engine_instance
-
-            mock_scip_files = [mock_scip_dir / "project1.scip"]
+            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            return_value=mock_scip_service,
+        ):
             with patch(
-                "code_indexer.server.routers.scip_queries._find_scip_files"
-            ) as mock_find:
-                mock_find.return_value = mock_scip_files
-
-                response = client.get("/scip/dependents?symbol=UserService&depth=1")
+                "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
+                new_callable=AsyncMock,
+            ) as mock_truncate:
+                mock_truncate.return_value = (
+                    mock_scip_service.get_dependents.return_value
+                )
+                response = test_client.get(
+                    "/scip/dependents?symbol=UserService&depth=1"
+                )
 
                 assert response.status_code == 200
                 data = response.json()
@@ -255,51 +234,40 @@ class TestDependentsEndpoint:
 class TestImpactEndpoint:
     """Tests for /scip/impact endpoint."""
 
-    def test_impact_endpoint_returns_results(self, mock_scip_dir):
-        """Should return impact analysis results for a symbol."""
-        from code_indexer.server.app import app
-        from code_indexer.server.routers.scip_queries import router
-        from code_indexer.scip.query.composites import (
-            ImpactAnalysisResult,
-            AffectedSymbol,
-            AffectedFile,
-        )
-
-        app.include_router(router)
-        client = TestClient(app)
-
-        mock_impact_result = ImpactAnalysisResult(
-            target_symbol="com.example.UserService",
-            target_location=None,
-            depth_analyzed=3,
-            affected_symbols=[
-                AffectedSymbol(
-                    symbol="com.example.AuthHandler",
-                    file_path=Path("src/auth/handler.py"),
-                    line=20,
-                    column=5,
-                    depth=1,
-                    relationship="call",
-                    chain=["com.example.UserService", "com.example.AuthHandler"],
-                )
+    def test_impact_endpoint_returns_results(self, test_client, mock_scip_service):
+        """Should call SCIPQueryService and return impact analysis results."""
+        mock_scip_service.analyze_impact.return_value = {
+            "target_symbol": "com.example.UserService",
+            "depth_analyzed": 3,
+            "total_affected": 1,
+            "truncated": False,
+            "affected_symbols": [
+                {
+                    "symbol": "com.example.AuthHandler",
+                    "file_path": "src/auth/handler.py",
+                    "line": 20,
+                    "column": 5,
+                    "depth": 1,
+                    "relationship": "call",
+                    "chain": ["com.example.UserService", "com.example.AuthHandler"],
+                }
             ],
-            affected_files=[
-                AffectedFile(
-                    path=Path("src/auth/handler.py"),
-                    project="project1",
-                    affected_symbol_count=1,
-                    min_depth=1,
-                    max_depth=1,
-                )
+            "affected_files": [
+                {
+                    "path": "src/auth/handler.py",
+                    "project": "project1",
+                    "affected_symbol_count": 1,
+                    "min_depth": 1,
+                    "max_depth": 1,
+                }
             ],
-            truncated=False,
-            total_affected=1,
-        )
+        }
 
-        with patch("code_indexer.scip.query.composites.analyze_impact") as mock_analyze:
-            mock_analyze.return_value = mock_impact_result
-
-            response = client.get("/scip/impact?symbol=UserService&depth=3")
+        with patch(
+            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            return_value=mock_scip_service,
+        ):
+            response = test_client.get("/scip/impact?symbol=UserService&depth=3")
 
             assert response.status_code == 200
             data = response.json()
@@ -317,52 +285,25 @@ class TestImpactEndpoint:
 class TestCallChainEndpoint:
     """Tests for /scip/callchain endpoint."""
 
-    def test_callchain_endpoint_returns_results(self, mock_scip_dir):
-        """Should return call chain tracing results between two symbols."""
-        from code_indexer.server.app import app
-        from code_indexer.server.routers.scip_queries import router
-        from code_indexer.scip.query.composites import (
-            CallChainResult,
-            CallChain,
-            CallStep,
-        )
+    def test_callchain_endpoint_returns_results(self, test_client, mock_scip_service):
+        """Should call SCIPQueryService and return call chain results."""
+        mock_scip_service.trace_callchain.return_value = [
+            {
+                "path": [
+                    "com.example.Controller",
+                    "com.example.Service",
+                    "com.example.Database",
+                ],
+                "length": 3,
+                "has_cycle": False,
+            }
+        ]
 
-        app.include_router(router)
-        client = TestClient(app)
-
-        mock_callchain_result = CallChainResult(
-            from_symbol="com.example.Controller",
-            to_symbol="com.example.Database",
-            chains=[
-                CallChain(
-                    path=[
-                        CallStep(
-                            symbol="com.example.Service",
-                            file_path=Path("src/services/service.py"),
-                            line=15,
-                            column=10,
-                            call_type="call",
-                        ),
-                        CallStep(
-                            symbol="com.example.Database",
-                            file_path=Path("src/db/database.py"),
-                            line=50,
-                            column=5,
-                            call_type="call",
-                        ),
-                    ],
-                    length=2,
-                )
-            ],
-            total_chains_found=1,
-            truncated=False,
-            max_depth_reached=False,
-        )
-
-        with patch("code_indexer.scip.query.composites.trace_call_chain") as mock_trace:
-            mock_trace.return_value = mock_callchain_result
-
-            response = client.get(
+        with patch(
+            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            return_value=mock_scip_service,
+        ):
+            response = test_client.get(
                 "/scip/callchain?from_symbol=Controller&to_symbol=Database&max_depth=10"
             )
 
@@ -370,63 +311,49 @@ class TestCallChainEndpoint:
             data = response.json()
 
             assert data["success"] is True
-            assert data["from_symbol"] == "com.example.Controller"
-            assert data["to_symbol"] == "com.example.Database"
+            assert data["from_symbol"] == "Controller"
+            assert data["to_symbol"] == "Database"
             assert data["total_chains_found"] == 1
             assert "chains" in data
             assert len(data["chains"]) == 1
-            assert len(data["chains"][0]["path"]) == 2
-            assert data["chains"][0]["path"][0]["symbol"] == "com.example.Service"
 
 
 class TestContextEndpoint:
     """Tests for /scip/context endpoint."""
 
-    def test_context_endpoint_returns_results(self, mock_scip_dir):
-        """Should return smart context results for a symbol."""
-        from code_indexer.server.app import app
-        from code_indexer.server.routers.scip_queries import router
-        from code_indexer.scip.query.composites import (
-            SmartContextResult,
-            ContextFile,
-            ContextSymbol,
-        )
-
-        app.include_router(router)
-        client = TestClient(app)
-
-        mock_context_result = SmartContextResult(
-            target_symbol="com.example.UserService",
-            summary="Read these 1 file(s) to understand com.example.UserService (avg relevance: 0.90)",
-            files=[
-                ContextFile(
-                    path=Path("src/services/user_service.py"),
-                    project="backend",
-                    relevance_score=0.9,
-                    symbols=[
-                        ContextSymbol(
-                            name="com.example.UserService",
-                            kind="class",
-                            relationship="definition",
-                            line=10,
-                            column=5,
-                            relevance=1.0,
-                        )
+    def test_context_endpoint_returns_results(self, test_client, mock_scip_service):
+        """Should call SCIPQueryService and return smart context results."""
+        mock_scip_service.get_context.return_value = {
+            "target_symbol": "com.example.UserService",
+            "summary": "Read these 1 file(s) to understand com.example.UserService",
+            "files": [
+                {
+                    "path": "src/services/user_service.py",
+                    "project": "backend",
+                    "relevance_score": 0.9,
+                    "symbols": [
+                        {
+                            "name": "com.example.UserService",
+                            "kind": "class",
+                            "relationship": "definition",
+                            "line": 10,
+                            "column": 5,
+                            "relevance": 1.0,
+                        }
                     ],
-                    read_priority=1,
-                )
+                    "read_priority": 1,
+                }
             ],
-            total_files=1,
-            total_symbols=1,
-            avg_relevance=0.9,
-        )
+            "total_files": 1,
+            "total_symbols": 1,
+            "avg_relevance": 0.9,
+        }
 
         with patch(
-            "code_indexer.scip.query.composites.get_smart_context"
-        ) as mock_context:
-            mock_context.return_value = mock_context_result
-
-            response = client.get("/scip/context?symbol=UserService&limit=20")
+            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            return_value=mock_scip_service,
+        ):
+            response = test_client.get("/scip/context?symbol=UserService&limit=20")
 
             assert response.status_code == 200
             data = response.json()

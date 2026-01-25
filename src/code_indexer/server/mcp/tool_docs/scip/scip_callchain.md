@@ -2,8 +2,101 @@
 name: scip_callchain
 category: scip
 required_permission: query_repos
-tl_dr: '[SCIP Code Intelligence] Trace all execution paths from entry point (from_symbol)
-  to target function (to_symbol).'
+tl_dr: '[SCIP Code Intelligence] Trace all execution paths from entry point (from_symbol) to target function (to_symbol).'
+inputSchema:
+  type: object
+  properties:
+    from_symbol:
+      type: string
+      description: Starting symbol (e.g., 'handle_request', 'Controller.process')
+    to_symbol:
+      type: string
+      description: Target symbol to reach (e.g., 'DatabaseManager', 'authenticate')
+    max_depth:
+      type: integer
+      default: 10
+      description: Maximum chain length to search. Default 10. Max 20. Higher values find longer chains but slower query.
+    project:
+      type:
+      - string
+      - 'null'
+      default: null
+      description: Optional project filter to limit search to specific project
+    repository_alias:
+      type:
+      - string
+      - 'null'
+      default: null
+      description: Repository alias to filter SCIP search. String for single repo, null/omit for all repos.
+  required:
+  - from_symbol
+  - to_symbol
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: Whether the operation succeeded
+    from_symbol:
+      type: string
+      description: Starting symbol searched
+    to_symbol:
+      type: string
+      description: Target symbol searched
+    total_chains_found:
+      type: integer
+      description: Total number of call chains found
+    truncated:
+      type: boolean
+      description: Whether results were truncated due to size limits
+    max_depth_reached:
+      type: boolean
+      description: Whether search hit max_depth limit
+    chains:
+      type: array
+      description: List of call chains from source to target
+      items:
+        type: object
+        properties:
+          length:
+            type: integer
+            description: Number of steps in chain
+          path:
+            type: array
+            description: Sequence of call steps from source to target
+            items:
+              type: object
+              properties:
+                symbol:
+                  type: string
+                  description: Symbol at this step
+                file_path:
+                  type: string
+                  description: File path relative to project root
+                line:
+                  type: integer
+                  description: Line number (1-indexed)
+                column:
+                  type: integer
+                  description: Column number (0-indexed)
+                call_type:
+                  type: string
+                  description: Type of call (call, import, instantiation, etc.)
+              required:
+              - symbol
+              - file_path
+              - line
+              - column
+              - call_type
+        required:
+        - length
+        - path
+    error:
+      type: string
+      description: Error message if operation failed
+  required:
+  - success
+  - chains
 ---
 
 TL;DR: [SCIP Code Intelligence] Trace all execution paths from entry point (from_symbol) to target function (to_symbol). 

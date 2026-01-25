@@ -2,8 +2,54 @@
 name: discover_repositories
 category: repos
 required_permission: query_repos
-tl_dr: List repositories available from external source configurations like GitHub
-  organizations or local paths that are NOT yet indexed.
+tl_dr: List repositories available from external source configurations like GitHub organizations or local paths that are NOT
+  yet indexed.
+inputSchema:
+  type: object
+  properties:
+    source_type:
+      type: string
+      description: Source type filter (optional)
+  required: []
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: Whether operation succeeded
+    repositories:
+      type: array
+      description: List of discovered golden repositories
+      items:
+        type: object
+        description: Golden repository information from GoldenRepository.to_dict()
+        properties:
+          alias:
+            type: string
+            description: Repository alias
+          repo_url:
+            type: string
+            description: Git repository URL
+          default_branch:
+            type: string
+            description: Default branch name
+          clone_path:
+            type: string
+            description: Filesystem path to cloned repository
+          created_at:
+            type: string
+            description: Repository creation timestamp
+          enable_temporal:
+            type: boolean
+            description: Whether temporal indexing is enabled
+          temporal_options:
+            type: object
+            description: Temporal indexing configuration options
+    error:
+      type: string
+      description: Error message if failed
+  required:
+  - success
 ---
 
 TL;DR: List repositories available from external source configurations like GitHub organizations or local paths that are NOT yet indexed.

@@ -48,16 +48,19 @@ class RegexSearchResult:
 class RegexSearchService:
     """Service for performing regex searches on repository files."""
 
-    def __init__(self, repo_path: Path):
+    def __init__(self, repo_path: Path, subprocess_max_workers: int = 2):
         """Initialize the regex search service.
 
         Args:
             repo_path: Path to the repository root
+            subprocess_max_workers: Maximum concurrent workers for subprocess execution
+                (default: 2, per Story #27 resource audit recommendation)
 
         Raises:
             RuntimeError: If neither ripgrep nor grep is available
         """
         self.repo_path = repo_path
+        self._subprocess_max_workers = subprocess_max_workers
         self._search_engine = self._detect_search_engine()
 
     def _detect_search_engine(self) -> str:
@@ -253,7 +256,7 @@ class RegexSearchService:
 
         try:
             # Execute with SubprocessExecutor for async + timeout protection
-            executor = SubprocessExecutor(max_workers=1)
+            executor = SubprocessExecutor(max_workers=self._subprocess_max_workers)
             try:
                 result = await executor.execute_with_limits(
                     command=cmd,
@@ -350,7 +353,7 @@ class RegexSearchService:
             # Execute glob script with subprocess executor for timeout + async protection
             cmd = ["python3", str(script_path), config_path]
 
-            executor = SubprocessExecutor(max_workers=1)
+            executor = SubprocessExecutor(max_workers=self._subprocess_max_workers)
             try:
                 result = await executor.execute_with_limits(
                     command=cmd,
@@ -571,7 +574,7 @@ class RegexSearchService:
 
         try:
             # Execute with SubprocessExecutor for async + timeout protection
-            executor = SubprocessExecutor(max_workers=1)
+            executor = SubprocessExecutor(max_workers=self._subprocess_max_workers)
             try:
                 result = await executor.execute_with_limits(
                     command=cmd,

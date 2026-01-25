@@ -3,6 +3,33 @@ name: deactivate_repository
 category: repos
 required_permission: activate_repos
 tl_dr: Remove a user-specific repository activation and delete associated user indexes.
+inputSchema:
+  type: object
+  properties:
+    user_alias:
+      type: string
+      description: User alias of repository to deactivate
+  required:
+  - user_alias
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: Whether operation succeeded
+    job_id:
+      type:
+      - string
+      - 'null'
+      description: Background job ID for tracking deactivation
+    message:
+      type: string
+      description: Human-readable status message
+    error:
+      type: string
+      description: Error message if failed
+  required:
+  - success
 ---
 
 TL;DR: Remove a user-specific repository activation and delete associated user indexes. Does NOT affect the underlying golden repository or global indexes shared by other users.

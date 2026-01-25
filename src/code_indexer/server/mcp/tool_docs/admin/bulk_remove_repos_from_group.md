@@ -3,6 +3,20 @@ name: bulk_remove_repos_from_group
 category: admin
 required_permission: manage_users
 tl_dr: Revoke a group's access to multiple repositories in a single operation.
+inputSchema:
+  type: object
+  properties:
+    group_id:
+      type: string
+      description: The unique identifier of the group
+    repo_names:
+      type: array
+      items:
+        type: string
+      description: Array of repository names to revoke access from
+  required:
+  - group_id
+  - repo_names
 ---
 
 Revoke a group's access to multiple repositories in a single operation. Users in the group will no longer be able to query these repositories.

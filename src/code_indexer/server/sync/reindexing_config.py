@@ -17,7 +17,7 @@ class ReindexingConfig:
     """Configuration for re-indexing decision engine."""
 
     # Trigger thresholds
-    change_percentage_threshold: float = 0.3  # 30%
+    change_percentage_threshold: float = 0.8  # 80%
     accuracy_threshold: float = 0.8  # 80%
     max_index_age_days: int = 30
 

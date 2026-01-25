@@ -3,6 +3,18 @@ name: add_member_to_group
 category: admin
 required_permission: manage_users
 tl_dr: Assign a user to a group.
+inputSchema:
+  type: object
+  properties:
+    group_id:
+      type: string
+      description: The unique identifier of the target group
+    user_id:
+      type: string
+      description: The username/ID of the user to assign
+  required:
+  - group_id
+  - user_id
 ---
 
 TL;DR: Assign a user to a group. Assign a user to a group. Each user can only belong to one group at a time - this operation will move the user from their current group to the specified group.

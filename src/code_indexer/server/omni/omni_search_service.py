@@ -13,17 +13,20 @@ from typing import Dict, List, Optional, Any, cast
 from .repo_pattern_matcher import RepoPatternMatcher
 from .result_aggregator import ResultAggregator
 from .omni_cache import OmniCache
-from ..utils.config_manager import OmniSearchConfig
+from ..utils.config_manager import MultiSearchLimitsConfig
 
 logger = logging.getLogger(__name__)
 
 
 class OmniSearchService:
-    """Orchestrates cross-repository search with parallel execution."""
+    """Orchestrates cross-repository search with parallel execution.
+
+    Story #29: Updated to use MultiSearchLimitsConfig with omni_ prefixed fields.
+    """
 
     def __init__(
         self,
-        config: OmniSearchConfig,
+        config: MultiSearchLimitsConfig,
         query_service: Any,
         repo_manager: Any,
     ):
@@ -31,7 +34,7 @@ class OmniSearchService:
         Initialize omni-search service.
 
         Args:
-            config: Omni-search configuration
+            config: Multi-search limits config (with omni_ prefixed fields)
             query_service: Query service for single-repo searches
             repo_manager: Repository manager for getting repo aliases
         """
@@ -39,8 +42,8 @@ class OmniSearchService:
         self.query_service = query_service
         self.repo_manager = repo_manager
         self.cache = OmniCache(
-            max_entries=config.cache_max_entries,
-            ttl_seconds=config.cache_ttl_seconds,
+            max_entries=config.omni_cache_max_entries,
+            ttl_seconds=config.omni_cache_ttl_seconds,
         )
 
     def search(
@@ -66,12 +69,12 @@ class OmniSearchService:
         """
         # Set defaults
         if limit is None:
-            limit = self.config.default_limit
+            limit = self.config.omni_default_limit
         if aggregation_mode is None:
-            aggregation_mode = self.config.default_aggregation_mode
+            aggregation_mode = self.config.omni_default_aggregation_mode
 
         # Validate limit
-        limit = min(limit, self.config.max_limit)
+        limit = min(limit, self.config.omni_max_limit)
 
         # Get all repository aliases
         all_repos = self.repo_manager.get_all_aliases()
@@ -79,7 +82,7 @@ class OmniSearchService:
         # Filter repos by patterns
         matcher = RepoPatternMatcher(
             patterns=repository_patterns,
-            metacharacters=self.config.pattern_metacharacters,
+            metacharacters=self.config.omni_pattern_metacharacters,
         )
         target_repos = matcher.filter_repos(all_repos)
 
@@ -98,7 +101,7 @@ class OmniSearchService:
         repo_results = {}
         errors = {}
 
-        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=self.config.omni_max_workers) as executor:
             # Submit all search tasks
             future_to_repo = {
                 executor.submit(
@@ -115,16 +118,16 @@ class OmniSearchService:
                 repo_alias = future_to_repo[future]
 
                 try:
-                    result = future.result(timeout=self.config.per_repo_timeout_seconds)
+                    result = future.result(timeout=self.config.omni_per_repo_timeout_seconds)
                     if result and "results" in result:
                         repo_results[repo_alias] = result["results"][
-                            : self.config.max_results_per_repo
+                            : self.config.omni_max_results_per_repo
                         ]
                     else:
                         repo_results[repo_alias] = []
                 except TimeoutError:
                     errors[repo_alias] = (
-                        f"Search timeout after {self.config.per_repo_timeout_seconds}s"
+                        f"Search timeout after {self.config.omni_per_repo_timeout_seconds}s"
                     )
                     logger.warning(
                         f"Search timeout for repo {repo_alias}",
