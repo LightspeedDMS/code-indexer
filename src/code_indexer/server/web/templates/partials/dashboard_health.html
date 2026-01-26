@@ -6,6 +6,9 @@
     <article class="health-card overall-status">
         <header>
             <h3>Server Status</h3>
+            {% if server_version %}
+            <span class="server-version">v{{ server_version }}</span>
+            {% endif %}
         </header>
         <div class="status-content">
             <span class="status-indicator status-{{ health.status.value }}"></span>

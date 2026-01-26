@@ -26,6 +26,7 @@ from .auth import (
     SessionData,
 )
 from ..services.ci_token_manager import CITokenManager, TokenValidationError
+from code_indexer import __version__ as cidx_version
 
 logger = logging.getLogger(__name__)
 
@@ -307,6 +308,7 @@ async def dashboard_health_partial(request: Request):
             "request": request,
             "health": health_data,
             "database_health": database_health,
+            "server_version": cidx_version,
         },
     )
 

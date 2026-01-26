@@ -209,11 +209,23 @@ header.admin-header {
 
 .health-card header {
     padding-bottom: 0.5rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
 }
 
 .health-card header h3 {
     margin: 0;
     font-size: 1rem;
+}
+
+.server-version {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--pico-muted-color);
+    background: var(--pico-secondary-background);
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
 }
 
 .health-card .status-content {
