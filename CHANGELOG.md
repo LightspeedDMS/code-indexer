@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.6.11] - 2026-01-26
+
+### Changed
+
+- **Smart Context-Aware Defaults for Multi-Repo Search** - Multi-repo searches (2+ repositories) now use more intuitive defaults:
+  - `aggregation_mode` defaults to `'per_repo'` (ensures all repositories are represented in results)
+  - `response_format` defaults to `'grouped'` (results pre-organized by repository)
+  - Single-repo searches retain original defaults (`'global'` and `'flat'`)
+  - 6 new unit tests covering default behavior
+
+### Fixed
+
+- **Multi-Repo Search Content Bug** - Fixed bug where multi-repo searches returned empty `content` fields
+  - Root cause: `include_source=False` was hardcoded in `MultiSearchService._search_single_repository()`
+  - Fix: Changed to `include_source=True` to return actual code content
+  - Truncation pipeline properly handles large content (converts to `preview` + `cache_handle`)
+  - 3 new unit tests covering content inclusion
+
+---
+
 ## [8.6.10] - 2026-01-26
 
 ### Fixed

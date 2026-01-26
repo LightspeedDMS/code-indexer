@@ -45,9 +45,7 @@ def mock_config_service():
 @pytest.fixture
 def mock_wildcard_expansion():
     """Mock wildcard expansion to return patterns unchanged."""
-    with patch(
-        "code_indexer.server.mcp.handlers._expand_wildcard_patterns"
-    ) as mock:
+    with patch("code_indexer.server.mcp.handlers._expand_wildcard_patterns") as mock:
         mock.side_effect = lambda patterns: patterns
         yield mock
 
@@ -360,6 +358,7 @@ class TestOmniSearchResponseConversion:
             "query_text": "test",
             "repository_alias": ["repo1-global", "repo2-global"],
             "limit": 10,
+            "response_format": "flat",  # Explicit flat for testing source_repo tagging
         }
 
         # Service returns results grouped by repo

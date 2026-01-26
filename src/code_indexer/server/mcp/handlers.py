@@ -764,7 +764,12 @@ async def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any
     repo_aliases = params.get("repository_alias", [])
     repo_aliases = _expand_wildcard_patterns(repo_aliases)
     limit = params.get("limit", 10)
-    aggregation_mode = params.get("aggregation_mode", "global")
+
+    # Smart context-aware defaults: multi-repo (2+) uses per_repo, single repo uses global
+    if len(repo_aliases) > 1:
+        aggregation_mode = params.get("aggregation_mode", "per_repo")
+    else:
+        aggregation_mode = params.get("aggregation_mode", "global")
 
     if not repo_aliases:
         return _mcp_response(
@@ -790,7 +795,9 @@ async def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any
 
     # Story #36: Map MCP search_mode to MultiSearchRequest search_type
     search_mode = params.get("search_mode", "semantic")
-    search_type = search_mode if search_mode in ["semantic", "fts", "regex"] else "semantic"
+    search_type = (
+        search_mode if search_mode in ["semantic", "fts", "regex"] else "semantic"
+    )
     # Handle temporal queries - map to temporal search_type
     if _is_temporal_query(params):
         search_type = "temporal"
@@ -873,8 +880,11 @@ async def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any
         )
         final_results = all_results[:limit]
 
-    # Get response_format parameter (default to "flat" for backward compatibility)
-    response_format = params.get("response_format", "flat")
+    # Smart context-aware defaults: multi-repo (2+) uses grouped, single repo uses flat
+    if len(repo_aliases) > 1:
+        response_format = params.get("response_format", "grouped")
+    else:
+        response_format = params.get("response_format", "flat")
 
     # Story #683: Apply payload truncation to aggregated multi-repo results
     # This ensures consistency with REST API which calls _apply_multi_truncation()
@@ -2668,7 +2678,9 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
         subprocess_max_workers = config.background_jobs_config.subprocess_max_workers
 
         # Create service and execute search with timeout protection
-        service = RegexSearchService(repo_path, subprocess_max_workers=subprocess_max_workers)
+        service = RegexSearchService(
+            repo_path, subprocess_max_workers=subprocess_max_workers
+        )
         result = await service.search(
             pattern=pattern,
             path=args.get("path"),
@@ -4566,7 +4578,9 @@ async def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Apply project filter if specified (backward compatibility)
         if project:
-            results_dicts = [r for r in results_dicts if project in r.get("project", "")]
+            results_dicts = [
+                r for r in results_dicts if project in r.get("project", "")
+            ]
 
         # Story #685: Apply SCIP payload truncation to context fields
         results_dicts = await _apply_scip_payload_truncation(results_dicts)
@@ -4626,7 +4640,9 @@ async def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Apply project filter if specified (backward compatibility)
         if project:
-            results_dicts = [r for r in results_dicts if project in r.get("project", "")]
+            results_dicts = [
+                r for r in results_dicts if project in r.get("project", "")
+            ]
 
         # Story #685: Apply SCIP payload truncation to context fields
         results_dicts = await _apply_scip_payload_truncation(results_dicts)
@@ -4686,7 +4702,9 @@ async def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any
 
         # Apply project filter if specified (backward compatibility)
         if project:
-            results_dicts = [r for r in results_dicts if project in r.get("project", "")]
+            results_dicts = [
+                r for r in results_dicts if project in r.get("project", "")
+            ]
 
         # Story #685: Apply SCIP payload truncation to context fields
         results_dicts = await _apply_scip_payload_truncation(results_dicts)
@@ -4746,7 +4764,9 @@ async def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Apply project filter if specified (backward compatibility)
         if project:
-            results_dicts = [r for r in results_dicts if project in r.get("project", "")]
+            results_dicts = [
+                r for r in results_dicts if project in r.get("project", "")
+            ]
 
         # Story #685: Apply SCIP payload truncation to context fields
         results_dicts = await _apply_scip_payload_truncation(results_dicts)

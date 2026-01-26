@@ -257,7 +257,7 @@ class MultiSearchService:
         single_repo_request = SemanticSearchRequest(
             query=request.query,
             limit=min(request.limit, self.config.max_results_per_repo),
-            include_source=False,
+            include_source=True,  # Must be True to return content in results
         )
 
         # Execute search using path resolved via GlobalRegistry (Story #43)
