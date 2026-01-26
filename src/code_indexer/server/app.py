@@ -2030,16 +2030,34 @@ def create_app() -> FastAPI:
             extra={"correlation_id": get_correlation_id()},
         )
         try:
+            # Load config to get configured log level (Story #38: respect log_level setting)
+            from code_indexer.server.utils.config_manager import ServerConfigManager
+
+            config_manager = ServerConfigManager(server_dir_path=server_data_dir)
+            startup_config = config_manager.load_config()
+
+            # Convert string log level to logging constant
+            log_level_map = {
+                "DEBUG": logging.DEBUG,
+                "INFO": logging.INFO,
+                "WARNING": logging.WARNING,
+                "ERROR": logging.ERROR,
+                "CRITICAL": logging.CRITICAL,
+            }
+            configured_level = log_level_map.get(
+                startup_config.log_level.upper(), logging.INFO
+            )
+
             log_db_path = Path(server_data_dir) / "logs.db"
             sqlite_handler = SQLiteLogHandler(log_db_path)
-            sqlite_handler.setLevel(logging.INFO)
+            sqlite_handler.setLevel(configured_level)
             logging.getLogger().addHandler(sqlite_handler)
 
             # Set app state for web routes to access
             app.state.log_db_path = log_db_path
 
             logger.info(
-                f"SQLite log handler initialized: {log_db_path}",
+                f"SQLite log handler initialized: {log_db_path} (level: {startup_config.log_level})",
                 extra={"correlation_id": get_correlation_id()},
             )
 
