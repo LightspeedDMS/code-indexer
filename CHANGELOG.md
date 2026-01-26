@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.6.16] - 2026-01-26
+
+### Removed
+
+- **Dead Config Sections from Web UI** - Removed 5 entire config sections that had no runtime effect:
+  - **Git Timeouts Settings** - 8 settings (git_local_timeout, git_remote_timeout, git_command_timeout, git_fetch_timeout, github_api_timeout, gitlab_api_timeout, github_provider_timeout, gitlab_provider_timeout)
+  - **Error Handling Settings** - 3 settings (max_retry_attempts, base_retry_delay_seconds, max_retry_delay_seconds)
+  - **API Limits Settings** - 9 settings (default_file_read_lines, max_file_read_lines, default_diff_lines, max_diff_lines, default_log_commits, max_log_commits, audit_log_default_limit, log_page_size_default, log_page_size_max)
+  - **Web Security Settings** - 2 settings (csrf_max_age_seconds, web_session_timeout_seconds)
+  - **Authentication Settings** - 1 setting (oauth_extension_threshold_hours)
+
+- **Dead SCIP Settings from Web UI** - Removed 4 SCIP query limit settings that were never used at runtime:
+  - scip_reference_limit, scip_dependency_depth, scip_callchain_max_depth, scip_callchain_limit
+  - Kept 3 live SCIP settings: indexing_timeout_seconds, scip_generation_timeout_seconds, temporal_stale_threshold_days
+
+### Changed
+
+- **SCIP Section Description** - Updated to reflect only the remaining timeout and threshold settings
+
+---
+
 ## [8.6.15] - 2026-01-26
 
 ### Removed
