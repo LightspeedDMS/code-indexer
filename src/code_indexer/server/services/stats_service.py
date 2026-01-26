@@ -26,6 +26,15 @@ from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
 logger = logging.getLogger(__name__)
 
+
+def _get_golden_repos_dir() -> str:
+    """Get golden repos directory from environment or default."""
+    golden_repos_dir = os.environ.get("CIDX_GOLDEN_REPOS_DIR")
+    if not golden_repos_dir:
+        golden_repos_dir = str(Path.home() / ".cidx-server" / "data" / "golden-repos")
+    return golden_repos_dir
+
+
 # File extension to language mapping
 LANGUAGE_EXTENSIONS = {
     ".py": "python",
@@ -503,40 +512,53 @@ class RepositoryStatsService:
             FileNotFoundError: If repository not found
         """
         try:
-            # Use existing repository manager patterns from the codebase
-            from ..repositories.golden_repo_manager import GoldenRepoManager
+            # Story #46: Use GlobalRegistry for correct alias_name lookup
+            from ..utils.registry_factory import get_server_global_registry
+            from code_indexer.global_repos.alias_manager import AliasManager
             from pathlib import Path
 
-            home_dir = Path.home()
-            data_dir = str(home_dir / ".cidx-server" / "data")
-            repo_manager = GoldenRepoManager(data_dir=data_dir)
+            # Get golden repos directory
+            golden_repos_dir = _get_golden_repos_dir()
 
-            # Search for repository by alias (repo_id)
-            golden_repos = repo_manager.list_golden_repos()
-            for repo_data in golden_repos:
-                if repo_data.get("alias") == repo_id:
-                    # Return real metadata from golden repository
-                    return {
-                        "created_at": repo_data.get("created_at"),
-                        "last_sync_at": None,  # This would come from sync tracking
-                        "sync_count": 0,  # This would come from sync tracking
-                        "repo_url": repo_data.get("repo_url"),
-                        "default_branch": repo_data.get("default_branch"),
-                        "clone_path": repo_data.get("clone_path"),
-                    }
+            # Use GlobalRegistry to find repo by alias_name
+            registry = get_server_global_registry(golden_repos_dir)
+            global_repos = registry.list_global_repos()
 
-            # Repository not found
-            raise FileNotFoundError(
-                f"Repository {repo_id} not found in golden repositories"
+            repo_entry = next(
+                (r for r in global_repos if r.get("alias_name") == repo_id), None
             )
 
+            if not repo_entry:
+                raise FileNotFoundError(
+                    f"Repository '{repo_id}' not found in global repositories"
+                )
+
+            # Use AliasManager to get the target path
+            alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
+            target_path = alias_manager.read_alias(repo_id)
+
+            if target_path is None:
+                raise FileNotFoundError(
+                    f"Alias for global repository '{repo_id}' not found"
+                )
+
+            # Return metadata from global registry entry
+            return {
+                "created_at": repo_entry.get("created_at"),
+                "last_sync_at": None,  # This would come from sync tracking
+                "sync_count": 0,  # This would come from sync tracking
+                "repo_url": repo_entry.get("repo_url"),
+                "default_branch": repo_entry.get("default_branch"),
+                "clone_path": str(target_path),
+            }
+
+        except FileNotFoundError:
+            raise
         except Exception as e:
             logger.error(
                 f"Failed to get repository metadata for {repo_id}: {e}",
                 extra={"correlation_id": get_correlation_id()},
             )
-            if isinstance(e, FileNotFoundError):
-                raise
             raise RuntimeError(f"Unable to access repository metadata: {e}")
 
 

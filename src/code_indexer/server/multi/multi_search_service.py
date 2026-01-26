@@ -31,6 +31,27 @@ MAX_RECOMMENDED_REPOS = 10
 RECOMMENDED_MIN_SCORE = 0.7
 
 
+def _get_golden_repos_dir() -> str:
+    """Get golden_repos_dir from app.state.
+
+    Raises:
+        RuntimeError: If golden_repos_dir is not configured in app.state
+    """
+    from typing import Optional, cast
+    from ..app import app as app_module
+
+    golden_repos_dir: Optional[str] = cast(
+        Optional[str], getattr(app_module.state, "golden_repos_dir", None)
+    )
+    if golden_repos_dir:
+        return golden_repos_dir
+
+    raise RuntimeError(
+        "golden_repos_dir not configured in app.state. "
+        "Server must set app.state.golden_repos_dir during startup."
+    )
+
+
 class MultiSearchService:
     """
     Orchestrates parallel search execution across multiple repositories.
@@ -239,9 +260,13 @@ class MultiSearchService:
             include_source=False,
         )
 
-        # Execute search
+        # Execute search using path resolved via GlobalRegistry (Story #43)
+        # Use self._get_repository_path() for consistent path resolution
         try:
-            response = search_service.search_repository(repo_id, single_repo_request)
+            repo_path = self._get_repository_path(repo_id)
+            response = search_service.search_repository_path(
+                repo_path, single_repo_request
+            )
 
             # Convert response to dict format
             results = []
@@ -543,36 +568,57 @@ class MultiSearchService:
         """
         Get file system path for repository.
 
+        Uses GlobalRegistry with alias_name lookup (e.g., "my-repo-global") and
+        AliasManager to get the current target path (registry path becomes stale
+        after refresh operations).
+
         Args:
-            repo_id: Repository identifier
+            repo_id: Repository identifier (global alias name, e.g., "my-repo-global")
 
         Returns:
             File system path to repository
 
         Raises:
-            FileNotFoundError: If repository not found
+            FileNotFoundError: If repository not found in global repositories
         """
-        from ..repositories.golden_repo_manager import GoldenRepoManager
+        from ..utils.registry_factory import get_server_global_registry
+        from code_indexer.global_repos.alias_manager import AliasManager
 
-        home_dir = Path.home()
-        data_dir = str(home_dir / ".cidx-server" / "data")
-        repo_manager = GoldenRepoManager(data_dir=data_dir)
+        # Get golden_repos_dir from server configuration
+        golden_repos_dir = _get_golden_repos_dir()
 
-        # Search for repository by alias
-        golden_repos = repo_manager.list_golden_repos()
-        for repo_data in golden_repos:
-            if repo_data.get("alias") == repo_id:
-                clone_path = repo_data.get("clone_path")
-                if clone_path and Path(clone_path).exists():
-                    return clone_path
-                else:
-                    raise FileNotFoundError(
-                        f"Repository path {clone_path} does not exist"
-                    )
+        # Look up global repo in GlobalRegistry to verify it exists
+        registry = get_server_global_registry(golden_repos_dir)
+        global_repos = registry.list_global_repos()
 
-        raise FileNotFoundError(
-            f"Repository {repo_id} not found in golden repositories"
+        # Find the matching global repo by alias_name
+        repo_entry = next(
+            (r for r in global_repos if r.get("alias_name") == repo_id), None
         )
+
+        if not repo_entry:
+            raise FileNotFoundError(
+                f"Repository '{repo_id}' not found in global repositories"
+            )
+
+        # Use AliasManager to get current target path (registry path becomes stale after refresh)
+        alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
+        target_path = alias_manager.read_alias(repo_id)
+
+        if not target_path:
+            raise FileNotFoundError(
+                f"Alias for global repository '{repo_id}' not found"
+            )
+
+        # Verify the path exists
+        if not Path(target_path).exists():
+            raise FileNotFoundError(
+                f"Repository path for '{repo_id}' does not exist: {target_path}"
+            )
+
+        # Type assertion: target_path is verified non-None above
+        assert isinstance(target_path, str)
+        return target_path
 
     def _format_timeout_error(
         self, request: MultiSearchRequest, timed_out_repos: List[str]

@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.6.10] - 2026-01-26
+
+### Fixed
+
+- **Fix Global Repository Lookup in Search Services** (Epic #47)
+  - Fixed `MultiSearchService._get_repository_path()` to use GlobalRegistry instead of GoldenRepoManager (Story #43)
+  - Fixed `SemanticSearchService._get_repository_path()` to use GlobalRegistry instead of GoldenRepoManager (Story #44)
+  - Fixed `SCIPMultiService._get_repository_path()` to use GlobalRegistry instead of GoldenRepoManager (Story #45)
+  - Fixed `RepositoryStatsService.get_repository_metadata()` to use GlobalRegistry instead of GoldenRepoManager (Story #46)
+  - Multi-repo search now correctly resolves global repository names (ending in `-global`)
+  - Error messages now reference "global repositories" instead of "golden repositories"
+  - 30 new unit tests covering the bug fixes with source verification and functional tests
+
+### Changed
+
+- **SCIPMultiService exception handling** - `_get_scip_file_for_repo()` now propagates `FileNotFoundError` instead of swallowing it, enabling proper error messages for non-existent repositories
+
+---
+
 ## [8.6.9] - 2026-01-25
 
 ### Added
