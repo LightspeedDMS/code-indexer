@@ -4,7 +4,7 @@
         <h2>Server Settings</h2>
     </summary>
     <p class="section-description">
-        Core server configuration including network binding (host/port), worker processes, logging verbosity, and JWT token expiration. Changes to host and port require a server restart to take effect. The service display name controls how the server identifies itself in MCP protocol responses.
+        Core server configuration including network binding (host/port), Uvicorn HTTP worker processes, logging verbosity, and JWT token expiration. Changes to host and port require a server restart to take effect. The service display name controls how the server identifies itself in MCP protocol responses. <strong>Workers</strong> controls how many parallel Uvicorn ASGI processes handle incoming HTTP requests (REST API, Web UI, MCP endpoints).
     </p>
     <article>
         <!-- Display Mode -->
@@ -623,7 +623,7 @@
         <h2>Job Queue Settings</h2>
     </summary>
     <p class="section-description">
-        Controls the async job queue for long-running operations like repository cloning and indexing. System-wide limits prevent server overload, while per-user limits ensure fair resource allocation. Average job duration is used to estimate queue wait times displayed to users when jobs are queued behind others.
+        Controls the <strong>SyncJob queue</strong> for repository synchronization operations. <strong>Affected operations:</strong> git clone, git pull, repository sync, and repository refresh jobs. System-wide limits prevent server overload, while per-user limits ensure fair resource allocation. Average job duration is used to estimate queue wait times displayed to users when jobs are queued behind others.
     </p>
     <article>
         <!-- Display Mode -->
@@ -2339,7 +2339,7 @@
         <h2>Background Jobs Settings</h2>
     </summary>
     <article>
-        <p class="section-description">Configure background job execution limits and concurrency. These settings control how many operations can run simultaneously, affecting server resource usage and responsiveness for long-running tasks like repository indexing and SCIP generation.</p>
+        <p class="section-description">Controls the <strong>BackgroundJobManager</strong> for async background tasks. <strong>Affected operations:</strong> Add Golden Repository, Remove Golden Repository, SCIP Self-Healing, and SCIP index generation. <strong>Subprocess Max Workers</strong> controls parallelism of external process execution (ripgrep/grep for regex search). These are separate from SyncJob queue operations.</p>
         <!-- Display Mode -->
         <div id="display-background-jobs">
             <table class="config-table">

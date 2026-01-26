@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.6.14] - 2026-01-26
+
+### Changed
+
+- **Configuration Section Documentation Clarity** - Updated Web UI config section descriptions to specify exactly what jobs each setting controls:
+  - **Server Settings**: Clarified Workers controls Uvicorn ASGI processes for HTTP requests (REST API, Web UI, MCP endpoints)
+  - **Job Queue Settings**: Clarified these control SyncJob queue (git clone, git pull, repository sync/refresh operations)
+  - **Background Jobs Settings**: Clarified these control BackgroundJobManager (Add/Remove Golden Repo, SCIP Self-Healing, SCIP generation) and subprocess parallelism (regex search)
+
+---
+
 ## [8.6.13] - 2026-01-26
 
 ### Added
