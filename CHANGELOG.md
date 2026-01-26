@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.6.15] - 2026-01-26
+
+### Removed
+
+- **Workers Setting from Server Settings UI** - Removed the misleading Workers setting from the Web UI configuration:
+  - The setting had no effect because uvicorn workers are hardcoded to 1 in the systemd service file
+  - Multiple workers break in-memory cache coherency (HNSW, FTS, OmniCache cursors) and cursor-based pagination
+  - Underlying config field retained for backwards compatibility but no longer exposed in UI
+
+### Changed
+
+- **Server Settings Section Description** - Updated to remove worker references since the setting is no longer configurable
+
+---
+
 ## [8.6.14] - 2026-01-26
 
 ### Changed

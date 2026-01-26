@@ -4,7 +4,7 @@
         <h2>Server Settings</h2>
     </summary>
     <p class="section-description">
-        Core server configuration including network binding (host/port), Uvicorn HTTP worker processes, logging verbosity, and JWT token expiration. Changes to host and port require a server restart to take effect. The service display name controls how the server identifies itself in MCP protocol responses. <strong>Workers</strong> controls how many parallel Uvicorn ASGI processes handle incoming HTTP requests (REST API, Web UI, MCP endpoints).
+        Core server configuration including network binding (host/port), logging verbosity, and JWT token expiration. Changes to host and port require a server restart to take effect. The service display name controls how the server identifies itself in MCP protocol responses.
     </p>
     <article>
         <!-- Display Mode -->
@@ -24,11 +24,6 @@
                         <td class="config-note">
                             <small class="read-only-note">Requires server restart</small>
                         </td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Workers</td>
-                        <td class="config-value">{{ config.server.workers }}</td>
-                        <td class="config-note"></td>
                     </tr>
                     <tr>
                         <td class="config-label">Log Level</td>
@@ -69,10 +64,6 @@
                     Port
                     <input type="number" id="server-port" name="port" value="{{ config.server.port }}" min="1" max="65535">
                     <small>1-65535</small>
-                </label>
-                <label for="server-workers">
-                    Workers
-                    <input type="number" id="server-workers" name="workers" value="{{ config.server.workers }}" min="1" max="64">
                 </label>
                 <label for="server-log-level">
                     Log Level
