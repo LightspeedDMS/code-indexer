@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.6.12] - 2026-01-26
+
+### Changed
+
+- **SQLite-Backed API Metrics Service** - Migrated ApiMetricsService from in-memory deques to SQLite database storage:
+  - Fixes dashboard counter flickering when using multiple uvicorn workers (separate processes had isolated memory)
+  - WAL mode enabled for concurrent write handling across processes
+  - Periodic cleanup (every 100 inserts) instead of every insert for better performance
+  - Retry logic with exponential backoff for database lock errors
+  - Graceful degradation on failures (logs warning, returns zeros instead of crashing)
+  - Database stored at `~/.cidx-server/data/api_metrics.db`
+
+### Added
+
+- **Multi-Repo Search Metrics Tracking** - Multi-repo searches via `_omni_search_code()` now properly tracked in API metrics:
+  - Semantic searches increment `semantic_searches` counter
+  - FTS/temporal/hybrid searches increment `other_index_searches` counter
+  - Regex searches increment `regex_searches` counter
+  - Previously these searches bypassed tracking because they don't use `semantic_query_manager._perform_search()`
+  - 5 new unit tests for multi-repo metrics tracking
+
+- **CLAUDE.md Admin Password Rule** - Added critical rule to never change admin password during local development:
+  - Documents default credentials (admin/admin) for localhost:8000
+  - Includes recovery procedure if password is accidentally changed
+
+- **24 New Tests for API Metrics Service** - Comprehensive test coverage for SQLite-backed metrics:
+  - Initialization, increment operations, get_metrics with time windows
+  - Periodic cleanup behavior, retry logic, exception handling
+  - Multi-worker simulation, graceful degradation scenarios
+
+---
+
 ## [8.6.11] - 2026-01-26
 
 ### Changed

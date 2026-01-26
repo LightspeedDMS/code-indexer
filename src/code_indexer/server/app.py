@@ -2125,6 +2125,32 @@ def create_app() -> FastAPI:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+        # Startup: Initialize ApiMetricsService with database for multi-worker support
+        logger.info(
+            "Server startup: Initializing ApiMetricsService",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.api_metrics_service import (
+                api_metrics_service,
+            )
+
+            metrics_db_path = Path(server_data_dir) / "data" / "api_metrics.db"
+            api_metrics_service.initialize(str(metrics_db_path))
+
+            logger.info(
+                f"ApiMetricsService initialized: {metrics_db_path}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        except Exception as e:
+            # Log error but don't block server startup
+            logger.error(
+                f"Failed to initialize ApiMetricsService: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
         # Startup: Migrate legacy cidx-meta and bootstrap if needed
         logger.info(
             "Server startup: Checking cidx-meta migration and bootstrap",

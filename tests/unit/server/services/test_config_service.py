@@ -303,7 +303,7 @@ class TestNewConfigDataclasses:
         """Test ServerConfig has workers field with default value."""
         config = ServerConfig(server_dir="/tmp/test")
 
-        assert config.workers == 4
+        assert config.workers == 1
 
 
 class TestOIDCConfigSettings:

@@ -24,6 +24,7 @@ from code_indexer.server.auth import dependencies
 from code_indexer.server.utils.registry_factory import get_server_global_registry
 from code_indexer.server import app as app_module
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.api_metrics_service import api_metrics_service
 from code_indexer.server.services.ssh_key_manager import (
     SSHKeyManager,
     KeyNotFoundError,
@@ -801,6 +802,16 @@ async def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any
     # Handle temporal queries - map to temporal search_type
     if _is_temporal_query(params):
         search_type = "temporal"
+
+    # Track API metrics for multi-repo searches
+    # (Single-repo searches are tracked in semantic_query_manager._perform_search)
+    if search_type == "semantic":
+        api_metrics_service.increment_semantic_search()
+    elif search_type == "regex":
+        api_metrics_service.increment_regex_search()
+    else:
+        # FTS, temporal, hybrid all go to other_index_searches bucket
+        api_metrics_service.increment_other_index_search()
 
     # Story #36: Create MultiSearchRequest from MCP params
     request = MultiSearchRequest(

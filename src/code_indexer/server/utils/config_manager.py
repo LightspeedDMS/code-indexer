@@ -551,7 +551,7 @@ class ServerConfig:
     server_dir: str
     host: str = "127.0.0.1"
     port: int = 8000
-    workers: int = 4
+    workers: int = 1
     jwt_expiration_minutes: int = 10
     log_level: str = "INFO"
     # Story #22 - Configurable service display name for MCP protocol

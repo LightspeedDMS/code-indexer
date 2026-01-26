@@ -308,6 +308,55 @@ venv/
 
 
 @pytest.fixture(autouse=True)
+def initialize_api_metrics_service(tmp_path):
+    """Initialize api_metrics_service with a temp database for each test.
+
+    This ensures the global singleton works with the database-backed implementation
+    in tests, providing backward compatibility with existing tests.
+
+    Note: We initialize both import paths (src.code_indexer and code_indexer)
+    since different tests may use different import patterns.
+    """
+    import logging
+
+    db_path = tmp_path / "test_api_metrics.db"
+    services_initialized = []
+
+    # Initialize via src.code_indexer path (used by most unit tests)
+    try:
+        from src.code_indexer.server.services.api_metrics_service import (
+            api_metrics_service as src_service,
+        )
+        src_service.initialize(str(db_path))
+        src_service.reset()
+        services_initialized.append(src_service)
+    except ImportError:
+        pass
+
+    # Initialize via code_indexer path (used by some integration tests)
+    try:
+        from code_indexer.server.services.api_metrics_service import (
+            api_metrics_service as pkg_service,
+        )
+        # Only initialize if it's a different instance (not the same object)
+        if not services_initialized or pkg_service is not services_initialized[0]:
+            pkg_service.initialize(str(db_path))
+            pkg_service.reset()
+            services_initialized.append(pkg_service)
+    except ImportError:
+        pass
+
+    yield
+
+    # Cleanup: reset after test
+    for service in services_initialized:
+        try:
+            service.reset()
+        except Exception as e:
+            logging.debug(f"Failed to reset api_metrics_service during cleanup: {e}")
+
+
+@pytest.fixture(autouse=True)
 def clear_rate_limiters():
     """Clear rate limiter state before each test to prevent cross-test contamination."""
     try:

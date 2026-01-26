@@ -56,6 +56,35 @@
 
 ---
 
+## CRITICAL: ADMIN PASSWORD - NEVER CHANGE
+
+**ABSOLUTE PROHIBITION**: NEVER change the admin user password during local development or testing.
+
+**DEFAULT CREDENTIALS** (localhost:8000):
+- Username: `admin`
+- Password: `admin`
+
+**WHY**: The admin/admin credentials are the standard for local development. Changing them breaks manual testing workflows and causes "session_expired" login failures that are difficult to debug.
+
+**IF YOU BROKE IT** (login returns "session_expired" with correct credentials):
+```bash
+# Generate new hash for 'admin' password
+python3 -c "
+from src.code_indexer.server.auth.password_manager import PasswordManager
+pm = PasswordManager()
+print(pm.hash_password('admin'))
+"
+
+# Update database with new hash (replace HASH with output above)
+sqlite3 ~/.cidx-server/data/cidx_server.db "UPDATE users SET password_hash='HASH' WHERE username='admin';"
+```
+
+**VIOLATION = WASTED TIME**: Changing admin password causes login failures that require database surgery to fix.
+
+**RECORDED**: 2026-01-26 - After admin password was changed causing "session_expired" errors on localhost:8000 login.
+
+---
+
 ## SSH SERVER RESTART - CRITICAL PROCEDURE
 
 **ABSOLUTE PROHIBITION**: NEVER use `kill -15 && nohup python3 -m ... &` for server restarts.

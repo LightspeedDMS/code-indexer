@@ -339,10 +339,10 @@ class DeploymentExecutor:
             return False
 
     def _ensure_workers_config(self) -> bool:
-        """Ensure systemd service has --workers 4 configured.
+        """Ensure systemd service has --workers 1 configured.
 
-        Story #30 AC4: Updates existing systemd service file to add
-        --workers 4 if missing. This enables concurrent request handling.
+        Single worker maintains in-memory cache coherency (HNSW, FTS, OmniCache).
+        Multiple workers duplicate caches and break cursor-based pagination.
 
         Returns:
             True if config is correct or was updated, False on error
@@ -367,17 +367,17 @@ class DeploymentExecutor:
                 )
                 return True
 
-            # Add --workers 4 to ExecStart line
+            # Add --workers 1 to ExecStart line
             if "ExecStart=" in content and "uvicorn" in content:
-                # Find ExecStart line and add --workers 4
+                # Find ExecStart line and add --workers 1
                 lines = content.split("\n")
                 updated_lines = []
                 modified = False
 
                 for line in lines:
                     if line.startswith("ExecStart=") and "uvicorn" in line:
-                        # Add --workers 4 before any newline
-                        line = line.rstrip() + " --workers 4"
+                        # Add --workers 1 before any newline
+                        line = line.rstrip() + " --workers 1"
                         modified = True
                     updated_lines.append(line)
 
@@ -405,7 +405,7 @@ class DeploymentExecutor:
                     )
 
                     logger.info(
-                        "Added --workers 4 to service file",
+                        "Added --workers 1 to service file",
                         extra={"correlation_id": get_correlation_id()},
                     )
 

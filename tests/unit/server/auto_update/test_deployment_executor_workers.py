@@ -1,8 +1,9 @@
 """
-Tests for Story #30 AC4: Uvicorn workers configuration in auto-update.
+Tests for uvicorn workers configuration in auto-update.
 
 Tests for DeploymentExecutor._ensure_workers_config() method that adds
---workers 4 to existing systemd service files during auto-update.
+--workers 1 to existing systemd service files during auto-update.
+Single worker maintains in-memory cache coherency (HNSW, FTS, OmniCache).
 """
 
 import tempfile
