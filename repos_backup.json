@@ -1,0 +1,872 @@
+[
+  {
+    "alias": "oem-data-forwarding",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/application-services/oem-data-forwarding.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/oem-data-forwarding",
+    "created_at": "2026-01-14T15:55:01.004722+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "payment-gateway",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/application-services/payment-gateway.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/payment-gateway",
+    "created_at": "2026-01-14T15:55:05.084314+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "subscription-data-access-library",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/libraries/webhooks/subscription-data-access-library.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/subscription-data-access-library",
+    "created_at": "2026-01-14T16:09:18.325751+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "contact-widget-api",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/contact-widget/contact-widget-api.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/contact-widget-api",
+    "created_at": "2026-01-14T16:09:18.332484+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "sandboxservice",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/phoenix/sandboxservice.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/sandboxservice",
+    "created_at": "2026-01-14T16:09:33.505637+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "tableau",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/data-services/analytics/tableau.git",
+    "default_branch": "release/prod",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/tableau",
+    "created_at": "2026-01-14T16:09:33.880694+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "subscription-management-api",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/webhook-publishing/subscription-management-api.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/subscription-management-api",
+    "created_at": "2026-01-14T16:09:45.768057+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "ls-service-auth-management",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/ls-service-auth/ls-service-auth-management.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/ls-service-auth-management",
+    "created_at": "2026-01-14T16:10:00.286580+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "email-marketing-api",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/email-marketing/email-marketing-api.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/email-marketing-api",
+    "created_at": "2026-01-14T16:10:11.282151+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "parts-order-api",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/internal-services/parts-order-api.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/parts-order-api",
+    "created_at": "2026-01-14T16:10:34.564396+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "web-reports",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/internal-services/web-reports.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/web-reports",
+    "created_at": "2026-01-14T16:10:37.682376+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "data-services-api-k8",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/data-services/data-services-api-k8.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/data-services-api-k8",
+    "created_at": "2026-01-14T16:12:09.057777+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "steps-automation",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/automation/steps-automation.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/steps-automation",
+    "created_at": "2026-01-14T16:13:10.332063+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "db-update",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/libraries/db-update.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/db-update",
+    "created_at": "2026-01-14T16:13:16.895986+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "pch-api-handler",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/application-services/prospect-clearinghouse/pch-aws/lambdas/pch-api-handler.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/pch-api-handler",
+    "created_at": "2026-01-14T16:14:23.669789+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "email-marketing-event-processing",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/email-marketing/email-marketing-event-processing.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/email-marketing-event-processing",
+    "created_at": "2026-01-14T16:14:35.755088+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "jira-dev-agent-integration",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/internal-services/jira-dev-agent-integration.git",
+    "default_branch": "main",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/jira-dev-agent-integration",
+    "created_at": "2026-01-14T16:14:46.416702+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "voip-zoom-webhook-receiving",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/application-services/webhook-receiving/voip-zoom-webhook-receiving.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/voip-zoom-webhook-receiving",
+    "created_at": "2026-01-14T16:14:46.496192+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "dmwservice",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/internal-services/dmwservice.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/dmwservice",
+    "created_at": "2026-01-14T16:15:06.833618+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "ro-updater-rest-service",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/application-services/ro-updater-rest-service.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/ro-updater-rest-service",
+    "created_at": "2026-01-14T16:15:12.863172+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "reporting-service",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/application-services/reporting-service.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/reporting-service",
+    "created_at": "2026-01-14T16:15:36.929918+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "mobile",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/evolution/mobile.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/mobile",
+    "created_at": "2026-01-14T16:15:38.399429+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "oem-order-processing",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/application-services/oem-order-processing.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/oem-order-processing",
+    "created_at": "2026-01-14T16:16:25.974357+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "contact-widget-frontend",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/contact-widget/contact-widget-frontend.git",
+    "default_branch": "main",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/contact-widget-frontend",
+    "created_at": "2026-01-14T16:16:34.640589+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "mobile-server",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/application-services/mobile-server.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/mobile-server",
+    "created_at": "2026-01-14T16:16:54.587510+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "ls-version-api",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/ls-version/ls-version-api.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/ls-version-api",
+    "created_at": "2026-01-14T16:17:04.105109+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "oem-repairorder-service",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/application-services/oem-repairorder-service.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/oem-repairorder-service",
+    "created_at": "2026-01-14T16:17:08.322768+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "ls-login-api",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/application-services/ls-login-api.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/ls-login-api",
+    "created_at": "2026-01-14T16:17:10.122886+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "variable-reporting",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/libraries/variable-reporting.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/variable-reporting",
+    "created_at": "2026-01-14T16:17:16.679564+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "electronic-forms-api",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/electronic-forms/electronic-forms-api.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/electronic-forms-api",
+    "created_at": "2026-01-14T16:17:42.403919+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "rental-plus-api",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/rental-plus-api.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/rental-plus-api",
+    "created_at": "2026-01-14T16:18:18.604043+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "data-services-purchase-order",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/data-services/data-services-purchase-order.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/data-services-purchase-order",
+    "created_at": "2026-01-14T16:18:35.646603+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "webhook-event-processing",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/webhook-publishing/webhook-event-processing.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/webhook-event-processing",
+    "created_at": "2026-01-14T16:22:29.616129+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "webhook-pre-processor",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/application-services/webhook-receiving/webhook-pre-processor.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/webhook-pre-processor",
+    "created_at": "2026-01-14T16:22:29.953272+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "part-escalator",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/application-services/part-escalator.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/part-escalator",
+    "created_at": "2026-01-14T16:23:17.354478+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "data-retriever-library",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/data-services/data-retriever-library.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/data-retriever-library",
+    "created_at": "2026-01-14T16:25:18.436143+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "evolution",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/conversion/evolution.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/evolution",
+    "created_at": "2026-01-14T16:26:04.539088+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "steps",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/conversion/steps/steps.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/steps",
+    "created_at": "2026-01-14T16:28:43.708572+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "conversiontool",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/conversion/conversiontool.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/conversiontool",
+    "created_at": "2026-01-14T16:28:58.982554+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "ls-kb",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/ideas/seba.battig-space/ls_kb.git",
+    "default_branch": "main",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/ls-kb",
+    "created_at": "2026-01-14T16:31:02.636284+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "phoenix",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/phoenix/phoenix.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/phoenix",
+    "created_at": "2026-01-14T16:34:37.655748+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "fresca",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/front-end/fresca.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/fresca",
+    "created_at": "2026-01-14T20:50:31.865110+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "ask-lightspeed",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/evolution/ask-lightspeed.git",
+    "default_branch": "model-testing",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/ask-lightspeed",
+    "created_at": "2026-01-22T18:00:22.424202+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "stepscommand",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/conversion/stepscommand.git",
+    "default_branch": "feature/development",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/stepscommand",
+    "created_at": "2026-01-22T18:14:08.672304+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "data-services-pmsr",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/data-services/data-services-pmsr.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/data-services-pmsr",
+    "created_at": "2026-01-22T22:26:43.382748+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "data-services-getvininfouser",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/data-services/data-services-getvininfouser.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/data-services-getvininfouser",
+    "created_at": "2026-01-22T22:27:01.852055+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "data-services-unitinfo",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/data-services/data-services-unitinfo.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/data-services-unitinfo",
+    "created_at": "2026-01-22T22:27:10.173303+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "data-services-v1-authorizer",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/data-services/data-services-v1-authorizer.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/data-services-v1-authorizer",
+    "created_at": "2026-01-22T22:27:14.967084+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "data-services-deal-update",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/data-services/data-services-deal-update.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/data-services-deal-update",
+    "created_at": "2026-01-22T22:27:16.714451+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "data-services-vg-value",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/data-services/data-services-vg-value.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/data-services-vg-value",
+    "created_at": "2026-01-22T22:27:23.823393+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "data-services-locator-parts",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/data-services/data-services-locator-parts.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/data-services-locator-parts",
+    "created_at": "2026-01-22T22:27:42.111288+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "data-services-forms-sf-int",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/data-services/data-services-forms-sf-int.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/data-services-forms-sf-int",
+    "created_at": "2026-01-22T22:27:49.337029+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "data-services-dealer-cost",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/data-services/data-services-dealer-cost.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/data-services-dealer-cost",
+    "created_at": "2026-01-22T22:27:52.844451+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "data-services-3painfocmf",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/data-services/data-services-3painfocmf.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/data-services-3painfocmf",
+    "created_at": "2026-01-22T22:27:56.398534+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "data-services-utilities",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/data-services/data-services-utilities.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/data-services-utilities",
+    "created_at": "2026-01-22T23:26:39.605911+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "data-services-auth",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/data-services/data-services-auth.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/data-services-auth",
+    "created_at": "2026-01-22T23:26:55.669540+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "data-services-vg-rvmakes",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/lambdas/data-services/data-services-vg-rvmakes.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/data-services-vg-rvmakes",
+    "created_at": "2026-01-22T23:26:58.873187+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  },
+  {
+    "alias": "simple-cache",
+    "repo_url": "git@gitlab.com:lightspeeddms/private/libraries/simple-cache.git",
+    "default_branch": "master",
+    "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/simple-cache",
+    "created_at": "2026-01-23T18:41:34.127451+00:00",
+    "enable_temporal": false,
+    "temporal_options": null,
+    "indexes": {
+      "has_semantic": false,
+      "has_fts": false,
+      "has_temporal": false,
+      "has_scip": false
+    }
+  }
+]
