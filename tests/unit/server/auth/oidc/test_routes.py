@@ -26,14 +26,25 @@ class TestOIDCRoutes:
     def test_sso_callback_rejects_invalid_state(self):
         """Test that /auth/sso/callback returns 400 for invalid state token."""
         from code_indexer.server.auth.oidc.routes import router
+        from code_indexer.server.auth.oidc.oidc_manager import OIDCManager
         from code_indexer.server.auth.oidc.state_manager import StateManager
+        from code_indexer.server.utils.config_manager import OIDCProviderConfig
+
+        # Create configured OIDC manager (needed even though state check fails first)
+        config = OIDCProviderConfig(
+            enabled=True,
+            issuer_url="https://example.com",
+            client_id="test-client-id",
+        )
+        oidc_mgr = OIDCManager(config, None, None)
 
         # Create state manager
         state_mgr = StateManager()
 
-        # Inject state manager into routes module
+        # Inject managers into routes module
         import code_indexer.server.auth.oidc.routes as routes_module
 
+        routes_module.oidc_manager = oidc_mgr
         routes_module.state_manager = state_mgr
 
         app = FastAPI()
@@ -134,7 +145,7 @@ class TestOIDCRoutes:
 
         # Verify provider methods were called
         oidc_mgr.provider.exchange_code_for_token.assert_called_once()
-        oidc_mgr.provider.get_user_info.assert_called_once_with("test-access-token")
+        oidc_mgr.provider.get_user_info.assert_called_once_with("test-access-token", "test-id-token")
         oidc_mgr.match_or_create_user.assert_called_once()
 
     def test_sso_callback_handles_match_or_create_user_returning_none(self):
