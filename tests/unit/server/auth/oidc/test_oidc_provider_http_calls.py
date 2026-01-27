@@ -79,3 +79,137 @@ class TestOIDCProviderHttpCalls:
             mock_response.json.assert_called_once()
             assert user_info.subject == "test-user-id"
             assert user_info.email == "test@example.com"
+
+    @pytest.mark.asyncio
+    async def test_get_user_info_extracts_groups_from_claim(self):
+        """Test that get_user_info extracts groups from the configured groups_claim."""
+        config = OIDCProviderConfig(
+            enabled=True,
+            issuer_url="http://localhost:8180/realms/test",
+            client_id="test-client",
+            client_secret="test-secret",
+            groups_claim="groups",  # Default groups claim
+        )
+        provider = OIDCProvider(config)
+
+        # Mock httpx.AsyncClient with groups in response
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "sub": "test-user-id",
+            "email": "test@example.com",
+            "email_verified": True,
+            "groups": ["SSOAdmins", "SSODevelopers"],  # Groups from SSO provider
+        }
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            user_info = await provider.get_user_info("test-access-token")
+
+            # Verify groups were extracted
+            assert user_info.groups is not None
+            assert len(user_info.groups) == 2
+            assert "SSOAdmins" in user_info.groups
+            assert "SSODevelopers" in user_info.groups
+
+    @pytest.mark.asyncio
+    async def test_get_user_info_handles_missing_groups_claim(self):
+        """Test that get_user_info handles missing groups claim gracefully."""
+        config = OIDCProviderConfig(
+            enabled=True,
+            issuer_url="http://localhost:8180/realms/test",
+            client_id="test-client",
+            client_secret="test-secret",
+            groups_claim="groups",
+        )
+        provider = OIDCProvider(config)
+
+        # Mock response without groups claim
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "sub": "test-user-id",
+            "email": "test@example.com",
+            "email_verified": True,
+            # No groups claim
+        }
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            user_info = await provider.get_user_info("test-access-token")
+
+            # Groups should be None (not an empty list, as per implementation)
+            assert user_info.groups is None
+
+    @pytest.mark.asyncio
+    async def test_get_user_info_handles_non_list_groups_claim(self):
+        """Test that get_user_info handles non-list groups claim gracefully."""
+        config = OIDCProviderConfig(
+            enabled=True,
+            issuer_url="http://localhost:8180/realms/test",
+            client_id="test-client",
+            client_secret="test-secret",
+            groups_claim="groups",
+        )
+        provider = OIDCProvider(config)
+
+        # Mock response with non-list groups claim (string instead of list)
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "sub": "test-user-id",
+            "email": "test@example.com",
+            "email_verified": True,
+            "groups": "single-group-string",  # Not a list
+        }
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            user_info = await provider.get_user_info("test-access-token")
+
+            # Groups should be None when claim value is not a list
+            assert user_info.groups is None
+
+    @pytest.mark.asyncio
+    async def test_get_user_info_custom_groups_claim(self):
+        """Test that get_user_info uses custom groups_claim setting."""
+        config = OIDCProviderConfig(
+            enabled=True,
+            issuer_url="http://localhost:8180/realms/test",
+            client_id="test-client",
+            client_secret="test-secret",
+            groups_claim="roles",  # Custom claim name
+        )
+        provider = OIDCProvider(config)
+
+        # Mock response with groups in "roles" claim
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "sub": "test-user-id",
+            "email": "test@example.com",
+            "email_verified": True,
+            "roles": ["Admin", "Developer"],  # Groups in custom "roles" claim
+        }
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            user_info = await provider.get_user_info("test-access-token")
+
+            # Verify groups were extracted from custom "roles" claim
+            assert user_info.groups is not None
+            assert len(user_info.groups) == 2
+            assert "Admin" in user_info.groups
+            assert "Developer" in user_info.groups

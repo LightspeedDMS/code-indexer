@@ -56,8 +56,14 @@ async def sso_callback(code: str, state: str, request: Request):
         code, code_verifier, callback_url
     )
 
-    # Get user info from provider
-    user_info = await oidc_manager.provider.get_user_info(tokens["access_token"])
+    # Parse ID token to get user info (includes groups for Entra/Keycloak)
+    if "id_token" not in tokens:
+        raise HTTPException(status_code=500, detail="ID token not returned by provider")
+
+    user_info = await oidc_manager.provider.get_user_info(
+        tokens["access_token"],
+        tokens["id_token"]
+    )
 
     # Match or create user (email-based)
     user = await oidc_manager.match_or_create_user(user_info)

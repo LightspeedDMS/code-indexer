@@ -2,7 +2,7 @@
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List
 
 
 @dataclass
@@ -20,6 +20,7 @@ class OIDCUserInfo:
     email: Optional[str] = None
     email_verified: bool = False
     username: Optional[str] = None
+    groups: Optional[List[str]] = None
 
 
 class OIDCProvider:
@@ -110,39 +111,53 @@ class OIDCProvider:
 
         return tokens
 
-    async def get_user_info(self, access_token):
-        import httpx
+    async def get_user_info(self, access_token, id_token):
+        """Parse ID token to extract user information and claims.
+
+        ID token contains all necessary user claims including groups.
+        This approach works universally with Entra, Keycloak, and other OIDC providers.
+
+        Args:
+            access_token: OAuth access token (kept for backward compatibility)
+            id_token: OIDC ID token (JWT) containing user claims
+
+        Returns:
+            OIDCUserInfo object with user claims including groups
+        """
+        import base64
+        import json
         import logging
 
         logger = logging.getLogger(__name__)
 
-        # Construct userinfo endpoint (typically from discovery, but fallback to standard path)
-        # Use userinfo endpoint from discovery metadata (preferred) or fallback
-        if self._metadata and self._metadata.userinfo_endpoint:
-            userinfo_endpoint = self._metadata.userinfo_endpoint
-        else:
-            userinfo_endpoint = (
-                f"{self.config.issuer_url}/protocol/openid-connect/userinfo"
-            )
+        # Parse ID token JWT (format: header.payload.signature)
+        if not id_token:
+            raise Exception("ID token is required but was not provided")
 
-        # Fetch user info from userinfo endpoint
-        headers = {"Authorization": f"Bearer {access_token}"}
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(userinfo_endpoint, headers=headers)
-                response.raise_for_status()  # Raise HTTPStatusError for 4xx/5xx
-                data = response.json()  # Not async in httpx
-        except httpx.HTTPStatusError as e:
-            raise Exception(
-                f"Failed to get user info: HTTP {e.response.status_code} - {e.response.text}"
-            ) from e
-        except httpx.RequestError as e:
-            raise Exception(f"Failed to connect to userinfo endpoint: {str(e)}") from e
+            parts = id_token.split('.')
+            if len(parts) != 3:
+                raise Exception(f"Invalid ID token format: expected 3 parts, got {len(parts)}")
 
-        # Validate userinfo response has required fields
+            # Decode payload (base64url decode with padding)
+            payload = parts[1]
+            # Add padding if needed (base64 requires length to be multiple of 4)
+            padding = 4 - (len(payload) % 4)
+            if padding != 4:
+                payload += '=' * padding
+
+            data = json.loads(base64.urlsafe_b64decode(payload))
+            logger.info(
+                f"Parsed ID token with claims: {list(data.keys())}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            raise Exception(f"Failed to parse ID token: {e}") from e
+
+        # Validate ID token has required fields
         if "sub" not in data or not data["sub"]:
             raise Exception(
-                "Invalid userinfo response: missing or empty sub (subject) claim"
+                "Invalid ID token: missing or empty sub (subject) claim"
             )
 
         # Log claim extraction for debugging
@@ -151,7 +166,7 @@ class OIDCProvider:
             extra={"correlation_id": get_correlation_id()},
         )
         logger.info(
-            f"Available claims in userinfo: {list(data.keys())}",
+            f"Available claims in ID token: {list(data.keys())}",
             extra={"correlation_id": get_correlation_id()},
         )
 
@@ -167,12 +182,32 @@ class OIDCProvider:
             extra={"correlation_id": get_correlation_id()},
         )
 
+        # Extract groups from configured groups_claim
+        groups_value = data.get(self.config.groups_claim)
+        logger.info(
+            f"Groups claim '{self.config.groups_claim}' raw value: {groups_value} (type: {type(groups_value).__name__})",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        if groups_value and isinstance(groups_value, list):
+            groups_list = [str(g) for g in groups_value]
+            logger.info(
+                f"Extracted {len(groups_list)} groups from '{self.config.groups_claim}' claim: {groups_list}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        else:
+            groups_list = []
+            logger.info(
+                f"No groups found in '{self.config.groups_claim}' claim or claim value is not a list",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
         # Create OIDCUserInfo from response
         user_info = OIDCUserInfo(
             subject=data.get("sub", ""),
             email=email_value,
             email_verified=data.get("email_verified", False),
             username=username_value,
+            groups=groups_list if groups_list else None,
         )
 
         return user_info
