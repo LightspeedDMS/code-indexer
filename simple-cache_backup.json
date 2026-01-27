@@ -1,0 +1,15 @@
+{
+  "alias": "simple-cache",
+  "repo_url": "git@gitlab.com:lightspeeddms/private/libraries/simple-cache.git",
+  "default_branch": "master",
+  "clone_path": "/opt/code-indexer/.cidx-server/data/golden-repos/simple-cache",
+  "created_at": "2026-01-14T16:13:35.647307+00:00",
+  "enable_temporal": false,
+  "temporal_options": null,
+  "indexes": {
+    "has_semantic": false,
+    "has_fts": false,
+    "has_temporal": false,
+    "has_scip": false
+  }
+}

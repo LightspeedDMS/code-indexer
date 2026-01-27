@@ -1,6 +1,34 @@
 """Tests for OIDC username_claim extraction and JIT provisioning."""
 
 import pytest
+import base64
+import json
+
+
+def create_mock_id_token(claims):
+    """Create a mock ID token JWT for testing.
+
+    Args:
+        claims: Dictionary of claims to include in the token
+
+    Returns:
+        JWT string (header.payload.signature)
+    """
+    # Create header (standard JWT header)
+    header = {"alg": "RS256", "typ": "JWT"}
+    header_b64 = base64.urlsafe_b64encode(
+        json.dumps(header).encode()
+    ).decode().rstrip("=")
+
+    # Create payload with claims
+    payload_b64 = base64.urlsafe_b64encode(
+        json.dumps(claims).encode()
+    ).decode().rstrip("=")
+
+    # Signature is not validated in tests, so just use placeholder
+    signature = "mock-signature"
+
+    return f"{header_b64}.{payload_b64}.{signature}"
 
 
 class TestUsernameClaimExtraction:
@@ -28,39 +56,16 @@ class TestUsernameClaimExtraction:
             token_endpoint="https://example.com/token",
         )
 
-        # Mock userinfo response with preferred_username
-        mock_userinfo = {
+        # Create ID token with preferred_username claim
+        claims = {
             "sub": "oidc-user-12345",
             "email": "user@example.com",
             "email_verified": True,
             "preferred_username": "jdoe",
         }
+        id_token = create_mock_id_token(claims)
 
-        async def mock_get(*args, **kwargs):
-            class MockResponse:
-                def json(self):
-                    return mock_userinfo
-
-                def raise_for_status(self):
-                    pass
-
-            return MockResponse()
-
-        import httpx
-
-        class MockAsyncClient:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                pass
-
-            async def get(self, *args, **kwargs):
-                return await mock_get(*args, **kwargs)
-
-        monkeypatch.setattr(httpx, "AsyncClient", lambda: MockAsyncClient())
-
-        user_info = await provider.get_user_info("test-access-token")
+        user_info = await provider.get_user_info("test-access-token", id_token)
 
         assert user_info.subject == "oidc-user-12345"
         assert user_info.email == "user@example.com"
@@ -88,45 +93,22 @@ class TestUsernameClaimExtraction:
             token_endpoint="https://example.com/token",
         )
 
-        # Mock userinfo response with custom claim
-        mock_userinfo = {
+        # Create ID token with custom username claim
+        claims = {
             "sub": "oidc-user-12345",
             "email": "user@example.com",
             "email_verified": True,
             "custom_username": "custom_user",
         }
+        id_token = create_mock_id_token(claims)
 
-        async def mock_get(*args, **kwargs):
-            class MockResponse:
-                def json(self):
-                    return mock_userinfo
-
-                def raise_for_status(self):
-                    pass
-
-            return MockResponse()
-
-        import httpx
-
-        class MockAsyncClient:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                pass
-
-            async def get(self, *args, **kwargs):
-                return await mock_get(*args, **kwargs)
-
-        monkeypatch.setattr(httpx, "AsyncClient", lambda: MockAsyncClient())
-
-        user_info = await provider.get_user_info("test-access-token")
+        user_info = await provider.get_user_info("test-access-token", id_token)
 
         assert user_info.username == "custom_user"
 
     @pytest.mark.asyncio
     async def test_username_is_none_when_claim_not_present(self, monkeypatch):
-        """Test that username is None when username_claim is not in userinfo."""
+        """Test that username is None when username_claim is not in ID token."""
         from code_indexer.server.auth.oidc.oidc_provider import (
             OIDCProvider,
             OIDCMetadata,
@@ -146,38 +128,15 @@ class TestUsernameClaimExtraction:
             token_endpoint="https://example.com/token",
         )
 
-        # Mock userinfo response WITHOUT preferred_username
-        mock_userinfo = {
+        # Create ID token WITHOUT preferred_username
+        claims = {
             "sub": "oidc-user-12345",
             "email": "user@example.com",
             "email_verified": True,
         }
+        id_token = create_mock_id_token(claims)
 
-        async def mock_get(*args, **kwargs):
-            class MockResponse:
-                def json(self):
-                    return mock_userinfo
-
-                def raise_for_status(self):
-                    pass
-
-            return MockResponse()
-
-        import httpx
-
-        class MockAsyncClient:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                pass
-
-            async def get(self, *args, **kwargs):
-                return await mock_get(*args, **kwargs)
-
-        monkeypatch.setattr(httpx, "AsyncClient", lambda: MockAsyncClient())
-
-        user_info = await provider.get_user_info("test-access-token")
+        user_info = await provider.get_user_info("test-access-token", id_token)
 
         assert user_info.username is None
 

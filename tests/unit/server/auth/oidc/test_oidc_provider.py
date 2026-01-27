@@ -1,6 +1,34 @@
 """Tests for OIDC provider implementation."""
 
 import pytest
+import base64
+import json
+
+
+def create_mock_id_token(claims):
+    """Create a mock ID token JWT for testing.
+
+    Args:
+        claims: Dictionary of claims to include in the token
+
+    Returns:
+        JWT string (header.payload.signature)
+    """
+    # Create header (standard JWT header)
+    header = {"alg": "RS256", "typ": "JWT"}
+    header_b64 = base64.urlsafe_b64encode(
+        json.dumps(header).encode()
+    ).decode().rstrip("=")
+
+    # Create payload with claims
+    payload_b64 = base64.urlsafe_b64encode(
+        json.dumps(claims).encode()
+    ).decode().rstrip("=")
+
+    # Signature is not validated in tests, so just use placeholder
+    signature = "mock-signature"
+
+    return f"{header_b64}.{payload_b64}.{signature}"
 
 
 class TestOIDCMetadata:
@@ -286,7 +314,7 @@ class TestOIDCProvider:
 
     @pytest.mark.asyncio
     async def test_get_user_info_extracts_user_info(self, monkeypatch):
-        """Test that get_user_info extracts user information from access token."""
+        """Test that get_user_info extracts user information from ID token."""
         from code_indexer.server.auth.oidc.oidc_provider import (
             OIDCProvider,
             OIDCMetadata,
@@ -307,40 +335,16 @@ class TestOIDCProvider:
             token_endpoint="https://example.com/token",
         )
 
-        # Mock userinfo response
-        mock_userinfo = {
+        # Create mock ID token with user claims
+        claims = {
             "sub": "oidc-user-12345",
             "email": "user@example.com",
             "email_verified": True,
         }
-
-        async def mock_get(*args, **kwargs):
-            class MockResponse:
-                def json(self):
-                    return mock_userinfo
-
-                def raise_for_status(self):
-                    pass  # No error for success case
-
-            return MockResponse()
-
-        # Mock httpx.AsyncClient
-        import httpx
-
-        class MockAsyncClient:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                pass
-
-            async def get(self, *args, **kwargs):
-                return await mock_get(*args, **kwargs)
-
-        monkeypatch.setattr(httpx, "AsyncClient", lambda: MockAsyncClient())
+        id_token = create_mock_id_token(claims)
 
         access_token = "test-access-token"
-        user_info = await provider.get_user_info(access_token)
+        user_info = await provider.get_user_info(access_token, id_token)
 
         assert user_info.subject == "oidc-user-12345"
         assert user_info.email == "user@example.com"

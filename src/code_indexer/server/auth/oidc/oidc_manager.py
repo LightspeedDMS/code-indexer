@@ -60,7 +60,7 @@ class OIDCManager:
         """Check if OIDC is enabled in configuration."""
         return self.config.enabled
 
-    def _ensure_group_membership(self, username: str) -> None:
+    def _ensure_group_membership(self, username: str, external_groups=None) -> None:
         """Ensure user has group membership via SSO provisioning hook.
 
         Story #708: SSO Auto-Provisioning with Default Group Assignment
@@ -68,8 +68,14 @@ class OIDCManager:
         - AC3: Existing users' membership is NOT changed
         - AC6: Errors are logged but do not block authentication
 
+        Group Mapping Support:
+        - External groups from SSO provider can be mapped to CIDX groups via configuration
+        - First matched group is used for assignment
+        - Falls back to "users" group if no mappings match
+
         Args:
             username: The user's username to provision
+            external_groups: Optional list of external group names from OIDC provider
         """
         import logging
 
@@ -88,7 +94,12 @@ class OIDCManager:
                 ensure_user_group_membership,
             )
 
-            result = ensure_user_group_membership(username, self.group_manager)
+            # Get group_mappings from config
+            group_mappings = self.config.group_mappings or {}
+
+            result = ensure_user_group_membership(
+                username, self.group_manager, external_groups, group_mappings
+            )
             if result:
                 logger.debug(
                     f"SSO provisioning completed for user {username}",
@@ -191,7 +202,9 @@ class OIDCManager:
                         extra={"correlation_id": get_correlation_id()},
                     )
                     # Story #708: Ensure group membership on every SSO login
-                    self._ensure_group_membership(existing_user.username)
+                    self._ensure_group_membership(
+                        existing_user.username, user_info.groups
+                    )
                     return existing_user
                 else:
                     # Stale OIDC link (defensive check - should be cleaned up on user deletion)
@@ -219,7 +232,9 @@ class OIDCManager:
                         email=user_info.email,
                     )
                     # Story #708: Ensure group membership on every SSO login
-                    self._ensure_group_membership(existing_user.username)
+                    self._ensure_group_membership(
+                        existing_user.username, user_info.groups
+                    )
                     return existing_user
 
         # Create new user via JIT provisioning if enabled
@@ -281,6 +296,6 @@ class OIDCManager:
             )
 
             # Story #708: Ensure group membership for new JIT-provisioned user
-            self._ensure_group_membership(new_user.username)
+            self._ensure_group_membership(new_user.username, user_info.groups)
 
             return new_user

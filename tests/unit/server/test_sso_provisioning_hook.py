@@ -518,3 +518,187 @@ class TestAC7_AuditLoggingForSSOProvisioning:
             "auto-provisioned" in user_log["details"].lower()
             or "sso" in user_log["details"].lower()
         )
+
+
+class TestGroupMapping:
+    """Tests for external group to CIDX group mapping functionality."""
+
+    def test_user_assigned_to_mapped_group(self, group_manager):
+        """Test that user with matching external group is assigned to mapped CIDX group."""
+        # Given: Group mappings configured
+        group_mappings = [
+            {"external_group_id": "SSOAdmins", "cidx_group": "admins"},
+            {"external_group_id": "SSOPowerUsers", "cidx_group": "powerusers"},
+        ]
+
+        # And: A new SSO user with external groups
+        user_id = "mapped-user-1"
+        external_groups = ["SSOAdmins", "OtherGroup"]
+
+        # When: The provisioning hook is called with mappings
+        hook = SSOProvisioningHook(group_manager, group_mappings)
+        result = hook.ensure_group_membership(user_id, external_groups)
+
+        # Then: User is assigned to mapped "admins" group
+        assert result is True
+        user_group = group_manager.get_user_group(user_id)
+        assert user_group is not None
+        assert user_group.name == "admins"
+
+    def test_first_matching_group_is_used(self, group_manager):
+        """Test that when multiple external groups match, first one is used."""
+        # Given: Group mappings
+        group_mappings = [
+            {"external_group_id": "SSOAdmins", "cidx_group": "admins"},
+            {"external_group_id": "SSOPowerUsers", "cidx_group": "powerusers"},
+        ]
+
+        # And: User has multiple matching external groups
+        user_id = "multi-match-user"
+        external_groups = ["SSOPowerUsers", "SSOAdmins"]
+
+        # When: The provisioning hook is called
+        hook = SSOProvisioningHook(group_manager, group_mappings)
+        result = hook.ensure_group_membership(user_id, external_groups)
+
+        # Then: User is assigned to first matched group (powerusers)
+        assert result is True
+        user_group = group_manager.get_user_group(user_id)
+        assert user_group.name == "powerusers"
+
+    def test_fallback_to_users_when_no_match(self, group_manager):
+        """Test that user is assigned to 'users' when no groups match."""
+        # Given: Group mappings that don't match user's groups
+        group_mappings = [
+            {"external_group_id": "SSOAdmins", "cidx_group": "admins"},
+        ]
+
+        # And: User has external groups that don't match
+        user_id = "no-match-user"
+        external_groups = ["SomeOtherGroup", "UnmappedGroup"]
+
+        # When: The provisioning hook is called
+        hook = SSOProvisioningHook(group_manager, group_mappings)
+        result = hook.ensure_group_membership(user_id, external_groups)
+
+        # Then: User is assigned to default "users" group
+        assert result is True
+        user_group = group_manager.get_user_group(user_id)
+        assert user_group.name == "users"
+
+    def test_no_external_groups_falls_back_to_users(self, group_manager):
+        """Test that user with no external groups is assigned to 'users'."""
+        # Given: Group mappings configured
+        group_mappings = [{"external_group_id": "SSOAdmins", "cidx_group": "admins"}]
+
+        # And: User has no external groups (None)
+        user_id = "no-groups-user"
+
+        # When: The provisioning hook is called with None for external_groups
+        hook = SSOProvisioningHook(group_manager, group_mappings)
+        result = hook.ensure_group_membership(user_id, None)
+
+        # Then: User is assigned to "users" group
+        assert result is True
+        user_group = group_manager.get_user_group(user_id)
+        assert user_group.name == "users"
+
+    def test_empty_external_groups_falls_back_to_users(self, group_manager):
+        """Test that user with empty external groups list is assigned to 'users'."""
+        # Given: Group mappings configured
+        group_mappings = [{"external_group_id": "SSOAdmins", "cidx_group": "admins"}]
+
+        # And: User has empty external groups list
+        user_id = "empty-groups-user"
+        external_groups = []
+
+        # When: The provisioning hook is called
+        hook = SSOProvisioningHook(group_manager, group_mappings)
+        result = hook.ensure_group_membership(user_id, external_groups)
+
+        # Then: User is assigned to "users" group
+        assert result is True
+        user_group = group_manager.get_user_group(user_id)
+        assert user_group.name == "users"
+
+    def test_no_group_mappings_falls_back_to_users(self, group_manager):
+        """Test that user is assigned to 'users' when no mappings configured."""
+        # Given: No group mappings (empty list)
+        group_mappings = []
+
+        # And: User has external groups
+        user_id = "no-mappings-user"
+        external_groups = ["SSOAdmins"]
+
+        # When: The provisioning hook is called
+        hook = SSOProvisioningHook(group_manager, group_mappings)
+        result = hook.ensure_group_membership(user_id, external_groups)
+
+        # Then: User is assigned to "users" group
+        assert result is True
+        user_group = group_manager.get_user_group(user_id)
+        assert user_group.name == "users"
+
+    def test_audit_log_includes_group_mapping_info(self, group_manager):
+        """Test that audit log includes external group mapping information."""
+        # Given: Group mappings configured
+        group_mappings = [{"external_group_id": "SSOAdmins", "cidx_group": "admins"}]
+
+        # And: User with matching external group
+        user_id = "audit-mapping-user"
+        external_groups = ["SSOAdmins"]
+
+        # When: The provisioning hook is called
+        hook = SSOProvisioningHook(group_manager, group_mappings)
+        hook.ensure_group_membership(user_id, external_groups)
+
+        # Then: Audit log includes mapping information
+        logs, _ = group_manager.get_audit_logs(
+            action_type="user_assign",
+            admin_id="system:sso-provisioning",
+        )
+
+        user_log = next((log for log in logs if log["target_id"] == user_id), None)
+        assert user_log is not None
+        assert "admins" in user_log["details"].lower()
+        # Should mention that it was mapped from external groups
+        assert (
+            "mapped" in user_log["details"].lower()
+            or "ssoadmins" in user_log["details"].lower()
+        )
+
+    def test_existing_user_not_reassigned_with_group_mappings(self, group_manager):
+        """Test that existing user's group is not changed even with different external groups."""
+        # Given: User already assigned to users group
+        user_id = "existing-mapped-user"
+        users = group_manager.get_group_by_name("users")
+        group_manager.assign_user_to_group(user_id, users.id, "initial-setup")
+
+        # And: Group mappings that would assign them to admins
+        group_mappings = [{"external_group_id": "SSOAdmins", "cidx_group": "admins"}]
+        external_groups = ["SSOAdmins"]
+
+        # When: The provisioning hook is called with admin group mapping
+        hook = SSOProvisioningHook(group_manager, group_mappings)
+        hook.ensure_group_membership(user_id, external_groups)
+
+        # Then: User is still in users group (not reassigned)
+        user_group = group_manager.get_user_group(user_id)
+        assert user_group.name == "users"
+
+    def test_function_wrapper_with_group_mappings(self, group_manager):
+        """Test the standalone function wrapper with group mappings."""
+        # Given: Group mappings and external groups
+        group_mappings = [{"external_group_id": "SSOAdmins", "cidx_group": "admins"}]
+        external_groups = ["SSOAdmins"]
+        user_id = "function-wrapper-mapped-user"
+
+        # When: The standalone function is called with mappings
+        result = ensure_user_group_membership(
+            user_id, group_manager, external_groups, group_mappings
+        )
+
+        # Then: User is assigned to mapped group
+        assert result is True
+        user_group = group_manager.get_user_group(user_id)
+        assert user_group.name == "admins"
