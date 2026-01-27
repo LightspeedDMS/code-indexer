@@ -711,6 +711,17 @@ async def delete_user(
                 )
                 await db.commit()
 
+        # Clean up group membership (Bug fix: prevent orphaned group memberships)
+        try:
+            group_manager = _get_group_manager()
+            user_group = group_manager.get_user_group(username)
+            if user_group:
+                group_manager.remove_user_from_group(username, user_group.id)
+                logger.info(f"Cleaned up group membership for deleted user: {username}")
+        except RuntimeError:
+            # group_manager not available - skip cleanup
+            logger.warning(f"group_manager not available, skipped group cleanup for: {username}")
+
         return _create_users_page_response(
             request, session, success_message=f"User '{username}' deleted successfully"
         )
@@ -3997,6 +4008,14 @@ async def _reload_oidc_configuration():
     # Initialize OIDC database schema (no network calls)
     # Provider metadata will be discovered lazily on next SSO login attempt
     await oidc_manager.initialize()
+
+    # Inject GroupAccessManager into OIDCManager for SSO provisioning (Story #708)
+    if hasattr(app_module.app.state, "group_manager") and app_module.app.state.group_manager:
+        oidc_manager.group_manager = app_module.app.state.group_manager
+        logger.info(
+            "GroupAccessManager injected into reloaded OIDCManager for SSO auto-provisioning",
+            extra={"correlation_id": get_correlation_id()},
+        )
 
     # Replace the old managers with new ones
     oidc_routes.oidc_manager = oidc_manager

@@ -10,7 +10,7 @@ import logging
 import os
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, List, Union
 
 
 @dataclass
@@ -124,9 +124,24 @@ class OIDCProviderConfig:
     enable_jit_provisioning: bool = True
     default_role: str = "normal_user"
 
+    # Group mapping configuration
+    groups_claim: str = "groups"  # Claim name containing user's groups (e.g., "groups", "roles")
+    group_mappings: Optional[Union[Dict[str, str], List[Dict[str, str]]]] = None  # Map external groups to CIDX groups
+
     def __post_init__(self):
         if self.scopes is None:
             self.scopes = ["openid", "profile", "email"]
+        if self.group_mappings is None:
+            self.group_mappings = []
+        elif isinstance(self.group_mappings, dict):
+            # Backward compatibility: convert old dict format to new list format
+            self.group_mappings = [
+                {
+                    "external_group_id": external_id,
+                    "cidx_group": cidx_group,
+                }
+                for external_id, cidx_group in self.group_mappings.items()
+            ]
 
 
 @dataclass
