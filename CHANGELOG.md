@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.7.1] - 2026-01-28
+
+### Added
+
+- **Custom hnswlib Submodule with Integrity Checking** - Added LightspeedDMS/hnswlib fork as git submodule containing custom Python bindings that expose the `check_integrity()` method for HNSW index health validation:
+  - Connection validity checks (no invalid neighbor IDs)
+  - Self-loop detection
+  - Duplicate connection detection
+  - Orphan node detection (elements with no inbound connections)
+  - Foundation for upcoming HNSW Index Health Check epic across CLI, REST, MCP, and Web UI interfaces
+
+---
+
 ## [8.7.0] - 2026-01-26
 
 ### Added

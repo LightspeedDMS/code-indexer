@@ -226,8 +226,6 @@ python3 -m pytest \
     --deselect=tests/unit/storage/test_filesystem_vector_store.py::TestFilesystemVectorStoreCore::test_batch_upsert_performance \
     --deselect=tests/unit/storage/test_parallel_index_loading.py::TestPerformanceRequirements::test_parallel_execution_reduces_latency \
     -m "not slow and not e2e and not real_api and not integration and not requires_server and not requires_containers" \
-    --cov=code_indexer \
-    --cov-report=xml --cov-report=term-missing \
     2>&1 | tee "$TELEMETRY_FILE"
 
 PYTEST_EXIT_CODE=$?
