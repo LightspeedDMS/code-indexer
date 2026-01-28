@@ -22,7 +22,7 @@ class TestRestApiQueryTruncation:
     """Tests for REST API /api/query payload truncation."""
 
     @pytest.fixture
-    async def cache_100_chars(self, tmp_path):
+    def cache_100_chars(self, tmp_path):
         """Create PayloadCache with 100 char preview for easy testing."""
         from code_indexer.server.cache.payload_cache import (
             PayloadCache,
@@ -31,9 +31,9 @@ class TestRestApiQueryTruncation:
 
         config = PayloadCacheConfig(preview_size_chars=100, max_fetch_size_chars=200)
         cache = PayloadCache(db_path=tmp_path / "test_cache.db", config=config)
-        await cache.initialize()
+        cache.initialize()
         yield cache
-        await cache.close()
+        cache.close()
 
 
 class TestRestApiSemanticTruncation(TestRestApiQueryTruncation):
@@ -60,7 +60,7 @@ class TestRestApiSemanticTruncation(TestRestApiQueryTruncation):
                 },
             ]
 
-            truncated = await _apply_rest_semantic_truncation(results)
+            truncated = _apply_rest_semantic_truncation(results)
 
             assert len(truncated) == 1
             result = truncated[0]
@@ -96,7 +96,7 @@ class TestRestApiSemanticTruncation(TestRestApiQueryTruncation):
                 },
             ]
 
-            truncated = await _apply_rest_semantic_truncation(results)
+            truncated = _apply_rest_semantic_truncation(results)
 
             assert len(truncated) == 1
             result = truncated[0]
@@ -138,7 +138,7 @@ class TestRestApiFtsTruncation(TestRestApiQueryTruncation):
                 },
             ]
 
-            truncated = await _apply_rest_fts_truncation(results)
+            truncated = _apply_rest_fts_truncation(results)
 
             assert len(truncated) == 1
             result = truncated[0]
@@ -175,7 +175,7 @@ class TestRestApiFtsTruncation(TestRestApiQueryTruncation):
                 },
             ]
 
-            truncated = await _apply_rest_fts_truncation(results)
+            truncated = _apply_rest_fts_truncation(results)
 
             assert len(truncated) == 1
             result = truncated[0]
@@ -216,11 +216,11 @@ class TestRestApiCacheRetrieval(TestRestApiQueryTruncation):
                 },
             ]
 
-            truncated = await _apply_rest_semantic_truncation(results)
+            truncated = _apply_rest_semantic_truncation(results)
             handle = truncated[0]["cache_handle"]
 
             # Should be able to retrieve full content using handle
-            retrieved = await cache_100_chars.retrieve(handle, page=0)
+            retrieved = cache_100_chars.retrieve(handle, page=0)
             # Full content starts with the large content
             assert retrieved.content.startswith("Z" * 100)
         finally:
@@ -256,7 +256,7 @@ class TestRestApiNoPayloadCache:
                 },
             ]
 
-            truncated = await _apply_rest_semantic_truncation(results)
+            truncated = _apply_rest_semantic_truncation(results)
 
             # Results should be unchanged when cache not available
             assert len(truncated) == 1
@@ -288,7 +288,7 @@ class TestRestApiNoPayloadCache:
                 },
             ]
 
-            truncated = await _apply_rest_fts_truncation(results)
+            truncated = _apply_rest_fts_truncation(results)
 
             # Results should be unchanged when cache not available
             assert len(truncated) == 1
@@ -324,7 +324,7 @@ class TestRestApiFtsMatchTextTruncation(TestRestApiQueryTruncation):
                 },
             ]
 
-            truncated = await _apply_rest_fts_truncation(results)
+            truncated = _apply_rest_fts_truncation(results)
 
             assert len(truncated) == 1
             result = truncated[0]
@@ -365,7 +365,7 @@ class TestRestApiFtsMatchTextTruncation(TestRestApiQueryTruncation):
                 },
             ]
 
-            truncated = await _apply_rest_fts_truncation(results)
+            truncated = _apply_rest_fts_truncation(results)
 
             assert len(truncated) == 1
             result = truncated[0]
@@ -403,7 +403,7 @@ class TestRestApiFtsMatchTextTruncation(TestRestApiQueryTruncation):
                 },
             ]
 
-            truncated = await _apply_rest_fts_truncation(results)
+            truncated = _apply_rest_fts_truncation(results)
 
             assert len(truncated) == 1
             result = truncated[0]
@@ -458,7 +458,7 @@ class TestRestApiMultipleResults(TestRestApiQueryTruncation):
                 },
             ]
 
-            truncated = await _apply_rest_semantic_truncation(results)
+            truncated = _apply_rest_semantic_truncation(results)
 
             assert len(truncated) == 3
             # All three should be truncated
@@ -497,7 +497,7 @@ class TestRestApiMultipleResults(TestRestApiQueryTruncation):
                 },
             ]
 
-            truncated = await _apply_rest_fts_truncation(results)
+            truncated = _apply_rest_fts_truncation(results)
 
             assert len(truncated) == 2
             # First result
@@ -532,7 +532,7 @@ class TestRestApiEmptyResults(TestRestApiQueryTruncation):
 
         try:
             results = []
-            truncated = await _apply_rest_semantic_truncation(results)
+            truncated = _apply_rest_semantic_truncation(results)
             assert truncated == []
         finally:
             if original is None:
@@ -552,7 +552,7 @@ class TestRestApiEmptyResults(TestRestApiQueryTruncation):
 
         try:
             results = []
-            truncated = await _apply_rest_fts_truncation(results)
+            truncated = _apply_rest_fts_truncation(results)
             assert truncated == []
         finally:
             if original is None:
@@ -593,7 +593,7 @@ class TestRestApiMixedContent(TestRestApiQueryTruncation):
                 },
             ]
 
-            truncated = await _apply_rest_semantic_truncation(results)
+            truncated = _apply_rest_semantic_truncation(results)
 
             assert len(truncated) == 3
 
@@ -644,7 +644,7 @@ class TestRestApiMixedContent(TestRestApiQueryTruncation):
                 },
             ]
 
-            truncated = await _apply_rest_fts_truncation(results)
+            truncated = _apply_rest_fts_truncation(results)
 
             assert len(truncated) == 2
 

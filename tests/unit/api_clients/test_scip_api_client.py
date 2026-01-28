@@ -7,7 +7,7 @@ Uses mock HTTP responses to test client logic without requiring real server.
 """
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import MagicMock, patch
 from typing import Dict, Any
 from pathlib import Path
 import tempfile
@@ -86,9 +86,9 @@ class TestSCIPAPIClientDefinition:
         with patch.object(
             scip_client,
             "_authenticated_request",
-            return_value=AsyncMock(status_code=200, json=lambda: mock_response),
+            return_value=MagicMock(status_code=200, json=lambda: mock_response),
         ):
-            result = await scip_client.definition(
+            result = scip_client.definition(
                 symbol="TestSymbol",
                 repository_alias="test-repo",
             )
@@ -104,11 +104,11 @@ class TestSCIPAPIClientDefinition:
             "errors": {},
         }
 
-        mock_request = AsyncMock(
-            return_value=AsyncMock(status_code=200, json=lambda: mock_response)
+        mock_request = MagicMock(
+            return_value=MagicMock(status_code=200, json=lambda: mock_response)
         )
         with patch.object(scip_client, "_authenticated_request", mock_request):
-            await scip_client.definition(
+            scip_client.definition(
                 symbol="FilteredSymbol",
                 repository_alias="test-repo",
                 project="backend/",
@@ -138,9 +138,9 @@ class TestSCIPAPIClientReferences:
         with patch.object(
             scip_client,
             "_authenticated_request",
-            return_value=AsyncMock(status_code=200, json=lambda: mock_response),
+            return_value=MagicMock(status_code=200, json=lambda: mock_response),
         ):
-            result = await scip_client.references(
+            result = scip_client.references(
                 symbol="TestClass",
                 repository_alias="test-repo",
                 limit=50,
@@ -157,11 +157,11 @@ class TestSCIPAPIClientReferences:
             "errors": {},
         }
 
-        mock_request = AsyncMock(
-            return_value=AsyncMock(status_code=200, json=lambda: mock_response)
+        mock_request = MagicMock(
+            return_value=MagicMock(status_code=200, json=lambda: mock_response)
         )
         with patch.object(scip_client, "_authenticated_request", mock_request):
-            await scip_client.references(
+            scip_client.references(
                 symbol="MyClass",
                 repository_alias="backend-global",
                 limit=100,
@@ -188,9 +188,9 @@ class TestSCIPAPIClientDependencies:
         with patch.object(
             scip_client,
             "_authenticated_request",
-            return_value=AsyncMock(status_code=200, json=lambda: mock_response),
+            return_value=MagicMock(status_code=200, json=lambda: mock_response),
         ):
-            result = await scip_client.dependencies(
+            result = scip_client.dependencies(
                 symbol="MyService",
                 repository_alias="test-repo",
                 depth=2,
@@ -202,11 +202,11 @@ class TestSCIPAPIClientDependencies:
         """Test dependencies() passes depth parameter as max_depth."""
         mock_response = {"results": {}, "metadata": {}, "errors": {}}
 
-        mock_request = AsyncMock(
-            return_value=AsyncMock(status_code=200, json=lambda: mock_response)
+        mock_request = MagicMock(
+            return_value=MagicMock(status_code=200, json=lambda: mock_response)
         )
         with patch.object(scip_client, "_authenticated_request", mock_request):
-            await scip_client.dependencies(
+            scip_client.dependencies(
                 symbol="MyService",
                 repository_alias="test-repo",
                 depth=3,
@@ -228,11 +228,11 @@ class TestSCIPAPIClientDependents:
             "errors": {},
         }
 
-        mock_request = AsyncMock(
-            return_value=AsyncMock(status_code=200, json=lambda: mock_response)
+        mock_request = MagicMock(
+            return_value=MagicMock(status_code=200, json=lambda: mock_response)
         )
         with patch.object(scip_client, "_authenticated_request", mock_request):
-            result = await scip_client.dependents(
+            result = scip_client.dependents(
                 symbol="Logger",
                 repository_alias="test-repo",
                 depth=2,
@@ -250,11 +250,11 @@ class TestSCIPAPIClientImpact:
         """Test impact() caps depth at 10 even when higher value passed."""
         mock_response = {"results": {}, "metadata": {}, "errors": {}}
 
-        mock_request = AsyncMock(
-            return_value=AsyncMock(status_code=200, json=lambda: mock_response)
+        mock_request = MagicMock(
+            return_value=MagicMock(status_code=200, json=lambda: mock_response)
         )
         with patch.object(scip_client, "_authenticated_request", mock_request):
-            result = await scip_client.impact(
+            result = scip_client.impact(
                 symbol="Config",
                 repository_alias="test-repo",
                 depth=15,  # Should be capped to 10
@@ -279,9 +279,9 @@ class TestSCIPAPIClientCallchain:
         with patch.object(
             scip_client,
             "_authenticated_request",
-            return_value=AsyncMock(status_code=200, json=lambda: mock_response),
+            return_value=MagicMock(status_code=200, json=lambda: mock_response),
         ):
-            result = await scip_client.callchain(
+            result = scip_client.callchain(
                 from_symbol="main",
                 to_symbol="process_request",
                 repository_alias="test-repo",
@@ -293,7 +293,7 @@ class TestSCIPAPIClientCallchain:
     async def test_callchain_validates_empty_from_symbol(self, scip_client):
         """Test callchain() raises ValueError for empty from_symbol."""
         with pytest.raises(ValueError, match="from_symbol cannot be empty"):
-            await scip_client.callchain(
+            scip_client.callchain(
                 from_symbol="",
                 to_symbol="end",
                 repository_alias="test-repo",
@@ -303,7 +303,7 @@ class TestSCIPAPIClientCallchain:
     async def test_callchain_validates_empty_to_symbol(self, scip_client):
         """Test callchain() raises ValueError for empty to_symbol."""
         with pytest.raises(ValueError, match="to_symbol cannot be empty"):
-            await scip_client.callchain(
+            scip_client.callchain(
                 from_symbol="start",
                 to_symbol="",
                 repository_alias="test-repo",
@@ -332,13 +332,13 @@ class TestSCIPAPIClientContext:
         def mock_request_side_effect(*args, **kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
-                return AsyncMock(status_code=200, json=lambda: mock_def_response)
-            return AsyncMock(status_code=200, json=lambda: mock_ref_response)
+                return MagicMock(status_code=200, json=lambda: mock_def_response)
+            return MagicMock(status_code=200, json=lambda: mock_ref_response)
 
         with patch.object(
             scip_client, "_authenticated_request", side_effect=mock_request_side_effect
         ):
-            result = await scip_client.context(
+            result = scip_client.context(
                 symbol="MyService",
                 repository_alias="test-repo",
                 limit=10,
@@ -350,7 +350,7 @@ class TestSCIPAPIClientContext:
     async def test_context_validates_limit_minimum(self, scip_client):
         """Test context() validates limit is at least 1."""
         with pytest.raises(ValueError, match="limit must be at least 1"):
-            await scip_client.context(
+            scip_client.context(
                 symbol="MyService",
                 repository_alias="test-repo",
                 limit=0,
@@ -366,13 +366,13 @@ class TestSCIPAPIClientErrorHandling:
         with patch.object(
             scip_client,
             "_authenticated_request",
-            return_value=AsyncMock(
+            return_value=MagicMock(
                 status_code=404,
                 json=lambda: {"detail": "Symbol not found"},
             ),
         ):
             with pytest.raises(SCIPNotFoundError):
-                await scip_client.definition(
+                scip_client.definition(
                     symbol="NonExistent",
                     repository_alias="test-repo",
                 )
@@ -383,13 +383,13 @@ class TestSCIPAPIClientErrorHandling:
         with patch.object(
             scip_client,
             "_authenticated_request",
-            return_value=AsyncMock(
+            return_value=MagicMock(
                 status_code=500,
                 json=lambda: {"detail": "Internal server error"},
             ),
         ):
             with pytest.raises(SCIPQueryError):
-                await scip_client.definition(
+                scip_client.definition(
                     symbol="TestSymbol",
                     repository_alias="test-repo",
                 )

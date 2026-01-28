@@ -5,7 +5,7 @@ have been properly resolved.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 from httpx import Response
 
 from src.code_indexer.api_clients.repository_linking_client import (
@@ -64,10 +64,10 @@ class TestRepositoryActivationParameterFix:
             "usage_limits": {},
         }
 
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # This should now succeed with correct parameters
-        result = await repository_client.activate_repository(
+        result = repository_client.activate_repository(
             golden_alias="test-repo", branch="main", user_alias="user1"
         )
 
@@ -113,7 +113,7 @@ class TestRepositoryActivationParameterFix:
             "usage_limits": {},
         }
 
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Execute activation with various parameter combinations
         test_cases = [
@@ -123,7 +123,7 @@ class TestRepositoryActivationParameterFix:
         ]
 
         for golden_alias, branch, user_alias in test_cases:
-            result = await repository_client.activate_repository(
+            result = repository_client.activate_repository(
                 golden_alias=golden_alias, branch=branch, user_alias=user_alias
             )
 
@@ -167,7 +167,7 @@ class TestAPIVersionPrefixFix:
         rather than call non-existent endpoints.
         """
         # The current implementation returns empty list without calling the endpoint
-        result = await query_client.get_query_history("test-repo")
+        result = query_client.get_query_history("test-repo")
 
         # Should return empty list without errors
         assert isinstance(result, list)
@@ -190,10 +190,10 @@ class TestAPIVersionPrefixFix:
                 "embedding_count": 500,
             }
         }
-        query_client._authenticated_request = AsyncMock(return_value=mock_response)
+        query_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # This should succeed
-        result = await query_client.get_repository_statistics("test-repo")
+        result = query_client.get_repository_statistics("test-repo")
 
         # Should return statistics data
         assert isinstance(result, dict)
@@ -222,15 +222,15 @@ class TestAPIVersionPrefixFix:
                 "embedding_count": 500,
             }
         }
-        query_client._authenticated_request = AsyncMock(return_value=mock_response)
+        query_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Test query history (returns empty list directly)
-        history_result = await query_client.get_query_history("test-repo")
+        history_result = query_client.get_query_history("test-repo")
         assert isinstance(history_result, list)
         assert len(history_result) == 0
 
         # Test repository statistics (makes HTTP call)
-        stats_result = await query_client.get_repository_statistics("test-repo")
+        stats_result = query_client.get_repository_statistics("test-repo")
         assert isinstance(stats_result, dict)
         assert "total_files" in stats_result
 
@@ -280,10 +280,10 @@ class TestEndToEndCompatibilityValidation:
             "usage_limits": {"queries_per_hour": 1000},
         }
 
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Execute activation
-        result = await repository_client.activate_repository(
+        result = repository_client.activate_repository(
             golden_alias="e2e-repo", branch="e2e-branch", user_alias="e2e-user"
         )
 

@@ -81,7 +81,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
 
         return dict(mcp_result)
 
-    async def _call_mcp_tool(
+    def _call_mcp_tool(
         self, tool_name: str, arguments: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Call an MCP tool via the /mcp JSON-RPC endpoint.
@@ -105,9 +105,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
         }
 
         try:
-            response = await self._authenticated_request(
-                "POST", "/mcp", json=jsonrpc_request
-            )
+            response = self._authenticated_request("POST", "/mcp", json=jsonrpc_request)
 
             if response.status_code == 200:
                 return self._parse_mcp_response(response.json())
@@ -138,7 +136,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error calling MCP tool: {e}")
 
-    async def list_groups(self) -> Dict[str, Any]:
+    def list_groups(self) -> Dict[str, Any]:
         """List all groups with member counts and repository access.
 
         Returns:
@@ -148,7 +146,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
             APIClientError: If API request fails
             AuthenticationError: If authentication fails
         """
-        result = await self._call_mcp_tool("list_groups", {})
+        result = self._call_mcp_tool("list_groups", {})
 
         if not result.get("success", False):
             error = result.get("error", "Unknown error")
@@ -156,7 +154,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
 
         return {"groups": result.get("groups", [])}
 
-    async def create_group(self, name: str, description: str = "") -> Dict[str, Any]:
+    def create_group(self, name: str, description: str = "") -> Dict[str, Any]:
         """Create a new custom group.
 
         Args:
@@ -173,7 +171,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
         if not name:
             raise ValueError("Group name is required")
 
-        result = await self._call_mcp_tool(
+        result = self._call_mcp_tool(
             "create_group", {"name": name, "description": description}
         )
 
@@ -184,7 +182,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
 
         return {"group_id": result.get("group_id"), "name": result.get("name")}
 
-    async def get_group(self, group_id: int) -> Dict[str, Any]:
+    def get_group(self, group_id: int) -> Dict[str, Any]:
         """Get detailed information about a specific group.
 
         Args:
@@ -197,7 +195,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
             APIClientError: If group not found or request fails
             AuthenticationError: If authentication fails
         """
-        result = await self._call_mcp_tool("get_group", {"group_id": str(group_id)})
+        result = self._call_mcp_tool("get_group", {"group_id": str(group_id)})
 
         if not result.get("success", False):
             error_msg = result.get("error", "Unknown error")
@@ -213,7 +211,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
             "repos": result.get("repos", []),
         }
 
-    async def update_group(
+    def update_group(
         self,
         group_id: int,
         name: Optional[str] = None,
@@ -239,7 +237,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
         if description is not None:
             arguments["description"] = description
 
-        result = await self._call_mcp_tool("update_group", arguments)
+        result = self._call_mcp_tool("update_group", arguments)
 
         if not result.get("success", False):
             error_msg = result.get("error", "Unknown error")
@@ -249,7 +247,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
 
         return {"success": True}
 
-    async def delete_group(self, group_id: int) -> Dict[str, Any]:
+    def delete_group(self, group_id: int) -> Dict[str, Any]:
         """Delete a custom group.
 
         Args:
@@ -262,7 +260,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
             APIClientError: If group not found, is system group, or has users
             AuthenticationError: If authentication fails or permission denied
         """
-        result = await self._call_mcp_tool("delete_group", {"group_id": str(group_id)})
+        result = self._call_mcp_tool("delete_group", {"group_id": str(group_id)})
 
         if not result.get("success", False):
             error_msg = result.get("error", "Unknown error")
@@ -277,7 +275,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
 
         return {"success": True}
 
-    async def add_member(self, group_id: int, user_id: str) -> Dict[str, Any]:
+    def add_member(self, group_id: int, user_id: str) -> Dict[str, Any]:
         """Assign a user to a group.
 
         Args:
@@ -291,7 +289,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
             APIClientError: If group not found or request fails
             AuthenticationError: If authentication fails or permission denied
         """
-        result = await self._call_mcp_tool(
+        result = self._call_mcp_tool(
             "add_member_to_group", {"group_id": str(group_id), "user_id": user_id}
         )
 
@@ -303,7 +301,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
 
         return {"success": True}
 
-    async def add_repos(self, group_id: int, repo_names: List[str]) -> Dict[str, Any]:
+    def add_repos(self, group_id: int, repo_names: List[str]) -> Dict[str, Any]:
         """Grant a group access to one or more repositories.
 
         Args:
@@ -317,7 +315,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
             APIClientError: If group not found or request fails
             AuthenticationError: If authentication fails or permission denied
         """
-        result = await self._call_mcp_tool(
+        result = self._call_mcp_tool(
             "add_repos_to_group", {"group_id": str(group_id), "repo_names": repo_names}
         )
 
@@ -329,7 +327,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
 
         return {"success": True, "added_count": result.get("added_count", 0)}
 
-    async def remove_repo(self, group_id: int, repo_name: str) -> Dict[str, Any]:
+    def remove_repo(self, group_id: int, repo_name: str) -> Dict[str, Any]:
         """Revoke a group's access to a single repository.
 
         Args:
@@ -343,7 +341,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
             APIClientError: If group/repo not found or cidx-meta removal attempted
             AuthenticationError: If authentication fails or permission denied
         """
-        result = await self._call_mcp_tool(
+        result = self._call_mcp_tool(
             "remove_repo_from_group",
             {"group_id": str(group_id), "repo_name": repo_name},
         )
@@ -358,9 +356,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
 
         return {"success": True}
 
-    async def remove_repos(
-        self, group_id: int, repo_names: List[str]
-    ) -> Dict[str, Any]:
+    def remove_repos(self, group_id: int, repo_names: List[str]) -> Dict[str, Any]:
         """Revoke a group's access to multiple repositories.
 
         Args:
@@ -374,7 +370,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
             APIClientError: If group not found or request fails
             AuthenticationError: If authentication fails or permission denied
         """
-        result = await self._call_mcp_tool(
+        result = self._call_mcp_tool(
             "bulk_remove_repos_from_group",
             {"group_id": str(group_id), "repo_names": repo_names},
         )

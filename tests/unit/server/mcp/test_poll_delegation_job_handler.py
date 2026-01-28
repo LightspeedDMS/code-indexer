@@ -45,6 +45,9 @@ class TestPollDelegationJobHandler:
     Note: Story #720 changed poll_delegation_job from polling Claude Server
     to callback-based completion. See TestPollDelegationJobCallbackBased for
     tests of the callback-based behavior.
+
+    Story #50: Handler remains async (justified exception) because
+    DelegationJobTracker uses asyncio.Future for callback-based completion.
     """
 
     @pytest.mark.asyncio
@@ -108,7 +111,7 @@ class TestPollDelegationJobCallbackBased:
 
         # Register job in tracker
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("callback-job-123")
+        tracker.register_job("callback-job-123")
 
         # Simulate callback completing the job after a short delay
         async def complete_after_delay():
@@ -120,7 +123,7 @@ class TestPollDelegationJobCallbackBased:
                 exit_code=0,
                 error=None,
             )
-            await tracker.complete_job(result)
+            tracker.complete_job(result)
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(
@@ -164,7 +167,7 @@ class TestPollDelegationJobCallbackBased:
 
         # Register and immediately complete with failure
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("failed-job-456")
+        tracker.register_job("failed-job-456")
 
         result = JobResult(
             job_id="failed-job-456",
@@ -173,7 +176,7 @@ class TestPollDelegationJobCallbackBased:
             exit_code=1,
             error="Repository clone failed: authentication denied",
         )
-        await tracker.complete_job(result)
+        tracker.complete_job(result)
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(
@@ -210,7 +213,7 @@ class TestPollDelegationJobCallbackBased:
 
         # Register job but don't complete it
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("timeout-job-789")
+        tracker.register_job("timeout-job-789")
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(
@@ -230,7 +233,7 @@ class TestPollDelegationJobCallbackBased:
         assert data["continue_polling"] is True
 
         # Job should still exist in tracker (caller can poll again)
-        assert await tracker.has_job("timeout-job-789") is True
+        assert tracker.has_job("timeout-job-789") is True
 
     @pytest.mark.asyncio
     async def test_can_retry_poll_after_timeout(
@@ -250,7 +253,7 @@ class TestPollDelegationJobCallbackBased:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("retry-job-001")
+        tracker.register_job("retry-job-001")
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(
@@ -276,7 +279,7 @@ class TestPollDelegationJobCallbackBased:
                 exit_code=0,
                 error=None,
             )
-            await tracker.complete_job(job_result)
+            tracker.complete_job(job_result)
 
             # Second poll gets the result
             response2 = await handle_poll_delegation_job(
@@ -350,7 +353,7 @@ class TestPollDelegationJobTimeoutParameter:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-default-timeout")
+        tracker.register_job("job-default-timeout")
 
         # Complete job immediately so we don't wait
         result = JobResult(
@@ -360,7 +363,7 @@ class TestPollDelegationJobTimeoutParameter:
             exit_code=0,
             error=None,
         )
-        await tracker.complete_job(result)
+        tracker.complete_job(result)
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(
@@ -394,7 +397,7 @@ class TestPollDelegationJobTimeoutParameter:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-custom-timeout")
+        tracker.register_job("job-custom-timeout")
 
         # Complete job immediately so we don't wait
         result = JobResult(
@@ -404,7 +407,7 @@ class TestPollDelegationJobTimeoutParameter:
             exit_code=0,
             error=None,
         )
-        await tracker.complete_job(result)
+        tracker.complete_job(result)
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(
@@ -437,7 +440,7 @@ class TestPollDelegationJobTimeoutParameter:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-low-timeout")
+        tracker.register_job("job-low-timeout")
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(
@@ -471,7 +474,7 @@ class TestPollDelegationJobTimeoutParameter:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-high-timeout")
+        tracker.register_job("job-high-timeout")
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(
@@ -505,7 +508,7 @@ class TestPollDelegationJobTimeoutParameter:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-string-timeout")
+        tracker.register_job("job-string-timeout")
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(

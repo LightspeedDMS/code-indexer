@@ -22,7 +22,7 @@ class RepositoryProviderBase(ABC):
         ...
 
     @abstractmethod
-    async def is_configured(self) -> bool:
+    def is_configured(self) -> bool:
         """
         Check if the provider is properly configured.
 
@@ -33,7 +33,7 @@ class RepositoryProviderBase(ABC):
         ...
 
     @abstractmethod
-    async def discover_repositories(
+    def discover_repositories(
         self, page: int = 1, page_size: int = 50, search: Optional[str] = None
     ) -> "RepositoryDiscoveryResult":
         """

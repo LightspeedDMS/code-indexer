@@ -20,11 +20,10 @@ def mock_user():
     return user
 
 
-@pytest.mark.asyncio
 class TestListFilesBug:
     """Test list_files handler bug - wrong method parameters."""
 
-    async def test_list_files_expects_query_params_object_not_primitives(
+    def test_list_files_expects_query_params_object_not_primitives(
         self, mock_user
     ):
         """
@@ -59,7 +58,7 @@ class TestListFilesBug:
         mock_file_service.list_files = Mock(side_effect=capture_call)
 
         with patch("code_indexer.server.app.file_service", mock_file_service):
-            await list_files(params, mock_user)
+            list_files(params, mock_user)
 
             # Verify the call was made
             assert mock_file_service.list_files.called
@@ -73,16 +72,16 @@ class TestListFilesBug:
             ), f"query_params must be FileListQueryParams instance, got {type(received_query_params).__name__}"
 
             # Verify query_params has expected values
+            # Handler now builds recursive path pattern: src/ -> src/**/*
             assert (
-                received_query_params.path_pattern == "src/"
-            ), f"Expected path_pattern='src/', got '{received_query_params.path_pattern}'"
+                received_query_params.path_pattern == "src/**/*"
+            ), f"Expected path_pattern='src/**/*', got '{received_query_params.path_pattern}'"
 
 
-@pytest.mark.asyncio
 class TestGetFileContentBug:
     """Test get_file_content handler bug - method doesn't exist."""
 
-    async def test_file_listing_service_has_get_file_content_method(self):
+    def test_file_listing_service_has_get_file_content_method(self):
         """
         BUG FIX VERIFICATION: FileListingService now has get_file_content method.
 
@@ -100,7 +99,7 @@ class TestGetFileContentBug:
             file_service.get_file_content
         ), "get_file_content should be callable"
 
-    async def test_get_file_content_handler_needs_working_service_method(
+    def test_get_file_content_handler_needs_working_service_method(
         self, mock_user
     ):
         """
@@ -126,7 +125,7 @@ class TestGetFileContentBug:
         )
 
         with patch("code_indexer.server.app.file_service", mock_file_service):
-            result = await get_file_content(params, mock_user)
+            result = get_file_content(params, mock_user)
 
             # Parse MCP response
             data = json.loads(result["content"][0]["text"])
@@ -140,18 +139,21 @@ class TestGetFileContentBug:
             assert data["content"][0]["text"] == "def main():\n    pass"
 
             # Verify service was called with correct parameters
+            # Story #33: Handler now passes offset, limit, and skip_truncation
             mock_file_service.get_file_content.assert_called_once_with(
                 repository_alias="my-repo",
                 file_path="src/main.py",
                 username=mock_user.username,
+                offset=None,
+                limit=None,
+                skip_truncation=True,
             )
 
 
-@pytest.mark.asyncio
 class TestGetRepositoryStatisticsBug:
     """Test get_repository_statistics handler bug - uses wrong manager."""
 
-    async def test_stats_service_now_uses_activated_repo_manager(self):
+    def test_stats_service_now_uses_activated_repo_manager(self):
         """
         BUG FIX VERIFICATION: RepositoryStatsService now uses ActivatedRepoManager.
 
@@ -175,7 +177,7 @@ class TestGetRepositoryStatisticsBug:
             "GoldenRepoManager" not in source
         ), "RepositoryStatsService should not use GoldenRepoManager anymore"
 
-    async def test_get_repository_statistics_handler_needs_username_parameter(
+    def test_get_repository_statistics_handler_needs_username_parameter(
         self, mock_user
     ):
         """
@@ -201,7 +203,7 @@ class TestGetRepositoryStatisticsBug:
             "code_indexer.server.services.stats_service.stats_service",
             mock_stats_service,
         ):
-            result = await get_repository_statistics(params, mock_user)
+            result = get_repository_statistics(params, mock_user)
 
             # Parse MCP response
             data = json.loads(result["content"][0]["text"])

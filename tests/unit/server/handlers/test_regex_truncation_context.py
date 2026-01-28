@@ -1,6 +1,7 @@
 """Unit tests for Regex context truncation logic.
 
 Story #684: S6 - Regex Search with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 AC2: Regex Context Truncation (context_before, context_after fields)
 
 These tests follow TDD methodology - written BEFORE implementation.
@@ -12,10 +13,12 @@ from unittest.mock import patch
 
 
 class TestAC2ContextBeforeTruncation:
-    """AC2: Regex context_before truncation tests."""
+    """AC2: Regex context_before truncation tests.
 
-    @pytest.mark.asyncio
-    async def test_large_context_before_is_truncated(self, cache):
+    Story #50: _apply_regex_payload_truncation is now sync.
+    """
+
+    def test_large_context_before_is_truncated(self, cache):
         """Test that large context_before is truncated with cache handle."""
         from code_indexer.server.mcp.handlers import _apply_regex_payload_truncation
 
@@ -37,7 +40,7 @@ class TestAC2ContextBeforeTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -53,8 +56,7 @@ class TestAC2ContextBeforeTruncation:
         # Verify handle is valid UUID
         uuid.UUID(result["context_before_cache_handle"], version=4)
 
-    @pytest.mark.asyncio
-    async def test_small_context_before_not_truncated(self, cache):
+    def test_small_context_before_not_truncated(self, cache):
         """Test that small context_before is NOT truncated."""
         from code_indexer.server.mcp.handlers import _apply_regex_payload_truncation
 
@@ -72,7 +74,7 @@ class TestAC2ContextBeforeTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -83,10 +85,12 @@ class TestAC2ContextBeforeTruncation:
 
 
 class TestAC2ContextAfterTruncation:
-    """AC2: Regex context_after truncation tests."""
+    """AC2: Regex context_after truncation tests.
 
-    @pytest.mark.asyncio
-    async def test_large_context_after_is_truncated(self, cache):
+    Story #50: _apply_regex_payload_truncation is now sync.
+    """
+
+    def test_large_context_after_is_truncated(self, cache):
         """Test that large context_after is truncated with cache handle."""
         from code_indexer.server.mcp.handlers import _apply_regex_payload_truncation
 
@@ -108,7 +112,7 @@ class TestAC2ContextAfterTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -121,8 +125,7 @@ class TestAC2ContextAfterTruncation:
         # Original context_after should be removed
         assert "context_after" not in result
 
-    @pytest.mark.asyncio
-    async def test_small_context_after_not_truncated(self, cache):
+    def test_small_context_after_not_truncated(self, cache):
         """Test that small context_after is NOT truncated."""
         from code_indexer.server.mcp.handlers import _apply_regex_payload_truncation
 
@@ -140,7 +143,7 @@ class TestAC2ContextAfterTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -151,10 +154,12 @@ class TestAC2ContextAfterTruncation:
 
 
 class TestAC2EmptyContextArrays:
-    """AC2: Empty context arrays tests."""
+    """AC2: Empty context arrays tests.
 
-    @pytest.mark.asyncio
-    async def test_empty_context_arrays(self, cache):
+    Story #50: _apply_regex_payload_truncation is now sync.
+    """
+
+    def test_empty_context_arrays(self, cache):
         """Test that empty context arrays are handled correctly."""
         from code_indexer.server.mcp.handlers import _apply_regex_payload_truncation
 
@@ -171,7 +176,7 @@ class TestAC2EmptyContextArrays:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -183,8 +188,7 @@ class TestAC2EmptyContextArrays:
         assert result["context_after_cache_handle"] is None
         assert result["context_after_has_more"] is False
 
-    @pytest.mark.asyncio
-    async def test_both_contexts_small(self, cache):
+    def test_both_contexts_small(self, cache):
         """Test that both small context arrays are preserved."""
         from code_indexer.server.mcp.handlers import _apply_regex_payload_truncation
 
@@ -203,7 +207,7 @@ class TestAC2EmptyContextArrays:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 

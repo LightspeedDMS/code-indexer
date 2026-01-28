@@ -101,7 +101,7 @@ class RepositoryMatcher:
         self.activated_repo_manager = activated_repo_manager
         self.access_control_manager = access_control_manager
 
-    async def find_matching_golden_repositories(
+    def find_matching_golden_repositories(
         self,
         canonical_url: str,
         user: User,
@@ -166,7 +166,7 @@ class RepositoryMatcher:
             logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
             raise MatchingError(error_msg) from e
 
-    async def find_matching_activated_repositories(
+    def find_matching_activated_repositories(
         self,
         canonical_url: str,
         user: User,
@@ -233,7 +233,7 @@ class RepositoryMatcher:
             logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
             raise MatchingError(error_msg) from e
 
-    async def find_all_matching_repositories(
+    def find_all_matching_repositories(
         self,
         canonical_url: str,
         user: User,
@@ -253,10 +253,10 @@ class RepositoryMatcher:
         """
         try:
             # Find both types concurrently
-            golden_repos = await self.find_matching_golden_repositories(
+            golden_repos = self.find_matching_golden_repositories(
                 canonical_url, user
             )
-            activated_repos = await self.find_matching_activated_repositories(
+            activated_repos = self.find_matching_activated_repositories(
                 canonical_url, user
             )
 

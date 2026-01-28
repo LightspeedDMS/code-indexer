@@ -40,8 +40,7 @@ class TestGetJobDetailsTool:
         assert job_props["error"]["type"] == ["string", "null"]
         assert "error message" in job_props["error"]["description"].lower()
 
-    @pytest.mark.asyncio
-    async def test_handler_missing_job_id(self):
+    def test_handler_missing_job_id(self):
         """Test handler returns error when job_id is missing."""
         from code_indexer.server.auth.user_manager import User, UserRole
 
@@ -51,7 +50,7 @@ class TestGetJobDetailsTool:
             role=UserRole.ADMIN,
             created_at="2025-01-01T00:00:00Z",
         )
-        result = await handlers.get_job_details({}, user)
+        result = handlers.get_job_details({}, user)
 
         assert "content" in result
         assert result["content"][0]["type"] == "text"
@@ -62,8 +61,7 @@ class TestGetJobDetailsTool:
         assert response["success"] is False
         assert "job_id" in response["error"].lower()
 
-    @pytest.mark.asyncio
-    async def test_handler_job_not_found(self, monkeypatch):
+    def test_handler_job_not_found(self, monkeypatch):
         """Test handler returns error when job doesn't exist."""
         from code_indexer.server.auth.user_manager import User, UserRole
         import code_indexer.server.app as app_module
@@ -81,7 +79,7 @@ class TestGetJobDetailsTool:
             role=UserRole.ADMIN,
             created_at="2025-01-01T00:00:00Z",
         )
-        result = await handlers.get_job_details({"job_id": "nonexistent"}, user)
+        result = handlers.get_job_details({"job_id": "nonexistent"}, user)
 
         assert "content" in result
         import json
@@ -90,8 +88,7 @@ class TestGetJobDetailsTool:
         assert response["success"] is False
         assert "not found" in response["error"].lower()
 
-    @pytest.mark.asyncio
-    async def test_handler_returns_job_with_error(self, monkeypatch):
+    def test_handler_returns_job_with_error(self, monkeypatch):
         """Test handler returns job details including error message."""
         from code_indexer.server.auth.user_manager import User, UserRole
         import code_indexer.server.app as app_module
@@ -120,7 +117,7 @@ class TestGetJobDetailsTool:
             role=UserRole.ADMIN,
             created_at="2025-01-01T00:00:00Z",
         )
-        result = await handlers.get_job_details({"job_id": "test-job-123"}, user)
+        result = handlers.get_job_details({"job_id": "test-job-123"}, user)
 
         assert "content" in result
         import json

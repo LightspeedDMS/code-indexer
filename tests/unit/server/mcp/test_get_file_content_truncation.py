@@ -10,7 +10,7 @@ Tests AC1 and AC4:
 import json
 from datetime import datetime
 from typing import cast
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock, Mock
 import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -50,8 +50,7 @@ class TestGetFileContentTruncation:
             mock_app.file_service = mock_service
             yield mock_service, mock_app
 
-    @pytest.mark.asyncio
-    async def test_truncated_content_returns_cache_handle(
+    def test_truncated_content_returns_cache_handle(
         self, mock_user, mock_file_service
     ):
         """AC1: Truncated content returns cache_handle field."""
@@ -77,9 +76,9 @@ class TestGetFileContentTruncation:
             },
         }
 
-        # Mock payload cache for truncation
-        mock_cache = AsyncMock()
-        mock_cache.store = AsyncMock(return_value="cache_handle_abc123")
+        # Mock payload cache for truncation (sync after Epic #48)
+        mock_cache = MagicMock()
+        mock_cache.store = Mock(return_value="cache_handle_abc123")
         mock_cache.config.max_fetch_size_chars = 500  # Required for total_pages calculation
         mock_app.app.state.payload_cache = mock_cache
 
@@ -99,7 +98,7 @@ class TestGetFileContentTruncation:
                 "file_path": "large_file.py",
             }
 
-            mcp_response = await handlers.get_file_content(params, mock_user)
+            mcp_response = handlers.get_file_content(params, mock_user)
 
             data = _extract_response_data(mcp_response)
 
@@ -108,8 +107,7 @@ class TestGetFileContentTruncation:
             assert "cache_handle" in data or "cache_handle" in data.get("metadata", {})
             assert "truncated" in data or "truncated" in data.get("metadata", {})
 
-    @pytest.mark.asyncio
-    async def test_small_content_no_cache_handle(self, mock_user, mock_file_service):
+    def test_small_content_no_cache_handle(self, mock_user, mock_file_service):
         """AC4: Small content has cache_handle=null and truncated=false."""
         from code_indexer.server.mcp import handlers
 
@@ -134,8 +132,8 @@ class TestGetFileContentTruncation:
         }
 
         # Mock payload cache (should not be called for small content)
-        mock_cache = AsyncMock()
-        mock_cache.store = AsyncMock()
+        mock_cache = MagicMock()
+        mock_cache.store = Mock()
         mock_app.app.state.payload_cache = mock_cache
 
         # Mock content limits config
@@ -154,7 +152,7 @@ class TestGetFileContentTruncation:
                 "file_path": "small_file.py",
             }
 
-            mcp_response = await handlers.get_file_content(params, mock_user)
+            mcp_response = handlers.get_file_content(params, mock_user)
 
             data = _extract_response_data(mcp_response)
 
@@ -176,8 +174,7 @@ class TestGetFileContentBackwardCompatibility:
             mock_app.file_service = mock_service
             yield mock_service, mock_app
 
-    @pytest.mark.asyncio
-    async def test_content_field_always_present(self, mock_user, mock_file_service):
+    def test_content_field_always_present(self, mock_user, mock_file_service):
         """AC4: Content field is always present (full content or preview)."""
         from code_indexer.server.mcp import handlers
 
@@ -198,14 +195,13 @@ class TestGetFileContentBackwardCompatibility:
             "file_path": "test.py",
         }
 
-        mcp_response = await handlers.get_file_content(params, mock_user)
+        mcp_response = handlers.get_file_content(params, mock_user)
 
         # MCP response should have content blocks
         assert "content" in mcp_response
         assert len(mcp_response["content"]) > 0
 
-    @pytest.mark.asyncio
-    async def test_existing_clients_continue_to_work(self, mock_user, mock_file_service):
+    def test_existing_clients_continue_to_work(self, mock_user, mock_file_service):
         """AC4: Existing clients that ignore new fields continue to work."""
         from code_indexer.server.mcp import handlers
 
@@ -231,7 +227,7 @@ class TestGetFileContentBackwardCompatibility:
             "file_path": "main.py",
         }
 
-        mcp_response = await handlers.get_file_content(params, mock_user)
+        mcp_response = handlers.get_file_content(params, mock_user)
 
         # Existing clients expect content blocks with type and text
         assert "content" in mcp_response
@@ -264,8 +260,7 @@ class TestGetFileContentGlobalRepoTruncation:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
             yield mock_service, mock_app
 
-    @pytest.mark.asyncio
-    async def test_global_repo_truncation_applies_cache_handle(
+    def test_global_repo_truncation_applies_cache_handle(
         self, mock_user, mock_global_repo_setup
     ):
         """AC2: Global repo path uses get_file_content_by_path with truncation."""
@@ -297,8 +292,8 @@ class TestGetFileContentGlobalRepoTruncation:
         mock_alias_manager.read_alias.return_value = "/mock/test/repo/path"
 
         # Mock payload cache
-        mock_cache = AsyncMock()
-        mock_cache.store = AsyncMock(return_value="global_cache_handle_xyz")
+        mock_cache = MagicMock()
+        mock_cache.store = Mock(return_value="global_cache_handle_xyz")
         mock_cache.config.max_fetch_size_chars = 500  # Required for total_pages calculation
         mock_app.app.state.payload_cache = mock_cache
 
@@ -327,7 +322,7 @@ class TestGetFileContentGlobalRepoTruncation:
                 "file_path": "large_file.py",
             }
 
-            mcp_response = await handlers.get_file_content(params, mock_user)
+            mcp_response = handlers.get_file_content(params, mock_user)
             data = _extract_response_data(mcp_response)
 
             # Verify global repo path was used
@@ -340,8 +335,7 @@ class TestGetFileContentGlobalRepoTruncation:
             )
             assert cache_handle == "global_cache_handle_xyz"
 
-    @pytest.mark.asyncio
-    async def test_global_repo_small_file_no_truncation(
+    def test_global_repo_small_file_no_truncation(
         self, mock_user, mock_global_repo_setup
     ):
         """AC2: Global repo small file returns no cache_handle."""
@@ -370,7 +364,7 @@ class TestGetFileContentGlobalRepoTruncation:
         mock_alias_manager = MagicMock()
         mock_alias_manager.read_alias.return_value = "/mock/test/repo/path"
 
-        mock_cache = AsyncMock()
+        mock_cache = MagicMock()
         mock_app.app.state.payload_cache = mock_cache
 
         with (
@@ -398,7 +392,7 @@ class TestGetFileContentGlobalRepoTruncation:
                 "file_path": "small_file.py",
             }
 
-            mcp_response = await handlers.get_file_content(params, mock_user)
+            mcp_response = handlers.get_file_content(params, mock_user)
             data = _extract_response_data(mcp_response)
 
             assert data.get("success") is True

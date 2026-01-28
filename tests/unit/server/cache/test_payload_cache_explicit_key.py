@@ -1,12 +1,14 @@
 """Unit tests for PayloadCache explicit key operations.
 
 Story #720: Delegation Result Caching and Timeout Parameterization
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 Part 1: Add store_with_key() and has_key() to PayloadCache
 
 These tests follow TDD methodology - written BEFORE implementation.
 """
 
 import pytest
+import sqlite3
 import tempfile
 import time
 from pathlib import Path
@@ -22,7 +24,7 @@ class TestPayloadCacheStoreWithKey:
             yield Path(tmpdir) / "payload_cache.db"
 
     @pytest.fixture
-    async def cache(self, temp_db_path):
+    def cache(self, temp_db_path):
         """Create and initialize a PayloadCache instance for testing."""
         from code_indexer.server.cache.payload_cache import (
             PayloadCache,
@@ -31,12 +33,11 @@ class TestPayloadCacheStoreWithKey:
 
         config = PayloadCacheConfig()
         cache = PayloadCache(db_path=temp_db_path, config=config)
-        await cache.initialize()
+        cache.initialize()
         yield cache
-        await cache.close()
+        cache.close()
 
-    @pytest.mark.asyncio
-    async def test_store_with_key_stores_content_with_explicit_key(self, cache):
+    def test_store_with_key_stores_content_with_explicit_key(self, cache):
         """
         store_with_key() stores content with the provided key instead of UUID4.
 
@@ -47,14 +48,13 @@ class TestPayloadCacheStoreWithKey:
         explicit_key = "delegation:job-12345"
         content = "The authentication module uses JWT tokens."
 
-        await cache.store_with_key(explicit_key, content)
+        cache.store_with_key(explicit_key, content)
 
         # Retrieve using the explicit key
-        result = await cache.retrieve(explicit_key, page=0)
+        result = cache.retrieve(explicit_key, page=0)
         assert result.content == content
 
-    @pytest.mark.asyncio
-    async def test_store_with_key_updates_existing_key(self, cache):
+    def test_store_with_key_updates_existing_key(self, cache):
         """
         store_with_key() updates content if key already exists.
 
@@ -67,17 +67,16 @@ class TestPayloadCacheStoreWithKey:
         updated_content = "Updated content with more details"
 
         # Store original content
-        await cache.store_with_key(explicit_key, original_content)
+        cache.store_with_key(explicit_key, original_content)
 
         # Update with new content
-        await cache.store_with_key(explicit_key, updated_content)
+        cache.store_with_key(explicit_key, updated_content)
 
         # Retrieve should return updated content
-        result = await cache.retrieve(explicit_key, page=0)
+        result = cache.retrieve(explicit_key, page=0)
         assert result.content == updated_content
 
-    @pytest.mark.asyncio
-    async def test_store_with_key_preserves_total_size(self, cache, temp_db_path):
+    def test_store_with_key_preserves_total_size(self, cache, temp_db_path):
         """
         store_with_key() stores correct total_size metadata.
 
@@ -88,22 +87,22 @@ class TestPayloadCacheStoreWithKey:
         explicit_key = "delegation:size-test"
         content = "A" * 12345
 
-        await cache.store_with_key(explicit_key, content)
+        cache.store_with_key(explicit_key, content)
 
         # Verify directly in database
-        import aiosqlite
-
-        async with aiosqlite.connect(str(temp_db_path)) as db:
-            async with db.execute(
+        conn = sqlite3.connect(str(temp_db_path))
+        try:
+            cursor = conn.execute(
                 "SELECT total_size FROM payload_cache WHERE handle = ?",
                 (explicit_key,),
-            ) as cursor:
-                row = await cursor.fetchone()
-                assert row is not None
-                assert row[0] == 12345
+            )
+            row = cursor.fetchone()
+            assert row is not None
+            assert row[0] == 12345
+        finally:
+            conn.close()
 
-    @pytest.mark.asyncio
-    async def test_store_with_key_updates_timestamp_on_replace(self, cache, temp_db_path):
+    def test_store_with_key_updates_timestamp_on_replace(self, cache, temp_db_path):
         """
         store_with_key() updates created_at timestamp when updating existing key.
 
@@ -111,41 +110,44 @@ class TestPayloadCacheStoreWithKey:
         When store_with_key() is called again with new content
         Then the timestamp should be updated (for TTL purposes)
         """
-        import aiosqlite
-
         explicit_key = "delegation:timestamp-test"
 
         # Store initial content
-        await cache.store_with_key(explicit_key, "Initial content")
+        cache.store_with_key(explicit_key, "Initial content")
 
         # Get initial timestamp
-        async with aiosqlite.connect(str(temp_db_path)) as db:
-            async with db.execute(
+        conn = sqlite3.connect(str(temp_db_path))
+        try:
+            cursor = conn.execute(
                 "SELECT created_at FROM payload_cache WHERE handle = ?",
                 (explicit_key,),
-            ) as cursor:
-                row = await cursor.fetchone()
-                initial_timestamp = row[0]
+            )
+            row = cursor.fetchone()
+            initial_timestamp = row[0]
+        finally:
+            conn.close()
 
         # Wait a tiny bit to ensure timestamp difference
         time.sleep(0.01)
 
         # Update content
-        await cache.store_with_key(explicit_key, "Updated content")
+        cache.store_with_key(explicit_key, "Updated content")
 
         # Get updated timestamp
-        async with aiosqlite.connect(str(temp_db_path)) as db:
-            async with db.execute(
+        conn = sqlite3.connect(str(temp_db_path))
+        try:
+            cursor = conn.execute(
                 "SELECT created_at FROM payload_cache WHERE handle = ?",
                 (explicit_key,),
-            ) as cursor:
-                row = await cursor.fetchone()
-                updated_timestamp = row[0]
+            )
+            row = cursor.fetchone()
+            updated_timestamp = row[0]
+        finally:
+            conn.close()
 
         assert updated_timestamp > initial_timestamp
 
-    @pytest.mark.asyncio
-    async def test_store_with_key_pagination_works(self, cache):
+    def test_store_with_key_pagination_works(self, cache):
         """
         store_with_key() content can be retrieved with pagination.
 
@@ -157,16 +159,16 @@ class TestPayloadCacheStoreWithKey:
         # Content larger than max_fetch_size_chars (5000)
         content = "A" * 5000 + "B" * 5000
 
-        await cache.store_with_key(explicit_key, content)
+        cache.store_with_key(explicit_key, content)
 
         # Retrieve page 0
-        result0 = await cache.retrieve(explicit_key, page=0)
+        result0 = cache.retrieve(explicit_key, page=0)
         assert result0.content == "A" * 5000
         assert result0.total_pages == 2
         assert result0.has_more is True
 
         # Retrieve page 1
-        result1 = await cache.retrieve(explicit_key, page=1)
+        result1 = cache.retrieve(explicit_key, page=1)
         assert result1.content == "B" * 5000
         assert result1.has_more is False
 
@@ -181,7 +183,7 @@ class TestPayloadCacheHasKey:
             yield Path(tmpdir) / "payload_cache.db"
 
     @pytest.fixture
-    async def cache(self, temp_db_path):
+    def cache(self, temp_db_path):
         """Create and initialize a PayloadCache instance for testing."""
         from code_indexer.server.cache.payload_cache import (
             PayloadCache,
@@ -190,12 +192,11 @@ class TestPayloadCacheHasKey:
 
         config = PayloadCacheConfig()
         cache = PayloadCache(db_path=temp_db_path, config=config)
-        await cache.initialize()
+        cache.initialize()
         yield cache
-        await cache.close()
+        cache.close()
 
-    @pytest.mark.asyncio
-    async def test_has_key_returns_true_for_existing_key(self, cache):
+    def test_has_key_returns_true_for_existing_key(self, cache):
         """
         has_key() returns True when key exists in cache.
 
@@ -204,14 +205,13 @@ class TestPayloadCacheHasKey:
         Then it should return True
         """
         explicit_key = "delegation:exists-test"
-        await cache.store_with_key(explicit_key, "Some content")
+        cache.store_with_key(explicit_key, "Some content")
 
-        result = await cache.has_key(explicit_key)
+        result = cache.has_key(explicit_key)
 
         assert result is True
 
-    @pytest.mark.asyncio
-    async def test_has_key_returns_false_for_nonexistent_key(self, cache):
+    def test_has_key_returns_false_for_nonexistent_key(self, cache):
         """
         has_key() returns False when key does not exist.
 
@@ -219,12 +219,11 @@ class TestPayloadCacheHasKey:
         When has_key() is called
         Then it should return False
         """
-        result = await cache.has_key("delegation:nonexistent-key")
+        result = cache.has_key("delegation:nonexistent-key")
 
         assert result is False
 
-    @pytest.mark.asyncio
-    async def test_has_key_works_with_uuid4_stored_content(self, cache):
+    def test_has_key_works_with_uuid4_stored_content(self, cache):
         """
         has_key() works with handles from store() (UUID4).
 
@@ -232,14 +231,13 @@ class TestPayloadCacheHasKey:
         When has_key() is called with that UUID
         Then it should return True
         """
-        handle = await cache.store("Content stored with UUID4")
+        handle = cache.store("Content stored with UUID4")
 
-        result = await cache.has_key(handle)
+        result = cache.has_key(handle)
 
         assert result is True
 
-    @pytest.mark.asyncio
-    async def test_has_key_does_not_retrieve_content(self, cache, temp_db_path):
+    def test_has_key_does_not_retrieve_content(self, cache, temp_db_path):
         """
         has_key() is efficient - only checks existence without retrieving content.
 
@@ -253,15 +251,14 @@ class TestPayloadCacheHasKey:
         explicit_key = "delegation:large-check"
         large_content = "X" * 100000  # 100KB of content
 
-        await cache.store_with_key(explicit_key, large_content)
+        cache.store_with_key(explicit_key, large_content)
 
         # This should be fast because it doesn't load content
-        result = await cache.has_key(explicit_key)
+        result = cache.has_key(explicit_key)
 
         assert result is True
 
-    @pytest.mark.asyncio
-    async def test_has_key_returns_false_after_cleanup(self, cache):
+    def test_has_key_returns_false_after_cleanup(self, cache):
         """
         has_key() returns False for expired keys after cleanup.
 
@@ -279,20 +276,20 @@ class TestPayloadCacheHasKey:
             temp_path = Path(tmpdir) / "short_ttl_cache.db"
             short_ttl_config = PayloadCacheConfig(cache_ttl_seconds=0)  # Immediate expiry
             short_ttl_cache = PayloadCache(db_path=temp_path, config=short_ttl_config)
-            await short_ttl_cache.initialize()
+            short_ttl_cache.initialize()
 
             try:
                 explicit_key = "delegation:expiring-key"
-                await short_ttl_cache.store_with_key(explicit_key, "Will expire")
+                short_ttl_cache.store_with_key(explicit_key, "Will expire")
 
                 # Key exists before cleanup
-                assert await short_ttl_cache.has_key(explicit_key) is True
+                assert short_ttl_cache.has_key(explicit_key) is True
 
                 # Wait a tiny bit and run cleanup
                 time.sleep(0.01)
-                await short_ttl_cache.cleanup_expired()
+                short_ttl_cache.cleanup_expired()
 
                 # Key should be gone after cleanup
-                assert await short_ttl_cache.has_key(explicit_key) is False
+                assert short_ttl_cache.has_key(explicit_key) is False
             finally:
-                await short_ttl_cache.close()
+                short_ttl_cache.close()

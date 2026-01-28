@@ -52,8 +52,7 @@ def _extract_response_data(mcp_response: dict) -> dict:
 class TestHandleCreateFile:
     """Test handle_create_file MCP handler."""
 
-    @pytest.mark.asyncio
-    async def test_create_file_success(self, mock_user, mock_file_crud_service):
+    def test_create_file_success(self, mock_user, mock_file_crud_service):
         """Test successful file creation."""
         from code_indexer.server.mcp import handlers
 
@@ -73,7 +72,7 @@ class TestHandleCreateFile:
         }
 
         # Execute handler
-        mcp_response = await handlers.handle_create_file(params, mock_user)
+        mcp_response = handlers.handle_create_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         # Verify response
@@ -91,22 +90,20 @@ class TestHandleCreateFile:
             username="testuser",
         )
 
-    @pytest.mark.asyncio
-    async def test_create_file_missing_params(self, mock_user, mock_file_crud_service):
+    def test_create_file_missing_params(self, mock_user, mock_file_crud_service):
         """Test create_file with missing required parameters."""
         from code_indexer.server.mcp import handlers
 
         # Missing file_path and content
         params = {"repository_alias": "test-repo"}
 
-        mcp_response = await handlers.handle_create_file(params, mock_user)
+        mcp_response = handlers.handle_create_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert "Missing required parameter" in data["error"]
 
-    @pytest.mark.asyncio
-    async def test_create_file_already_exists(self, mock_user, mock_file_crud_service):
+    def test_create_file_already_exists(self, mock_user, mock_file_crud_service):
         """Test create_file when file already exists."""
         from code_indexer.server.mcp import handlers
 
@@ -121,14 +118,13 @@ class TestHandleCreateFile:
             "content": "content",
         }
 
-        mcp_response = await handlers.handle_create_file(params, mock_user)
+        mcp_response = handlers.handle_create_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert "File already exists" in data["error"]
 
-    @pytest.mark.asyncio
-    async def test_create_file_permission_denied(
+    def test_create_file_permission_denied(
         self, mock_user, mock_file_crud_service
     ):
         """Test create_file with invalid path (security violation)."""
@@ -145,14 +141,13 @@ class TestHandleCreateFile:
             "content": "#!/bin/bash",
         }
 
-        mcp_response = await handlers.handle_create_file(params, mock_user)
+        mcp_response = handlers.handle_create_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert "Permission" in data["error"] or ".git" in data["error"]
 
-    @pytest.mark.asyncio
-    async def test_create_file_crud_operation_error(
+    def test_create_file_crud_operation_error(
         self, mock_user, mock_file_crud_service
     ):
         """Test create_file with general CRUD operation failure."""
@@ -169,14 +164,13 @@ class TestHandleCreateFile:
             "content": "content",
         }
 
-        mcp_response = await handlers.handle_create_file(params, mock_user)
+        mcp_response = handlers.handle_create_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert "Failed to write file" in data["error"]
 
-    @pytest.mark.asyncio
-    async def test_create_file_repository_not_activated(
+    def test_create_file_repository_not_activated(
         self, mock_user, mock_file_crud_service
     ):
         """Test create_file when repository is not activated."""
@@ -193,7 +187,7 @@ class TestHandleCreateFile:
             "content": "content",
         }
 
-        mcp_response = await handlers.handle_create_file(params, mock_user)
+        mcp_response = handlers.handle_create_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
@@ -203,8 +197,7 @@ class TestHandleCreateFile:
 class TestHandleEditFile:
     """Test handle_edit_file MCP handler."""
 
-    @pytest.mark.asyncio
-    async def test_edit_file_success(self, mock_user, mock_file_crud_service):
+    def test_edit_file_success(self, mock_user, mock_file_crud_service):
         """Test successful file edit with optimistic locking."""
         from code_indexer.server.mcp import handlers
 
@@ -227,7 +220,7 @@ class TestHandleEditFile:
         }
 
         # Execute handler
-        mcp_response = await handlers.handle_edit_file(params, mock_user)
+        mcp_response = handlers.handle_edit_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         # Verify response
@@ -248,8 +241,7 @@ class TestHandleEditFile:
             username="testuser",
         )
 
-    @pytest.mark.asyncio
-    async def test_edit_file_replace_all(self, mock_user, mock_file_crud_service):
+    def test_edit_file_replace_all(self, mock_user, mock_file_crud_service):
         """Test edit_file with replace_all=True."""
         from code_indexer.server.mcp import handlers
 
@@ -271,14 +263,13 @@ class TestHandleEditFile:
             "replace_all": True,
         }
 
-        mcp_response = await handlers.handle_edit_file(params, mock_user)
+        mcp_response = handlers.handle_edit_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
         assert data["changes_made"] == 3
 
-    @pytest.mark.asyncio
-    async def test_edit_file_missing_params(self, mock_user, mock_file_crud_service):
+    def test_edit_file_missing_params(self, mock_user, mock_file_crud_service):
         """Test edit_file with missing required parameters."""
         from code_indexer.server.mcp import handlers
 
@@ -290,14 +281,13 @@ class TestHandleEditFile:
             "new_string": "new",
         }
 
-        mcp_response = await handlers.handle_edit_file(params, mock_user)
+        mcp_response = handlers.handle_edit_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert "Missing required parameter" in data["error"]
 
-    @pytest.mark.asyncio
-    async def test_edit_file_hash_mismatch(self, mock_user, mock_file_crud_service):
+    def test_edit_file_hash_mismatch(self, mock_user, mock_file_crud_service):
         """Test edit_file when content hash doesn't match (concurrent modification)."""
         from code_indexer.server.mcp import handlers
 
@@ -316,14 +306,13 @@ class TestHandleEditFile:
             "replace_all": False,
         }
 
-        mcp_response = await handlers.handle_edit_file(params, mock_user)
+        mcp_response = handlers.handle_edit_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert "hash mismatch" in data["error"].lower()
 
-    @pytest.mark.asyncio
-    async def test_edit_file_not_found(self, mock_user, mock_file_crud_service):
+    def test_edit_file_not_found(self, mock_user, mock_file_crud_service):
         """Test edit_file when file doesn't exist."""
         from code_indexer.server.mcp import handlers
 
@@ -341,14 +330,13 @@ class TestHandleEditFile:
             "replace_all": False,
         }
 
-        mcp_response = await handlers.handle_edit_file(params, mock_user)
+        mcp_response = handlers.handle_edit_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert "not found" in data["error"].lower()
 
-    @pytest.mark.asyncio
-    async def test_edit_file_string_not_unique(self, mock_user, mock_file_crud_service):
+    def test_edit_file_string_not_unique(self, mock_user, mock_file_crud_service):
         """Test edit_file when old_string appears multiple times and replace_all=False."""
         from code_indexer.server.mcp import handlers
 
@@ -367,7 +355,7 @@ class TestHandleEditFile:
             "replace_all": False,
         }
 
-        mcp_response = await handlers.handle_edit_file(params, mock_user)
+        mcp_response = handlers.handle_edit_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
@@ -377,8 +365,7 @@ class TestHandleEditFile:
 class TestHandleDeleteFile:
     """Test handle_delete_file MCP handler."""
 
-    @pytest.mark.asyncio
-    async def test_delete_file_success_without_hash(
+    def test_delete_file_success_without_hash(
         self, mock_user, mock_file_crud_service
     ):
         """Test successful file deletion without hash validation."""
@@ -397,7 +384,7 @@ class TestHandleDeleteFile:
         }
 
         # Execute handler
-        mcp_response = await handlers.handle_delete_file(params, mock_user)
+        mcp_response = handlers.handle_delete_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         # Verify response
@@ -413,8 +400,7 @@ class TestHandleDeleteFile:
             username="testuser",
         )
 
-    @pytest.mark.asyncio
-    async def test_delete_file_success_with_hash(
+    def test_delete_file_success_with_hash(
         self, mock_user, mock_file_crud_service
     ):
         """Test successful file deletion with hash validation."""
@@ -433,7 +419,7 @@ class TestHandleDeleteFile:
             "content_hash": "hash_xyz789",
         }
 
-        mcp_response = await handlers.handle_delete_file(params, mock_user)
+        mcp_response = handlers.handle_delete_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
@@ -446,22 +432,20 @@ class TestHandleDeleteFile:
             username="testuser",
         )
 
-    @pytest.mark.asyncio
-    async def test_delete_file_missing_params(self, mock_user, mock_file_crud_service):
+    def test_delete_file_missing_params(self, mock_user, mock_file_crud_service):
         """Test delete_file with missing required parameters."""
         from code_indexer.server.mcp import handlers
 
         # Missing file_path
         params = {"repository_alias": "test-repo"}
 
-        mcp_response = await handlers.handle_delete_file(params, mock_user)
+        mcp_response = handlers.handle_delete_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert "Missing required parameter" in data["error"]
 
-    @pytest.mark.asyncio
-    async def test_delete_file_not_found(self, mock_user, mock_file_crud_service):
+    def test_delete_file_not_found(self, mock_user, mock_file_crud_service):
         """Test delete_file when file doesn't exist."""
         from code_indexer.server.mcp import handlers
 
@@ -475,14 +459,13 @@ class TestHandleDeleteFile:
             "file_path": "src/missing.py",
         }
 
-        mcp_response = await handlers.handle_delete_file(params, mock_user)
+        mcp_response = handlers.handle_delete_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert "not found" in data["error"].lower()
 
-    @pytest.mark.asyncio
-    async def test_delete_file_hash_mismatch(self, mock_user, mock_file_crud_service):
+    def test_delete_file_hash_mismatch(self, mock_user, mock_file_crud_service):
         """Test delete_file when content hash doesn't match (safety check)."""
         from code_indexer.server.mcp import handlers
 
@@ -498,14 +481,13 @@ class TestHandleDeleteFile:
             "content_hash": "old_hash",
         }
 
-        mcp_response = await handlers.handle_delete_file(params, mock_user)
+        mcp_response = handlers.handle_delete_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert "hash mismatch" in data["error"].lower()
 
-    @pytest.mark.asyncio
-    async def test_delete_file_permission_denied(
+    def test_delete_file_permission_denied(
         self, mock_user, mock_file_crud_service
     ):
         """Test delete_file with invalid path (security violation)."""
@@ -521,14 +503,13 @@ class TestHandleDeleteFile:
             "file_path": ".git/config",
         }
 
-        mcp_response = await handlers.handle_delete_file(params, mock_user)
+        mcp_response = handlers.handle_delete_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert "Permission" in data["error"] or ".git" in data["error"]
 
-    @pytest.mark.asyncio
-    async def test_delete_file_crud_operation_error(
+    def test_delete_file_crud_operation_error(
         self, mock_user, mock_file_crud_service
     ):
         """Test delete_file with general CRUD operation failure."""
@@ -544,7 +525,7 @@ class TestHandleDeleteFile:
             "file_path": "src/locked_file.py",
         }
 
-        mcp_response = await handlers.handle_delete_file(params, mock_user)
+        mcp_response = handlers.handle_delete_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False

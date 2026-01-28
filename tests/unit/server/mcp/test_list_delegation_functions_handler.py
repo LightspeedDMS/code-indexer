@@ -80,8 +80,7 @@ def admin_user():
 class TestListDelegationFunctionsHandler:
     """Tests for list_delegation_functions handler."""
 
-    @pytest.mark.asyncio
-    async def test_handler_returns_mcp_response_format(
+    def test_handler_returns_mcp_response_format(
         self, test_user, temp_function_repo
     ):
         """
@@ -103,7 +102,7 @@ class TestListDelegationFunctionsHandler:
                 lambda user: {"engineering"},
             )
 
-            response = await handle_list_delegation_functions({}, test_user)
+            response = handle_list_delegation_functions({}, test_user)
 
         assert "content" in response
         assert len(response["content"]) == 1
@@ -112,8 +111,7 @@ class TestListDelegationFunctionsHandler:
         data = json.loads(response["content"][0]["text"])
         assert "success" in data
 
-    @pytest.mark.asyncio
-    async def test_handler_returns_functions_for_user_groups(
+    def test_handler_returns_functions_for_user_groups(
         self, test_user, temp_function_repo
     ):
         """
@@ -135,15 +133,14 @@ class TestListDelegationFunctionsHandler:
                 lambda user: {"engineering"},
             )
 
-            response = await handle_list_delegation_functions({}, test_user)
+            response = handle_list_delegation_functions({}, test_user)
 
         data = json.loads(response["content"][0]["text"])
         assert data["success"] is True
         assert len(data["functions"]) == 1
         assert data["functions"][0]["name"] == "semantic-search"
 
-    @pytest.mark.asyncio
-    async def test_handler_filters_by_impersonated_user_groups(
+    def test_handler_filters_by_impersonated_user_groups(
         self, admin_user, temp_function_repo
     ):
         """
@@ -194,7 +191,7 @@ class TestListDelegationFunctionsHandler:
             )
 
             # Pass session_state to the handler
-            response = await handle_list_delegation_functions(
+            response = handle_list_delegation_functions(
                 {}, admin_user, session_state=session_state
             )
 
@@ -204,8 +201,7 @@ class TestListDelegationFunctionsHandler:
         assert len(data["functions"]) == 1
         assert data["functions"][0]["name"] == "admin-tool"
 
-    @pytest.mark.asyncio
-    async def test_handler_includes_parameters_in_response(
+    def test_handler_includes_parameters_in_response(
         self, test_user, temp_function_repo
     ):
         """
@@ -226,7 +222,7 @@ class TestListDelegationFunctionsHandler:
                 lambda user: {"engineering"},
             )
 
-            response = await handle_list_delegation_functions({}, test_user)
+            response = handle_list_delegation_functions({}, test_user)
 
         data = json.loads(response["content"][0]["text"])
         func = data["functions"][0]
@@ -236,8 +232,7 @@ class TestListDelegationFunctionsHandler:
         assert func["parameters"][0]["type"] == "string"
         assert func["parameters"][0]["required"] is True
 
-    @pytest.mark.asyncio
-    async def test_handler_returns_empty_list_for_empty_repo(self, test_user):
+    def test_handler_returns_empty_list_for_empty_repo(self, test_user):
         """
         Handler should return empty list for empty function repository.
 
@@ -259,7 +254,7 @@ class TestListDelegationFunctionsHandler:
                     lambda user: {"engineering"},
                 )
 
-                response = await handle_list_delegation_functions({}, test_user)
+                response = handle_list_delegation_functions({}, test_user)
 
             data = json.loads(response["content"][0]["text"])
             assert data["success"] is True
@@ -267,8 +262,7 @@ class TestListDelegationFunctionsHandler:
         finally:
             shutil.rmtree(empty_dir, ignore_errors=True)
 
-    @pytest.mark.asyncio
-    async def test_handler_returns_error_when_not_configured(self, test_user):
+    def test_handler_returns_error_when_not_configured(self, test_user):
         """
         Handler should return error when delegation not configured.
 
@@ -284,14 +278,13 @@ class TestListDelegationFunctionsHandler:
                 lambda: None,
             )
 
-            response = await handle_list_delegation_functions({}, test_user)
+            response = handle_list_delegation_functions({}, test_user)
 
         data = json.loads(response["content"][0]["text"])
         assert data["success"] is False
         assert "not configured" in data["error"].lower()
 
-    @pytest.mark.asyncio
-    async def test_handler_returns_error_when_repo_not_found(self, test_user):
+    def test_handler_returns_error_when_repo_not_found(self, test_user):
         """
         Handler should return error when function repository not found.
 
@@ -314,7 +307,7 @@ class TestListDelegationFunctionsHandler:
                 lambda user: {"engineering"},
             )
 
-            response = await handle_list_delegation_functions({}, test_user)
+            response = handle_list_delegation_functions({}, test_user)
 
         data = json.loads(response["content"][0]["text"])
         assert data["success"] is True

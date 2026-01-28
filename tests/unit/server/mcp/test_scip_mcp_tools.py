@@ -35,8 +35,7 @@ def mock_scip_files(tmp_path):
 class TestSCIPDefinitionTool:
     """Tests for scip_definition MCP tool."""
 
-    @pytest.mark.asyncio
-    async def test_scip_definition_returns_mcp_response(
+    def test_scip_definition_returns_mcp_response(
         self, mock_user, mock_scip_files
     ):
         """Should return MCP-compliant response with definition results."""
@@ -63,7 +62,7 @@ class TestSCIPDefinitionTool:
             "code_indexer.server.mcp.handlers._get_scip_query_service",
             return_value=mock_service,
         ):
-            response = await scip_definition(params, mock_user)
+            response = scip_definition(params, mock_user)
 
             # Verify MCP-compliant response structure
             assert "content" in response
@@ -82,8 +81,7 @@ class TestSCIPDefinitionTool:
 class TestSCIPReferencesTool:
     """Tests for scip_references MCP tool."""
 
-    @pytest.mark.asyncio
-    async def test_scip_references_returns_mcp_response(
+    def test_scip_references_returns_mcp_response(
         self, mock_user, mock_scip_files
     ):
         """Should return MCP-compliant response with reference results."""
@@ -110,7 +108,7 @@ class TestSCIPReferencesTool:
             "code_indexer.server.mcp.handlers._get_scip_query_service",
             return_value=mock_service,
         ):
-            response = await scip_references(params, mock_user)
+            response = scip_references(params, mock_user)
 
             assert "content" in response
             data = json.loads(response["content"][0]["text"])
@@ -121,8 +119,7 @@ class TestSCIPReferencesTool:
 class TestSCIPDependenciesTool:
     """Tests for scip_dependencies MCP tool."""
 
-    @pytest.mark.asyncio
-    async def test_scip_dependencies_returns_mcp_response(
+    def test_scip_dependencies_returns_mcp_response(
         self, mock_user, mock_scip_files
     ):
         """Should return MCP-compliant response with dependency results."""
@@ -149,7 +146,7 @@ class TestSCIPDependenciesTool:
             "code_indexer.server.mcp.handlers._get_scip_query_service",
             return_value=mock_service,
         ):
-            response = await scip_dependencies(params, mock_user)
+            response = scip_dependencies(params, mock_user)
 
             # Verify MCP-compliant response structure
             assert "content" in response
@@ -168,8 +165,7 @@ class TestSCIPDependenciesTool:
 class TestSCIPDependentsTool:
     """Tests for scip_dependents MCP tool."""
 
-    @pytest.mark.asyncio
-    async def test_scip_dependents_returns_mcp_response(
+    def test_scip_dependents_returns_mcp_response(
         self, mock_user, mock_scip_files
     ):
         """Should return MCP-compliant response with dependent results."""
@@ -196,7 +192,7 @@ class TestSCIPDependentsTool:
             "code_indexer.server.mcp.handlers._get_scip_query_service",
             return_value=mock_service,
         ):
-            response = await scip_dependents(params, mock_user)
+            response = scip_dependents(params, mock_user)
 
             # Verify MCP-compliant response structure
             assert "content" in response
@@ -215,8 +211,7 @@ class TestSCIPDependentsTool:
 class TestSCIPImpactTool:
     """Tests for scip_impact MCP tool."""
 
-    @pytest.mark.asyncio
-    async def test_scip_impact_returns_mcp_response(self, mock_user, tmp_path):
+    def test_scip_impact_returns_mcp_response(self, mock_user, tmp_path):
         """Should return MCP-compliant response with impact analysis results."""
         from code_indexer.server.mcp.handlers import scip_impact
 
@@ -255,7 +250,7 @@ class TestSCIPImpactTool:
             "code_indexer.server.mcp.handlers._get_scip_query_service",
             return_value=mock_service,
         ):
-            response = await scip_impact(params, mock_user)
+            response = scip_impact(params, mock_user)
 
             # Verify MCP-compliant response structure
             assert "content" in response
@@ -275,8 +270,7 @@ class TestSCIPImpactTool:
 class TestSCIPCallChainTool:
     """Tests for scip_callchain MCP tool."""
 
-    @pytest.mark.asyncio
-    async def test_scip_callchain_returns_mcp_response(self, mock_user):
+    def test_scip_callchain_returns_mcp_response(self, mock_user):
         """Should return MCP-compliant response with call chain results."""
         from code_indexer.server.mcp.handlers import scip_callchain
 
@@ -296,7 +290,7 @@ class TestSCIPCallChainTool:
             "code_indexer.server.mcp.handlers._get_scip_query_service",
             return_value=mock_service,
         ):
-            response = await scip_callchain(params, mock_user)
+            response = scip_callchain(params, mock_user)
 
             assert "content" in response
             data = json.loads(response["content"][0]["text"])
@@ -309,8 +303,7 @@ class TestSCIPCallChainTool:
 class TestSCIPContextTool:
     """Tests for scip_context MCP tool."""
 
-    @pytest.mark.asyncio
-    async def test_scip_context_returns_mcp_response(self, mock_user):
+    def test_scip_context_returns_mcp_response(self, mock_user):
         """Should return MCP-compliant response with smart context results."""
         from code_indexer.server.mcp.handlers import scip_context
 
@@ -348,7 +341,7 @@ class TestSCIPContextTool:
             "code_indexer.server.mcp.handlers._get_scip_query_service",
             return_value=mock_service,
         ):
-            response = await scip_context(params, mock_user)
+            response = scip_context(params, mock_user)
 
             assert "content" in response
             data = json.loads(response["content"][0]["text"])

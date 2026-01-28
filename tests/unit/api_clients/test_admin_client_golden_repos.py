@@ -6,7 +6,7 @@ the server API with proper authentication, validation, and error handling.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 from pathlib import Path
 
 # removed unused imports: Dict, Any
@@ -46,14 +46,14 @@ class TestAdminAPIClientGoldenRepos:
         }
 
         # Mock the _authenticated_request method
-        admin_client._authenticated_request = AsyncMock()
+        admin_client._authenticated_request = MagicMock()
         mock_response = MagicMock()
         mock_response.status_code = 202
         mock_response.json.return_value = expected_response
         admin_client._authenticated_request.return_value = mock_response
 
         # Act
-        result = await admin_client.add_golden_repository(
+        result = admin_client.add_golden_repository(
             git_url=git_url, alias=alias, description=description
         )
 
@@ -86,14 +86,14 @@ class TestAdminAPIClientGoldenRepos:
         }
 
         # Mock the _authenticated_request method
-        admin_client._authenticated_request = AsyncMock()
+        admin_client._authenticated_request = MagicMock()
         mock_response = MagicMock()
         mock_response.status_code = 202
         mock_response.json.return_value = expected_response
         admin_client._authenticated_request.return_value = mock_response
 
         # Act
-        result = await admin_client.add_golden_repository(git_url=git_url, alias=alias)
+        result = admin_client.add_golden_repository(git_url=git_url, alias=alias)
 
         # Assert
         assert result == expected_response
@@ -120,14 +120,14 @@ class TestAdminAPIClientGoldenRepos:
         }
 
         # Mock the _authenticated_request method
-        admin_client._authenticated_request = AsyncMock()
+        admin_client._authenticated_request = MagicMock()
         mock_response = MagicMock()
         mock_response.status_code = 202
         mock_response.json.return_value = expected_response
         admin_client._authenticated_request.return_value = mock_response
 
         # Act
-        result = await admin_client.add_golden_repository(
+        result = admin_client.add_golden_repository(
             git_url=git_url, alias=alias, default_branch=default_branch
         )
 
@@ -153,7 +153,7 @@ class TestAdminAPIClientGoldenRepos:
         alias = "example-repo"
 
         # Mock the _authenticated_request method
-        admin_client._authenticated_request = AsyncMock()
+        admin_client._authenticated_request = MagicMock()
         mock_response = MagicMock()
         mock_response.status_code = 400
         mock_response.json.return_value = {"detail": "Invalid Git URL format"}
@@ -161,7 +161,7 @@ class TestAdminAPIClientGoldenRepos:
 
         # Act & Assert
         with pytest.raises(APIClientError) as exc_info:
-            await admin_client.add_golden_repository(git_url=git_url, alias=alias)
+            admin_client.add_golden_repository(git_url=git_url, alias=alias)
 
         assert "Invalid request data: Invalid Git URL format" in str(exc_info.value)
         assert exc_info.value.status_code == 400
@@ -176,7 +176,7 @@ class TestAdminAPIClientGoldenRepos:
         alias = "existing-repo"
 
         # Mock the _authenticated_request method
-        admin_client._authenticated_request = AsyncMock()
+        admin_client._authenticated_request = MagicMock()
         mock_response = MagicMock()
         mock_response.status_code = 409
         mock_response.json.return_value = {
@@ -186,7 +186,7 @@ class TestAdminAPIClientGoldenRepos:
 
         # Act & Assert
         with pytest.raises(APIClientError) as exc_info:
-            await admin_client.add_golden_repository(git_url=git_url, alias=alias)
+            admin_client.add_golden_repository(git_url=git_url, alias=alias)
 
         assert (
             "Repository conflict: Golden repository with alias 'existing-repo' already exists"
@@ -204,7 +204,7 @@ class TestAdminAPIClientGoldenRepos:
         alias = "example-repo"
 
         # Mock the _authenticated_request method
-        admin_client._authenticated_request = AsyncMock()
+        admin_client._authenticated_request = MagicMock()
         mock_response = MagicMock()
         mock_response.status_code = 403
         mock_response.json.return_value = {"detail": "Insufficient privileges"}
@@ -212,7 +212,7 @@ class TestAdminAPIClientGoldenRepos:
 
         # Act & Assert
         with pytest.raises(AuthenticationError) as exc_info:
-            await admin_client.add_golden_repository(git_url=git_url, alias=alias)
+            admin_client.add_golden_repository(git_url=git_url, alias=alias)
 
         assert (
             "Insufficient privileges for golden repository creation (admin role required)"
@@ -229,7 +229,7 @@ class TestAdminAPIClientGoldenRepos:
         alias = "example-repo"
 
         # Mock the _authenticated_request method
-        admin_client._authenticated_request = AsyncMock()
+        admin_client._authenticated_request = MagicMock()
         mock_response = MagicMock()
         mock_response.status_code = 500
         mock_response.json.return_value = {"detail": "Internal server error"}
@@ -237,7 +237,7 @@ class TestAdminAPIClientGoldenRepos:
 
         # Act & Assert
         with pytest.raises(APIClientError) as exc_info:
-            await admin_client.add_golden_repository(git_url=git_url, alias=alias)
+            admin_client.add_golden_repository(git_url=git_url, alias=alias)
 
         assert "Failed to add golden repository: Internal server error" in str(
             exc_info.value
@@ -254,14 +254,14 @@ class TestAdminAPIClientGoldenRepos:
         alias = "example-repo"
 
         # Mock the _authenticated_request method to raise NetworkError
-        admin_client._authenticated_request = AsyncMock()
+        admin_client._authenticated_request = MagicMock()
         admin_client._authenticated_request.side_effect = NetworkError(
             "Connection failed"
         )
 
         # Act & Assert
         with pytest.raises(NetworkError) as exc_info:
-            await admin_client.add_golden_repository(git_url=git_url, alias=alias)
+            admin_client.add_golden_repository(git_url=git_url, alias=alias)
 
         assert "Connection failed" in str(exc_info.value)
 
@@ -275,12 +275,12 @@ class TestAdminAPIClientGoldenRepos:
         alias = "example-repo"
 
         # Mock the _authenticated_request method to raise unexpected error
-        admin_client._authenticated_request = AsyncMock()
+        admin_client._authenticated_request = MagicMock()
         admin_client._authenticated_request.side_effect = Exception("Unexpected error")
 
         # Act & Assert
         with pytest.raises(APIClientError) as exc_info:
-            await admin_client.add_golden_repository(git_url=git_url, alias=alias)
+            admin_client.add_golden_repository(git_url=git_url, alias=alias)
 
         assert "Unexpected error adding golden repository: Unexpected error" in str(
             exc_info.value

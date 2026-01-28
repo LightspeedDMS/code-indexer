@@ -42,7 +42,7 @@ class SystemAPIClient(CIDXRemoteAPIClient):
             server_url=server_url, credentials=credentials, project_root=project_root
         )
 
-    async def check_basic_health(self) -> Dict[str, Any]:
+    def check_basic_health(self) -> Dict[str, Any]:
         """Check basic system health using GET /health endpoint.
 
         Performs a basic health check that returns server status and uptime
@@ -66,7 +66,7 @@ class SystemAPIClient(CIDXRemoteAPIClient):
 
         try:
             # Call basic health endpoint
-            response = await self._authenticated_request("GET", "/health")
+            response = self._authenticated_request("GET", "/health")
 
             # Calculate response time
             end_time = time.time()
@@ -93,7 +93,7 @@ class SystemAPIClient(CIDXRemoteAPIClient):
             logger.error(f"Unexpected error during health check: {e}")
             raise APIClientError(f"Health check failed after {response_time_ms}ms: {e}")
 
-    async def check_detailed_health(self) -> Dict[str, Any]:
+    def check_detailed_health(self) -> Dict[str, Any]:
         """Check detailed system health using GET /api/system/health endpoint.
 
         Performs a comprehensive health check that returns detailed information
@@ -119,7 +119,7 @@ class SystemAPIClient(CIDXRemoteAPIClient):
 
         try:
             # Call detailed health endpoint
-            response = await self._authenticated_request("GET", "/api/system/health")
+            response = self._authenticated_request("GET", "/api/system/health")
 
             # Calculate response time
             end_time = time.time()

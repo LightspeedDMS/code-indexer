@@ -98,7 +98,7 @@ class DeleteFileResponse(BaseModel):
     summary="Create a new file",
     description="Create a new file in the activated repository with specified content",
 )
-async def create_file(
+def create_file(
     alias: str, request: CreateFileRequest, user: User = Depends(get_current_user)
 ) -> CreateFileResponse:
     """
@@ -176,7 +176,7 @@ async def create_file(
     summary="Edit an existing file",
     description="Edit an existing file in the activated repository using string replacement",
 )
-async def edit_file(
+def edit_file(
     alias: str,
     file_path: str,
     request: EditFileRequest,
@@ -259,7 +259,7 @@ async def edit_file(
     summary="Delete a file",
     description="Delete a file from the activated repository",
 )
-async def delete_file(
+def delete_file(
     alias: str,
     file_path: str,
     content_hash: Optional[str] = Query(

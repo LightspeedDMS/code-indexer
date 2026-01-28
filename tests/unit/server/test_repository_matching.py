@@ -127,7 +127,7 @@ class TestRepositoryMatcher:
             None,  # User has no access to golden-2
         ]
 
-        results = await self.matcher.find_matching_golden_repositories(
+        results = matcher.find_matching_golden_repositories(
             canonical_url=canonical_url, user=user
         )
 
@@ -184,7 +184,7 @@ class TestRepositoryMatcher:
             mock_access_check
         )
 
-        results = await self.matcher.find_matching_activated_repositories(
+        results = matcher.find_matching_activated_repositories(
             canonical_url=canonical_url, user=user
         )
 
@@ -241,7 +241,7 @@ class TestRepositoryMatcher:
         (
             golden_results,
             activated_results,
-        ) = await self.matcher.find_all_matching_repositories(
+        ) = matcher.find_all_matching_repositories(
             canonical_url=canonical_url, user=user
         )
 
@@ -278,7 +278,7 @@ class TestRepositoryMatcher:
         # Mock no access
         self.access_control_manager.get_user_access_level.return_value = None
 
-        results = await self.matcher.find_matching_golden_repositories(
+        results = matcher.find_matching_golden_repositories(
             canonical_url=canonical_url, user=user
         )
 
@@ -312,7 +312,7 @@ class TestRepositoryMatcher:
         # Mock admin access
         self.access_control_manager.get_user_access_level.return_value = "admin"
 
-        results = await self.matcher.find_matching_golden_repositories(
+        results = matcher.find_matching_golden_repositories(
             canonical_url=canonical_url, user=admin_user
         )
 
@@ -336,7 +336,7 @@ class TestRepositoryMatcher:
         )
 
         with pytest.raises(MatchingError) as exc_info:
-            await self.matcher.find_matching_golden_repositories(
+            matcher.find_matching_golden_repositories(
                 canonical_url=canonical_url, user=user
             )
 
@@ -391,7 +391,7 @@ class TestRepositoryMatcher:
         (
             golden_results,
             activated_results,
-        ) = await self.matcher.find_all_matching_repositories(
+        ) = matcher.find_all_matching_repositories(
             canonical_url=canonical_url, user=user
         )
 
@@ -431,7 +431,7 @@ class TestRepositoryMatcher:
         self.golden_repo_manager.find_by_canonical_url.return_value = golden_repos
         self.access_control_manager.get_user_access_level.return_value = "read"
 
-        results = await self.matcher.find_matching_golden_repositories(
+        results = matcher.find_matching_golden_repositories(
             canonical_url=canonical_url, user=user
         )
 
@@ -479,7 +479,7 @@ class TestRepositoryMatcher:
         for url in url_variations:
             # Note: In the actual implementation, URL normalization happens before
             # calling the matcher, so we're testing with the canonical form
-            results = await self.matcher.find_matching_golden_repositories(
+            results = matcher.find_matching_golden_repositories(
                 canonical_url=canonical_url, user=user
             )
 

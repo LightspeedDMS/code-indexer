@@ -60,8 +60,7 @@ def _extract_response_data(mcp_response: dict) -> dict:
 class TestGitBranchListHandler:
     """Test git_branch_list MCP handler (F6: Branch Management)."""
 
-    @pytest.mark.asyncio
-    async def test_git_branch_list_success(
+    def test_git_branch_list_success(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test successful git branch list operation."""
@@ -75,7 +74,7 @@ class TestGitBranchListHandler:
 
         params = {"repository_alias": "test-repo"}
 
-        mcp_response = await handlers.git_branch_list(params, mock_user)
+        mcp_response = handlers.git_branch_list(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
@@ -83,12 +82,11 @@ class TestGitBranchListHandler:
         assert data["branches"][0]["current"] is True
         mock_git_service.git_branch_list.assert_called_once_with(Path("/tmp/test-repo"))
 
-    @pytest.mark.asyncio
-    async def test_git_branch_list_missing_repository(self, mock_user):
+    def test_git_branch_list_missing_repository(self, mock_user):
         """Test git branch list with missing repository_alias parameter."""
         params = {}  # Missing repository_alias
 
-        mcp_response = await handlers.git_branch_list(params, mock_user)
+        mcp_response = handlers.git_branch_list(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
@@ -98,8 +96,7 @@ class TestGitBranchListHandler:
 class TestGitBranchCreateHandler:
     """Test git_branch_create MCP handler (F6: Branch Management)."""
 
-    @pytest.mark.asyncio
-    async def test_git_branch_create_success(
+    def test_git_branch_create_success(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test successful git branch create operation."""
@@ -113,7 +110,7 @@ class TestGitBranchCreateHandler:
             "branch_name": "feature-new",
         }
 
-        mcp_response = await handlers.git_branch_create(params, mock_user)
+        mcp_response = handlers.git_branch_create(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
@@ -122,8 +119,7 @@ class TestGitBranchCreateHandler:
             Path("/tmp/test-repo"), "feature-new"
         )
 
-    @pytest.mark.asyncio
-    async def test_git_branch_create_already_exists(
+    def test_git_branch_create_already_exists(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git branch create when branch already exists."""
@@ -140,26 +136,25 @@ class TestGitBranchCreateHandler:
             "branch_name": "feature-new",
         }
 
-        mcp_response = await handlers.git_branch_create(params, mock_user)
+        mcp_response = handlers.git_branch_create(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert data["error_type"] == "GitCommandError"
         assert "already exists" in data["stderr"]
 
-    @pytest.mark.asyncio
-    async def test_git_branch_create_missing_parameters(self, mock_user):
+    def test_git_branch_create_missing_parameters(self, mock_user):
         """Test git branch create with missing required parameters."""
         # Missing repository_alias
         params = {"branch_name": "new-branch"}
-        mcp_response = await handlers.git_branch_create(params, mock_user)
+        mcp_response = handlers.git_branch_create(params, mock_user)
         data = _extract_response_data(mcp_response)
         assert data["success"] is False
         assert "Missing required parameter: repository_alias" in data["error"]
 
         # Missing branch_name
         params = {"repository_alias": "test-repo"}
-        mcp_response = await handlers.git_branch_create(params, mock_user)
+        mcp_response = handlers.git_branch_create(params, mock_user)
         data = _extract_response_data(mcp_response)
         assert data["success"] is False
         assert "Missing required parameter: branch_name" in data["error"]
@@ -168,8 +163,7 @@ class TestGitBranchCreateHandler:
 class TestGitBranchSwitchHandler:
     """Test git_branch_switch MCP handler (F6: Branch Management)."""
 
-    @pytest.mark.asyncio
-    async def test_git_branch_switch_success(
+    def test_git_branch_switch_success(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test successful git branch switch operation."""
@@ -183,7 +177,7 @@ class TestGitBranchSwitchHandler:
             "branch_name": "feature-x",
         }
 
-        mcp_response = await handlers.git_branch_switch(params, mock_user)
+        mcp_response = handlers.git_branch_switch(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
@@ -192,8 +186,7 @@ class TestGitBranchSwitchHandler:
             Path("/tmp/test-repo"), "feature-x"
         )
 
-    @pytest.mark.asyncio
-    async def test_git_branch_switch_nonexistent(
+    def test_git_branch_switch_nonexistent(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git branch switch to nonexistent branch."""
@@ -210,26 +203,25 @@ class TestGitBranchSwitchHandler:
             "branch_name": "nonexistent-branch",
         }
 
-        mcp_response = await handlers.git_branch_switch(params, mock_user)
+        mcp_response = handlers.git_branch_switch(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert data["error_type"] == "GitCommandError"
         assert "invalid reference" in data["stderr"]
 
-    @pytest.mark.asyncio
-    async def test_git_branch_switch_missing_parameters(self, mock_user):
+    def test_git_branch_switch_missing_parameters(self, mock_user):
         """Test git branch switch with missing required parameters."""
         # Missing repository_alias
         params = {"branch_name": "main"}
-        mcp_response = await handlers.git_branch_switch(params, mock_user)
+        mcp_response = handlers.git_branch_switch(params, mock_user)
         data = _extract_response_data(mcp_response)
         assert data["success"] is False
         assert "Missing required parameter: repository_alias" in data["error"]
 
         # Missing branch_name
         params = {"repository_alias": "test-repo"}
-        mcp_response = await handlers.git_branch_switch(params, mock_user)
+        mcp_response = handlers.git_branch_switch(params, mock_user)
         data = _extract_response_data(mcp_response)
         assert data["success"] is False
         assert "Missing required parameter: branch_name" in data["error"]
@@ -238,8 +230,7 @@ class TestGitBranchSwitchHandler:
 class TestGitBranchDeleteHandler:
     """Test git_branch_delete MCP handler (F6: Branch Management)."""
 
-    @pytest.mark.asyncio
-    async def test_git_branch_delete_requires_confirmation(
+    def test_git_branch_delete_requires_confirmation(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git branch delete requires confirmation token."""
@@ -254,15 +245,14 @@ class TestGitBranchDeleteHandler:
             "branch_name": "old-feature",
         }
 
-        mcp_response = await handlers.git_branch_delete(params, mock_user)
+        mcp_response = handlers.git_branch_delete(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert "confirmation_token_required" in data
         assert data["confirmation_token_required"]["token"] == "DEL789"
 
-    @pytest.mark.asyncio
-    async def test_git_branch_delete_with_valid_token(
+    def test_git_branch_delete_with_valid_token(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git branch delete with valid confirmation token."""
@@ -277,7 +267,7 @@ class TestGitBranchDeleteHandler:
             "confirmation_token": "DEL123",
         }
 
-        mcp_response = await handlers.git_branch_delete(params, mock_user)
+        mcp_response = handlers.git_branch_delete(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
@@ -286,8 +276,7 @@ class TestGitBranchDeleteHandler:
             Path("/tmp/test-repo"), "old-feature", confirmation_token="DEL123"
         )
 
-    @pytest.mark.asyncio
-    async def test_git_branch_delete_current_branch(
+    def test_git_branch_delete_current_branch(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git branch delete when trying to delete current branch."""
@@ -305,26 +294,25 @@ class TestGitBranchDeleteHandler:
             "confirmation_token": "ABC123",
         }
 
-        mcp_response = await handlers.git_branch_delete(params, mock_user)
+        mcp_response = handlers.git_branch_delete(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert data["error_type"] == "GitCommandError"
         assert "cannot delete" in data["stderr"].lower()
 
-    @pytest.mark.asyncio
-    async def test_git_branch_delete_missing_parameters(self, mock_user):
+    def test_git_branch_delete_missing_parameters(self, mock_user):
         """Test git branch delete with missing required parameters."""
         # Missing repository_alias
         params = {"branch_name": "old-feature"}
-        mcp_response = await handlers.git_branch_delete(params, mock_user)
+        mcp_response = handlers.git_branch_delete(params, mock_user)
         data = _extract_response_data(mcp_response)
         assert data["success"] is False
         assert "Missing required parameter: repository_alias" in data["error"]
 
         # Missing branch_name
         params = {"repository_alias": "test-repo"}
-        mcp_response = await handlers.git_branch_delete(params, mock_user)
+        mcp_response = handlers.git_branch_delete(params, mock_user)
         data = _extract_response_data(mcp_response)
         assert data["success"] is False
         assert "Missing required parameter: branch_name" in data["error"]

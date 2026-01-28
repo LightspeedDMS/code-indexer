@@ -102,11 +102,10 @@ class TestMCPToolSchemaTemporalParameters:
         )
 
 
-@pytest.mark.asyncio
 class TestTemporalQueryHandlerIntegration:
     """Test that MCP handler passes temporal parameters to semantic query manager."""
 
-    async def test_handler_passes_time_range_to_query_manager(self, mock_user):
+    def test_handler_passes_time_range_to_query_manager(self, mock_user):
         """Acceptance Criterion 2: Time-range filtering passes through to query manager."""
         params = {
             "query_text": "authentication",
@@ -128,14 +127,14 @@ class TestTemporalQueryHandlerIntegration:
                 }
             )
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             # Verify handler called query_manager with temporal parameters
             call_kwargs = mock_qm.query_user_repositories.call_args[1]
             assert "time_range" in call_kwargs
             assert call_kwargs["time_range"] == "2023-01-01..2024-01-01"
 
-    async def test_handler_passes_at_commit_to_query_manager(self, mock_user):
+    def test_handler_passes_at_commit_to_query_manager(self, mock_user):
         """Acceptance Criterion 3: Point-in-time query passes through to query manager."""
         params = {
             "query_text": "login handler",
@@ -157,13 +156,13 @@ class TestTemporalQueryHandlerIntegration:
                 }
             )
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             call_kwargs = mock_qm.query_user_repositories.call_args[1]
             assert "at_commit" in call_kwargs
             assert call_kwargs["at_commit"] == "abc123"
 
-    async def test_handler_passes_include_removed_to_query_manager(self, mock_user):
+    def test_handler_passes_include_removed_to_query_manager(self, mock_user):
         """Acceptance Criterion 4: Include removed code flag passes through."""
         params = {
             "query_text": "deprecated function",
@@ -185,13 +184,13 @@ class TestTemporalQueryHandlerIntegration:
                 }
             )
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             call_kwargs = mock_qm.query_user_repositories.call_args[1]
             assert "include_removed" in call_kwargs
             assert call_kwargs["include_removed"] is True
 
-    async def test_handler_passes_show_evolution_to_query_manager(self, mock_user):
+    def test_handler_passes_show_evolution_to_query_manager(self, mock_user):
         """Acceptance Criterion 5: Evolution display flag passes through."""
         params = {
             "query_text": "user authentication",
@@ -213,13 +212,13 @@ class TestTemporalQueryHandlerIntegration:
                 }
             )
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             call_kwargs = mock_qm.query_user_repositories.call_args[1]
             assert "show_evolution" in call_kwargs
             assert call_kwargs["show_evolution"] is True
 
-    async def test_handler_passes_evolution_limit_to_query_manager(self, mock_user):
+    def test_handler_passes_evolution_limit_to_query_manager(self, mock_user):
         """Acceptance Criterion 6: Evolution limit passes through (user-controlled)."""
         params = {
             "query_text": "database query",
@@ -242,18 +241,17 @@ class TestTemporalQueryHandlerIntegration:
                 }
             )
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             call_kwargs = mock_qm.query_user_repositories.call_args[1]
             assert "evolution_limit" in call_kwargs
             assert call_kwargs["evolution_limit"] == 5
 
 
-@pytest.mark.asyncio
 class TestTemporalResponseFormat:
     """Test that temporal query responses include required metadata."""
 
-    async def test_response_includes_temporal_metadata(self, mock_user):
+    def test_response_includes_temporal_metadata(self, mock_user):
         """Acceptance Criterion 7: Response includes temporal metadata."""
         params = {
             "query_text": "authentication",
@@ -294,7 +292,7 @@ class TestTemporalResponseFormat:
                 }
             )
 
-            result = await search_code(params, mock_user)
+            result = search_code(params, mock_user)
 
             # Parse MCP response
             data = json.loads(result["content"][0]["text"])
@@ -312,11 +310,10 @@ class TestTemporalResponseFormat:
             assert "commits" in temporal
 
 
-@pytest.mark.asyncio
 class TestGracefulFallback:
     """Test graceful fallback when temporal index missing."""
 
-    async def test_fallback_returns_current_code_with_warning(self, mock_user):
+    def test_fallback_returns_current_code_with_warning(self, mock_user):
         """Acceptance Criterion 9: Graceful fallback when temporal index missing."""
         params = {
             "query_text": "authentication",
@@ -346,7 +343,7 @@ class TestGracefulFallback:
                 }
             )
 
-            result = await search_code(params, mock_user)
+            result = search_code(params, mock_user)
 
             # Parse MCP response
             data = json.loads(result["content"][0]["text"])
@@ -357,11 +354,10 @@ class TestGracefulFallback:
             assert "Temporal index not available" in data["results"]["warning"]
 
 
-@pytest.mark.asyncio
 class TestTemporalErrorHandling:
     """Test error handling for invalid temporal parameters."""
 
-    async def test_error_on_invalid_date_format(self, mock_user):
+    def test_error_on_invalid_date_format(self, mock_user):
         """Acceptance Criterion 10: Clear error for invalid date formats."""
         params = {
             "query_text": "authentication",
@@ -376,7 +372,7 @@ class TestTemporalErrorHandling:
                 )
             )
 
-            result = await search_code(params, mock_user)
+            result = search_code(params, mock_user)
 
             # Parse MCP response
             data = json.loads(result["content"][0]["text"])
@@ -384,7 +380,7 @@ class TestTemporalErrorHandling:
             assert "Invalid date format" in data["error"]
             assert "YYYY-MM-DD" in data["error"]
 
-    async def test_error_on_invalid_date_separator(self, mock_user):
+    def test_error_on_invalid_date_separator(self, mock_user):
         """Acceptance Criterion 10: Clear error for wrong separator."""
         params = {
             "query_text": "authentication",
@@ -399,13 +395,13 @@ class TestTemporalErrorHandling:
                 )
             )
 
-            result = await search_code(params, mock_user)
+            result = search_code(params, mock_user)
 
             data = json.loads(result["content"][0]["text"])
             assert data["success"] is False
             assert "must use '..' separator" in data["error"]
 
-    async def test_error_on_end_before_start_date(self, mock_user):
+    def test_error_on_end_before_start_date(self, mock_user):
         """Acceptance Criterion 10: Clear error for invalid date range."""
         params = {
             "query_text": "authentication",
@@ -418,13 +414,13 @@ class TestTemporalErrorHandling:
                 side_effect=ValueError("End date must be after start date")
             )
 
-            result = await search_code(params, mock_user)
+            result = search_code(params, mock_user)
 
             data = json.loads(result["content"][0]["text"])
             assert data["success"] is False
             assert "End date must be after start date" in data["error"]
 
-    async def test_error_on_unknown_commit(self, mock_user):
+    def test_error_on_unknown_commit(self, mock_user):
         """Acceptance Criterion 10: Clear error for unknown commit."""
         params = {
             "query_text": "authentication",
@@ -437,7 +433,7 @@ class TestTemporalErrorHandling:
                 side_effect=ValueError("Commit 'nonexistent' not found in repository")
             )
 
-            result = await search_code(params, mock_user)
+            result = search_code(params, mock_user)
 
             data = json.loads(result["content"][0]["text"])
             assert data["success"] is False

@@ -1411,7 +1411,7 @@ def get_recent_errors() -> Optional[List[Dict[str, Any]]]:
         return None
 
 
-async def _apply_rest_semantic_truncation(
+def _apply_rest_semantic_truncation(
     results: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Apply payload truncation to semantic search results from REST API.
@@ -1443,7 +1443,7 @@ async def _apply_rest_semantic_truncation(
         try:
             if len(code_snippet) > preview_size:
                 # Large snippet: store and replace with preview
-                cache_handle = await payload_cache.store(code_snippet)
+                cache_handle = payload_cache.store(code_snippet)
                 result_dict["preview"] = code_snippet[:preview_size]
                 result_dict["cache_handle"] = cache_handle
                 result_dict["has_more"] = True
@@ -1464,7 +1464,7 @@ async def _apply_rest_semantic_truncation(
     return results
 
 
-async def _apply_rest_fts_truncation(
+def _apply_rest_fts_truncation(
     results: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Apply payload truncation to FTS search results from REST API.
@@ -1493,7 +1493,7 @@ async def _apply_rest_fts_truncation(
             try:
                 if len(snippet) > preview_size:
                     # Large snippet: store and replace with preview
-                    cache_handle = await payload_cache.store(snippet)
+                    cache_handle = payload_cache.store(snippet)
                     result_dict["snippet_preview"] = snippet[:preview_size]
                     result_dict["snippet_cache_handle"] = cache_handle
                     result_dict["snippet_has_more"] = True
@@ -1517,7 +1517,7 @@ async def _apply_rest_fts_truncation(
             try:
                 if len(match_text) > preview_size:
                     # Large match_text: store and replace with preview
-                    cache_handle = await payload_cache.store(match_text)
+                    cache_handle = payload_cache.store(match_text)
                     result_dict["match_text_preview"] = match_text[:preview_size]
                     result_dict["match_text_cache_handle"] = cache_handle
                     result_dict["match_text_has_more"] = True
@@ -2388,7 +2388,7 @@ def create_app() -> FastAPI:
             payload_cache = PayloadCache(
                 db_path=cache_db_path, config=payload_cache_config
             )
-            await payload_cache.initialize()
+            payload_cache.initialize()
             payload_cache.start_background_cleanup()
             app.state.payload_cache = payload_cache
 
@@ -2742,7 +2742,7 @@ def create_app() -> FastAPI:
         # Shutdown: Stop PayloadCache background cleanup (Story #679)
         if payload_cache is not None:
             try:
-                await payload_cache.close()
+                payload_cache.close()
                 logger.info(
                     "PayloadCache stopped successfully",
                     extra={"correlation_id": get_correlation_id()},
@@ -2828,7 +2828,7 @@ def create_app() -> FastAPI:
 
     # Add exception handlers for validation errors that FastAPI catches before middleware
     @app.exception_handler(RequestValidationError)
-    async def validation_exception_handler(
+    def validation_exception_handler(
         request: Request, exc: RequestValidationError
     ):
         error_data = global_error_handler.handle_validation_error(exc, request)
@@ -2969,7 +2969,7 @@ def create_app() -> FastAPI:
 
     # Health endpoint (requires authentication for security)
     @app.get("/health")
-    async def health_check(
+    def health_check(
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
         """
@@ -3089,7 +3089,7 @@ def create_app() -> FastAPI:
 
     # Cache statistics endpoint (Story #526: HNSW Index Cache monitoring)
     @app.get("/cache/stats")
-    async def get_cache_stats(
+    def get_cache_stats(
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
         """
@@ -3159,7 +3159,7 @@ def create_app() -> FastAPI:
             )
 
     @app.post("/auth/login", response_model=LoginResponse)
-    async def login(login_data: LoginRequest, request: Request):
+    def login(login_data: LoginRequest, request: Request):
         """
         Authenticate user and return JWT token with standardized security error responses.
 
@@ -3237,7 +3237,7 @@ def create_app() -> FastAPI:
         )
 
     @app.post("/auth/register", response_model=MessageResponse)
-    async def register(registration_data: RegistrationRequest, request: Request):
+    def register(registration_data: RegistrationRequest, request: Request):
         """
         Register new user account with standardized security responses.
 
@@ -3309,7 +3309,7 @@ def create_app() -> FastAPI:
         return MessageResponse(message=response["message"])
 
     @app.post("/auth/reset-password", response_model=MessageResponse)
-    async def reset_password(reset_data: PasswordResetRequest, request: Request):
+    def reset_password(reset_data: PasswordResetRequest, request: Request):
         """
         Initiate password reset process with standardized security responses.
 
@@ -3373,7 +3373,7 @@ def create_app() -> FastAPI:
         return MessageResponse(message=response["message"])
 
     @app.post("/api/auth/refresh", response_model=RefreshTokenResponse)
-    async def refresh_token_secure(
+    def refresh_token_secure(
         refresh_request: RefreshTokenRequest,
         request: Request,
     ):
@@ -3526,7 +3526,7 @@ def create_app() -> FastAPI:
             )
 
     @app.post("/auth/refresh", response_model=LoginResponse)
-    async def refresh_token(
+    def refresh_token(
         refresh_request: RefreshTokenRequest,
     ):
         """
@@ -3561,7 +3561,7 @@ def create_app() -> FastAPI:
             )
 
     @app.post("/api/keys", response_model=CreateApiKeyResponse, status_code=201)
-    async def create_api_key(
+    def create_api_key(
         current_user: dependencies.User = Depends(dependencies.get_current_user),
         request: CreateApiKeyRequest = Body(...),
     ):
@@ -3613,7 +3613,7 @@ def create_app() -> FastAPI:
             )
 
     @app.get("/api/keys", response_model=ApiKeyListResponse)
-    async def list_api_keys(
+    def list_api_keys(
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
         """
@@ -3626,7 +3626,7 @@ def create_app() -> FastAPI:
         return ApiKeyListResponse(keys=keys)
 
     @app.delete("/api/keys/{key_id}", status_code=200)
-    async def delete_api_key(
+    def delete_api_key(
         key_id: str,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
@@ -3652,7 +3652,7 @@ def create_app() -> FastAPI:
         response_model=CreateMCPCredentialResponse,
         status_code=201,
     )
-    async def create_mcp_credential(
+    def create_mcp_credential(
         current_user: dependencies.User = Depends(
             dependencies.get_current_user_web_or_api
         ),
@@ -3694,7 +3694,7 @@ def create_app() -> FastAPI:
             )
 
     @app.get("/api/mcp-credentials", response_model=MCPCredentialListResponse)
-    async def list_mcp_credentials(
+    def list_mcp_credentials(
         current_user: dependencies.User = Depends(
             dependencies.get_current_user_web_or_api
         ),
@@ -3709,7 +3709,7 @@ def create_app() -> FastAPI:
         return MCPCredentialListResponse(credentials=credentials)
 
     @app.delete("/api/mcp-credentials/{credential_id}", status_code=200)
-    async def delete_mcp_credential(
+    def delete_mcp_credential(
         credential_id: str,
         current_user: dependencies.User = Depends(
             dependencies.get_current_user_web_or_api
@@ -3737,7 +3737,7 @@ def create_app() -> FastAPI:
 
     # Admin MCP Credentials endpoints (require admin role)
     @app.get("/api/admin/users/{username}/mcp-credentials")
-    async def admin_list_user_mcp_credentials(
+    def admin_list_user_mcp_credentials(
         username: str,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
@@ -3827,7 +3827,7 @@ def create_app() -> FastAPI:
         }
 
     @app.delete("/api/admin/users/{username}/mcp-credentials/{credential_id}")
-    async def admin_revoke_user_mcp_credential(
+    def admin_revoke_user_mcp_credential(
         username: str,
         credential_id: str,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
@@ -3871,7 +3871,7 @@ def create_app() -> FastAPI:
         return {"message": "Credential revoked successfully"}
 
     @app.get("/api/admin/mcp-credentials")
-    async def admin_list_all_mcp_credentials(
+    def admin_list_all_mcp_credentials(
         limit: int = 100,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
@@ -3889,7 +3889,7 @@ def create_app() -> FastAPI:
 
     # Protected endpoints (require authentication)
     @app.get("/api/repos", response_model=RepositoryListResponse)
-    async def list_repositories(
+    def list_repositories(
         filter: Optional[str] = None,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
@@ -3929,7 +3929,7 @@ def create_app() -> FastAPI:
             )
 
     @app.get("/api/admin/users")
-    async def list_users(
+    def list_users(
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
         """
@@ -3945,7 +3945,7 @@ def create_app() -> FastAPI:
         }
 
     @app.post("/api/admin/users", response_model=UserResponse, status_code=201)
-    async def create_user(
+    def create_user(
         user_data: CreateUserRequest,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
@@ -3984,7 +3984,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     @app.put("/api/admin/users/{username}", response_model=MessageResponse)
-    async def update_user(
+    def update_user(
         username: str,
         user_data: UpdateUserRequest,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
@@ -4029,7 +4029,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     @app.delete("/api/admin/users/{username}", response_model=MessageResponse)
-    async def delete_user(
+    def delete_user(
         username: str,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
@@ -4078,7 +4078,7 @@ def create_app() -> FastAPI:
         return MessageResponse(message=f"User '{username}' deleted successfully")
 
     @app.post("/api/admin/scip-cleanup-workspaces")
-    async def scip_cleanup_workspaces(
+    def scip_cleanup_workspaces(
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
         """
@@ -4121,7 +4121,7 @@ def create_app() -> FastAPI:
             )
 
     @app.get("/api/admin/scip-cleanup-status")
-    async def get_scip_cleanup_status(
+    def get_scip_cleanup_status(
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
         """
@@ -4156,7 +4156,7 @@ def create_app() -> FastAPI:
             )
 
     @app.put("/api/users/change-password", response_model=MessageResponse)
-    async def change_current_user_password(
+    def change_current_user_password(
         password_data: ChangePasswordRequest,
         request: Request,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
@@ -4337,7 +4337,7 @@ def create_app() -> FastAPI:
     @app.put(
         "/api/admin/users/{username}/change-password", response_model=MessageResponse
     )
-    async def change_user_password(
+    def change_user_password(
         username: str,
         password_data: ChangePasswordRequest,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
@@ -4368,7 +4368,7 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/api/admin/golden-repos")
-    async def list_golden_repos(
+    def list_golden_repos(
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
         """
@@ -4384,7 +4384,7 @@ def create_app() -> FastAPI:
         }
 
     @app.post("/api/admin/golden-repos", response_model=JobResponse, status_code=202)
-    async def add_golden_repo(
+    def add_golden_repo(
         repo_data: AddGoldenRepoRequest,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
@@ -4437,7 +4437,7 @@ def create_app() -> FastAPI:
         response_model=JobResponse,
         status_code=202,
     )
-    async def refresh_golden_repo(
+    def refresh_golden_repo(
         alias: str,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
@@ -4475,7 +4475,7 @@ def create_app() -> FastAPI:
         response_model=AddIndexResponse,
         status_code=202,
     )
-    async def add_golden_repo_index(
+    def add_golden_repo_index(
         http_request: Request,
         alias: str,
         request: AddIndexRequest,
@@ -4569,7 +4569,7 @@ def create_app() -> FastAPI:
         "/api/admin/golden-repos/{alias}/indexes",
         response_model=IndexStatusResponse,
     )
-    async def get_golden_repo_index_status(
+    def get_golden_repo_index_status(
         alias: str,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
@@ -4603,7 +4603,7 @@ def create_app() -> FastAPI:
         return IndexStatusResponse(alias=alias, indexes=indexes)
 
     @app.get("/api/jobs/{job_id}", response_model=JobStatusResponse)
-    async def get_job_status(
+    def get_job_status(
         http_request: Request,
         job_id: str,
         current_user: dependencies.User = Depends(dependencies.get_current_user_hybrid),
@@ -4644,7 +4644,7 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/api/jobs", response_model=JobListResponse)
-    async def list_jobs(
+    def list_jobs(
         status: Optional[str] = None,
         limit: int = 10,
         offset: int = 0,
@@ -4704,7 +4704,7 @@ def create_app() -> FastAPI:
         )
 
     @app.delete("/api/jobs/{job_id}", response_model=JobCancellationResponse)
-    async def cancel_job(
+    def cancel_job(
         job_id: str,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
@@ -4738,7 +4738,7 @@ def create_app() -> FastAPI:
         )
 
     @app.delete("/api/admin/jobs/cleanup", response_model=JobCleanupResponse)
-    async def cleanup_old_jobs(
+    def cleanup_old_jobs(
         max_age_hours: int = 24,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
@@ -4767,7 +4767,7 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/api/admin/jobs/stats")
-    async def admin_jobs_stats(
+    def admin_jobs_stats(
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
@@ -4832,7 +4832,7 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/api/admin/scip-pr-history")
-    async def get_scip_pr_history(
+    def get_scip_pr_history(
         repo_alias: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
@@ -4858,7 +4858,7 @@ def create_app() -> FastAPI:
         return {"logs": logs, "total": len(logs)}
 
     @app.get("/api/admin/scip-git-cleanup-history")
-    async def get_scip_git_cleanup_history(
+    def get_scip_git_cleanup_history(
         repo_path: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
@@ -4884,7 +4884,7 @@ def create_app() -> FastAPI:
         return {"logs": logs, "total": len(logs)}
 
     @app.delete("/api/admin/golden-repos/{alias}", status_code=204)
-    async def remove_golden_repo(
+    def remove_golden_repo(
         alias: str,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
@@ -5006,7 +5006,7 @@ def create_app() -> FastAPI:
             )
 
     @app.post("/api/repos/activate", response_model=JobResponse, status_code=202)
-    async def activate_repository(
+    def activate_repository(
         request: ActivateRepositoryRequest,
         current_user: dependencies.User = Depends(dependencies.get_current_power_user),
     ):
@@ -5155,7 +5155,7 @@ def create_app() -> FastAPI:
             )
 
     @app.delete("/api/repos/{user_alias}", response_model=JobResponse, status_code=202)
-    async def deactivate_repository(
+    def deactivate_repository(
         user_alias: str,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
@@ -5195,7 +5195,7 @@ def create_app() -> FastAPI:
             )
 
     @app.get("/api/repos/activation/{job_id}/progress")
-    async def get_activation_progress(
+    def get_activation_progress(
         job_id: str,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
@@ -5317,7 +5317,7 @@ def create_app() -> FastAPI:
             )
 
     @app.put("/api/repos/{user_alias}/branch", response_model=MessageResponse)
-    async def switch_repository_branch(
+    def switch_repository_branch(
         user_alias: str,
         request: SwitchBranchRequest,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
@@ -5371,7 +5371,7 @@ def create_app() -> FastAPI:
 
     # Repository Discovery Endpoint
     @app.get("/api/repos/discover", response_model=RepositoryDiscoveryResponse)
-    async def discover_repositories(
+    def discover_repositories(
         source: str,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
@@ -5403,7 +5403,7 @@ def create_app() -> FastAPI:
             )
 
             # Discover matching repositories
-            discovery_response = await discovery_service.discover_repositories(
+            discovery_response = discovery_service.discover_repositories(
                 repo_url=source,
                 user=current_user,
             )
@@ -5438,7 +5438,7 @@ def create_app() -> FastAPI:
     # NOTE: Moved generic {user_alias} route after specific routes to avoid path conflicts
 
     @app.put("/api/repos/{user_alias}/sync", response_model=RepositorySyncResponse)
-    async def sync_repository(
+    def sync_repository(
         user_alias: str,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
@@ -5497,7 +5497,7 @@ def create_app() -> FastAPI:
     @app.post(
         "/api/repos/sync", response_model=RepositorySyncJobResponse, status_code=202
     )
-    async def sync_repository_general(
+    def sync_repository_general(
         sync_request: GeneralRepositorySyncRequest,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
@@ -5784,7 +5784,7 @@ def create_app() -> FastAPI:
     @app.get(
         "/api/repos/{user_alias}/branches", response_model=RepositoryBranchesResponse
     )
-    async def list_repository_branches(
+    def list_repository_branches(
         user_alias: str,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
@@ -5853,7 +5853,7 @@ def create_app() -> FastAPI:
     # NOTE: Routes moved before generic {user_alias} route to avoid path conflicts
 
     @app.get("/api/repos/golden/{alias}", response_model=RepositoryDetailsResponse)
-    async def get_golden_repository_details(
+    def get_golden_repository_details(
         alias: str,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
@@ -5895,7 +5895,7 @@ def create_app() -> FastAPI:
             )
 
     @app.get("/api/repos/golden/{alias}/branches")
-    async def list_golden_repository_branches(
+    def list_golden_repository_branches(
         alias: str,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
@@ -5928,7 +5928,7 @@ def create_app() -> FastAPI:
                 )
 
             # Get branch information
-            branches = await golden_repo_manager.get_golden_repo_branches(alias)
+            branches = golden_repo_manager.get_golden_repo_branches(alias)
 
             # Find default branch
             default_branch = None
@@ -5967,7 +5967,7 @@ def create_app() -> FastAPI:
             )
 
     @app.post("/api/query")
-    async def semantic_query(
+    def semantic_query(
         request: SemanticQueryRequest,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
@@ -6277,8 +6277,8 @@ def create_app() -> FastAPI:
                     semantic_dicts = [r.model_dump() for r in semantic_results_list]
 
                 # Apply payload truncation for consistency with MCP handlers
-                truncated_fts = await _apply_rest_fts_truncation(fts_dicts)
-                truncated_semantic = await _apply_rest_semantic_truncation(
+                truncated_fts = _apply_rest_fts_truncation(fts_dicts)
+                truncated_semantic = _apply_rest_semantic_truncation(
                     semantic_dicts
                 )
 
@@ -6341,7 +6341,7 @@ def create_app() -> FastAPI:
                 results["total_results"] = len(results["results"])
 
             # Apply payload truncation for consistency with MCP handlers
-            truncated_results = await _apply_rest_semantic_truncation(
+            truncated_results = _apply_rest_semantic_truncation(
                 results["results"]
             )
 
@@ -6402,7 +6402,7 @@ def create_app() -> FastAPI:
             )
 
     @app.get("/api/repositories/{repo_id}")
-    async def get_repository_details_v2(
+    def get_repository_details_v2(
         repo_id: str,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
@@ -6743,7 +6743,7 @@ def create_app() -> FastAPI:
             )
 
     @app.get("/api/repositories/{repo_id}/branches", response_model=BranchListResponse)
-    async def list_repository_branches_v2(
+    def list_repository_branches_v2(
         repo_id: str,
         include_remote: bool = False,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
@@ -6875,7 +6875,7 @@ def create_app() -> FastAPI:
         response_model=RepositorySyncJobResponse,
         status_code=202,
     )
-    async def sync_repository_v2(
+    def sync_repository_v2(
         repo_id: str,
         sync_request: Optional[RepositorySyncRequest] = None,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
@@ -7054,7 +7054,7 @@ def create_app() -> FastAPI:
     @app.get(
         "/api/repositories/{repo_id}/stats", response_model=RepositoryStatsResponse
     )
-    async def get_repository_stats(
+    def get_repository_stats(
         repo_id: str,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
@@ -7089,7 +7089,7 @@ def create_app() -> FastAPI:
 
     # File Listing Endpoint
     @app.get("/api/repositories/{repo_id}/files")
-    async def list_repository_files(
+    def list_repository_files(
         repo_id: str,
         page: int = 1,
         limit: int = 50,
@@ -7243,7 +7243,7 @@ def create_app() -> FastAPI:
     @app.post(
         "/api/repositories/{repo_id}/search", response_model=SemanticSearchResponse
     )
-    async def search_repository(
+    def search_repository(
         repo_id: str,
         search_request: SemanticSearchRequest,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
@@ -7277,7 +7277,7 @@ def create_app() -> FastAPI:
 
     # Health Check Endpoint
     @app.get("/api/system/health", response_model=HealthCheckResponse)
-    async def get_system_health(
+    def get_system_health(
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
         """
@@ -7301,7 +7301,7 @@ def create_app() -> FastAPI:
 
     # Repository Available Endpoint - must be defined BEFORE generic {user_alias} route
     @app.get("/api/repos/available", response_model=AvailableRepositoryListResponse)
-    async def list_available_repositories(
+    def list_available_repositories(
         search: Optional[str] = None,
         repo_status: Optional[str] = None,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
@@ -7374,7 +7374,7 @@ def create_app() -> FastAPI:
 
     # Repository Status Endpoint - must be defined BEFORE generic {user_alias} route
     @app.get("/api/repos/status", response_model=RepositoryStatusSummary)
-    async def get_repository_status_summary(
+    def get_repository_status_summary(
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
         """
@@ -7522,7 +7522,7 @@ def create_app() -> FastAPI:
 
     # Repository Information Endpoint (Story 6) - generic route MUST be last
     @app.get("/api/repos/{user_alias}")
-    async def get_repository_info(
+    def get_repository_info(
         user_alias: str,
         branches: Optional[bool] = Query(
             False, description="Include branch information"
@@ -7824,7 +7824,7 @@ def create_app() -> FastAPI:
 
     # RFC 8414 compliance: OAuth discovery at root level for Claude.ai compatibility
     @app.get("/.well-known/oauth-authorization-server")
-    async def root_oauth_discovery():
+    def root_oauth_discovery():
         """OAuth 2.1 discovery endpoint at root path (RFC 8414 compliance)."""
         from pathlib import Path
         from .auth.oauth.oauth_manager import OAuthManager
@@ -7836,7 +7836,7 @@ def create_app() -> FastAPI:
 
     # RFC 9728 compliance: OAuth Protected Resource Metadata
     @app.get("/.well-known/oauth-protected-resource")
-    async def oauth_protected_resource_metadata():
+    def oauth_protected_resource_metadata():
         """OAuth 2.0 Protected Resource Metadata endpoint (RFC 9728 compliance)."""
         issuer_url = os.getenv("CIDX_ISSUER_URL", "http://localhost:8000")
 
@@ -7850,7 +7850,7 @@ def create_app() -> FastAPI:
 
     # Favicon redirect
     @app.get("/favicon.ico")
-    async def favicon():
+    def favicon():
         """Redirect favicon.ico to admin static files."""
         from fastapi.responses import RedirectResponse
 

@@ -74,9 +74,12 @@ class MultiSearchService:
         self.thread_executor = ThreadPoolExecutor(max_workers=config.max_workers)
         self._shutdown = False
 
-    async def search(self, request: MultiSearchRequest) -> MultiSearchResponse:
+    def search(self, request: MultiSearchRequest) -> MultiSearchResponse:
         """
         Execute search across multiple repositories.
+
+        Story #51: Converted from async to sync for FastAPI thread pool execution.
+        Internal ThreadPoolExecutor is retained for parallel multi-repo search.
 
         Args:
             request: Multi-search request with repositories, query, and search type
@@ -88,9 +91,9 @@ class MultiSearchService:
 
         # Route to appropriate search strategy
         if request.search_type == "regex":
-            response = await self._search_regex_subprocess(request)
+            response = self._search_regex_subprocess(request)
         else:
-            response = await self._search_threaded(request)
+            response = self._search_threaded(request)
 
         # Calculate execution time
         execution_time_ms = int((time.time() - start_time) * 1000)
@@ -98,11 +101,13 @@ class MultiSearchService:
 
         return response
 
-    async def _search_threaded(
+    def _search_threaded(
         self, request: MultiSearchRequest
     ) -> MultiSearchResponse:
         """
         Execute search using ThreadPoolExecutor (semantic, FTS, temporal).
+
+        Story #51: Converted from async to sync for FastAPI thread pool execution.
 
         Args:
             request: Multi-search request
@@ -110,15 +115,17 @@ class MultiSearchService:
         Returns:
             MultiSearchResponse with aggregated results
         """
-        return await self._execute_parallel_search(
+        return self._execute_parallel_search(
             request, self._search_single_repo_sync
         )
 
-    async def _search_regex_subprocess(
+    def _search_regex_subprocess(
         self, request: MultiSearchRequest
     ) -> MultiSearchResponse:
         """
         Execute regex search in isolated subprocesses (ReDoS protection).
+
+        Story #51: Converted from async to sync for FastAPI thread pool execution.
 
         Each repository search runs in a separate subprocess to protect the server
         from potentially malicious regex patterns that could cause ReDoS attacks.
@@ -129,15 +136,18 @@ class MultiSearchService:
         Returns:
             MultiSearchResponse with aggregated results
         """
-        return await self._execute_parallel_search(
+        return self._execute_parallel_search(
             request, self._search_single_repo_subprocess
         )
 
-    async def _execute_parallel_search(
+    def _execute_parallel_search(
         self, request: MultiSearchRequest, search_func
     ) -> MultiSearchResponse:
         """
         Execute parallel search across repositories using provided search function.
+
+        Story #51: Converted from async to sync for FastAPI thread pool execution.
+        ThreadPoolExecutor is used internally for parallel multi-repo search.
 
         Extracts common logic for threaded and subprocess searches.
 

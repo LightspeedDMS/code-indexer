@@ -56,8 +56,7 @@ class TestListAPIKeysHandler:
         ]
         return manager
 
-    @pytest.mark.asyncio
-    async def test_list_api_keys_returns_success_true(
+    def test_list_api_keys_returns_success_true(
         self, normal_user, mock_user_manager
     ):
         """list_api_keys handler returns success=True on valid call."""
@@ -67,15 +66,14 @@ class TestListAPIKeysHandler:
             mock_app.user_manager = mock_user_manager
 
             handler = HANDLER_REGISTRY["list_api_keys"]
-            result = await handler({}, normal_user)
+            result = handler({}, normal_user)
 
             # Parse MCP response format
             assert "content" in result
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    @pytest.mark.asyncio
-    async def test_list_api_keys_returns_keys_array(
+    def test_list_api_keys_returns_keys_array(
         self, normal_user, mock_user_manager
     ):
         """list_api_keys handler returns keys array."""
@@ -85,7 +83,7 @@ class TestListAPIKeysHandler:
             mock_app.user_manager = mock_user_manager
 
             handler = HANDLER_REGISTRY["list_api_keys"]
-            result = await handler({}, normal_user)
+            result = handler({}, normal_user)
 
             content = json.loads(result["content"][0]["text"])
             assert "keys" in content
@@ -107,8 +105,7 @@ class TestCreateAPIKeyHandler:
         manager.generate_key.return_value = ("cidx_sk_full_key_value", "key-uuid-123")
         return manager
 
-    @pytest.mark.asyncio
-    async def test_create_api_key_returns_success(
+    def test_create_api_key_returns_success(
         self, normal_user, mock_api_key_manager
     ):
         """create_api_key handler returns success on valid creation."""
@@ -118,13 +115,12 @@ class TestCreateAPIKeyHandler:
             mock_app.api_key_manager = mock_api_key_manager
 
             handler = HANDLER_REGISTRY["create_api_key"]
-            result = await handler({"description": "Test key"}, normal_user)
+            result = handler({"description": "Test key"}, normal_user)
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    @pytest.mark.asyncio
-    async def test_create_api_key_returns_key_id(
+    def test_create_api_key_returns_key_id(
         self, normal_user, mock_api_key_manager
     ):
         """create_api_key handler returns key_id."""
@@ -134,13 +130,12 @@ class TestCreateAPIKeyHandler:
             mock_app.api_key_manager = mock_api_key_manager
 
             handler = HANDLER_REGISTRY["create_api_key"]
-            result = await handler({}, normal_user)
+            result = handler({}, normal_user)
 
             content = json.loads(result["content"][0]["text"])
             assert "key_id" in content
 
-    @pytest.mark.asyncio
-    async def test_create_api_key_returns_full_api_key(
+    def test_create_api_key_returns_full_api_key(
         self, normal_user, mock_api_key_manager
     ):
         """create_api_key handler returns full api_key (one-time display)."""
@@ -150,7 +145,7 @@ class TestCreateAPIKeyHandler:
             mock_app.api_key_manager = mock_api_key_manager
 
             handler = HANDLER_REGISTRY["create_api_key"]
-            result = await handler({}, normal_user)
+            result = handler({}, normal_user)
 
             content = json.loads(result["content"][0]["text"])
             assert "api_key" in content
@@ -171,8 +166,7 @@ class TestDeleteAPIKeyHandler:
         manager.delete_api_key.return_value = True
         return manager
 
-    @pytest.mark.asyncio
-    async def test_delete_api_key_returns_success(
+    def test_delete_api_key_returns_success(
         self, normal_user, mock_user_manager
     ):
         """delete_api_key handler returns success=True on valid deletion."""
@@ -182,16 +176,15 @@ class TestDeleteAPIKeyHandler:
             mock_app.user_manager = mock_user_manager
 
             handler = HANDLER_REGISTRY["delete_api_key"]
-            result = await handler({"key_id": "key-123"}, normal_user)
+            result = handler({"key_id": "key-123"}, normal_user)
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    @pytest.mark.asyncio
-    async def test_delete_api_key_missing_key_id_fails(self, normal_user):
+    def test_delete_api_key_missing_key_id_fails(self, normal_user):
         """delete_api_key handler fails when key_id is missing."""
         handler = HANDLER_REGISTRY["delete_api_key"]
-        result = await handler({}, normal_user)
+        result = handler({}, normal_user)
 
         content = json.loads(result["content"][0]["text"])
         assert content["success"] is False

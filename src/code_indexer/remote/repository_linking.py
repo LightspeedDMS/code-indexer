@@ -131,7 +131,7 @@ class ExactBranchMatcher:
         self.fallback_matcher: Optional[BranchFallbackMatcher] = None
         self.auto_activator: Optional[AutoRepositoryActivator] = None
 
-    async def find_exact_branch_match(
+    def find_exact_branch_match(
         self, local_repo_path: Path, repo_url: str
     ) -> Optional[RepositoryLink]:
         """Find repository with exact branch match for local repository.
@@ -163,7 +163,7 @@ class ExactBranchMatcher:
 
             # Discover remote repositories
             try:
-                discovery_response = await self.repository_client.discover_repositories(
+                discovery_response = self.repository_client.discover_repositories(
                     repo_url
                 )
             except RepositoryNotFoundError as e:
@@ -182,7 +182,7 @@ class ExactBranchMatcher:
                 )
 
                 # Try fallback matching if exact matching fails
-                fallback_result = await self._try_fallback_matching(
+                fallback_result = self._try_fallback_matching(
                     local_repo_path, discovery_response
                 )
                 if fallback_result:
@@ -210,7 +210,7 @@ class ExactBranchMatcher:
                 )
 
                 best_golden = golden_matches[0]  # First golden repo (highest priority)
-                auto_activated_link = await self._try_auto_activation(
+                auto_activated_link = self._try_auto_activation(
                     best_golden, local_repo_path
                 )
 
@@ -382,7 +382,7 @@ class ExactBranchMatcher:
 
         return best_match
 
-    async def _try_fallback_matching(
+    def _try_fallback_matching(
         self, local_repo_path: Path, discovery_response: ClientDiscoveryResponse
     ) -> Optional[RepositoryLink]:
         """Try fallback branch matching when exact matching fails.
@@ -428,7 +428,7 @@ class ExactBranchMatcher:
                         # Set the branch to the fallback branch found
                         golden_repo_match.branch = fallback_result.branch
 
-                        auto_activated_link = await self._try_auto_activation(
+                        auto_activated_link = self._try_auto_activation(
                             golden_repo_match, local_repo_path
                         )
 
@@ -455,7 +455,7 @@ class ExactBranchMatcher:
             logger.warning(f"Fallback matching error: {e}")
             return None
 
-    async def _try_auto_activation(
+    def _try_auto_activation(
         self, golden_repo: RepositoryMatch, local_repo_path: Path
     ) -> Optional[RepositoryLink]:
         """Try auto-activation of golden repository when only golden repositories match.
@@ -473,7 +473,7 @@ class ExactBranchMatcher:
                 self.auto_activator = AutoRepositoryActivator(self.repository_client)
 
             # Attempt auto-activation
-            activated_repo = await self.auto_activator.auto_activate_golden_repository(
+            activated_repo = self.auto_activator.auto_activate_golden_repository(
                 golden_repo, local_repo_path
             )
 
@@ -778,7 +778,7 @@ class AutoRepositoryActivator:
         """
         self.repository_client = repository_client
 
-    async def auto_activate_golden_repository(
+    def auto_activate_golden_repository(
         self, golden_repo: RepositoryMatch, project_context: Path
     ) -> ActivatedRepository:
         """Automatically activate a golden repository for user access.
@@ -799,7 +799,7 @@ class AutoRepositoryActivator:
             base_alias = self._generate_user_alias(golden_repo, project_context)
 
             # Ensure alias uniqueness across user's activated repositories
-            user_alias = await self._ensure_unique_alias(base_alias)
+            user_alias = self._ensure_unique_alias(base_alias)
 
             # Confirm activation with user
             if not self._confirm_activation(golden_repo, user_alias):
@@ -811,7 +811,7 @@ class AutoRepositoryActivator:
             logger.info(
                 f"Auto-activating golden repository: {golden_repo.alias} -> {user_alias}"
             )
-            activated_repo = await self.repository_client.activate_repository(
+            activated_repo = self.repository_client.activate_repository(
                 golden_repo.alias, golden_repo.branch, user_alias
             )
 
@@ -908,7 +908,7 @@ class AutoRepositoryActivator:
         # Combine prefix and remaining parts
         return prefix_parts + remaining_parts
 
-    async def _ensure_unique_alias(self, base_alias: str) -> str:
+    def _ensure_unique_alias(self, base_alias: str) -> str:
         """Ensure alias uniqueness across user's activated repositories.
 
         Args:
@@ -919,7 +919,7 @@ class AutoRepositoryActivator:
         """
         try:
             # Get existing activated repositories
-            existing_repos = await self.repository_client.list_user_repositories()
+            existing_repos = self.repository_client.list_user_repositories()
             existing_aliases = {repo.user_alias for repo in existing_repos}
 
             # Generate timestamped alias

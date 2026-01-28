@@ -50,7 +50,7 @@ class TestMultiSearchServiceThreadedExecution:
 
             # This will fail until implementation exists
             try:
-                response = await service.search(request)
+                response = service.search(request)
                 # Should have submitted 2 tasks (one per repo)
                 assert mock_submit.call_count == 2
             except AttributeError:
@@ -73,7 +73,7 @@ class TestMultiSearchServiceThreadedExecution:
 
         # This will fail until implementation exists
         try:
-            response = await service.search(request)
+            response = service.search(request)
             assert response.metadata.total_repos_searched >= 0
         except (AttributeError, NotImplementedError):
             pytest.fail("MultiSearchService.search() for FTS not implemented")
@@ -95,7 +95,7 @@ class TestMultiSearchServiceThreadedExecution:
 
         # This will fail until implementation exists
         try:
-            response = await service.search(request)
+            response = service.search(request)
             assert response.metadata.total_repos_searched >= 0
         except (AttributeError, NotImplementedError):
             pytest.fail("MultiSearchService.search() for temporal not implemented")
@@ -132,7 +132,7 @@ class TestMultiSearchServiceSubprocessExecution:
 
         # This will fail until subprocess implementation exists
         try:
-            response = await service.search(request)
+            response = service.search(request)
             # Regex should NOT use thread pool (uses subprocess instead)
             assert response.metadata.total_repos_searched >= 0
         except (AttributeError, NotImplementedError):
@@ -155,7 +155,7 @@ class TestMultiSearchServiceSubprocessExecution:
 
         # This will fail until subprocess implementation exists
         try:
-            response = await service.search(request)
+            response = service.search(request)
             # Each repo should execute in separate subprocess
             # Server should remain responsive even if regex causes issues
             assert response is not None
@@ -184,7 +184,7 @@ class TestMultiSearchServiceTimeoutEnforcement:
         # Mock slow repository that exceeds timeout
         # This will fail until timeout implementation exists
         try:
-            response = await service.search(request)
+            response = service.search(request)
             # Should have error for timed out repo
             if response.errors:
                 assert "timeout" in response.errors.get("slow_repo1", "").lower()
@@ -208,7 +208,7 @@ class TestMultiSearchServiceTimeoutEnforcement:
 
         # This will fail until subprocess timeout implementation exists
         try:
-            response = await service.search(request)
+            response = service.search(request)
             # Should timeout and return error
             if response.errors:
                 assert "timeout" in response.errors.get("slow_repo1", "").lower()
@@ -246,7 +246,7 @@ class TestMultiSearchServicePartialFailures:
 
         # This will fail until partial failure handling exists
         try:
-            response = await service.search(request)
+            response = service.search(request)
             # Should have results from good_repo even if bad_repo failed
             assert "good_repo" in response.results or "bad_repo" in response.errors
         except (AttributeError, NotImplementedError):
@@ -269,7 +269,7 @@ class TestMultiSearchServicePartialFailures:
 
         # This will fail until error handling exists
         try:
-            response = await service.search(request)
+            response = service.search(request)
             assert response.metadata.total_results == 0
             assert len(response.errors) > 0
         except (AttributeError, NotImplementedError):
@@ -292,7 +292,7 @@ class TestMultiSearchServicePartialFailures:
 
         # This will fail until error tracking exists
         try:
-            response = await service.search(request)
+            response = service.search(request)
             if response.errors:
                 assert "nonexistent_repo" in response.errors
         except (AttributeError, NotImplementedError):
@@ -319,7 +319,7 @@ class TestMultiSearchServiceActionableErrors:
 
         # This will fail until actionable error messages exist
         try:
-            response = await service.search(request)
+            response = service.search(request)
             if response.errors:
                 # Error should include recommendations like:
                 # - Reduce repositories from N to M
@@ -348,7 +348,7 @@ class TestMultiSearchServiceActionableErrors:
 
         # This will fail until timeout tracking exists
         try:
-            response = await service.search(request)
+            response = service.search(request)
             # Should clearly distinguish timed out vs completed repos
             if response.errors:
                 for repo_id in response.errors:
@@ -377,7 +377,7 @@ class TestMultiSearchServiceIntegration:
 
         # This will fail until aggregator integration exists
         try:
-            response = await service.search(request)
+            response = service.search(request)
             # Results should include repository field (from aggregator)
             if response.results.get("repo1"):
                 for result in response.results["repo1"]:
@@ -402,7 +402,7 @@ class TestMultiSearchServiceIntegration:
 
         # This will fail until limit enforcement exists
         try:
-            response = await service.search(request)
+            response = service.search(request)
             # Each repo should have at most 3 results
             for repo_id, results in response.results.items():
                 assert len(results) <= 3

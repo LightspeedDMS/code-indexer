@@ -12,7 +12,7 @@ Follows TDD: Tests written FIRST to define expected behavior.
 import json
 from datetime import datetime
 from typing import cast
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock, Mock
 import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -38,9 +38,9 @@ def mock_user():
 
 @pytest.fixture
 def mock_payload_cache():
-    """Create configured mock payload cache."""
-    cache = AsyncMock()
-    cache.store = AsyncMock(return_value="cache-handle-diff-123")
+    """Create configured mock payload cache (sync after Epic #48)."""
+    cache = MagicMock()
+    cache.store = Mock(return_value="cache-handle-diff-123")
     cache.config = MagicMock()
     cache.config.max_fetch_size_chars = MAX_FETCH_SIZE_CHARS
     return cache
@@ -125,8 +125,7 @@ def _mock_config_service(token_limit):
 class TestGitDiffTruncationWithCacheHandle:
     """Test git_diff handler truncation with cache_handle support."""
 
-    @pytest.mark.asyncio
-    async def test_large_diff_returns_cache_handle(
+    def test_large_diff_returns_cache_handle(
         self, mock_user, mock_payload_cache
     ):
         """Verify large diff returns cache_handle when truncated.
@@ -166,7 +165,7 @@ class TestGitDiffTruncationWithCacheHandle:
                 _mock_config_service(LOW_TOKEN_LIMIT)
             )
 
-            result = await handlers.handle_git_diff(
+            result = handlers.handle_git_diff(
                 {
                     "repository_alias": "test-repo",
                     "from_revision": "abc123",
@@ -185,8 +184,7 @@ class TestGitDiffTruncationWithCacheHandle:
             assert data.get("preview_tokens") > 0
             assert data.get("total_pages") >= 1
 
-    @pytest.mark.asyncio
-    async def test_small_diff_no_truncation(self, mock_user, mock_payload_cache):
+    def test_small_diff_no_truncation(self, mock_user, mock_payload_cache):
         """Verify small diff returns no cache_handle when not truncated.
 
         Story #34 AC2: Small diffs that fit within token limit should not be
@@ -224,7 +222,7 @@ class TestGitDiffTruncationWithCacheHandle:
                 _mock_config_service(HIGH_TOKEN_LIMIT)
             )
 
-            result = await handlers.handle_git_diff(
+            result = handlers.handle_git_diff(
                 {
                     "repository_alias": "test-repo",
                     "from_revision": "abc123",
@@ -240,8 +238,7 @@ class TestGitDiffTruncationWithCacheHandle:
             assert data.get("truncated") is False
             mock_payload_cache.store.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_diff_response_contains_truncation_fields(
+    def test_diff_response_contains_truncation_fields(
         self, mock_user, mock_payload_cache
     ):
         """Verify all required truncation fields are in response.
@@ -279,7 +276,7 @@ class TestGitDiffTruncationWithCacheHandle:
                 _mock_config_service(LOW_TOKEN_LIMIT)
             )
 
-            result = await handlers.handle_git_diff(
+            result = handlers.handle_git_diff(
                 {
                     "repository_alias": "test-repo",
                     "from_revision": "abc123",
@@ -309,8 +306,7 @@ class TestGitDiffTruncationWithCacheHandle:
             for field in required_fields:
                 assert field in data, f"Missing required field: {field}"
 
-    @pytest.mark.asyncio
-    async def test_diff_stores_serialized_json_in_cache(
+    def test_diff_stores_serialized_json_in_cache(
         self, mock_user, mock_payload_cache
     ):
         """Verify full diff is serialized to JSON and stored in cache.
@@ -348,7 +344,7 @@ class TestGitDiffTruncationWithCacheHandle:
                 _mock_config_service(LOW_TOKEN_LIMIT)
             )
 
-            await handlers.handle_git_diff(
+            handlers.handle_git_diff(
                 {
                     "repository_alias": "test-repo",
                     "from_revision": "abc123",
@@ -366,8 +362,7 @@ class TestGitDiffTruncationWithCacheHandle:
             assert "from_revision" in stored_data
             assert "to_revision" in stored_data
 
-    @pytest.mark.asyncio
-    async def test_diff_no_cache_when_payload_cache_unavailable(self, mock_user):
+    def test_diff_no_cache_when_payload_cache_unavailable(self, mock_user):
         """Verify diff returns without truncation when cache is unavailable.
 
         Story #34 AC5: Graceful handling when payload_cache is None.
@@ -404,7 +399,7 @@ class TestGitDiffTruncationWithCacheHandle:
                 _mock_config_service(LOW_TOKEN_LIMIT)
             )
 
-            result = await handlers.handle_git_diff(
+            result = handlers.handle_git_diff(
                 {
                     "repository_alias": "test-repo",
                     "from_revision": "abc123",
@@ -419,8 +414,7 @@ class TestGitDiffTruncationWithCacheHandle:
             assert data.get("cache_handle") is None
             assert data.get("truncated") is False
 
-    @pytest.mark.asyncio
-    async def test_diff_preserves_backward_compatibility(
+    def test_diff_preserves_backward_compatibility(
         self, mock_user, mock_payload_cache
     ):
         """Verify existing response fields are preserved.
@@ -458,7 +452,7 @@ class TestGitDiffTruncationWithCacheHandle:
                 _mock_config_service(HIGH_TOKEN_LIMIT)
             )
 
-            result = await handlers.handle_git_diff(
+            result = handlers.handle_git_diff(
                 {
                     "repository_alias": "test-repo",
                     "from_revision": "abc123",
@@ -491,8 +485,7 @@ class TestGitDiffTruncationWithCacheHandle:
 class TestGitDiffTruncationHelperIntegration:
     """Test git_diff handler's integration with TruncationHelper."""
 
-    @pytest.mark.asyncio
-    async def test_uses_truncation_helper_with_diff_content_type(
+    def test_uses_truncation_helper_with_diff_content_type(
         self, mock_user, mock_payload_cache
     ):
         """Verify TruncationHelper is called with content_type='diff'.
@@ -544,13 +537,13 @@ class TestGitDiffTruncationHelperIntegration:
                 total_pages=5,
                 has_more=True,
             )
-            mock_truncation_helper = AsyncMock()
-            mock_truncation_helper.truncate_and_cache = AsyncMock(
+            mock_truncation_helper = MagicMock()
+            mock_truncation_helper.truncate_and_cache = Mock(
                 return_value=mock_truncation_result
             )
             mock_truncation_helper_class.return_value = mock_truncation_helper
 
-            await handlers.handle_git_diff(
+            handlers.handle_git_diff(
                 {
                     "repository_alias": "test-repo",
                     "from_revision": "abc123",

@@ -17,6 +17,32 @@ import pytest
 from unittest.mock import MagicMock, Mock, patch
 
 
+@pytest.fixture
+def mock_json_registry():
+    """
+    Fixture that patches get_server_global_registry to return a JSON-based
+    GlobalRegistry instead of SQLite-based.
+
+    This avoids the need for SQLite schema initialization in unit tests that
+    only need to test temporal parameter passing, not actual database operations.
+
+    Note: The function is imported inside __init__ methods using lazy import,
+    so we only need to patch it at the source (registry_factory module).
+    """
+    from code_indexer.global_repos.global_registry import GlobalRegistry
+
+    def create_json_registry(golden_repos_dir, server_data_dir=None):
+        """Create a JSON-based GlobalRegistry (no SQLite)."""
+        return GlobalRegistry(golden_repos_dir, use_sqlite=False)
+
+    # Patch at the source - the registry_factory module
+    with patch(
+        "code_indexer.server.utils.registry_factory.get_server_global_registry",
+        side_effect=create_json_registry,
+    ):
+        yield
+
+
 class TestMCPToolsTemporalSchema:
     """Test that add_golden_repo tool schema includes temporal parameters."""
 
@@ -120,8 +146,7 @@ class TestMCPToolsTemporalSchema:
 class TestMCPHandlersTemporalPassing:
     """Test that add_golden_repo handler passes temporal parameters to GoldenRepoManager."""
 
-    @pytest.mark.asyncio
-    async def test_add_golden_repo_handler_passes_enable_temporal(self):
+    def test_add_golden_repo_handler_passes_enable_temporal(self):
         """
         Test that add_golden_repo handler extracts and passes enable_temporal parameter.
 
@@ -144,7 +169,7 @@ class TestMCPHandlersTemporalPassing:
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.golden_repo_manager.add_golden_repo.return_value = "job-123"
 
-            await add_golden_repo(params, user)
+            add_golden_repo(params, user)
 
             # Verify enable_temporal was passed
             call_kwargs = mock_app.golden_repo_manager.add_golden_repo.call_args
@@ -162,8 +187,7 @@ class TestMCPHandlersTemporalPassing:
                     for k, v in (call_kwargs.kwargs or {}).items()
                 ), "enable_temporal=True not passed to GoldenRepoManager"
 
-    @pytest.mark.asyncio
-    async def test_add_golden_repo_handler_passes_temporal_options(self):
+    def test_add_golden_repo_handler_passes_temporal_options(self):
         """
         Test that add_golden_repo handler extracts and passes temporal_options parameter.
 
@@ -193,7 +217,7 @@ class TestMCPHandlersTemporalPassing:
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.golden_repo_manager.add_golden_repo.return_value = "job-123"
 
-            await add_golden_repo(params, user)
+            add_golden_repo(params, user)
 
             # Verify temporal_options was passed
             call_kwargs = mock_app.golden_repo_manager.add_golden_repo.call_args
@@ -205,8 +229,7 @@ class TestMCPHandlersTemporalPassing:
                     passed_options == temporal_options
                 ), f"temporal_options not passed correctly. Expected {temporal_options}, got {passed_options}"
 
-    @pytest.mark.asyncio
-    async def test_add_golden_repo_handler_defaults_enable_temporal_to_false(self):
+    def test_add_golden_repo_handler_defaults_enable_temporal_to_false(self):
         """
         Test that enable_temporal defaults to False when not provided (backward compatibility).
 
@@ -228,7 +251,7 @@ class TestMCPHandlersTemporalPassing:
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.golden_repo_manager.add_golden_repo.return_value = "job-123"
 
-            await add_golden_repo(params, user)
+            add_golden_repo(params, user)
 
             call_kwargs = mock_app.golden_repo_manager.add_golden_repo.call_args
             if call_kwargs.kwargs:
@@ -352,7 +375,9 @@ class TestGlobalRegistryTemporalStorage:
 class TestGlobalActivatorTemporalPassing:
     """Test that GlobalActivator passes temporal settings to GlobalRegistry."""
 
-    def test_activate_golden_repo_passes_enable_temporal(self, tmp_path):
+    def test_activate_golden_repo_passes_enable_temporal(
+        self, tmp_path, mock_json_registry
+    ):
         """
         Test that activate_golden_repo passes enable_temporal to registry.
 
@@ -380,7 +405,9 @@ class TestGlobalActivatorTemporalPassing:
         assert repo is not None
         assert repo.get("enable_temporal") is True
 
-    def test_activate_golden_repo_passes_temporal_options(self, tmp_path):
+    def test_activate_golden_repo_passes_temporal_options(
+        self, tmp_path, mock_json_registry
+    ):
         """
         Test that activate_golden_repo passes temporal_options to registry.
         """
@@ -412,7 +439,9 @@ class TestGlobalActivatorTemporalPassing:
 class TestRefreshSchedulerTemporalCommand:
     """Test that RefreshScheduler uses temporal settings from registry during refresh."""
 
-    def test_create_new_index_uses_temporal_flags_when_enabled(self, tmp_path):
+    def test_create_new_index_uses_temporal_flags_when_enabled(
+        self, tmp_path, mock_json_registry
+    ):
         """
         Test that _create_new_index runs TWO separate commands when enable_temporal=True:
         1. cidx index --fts (semantic + FTS)
@@ -499,7 +528,9 @@ class TestRefreshSchedulerTemporalCommand:
             "--fts" not in temporal_cmd
         ), f"Second command should NOT have --fts: {temporal_cmd}"
 
-    def test_create_new_index_includes_temporal_options(self, tmp_path):
+    def test_create_new_index_includes_temporal_options(
+        self, tmp_path, mock_json_registry
+    ):
         """
         Test that _create_new_index includes --max-commits, --since-date, --diff-context
         in the SECOND command (temporal command), not in the first (semantic+FTS).
@@ -585,7 +616,9 @@ class TestRefreshSchedulerTemporalCommand:
         assert "--diff-context" in temporal_cmd
         assert "8" in temporal_cmd
 
-    def test_create_new_index_no_temporal_flags_when_disabled(self, tmp_path):
+    def test_create_new_index_no_temporal_flags_when_disabled(
+        self, tmp_path, mock_json_registry
+    ):
         """
         Test that _create_new_index runs ONLY ONE command when enable_temporal=False.
         Only semantic+FTS indexing, no temporal indexing command.
@@ -668,8 +701,7 @@ class TestRefreshSchedulerTemporalCommand:
 class TestDiscoverRepositoriesTemporalOutput:
     """Test that discover_repositories returns temporal settings."""
 
-    @pytest.mark.asyncio
-    async def test_discover_repositories_includes_temporal_fields(self):
+    def test_discover_repositories_includes_temporal_fields(self):
         """
         Test that discover_repositories response includes enable_temporal and temporal_options.
 
@@ -697,7 +729,7 @@ class TestDiscoverRepositoriesTemporalOutput:
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.golden_repo_manager.list_golden_repos.return_value = mock_repos
 
-            result = await discover_repositories({}, user)
+            result = discover_repositories({}, user)
 
             response_data = json.loads(result["content"][0]["text"])
 
@@ -714,8 +746,7 @@ class TestDiscoverRepositoriesTemporalOutput:
 class TestGetRepositoryStatusTemporalOutput:
     """Test that get_repository_status returns temporal settings."""
 
-    @pytest.mark.asyncio
-    async def test_get_repository_status_includes_temporal_fields(self):
+    def test_get_repository_status_includes_temporal_fields(self):
         """
         Test that get_repository_status includes enable_temporal and temporal_options.
 
@@ -747,8 +778,10 @@ class TestGetRepositoryStatusTemporalOutput:
                 mock_status
             )
 
-            result = await get_repository_status(
-                {"user_alias": "test-repo-global"}, user
+            # Use non-global alias to test the activated repository code path
+            # that calls repository_listing_manager.get_repository_details
+            result = get_repository_status(
+                {"repository_alias": "test-repo"}, user
             )
 
             response_data = json.loads(result["content"][0]["text"])

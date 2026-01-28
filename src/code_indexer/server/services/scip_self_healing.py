@@ -66,7 +66,7 @@ class SCIPSelfHealingService:
         self.repo_root = repo_root
         self.resolution_queue = resolution_queue
 
-    async def handle_scip_failure(
+    def handle_scip_failure(
         self,
         job_id: str,
         generation_result: GenerationResult,
@@ -450,7 +450,7 @@ Status values:
             extra={"correlation_id": get_correlation_id()},
         )
 
-        scip_success = await self._retry_scip_for_project(job_id, project_path)
+        scip_success = self._retry_scip_for_project(job_id, project_path)
 
         with self.job_manager._lock:
             job = self.job_manager.jobs.get(job_id)
@@ -531,7 +531,7 @@ Status values:
             )
             self.job_manager._persist_jobs()
 
-    async def _retry_scip_for_project(self, job_id: str, project_path: str) -> bool:
+    def _retry_scip_for_project(self, job_id: str, project_path: str) -> bool:
         """
         Retry SCIP indexing for a specific project only.
 
@@ -705,7 +705,7 @@ Status values:
             "unresolvable_projects": unresolvable_projects,
         }
 
-    async def determine_job_completion(self, job_id: str) -> JobStatus:
+    def determine_job_completion(self, job_id: str) -> JobStatus:
         """
         Determine final job status based on per-project resolution results.
 
@@ -789,7 +789,7 @@ Status values:
 
             # Story #659 Priority 4: Trigger PR creation on successful resolution
             if final_status == JobStatus.COMPLETED and resolved > 0:
-                await self._trigger_pr_creation(job_id, job, resolved, total_projects)
+                self._trigger_pr_creation(job_id, job, resolved, total_projects)
 
             return final_status
 
@@ -839,7 +839,7 @@ Status values:
 
         return pr_title, pr_body
 
-    async def _trigger_pr_creation(
+    def _trigger_pr_creation(
         self, job_id: str, job: Any, resolved: int, total_projects: int
     ) -> None:
         """

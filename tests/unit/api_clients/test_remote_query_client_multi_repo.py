@@ -92,7 +92,7 @@ class TestRemoteQueryClientMultiRepo:
         yield client
 
         # Proper cleanup with isolation
-        await client.close()
+        client.close()
         await isolation_manager.teardown_isolated_test("multi_repo_query_client")
 
     @pytest.mark.asyncio
@@ -100,7 +100,7 @@ class TestRemoteQueryClientMultiRepo:
         """Test successful multi-repository query with real server."""
 
         async def execute_query():
-            return await real_query_client.execute_multi_repo_query(
+            return real_query_client.execute_multi_repo_query(
                 repositories=["auth-repo", "api-repo"],
                 query="authentication",
                 limit=5,
@@ -131,7 +131,7 @@ class TestRemoteQueryClientMultiRepo:
         """Test multi-repo query with empty repositories list raises ValueError."""
 
         with pytest.raises((ValueError, QueryExecutionError)):
-            await real_query_client.execute_multi_repo_query(
+            real_query_client.execute_multi_repo_query(
                 repositories=[],
                 query="test query",
                 limit=5,
@@ -145,7 +145,7 @@ class TestRemoteQueryClientMultiRepo:
         """Test multi-repo query with invalid search type raises error."""
 
         async def execute_query():
-            return await real_query_client.execute_multi_repo_query(
+            return real_query_client.execute_multi_repo_query(
                 repositories=["auth-repo"],
                 query="test query",
                 limit=5,

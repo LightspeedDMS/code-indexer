@@ -1,6 +1,7 @@
 """Unit tests for Regex line_content truncation logic.
 
 Story #684: S6 - Regex Search with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 AC1: Regex Line Content Truncation (line_content field)
 
 These tests follow TDD methodology - written BEFORE implementation.
@@ -29,10 +30,11 @@ class TestAC1LineContentTruncation:
         line_content_cache_handle, line_content_has_more=true, line_content_total_size
     When line_content <= 2000 chars: return full line_content,
         line_content_cache_handle=null, line_content_has_more=false
+
+    Story #50: _apply_regex_payload_truncation is now sync.
     """
 
-    @pytest.mark.asyncio
-    async def test_large_line_content_is_truncated(self, cache):
+    def test_large_line_content_is_truncated(self, cache):
         """Test that line_content > 2000 chars is truncated with cache handle."""
         from code_indexer.server.mcp.handlers import _apply_regex_payload_truncation
 
@@ -53,7 +55,7 @@ class TestAC1LineContentTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)  # Sync call
 
         assert len(truncated) == 1
         result = truncated[0]
@@ -75,8 +77,7 @@ class TestAC1LineContentTruncation:
         assert result["line_number"] == 10
         assert result["column"] == 5
 
-    @pytest.mark.asyncio
-    async def test_small_line_content_not_truncated(self, cache):
+    def test_small_line_content_not_truncated(self, cache):
         """Test that line_content <= 2000 chars is NOT truncated."""
         from code_indexer.server.mcp.handlers import _apply_regex_payload_truncation
 
@@ -97,7 +98,7 @@ class TestAC1LineContentTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -110,8 +111,7 @@ class TestAC1LineContentTruncation:
         assert "line_content_preview" not in result
         assert "line_content_total_size" not in result
 
-    @pytest.mark.asyncio
-    async def test_line_content_at_exact_boundary_not_truncated(self, cache):
+    def test_line_content_at_exact_boundary_not_truncated(self, cache):
         """Test that line_content exactly at 2000 chars is NOT truncated."""
         from code_indexer.server.mcp.handlers import _apply_regex_payload_truncation
 
@@ -129,7 +129,7 @@ class TestAC1LineContentTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -138,8 +138,7 @@ class TestAC1LineContentTruncation:
         assert result["line_content_cache_handle"] is None
         assert result["line_content_has_more"] is False
 
-    @pytest.mark.asyncio
-    async def test_empty_line_content_not_truncated(self, cache):
+    def test_empty_line_content_not_truncated(self, cache):
         """Test that empty line_content is handled correctly."""
         from code_indexer.server.mcp.handlers import _apply_regex_payload_truncation
 
@@ -156,15 +155,14 @@ class TestAC1LineContentTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)  # Sync call
 
         result = truncated[0]
         assert result["line_content"] == ""
         assert result["line_content_cache_handle"] is None
         assert result["line_content_has_more"] is False
 
-    @pytest.mark.asyncio
-    async def test_returns_unmodified_when_no_cache(self):
+    def test_returns_unmodified_when_no_cache(self):
         """Test that results are returned unmodified when cache unavailable."""
         from code_indexer.server.mcp.handlers import _apply_regex_payload_truncation
 
@@ -185,7 +183,7 @@ class TestAC1LineContentTruncation:
         ) as mock_state:
             mock_state.payload_cache = None
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)  # Sync call
 
         # Results should be unchanged
         assert truncated == results

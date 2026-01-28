@@ -1,6 +1,7 @@
 """Unit tests for Temporal truncation edge cases.
 
 Story #681: S3 - Temporal Search with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 
 Edge cases:
 - No temporal_context
@@ -20,10 +21,12 @@ PREVIEW_SIZE = 2000
 
 
 class TestTemporalTruncationEdgeCases:
-    """Edge case tests for temporal payload truncation."""
+    """Edge case tests for temporal payload truncation.
 
-    @pytest.mark.asyncio
-    async def test_no_temporal_context(self, cache):
+    Story #50: _apply_temporal_payload_truncation is now sync.
+    """
+
+    def test_no_temporal_context(self, cache):
         """Test that results without temporal_context are handled."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -40,7 +43,7 @@ class TestTemporalTruncationEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -49,8 +52,7 @@ class TestTemporalTruncationEdgeCases:
         assert result["content_has_more"] is True
         assert "content" not in result
 
-    @pytest.mark.asyncio
-    async def test_temporal_context_without_evolution(self, cache):
+    def test_temporal_context_without_evolution(self, cache):
         """Test that temporal_context without evolution is handled."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -70,14 +72,13 @@ class TestTemporalTruncationEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         # Should work without error
         assert truncated[0]["temporal_context"]["commit_hash"] == "abc123"
         assert "evolution" not in truncated[0]["temporal_context"]
 
-    @pytest.mark.asyncio
-    async def test_evolution_entry_without_content(self, cache):
+    def test_evolution_entry_without_content(self, cache):
         """Test evolution entry with no content field (metadata only)."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -101,7 +102,7 @@ class TestTemporalTruncationEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         evo_entry = truncated[0]["temporal_context"]["evolution"][0]
 
@@ -114,8 +115,7 @@ class TestTemporalTruncationEdgeCases:
             "content_has_more"
         )
 
-    @pytest.mark.asyncio
-    async def test_evolution_entry_without_diff(self, cache):
+    def test_evolution_entry_without_diff(self, cache):
         """Test evolution entry with no diff field (new file)."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -139,7 +139,7 @@ class TestTemporalTruncationEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         evo_entry = truncated[0]["temporal_context"]["evolution"][0]
 
@@ -151,8 +151,7 @@ class TestTemporalTruncationEdgeCases:
             "diff_has_more"
         )
 
-    @pytest.mark.asyncio
-    async def test_unicode_content_truncated_correctly(self, cache):
+    def test_unicode_content_truncated_correctly(self, cache):
         """Test that Unicode content is truncated at char boundary."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -166,7 +165,7 @@ class TestTemporalTruncationEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -175,8 +174,7 @@ class TestTemporalTruncationEdgeCases:
         assert result["content_preview"] == "\U0001f600" * PREVIEW_SIZE
         assert result["content_total_size"] == PREVIEW_SIZE + 1000
 
-    @pytest.mark.asyncio
-    async def test_preserves_other_temporal_context_fields(self, cache):
+    def test_preserves_other_temporal_context_fields(self, cache):
         """Test that non-evolution temporal_context fields are preserved."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -205,7 +203,7 @@ class TestTemporalTruncationEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         tc = truncated[0]["temporal_context"]
 
@@ -219,8 +217,7 @@ class TestTemporalTruncationEdgeCases:
         # Evolution should be truncated
         assert tc["evolution"][0]["content_has_more"] is True
 
-    @pytest.mark.asyncio
-    async def test_no_content_field_in_result(self, cache):
+    def test_no_content_field_in_result(self, cache):
         """Test result without content field (edge case)."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -239,7 +236,7 @@ class TestTemporalTruncationEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 

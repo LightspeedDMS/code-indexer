@@ -2030,16 +2030,14 @@ def init(
             # Determine target directory
             target_dir = Path(codebase_dir) if codebase_dir else Path.cwd()
 
-            # Run remote initialization asynchronously
+            # Run remote initialization
             try:
-                asyncio.run(
-                    initialize_remote_mode(
-                        project_root=target_dir,
-                        server_url=remote,
-                        username=username,
-                        password=password,
-                        console=console,
-                    )
+                initialize_remote_mode(
+                    project_root=target_dir,
+                    server_url=remote,
+                    username=username,
+                    password=password,
+                    console=console,
                 )
                 sys.exit(0)
 
@@ -5316,17 +5314,15 @@ def query(
             # Use first language from tuple, ignore additional languages for remote mode
             # NOTE: Remote query API currently supports single path only
             # Use first path from tuple, ignore additional paths for remote mode
-            results_raw = asyncio.run(
-                execute_remote_query(
-                    query_text=query,
-                    limit=limit,
-                    project_root=project_root,
-                    language=languages[0] if languages else None,
-                    path=path_filter[0] if path_filter else None,
-                    min_score=min_score,
-                    include_source=True,
-                    accuracy=accuracy,
-                )
+            results_raw = execute_remote_query(
+                query_text=query,
+                limit=limit,
+                project_root=project_root,
+                language=languages[0] if languages else None,
+                path=path_filter[0] if path_filter else None,
+                min_score=min_score,
+                include_source=True,
+                accuracy=accuracy,
             )
 
             # Cast to help MyPy understand the actual return type
@@ -8499,18 +8495,16 @@ def sync(
 
         try:
             # Execute sync
-            results = asyncio.run(
-                execute_repository_sync(
-                    repository_alias=repository,
-                    project_root=project_root,
-                    sync_all=all,
-                    full_reindex=full_reindex,
-                    no_pull=no_pull,
-                    dry_run=dry_run,
-                    timeout=timeout,
-                    enable_polling=not dry_run,
-                    progress_callback=progress_callback,
-                )
+            results = execute_repository_sync(
+                repository_alias=repository,
+                project_root=project_root,
+                sync_all=all,
+                full_reindex=full_reindex,
+                no_pull=no_pull,
+                dry_run=dry_run,
+                timeout=timeout,
+                enable_polling=not dry_run,
+                progress_callback=progress_callback,
             )
 
         finally:
@@ -8721,9 +8715,7 @@ def auth_login(ctx, username: Optional[str], password: Optional[str]):
         auth_client = AuthAPIClient(server_url, project_root)
 
         with console.status("🔐 Authenticating..."):
-            auth_response = asyncio.run(
-                auth_client.login(username.strip(), password.strip())
-            )
+            auth_response = auth_client.login(username.strip(), password.strip())
 
         console.print(f"✅ Successfully logged in as {username}", style="green")
         console.print("🔑 Credentials stored securely", style="cyan")
@@ -8732,7 +8724,7 @@ def auth_login(ctx, username: Optional[str], password: Optional[str]):
             console.print(f"👤 User ID: {auth_response['user_id']}", style="dim")
 
         # Close the client
-        asyncio.run(auth_client.close())
+        auth_client.close()
 
     except Exception as e:
         console.print(f"❌ Login failed: {e}", style="red")
@@ -8817,8 +8809,8 @@ def auth_register(ctx, username: Optional[str], password: Optional[str], role: s
         auth_client = AuthAPIClient(server_url, project_root)
 
         with console.status("📝 Creating account..."):
-            auth_response = asyncio.run(
-                auth_client.register(username.strip(), password.strip(), role)
+            auth_response = auth_client.register(
+                username.strip(), password.strip(), role
             )
 
         console.print(
@@ -8831,7 +8823,7 @@ def auth_register(ctx, username: Optional[str], password: Optional[str], role: s
             console.print(f"🆔 User ID: {auth_response['user_id']}", style="dim")
 
         # Close the client
-        asyncio.run(auth_client.close())
+        auth_client.close()
 
     except Exception as e:
         console.print(f"❌ Registration failed: {e}", style="red")
@@ -8899,7 +8891,7 @@ def auth_logout(ctx):
         console.print("🔐 All credentials cleared", style="cyan")
 
         # Close the client
-        asyncio.run(auth_client.close())
+        auth_client.close()
 
     except Exception as e:
         console.print(f"❌ Logout failed: {e}", style="red")
@@ -9015,7 +9007,7 @@ def auth_change_password(ctx):
         console.print("🔐 Credentials updated securely", style="cyan")
 
         # Close the client
-        asyncio.run(auth_client.close())
+        auth_client.close()
 
     except Exception as e:
         console.print(f"❌ Password change failed: {e}", style="red")
@@ -9082,7 +9074,7 @@ def auth_reset_password(ctx, username: Optional[str]):
         # Create auth client and initiate reset
         auth_client = create_auth_client(server_url, project_root)
         with console.status("📤 Sending reset request..."):
-            asyncio.run(auth_client.reset_password(username.strip()))
+            auth_client.reset_password(username.strip())
 
         console.print(f"✅ Password reset request sent for {username}", style="green")
         console.print("📧 Check your email for reset instructions", style="blue")
@@ -9091,7 +9083,7 @@ def auth_reset_password(ctx, username: Optional[str]):
         )
 
         # Close the client
-        asyncio.run(auth_client.close())
+        auth_client.close()
 
     except Exception as e:
         console.print(f"❌ Password reset failed: {e}", style="red")
@@ -9242,7 +9234,7 @@ def auth_refresh(ctx):
             try:
                 console.print("🔄 Refreshing authentication token...", style="blue")
 
-                refresh_response = await auth_client.refresh_token()
+                refresh_response = auth_client.refresh_token()
 
                 console.print("✅ Token refreshed successfully", style="green")
 
@@ -9842,7 +9834,7 @@ def server_add_index(
             while True:
                 # Check timeout
                 if time.time() - start_time > timeout:
-                    run_async(admin_client.close())
+                    admin_client.close()
                     console.print(
                         "❌ Error: Timeout waiting for job completion", style="red"
                     )
@@ -9858,7 +9850,7 @@ def server_add_index(
                             f"✅ Index '{index_type}' added to '{alias}' successfully",
                             style="green",
                         )
-                    run_async(admin_client.close())
+                    admin_client.close()
                     sys.exit(0)
 
                 if status == "failed":
@@ -9866,7 +9858,7 @@ def server_add_index(
                     console.print(
                         f"❌ Error: Index addition failed: {error}", style="red"
                     )
-                    run_async(admin_client.close())
+                    admin_client.close()
                     sys.exit(1)
 
                 # Display progress if not quiet
@@ -9880,13 +9872,13 @@ def server_add_index(
             # No --wait flag, just output job_id
             if quiet:
                 console.print(job_id)
-            run_async(admin_client.close())
+            admin_client.close()
             sys.exit(0)
 
     except Exception as e:
         # Ensure cleanup on error
         if "admin_client" in locals():
-            run_async(admin_client.close())
+            admin_client.close()
         console.print(f"❌ Error: {str(e)}", style="red")
         sys.exit(1)
 
@@ -9950,13 +9942,13 @@ def server_list_indexes(ctx, alias: str, json_output: bool):
                 console.print(f"  {index_type:15} {status}", style=style)
             console.print()
 
-        run_async(admin_client.close())
+        admin_client.close()
         sys.exit(0)
 
     except Exception as e:
         # Ensure cleanup on error
         if "admin_client" in locals():
-            run_async(admin_client.close())
+            admin_client.close()
         console.print(f"❌ Error: {str(e)}", style="red")
         sys.exit(1)
 
@@ -10828,7 +10820,7 @@ def list_repos(ctx, filter: Optional[str]):
                 return await client.list_activated_repositories(filter_pattern=filter)
             finally:
                 # Ensure client is properly closed to avoid resource warnings
-                await client.close()
+                client.close()
 
         repositories = asyncio.run(fetch_repositories())
 
@@ -10960,9 +10952,9 @@ def available(ctx, search: Optional[str]):
                 project_root=project_root,
             )
             try:
-                return await client.list_available_repositories(search_term=search)
+                return client.list_available_repositories(search_term=search)
             finally:
-                await client.close()
+                client.close()
 
         repositories = asyncio.run(fetch_repositories())
 
@@ -11084,9 +11076,9 @@ def discover(ctx, source: str):
                 project_root=project_root,
             )
             try:
-                return await client.discover_repositories(source)
+                return client.discover_repositories(source)
             finally:
-                await client.close()
+                client.close()
 
         result = asyncio.run(discover_repositories())
 
@@ -11212,9 +11204,9 @@ def repos_status(ctx):
                 project_root=project_root,
             )
             try:
-                return await client.get_repository_status_summary()
+                return client.get_repository_status_summary()
             finally:
-                await client.close()
+                client.close()
 
         summary = asyncio.run(fetch_status())
 
@@ -11934,11 +11926,9 @@ def repos_files(ctx, user_alias: str, path: str):
                 project_root=project_root,
             )
             try:
-                return await client.list_repository_files(
-                    repo_alias=user_alias, path=path
-                )
+                return client.list_repository_files(repo_alias=user_alias, path=path)
             finally:
-                await client.close()
+                client.close()
 
         files = asyncio.run(fetch_files())
 
@@ -12029,7 +12019,7 @@ def repos_cat(ctx, user_alias: str, file_path: str, no_highlight: bool):
                     repo_alias=user_alias, file_path=file_path
                 )
             finally:
-                await client.close()
+                client.close()
 
         file_data = asyncio.run(fetch_file_content())
 
@@ -12138,13 +12128,13 @@ def execute_repository_activation(
             project_root=project_root,
         )
         try:
-            return await client.activate_repository(
+            return client.activate_repository(
                 golden_alias=golden_alias,
                 user_alias=user_alias,
                 target_branch=target_branch,
             )
         finally:
-            await client.close()
+            client.close()
 
     asyncio.run(do_activation())
 
@@ -12191,11 +12181,9 @@ def execute_repository_deactivation(
             project_root=project_root,
         )
         try:
-            return await client.deactivate_repository(
-                user_alias=user_alias, force=force
-            )
+            return client.deactivate_repository(user_alias=user_alias, force=force)
         finally:
-            await client.close()
+            client.close()
 
     result = asyncio.run(do_deactivation())
 
@@ -12238,7 +12226,7 @@ async def _execute_repository_info(
     )
 
     try:
-        repo_info = await client.get_repository_info(
+        repo_info = client.get_repository_info(
             user_alias=user_alias, branches=branches, health=health, activity=activity
         )
 
@@ -12249,7 +12237,7 @@ async def _execute_repository_info(
         console.print(f"❌ Failed to get repository info: {e}", style="red")
         raise
     finally:
-        await client.close()
+        client.close()
 
 
 async def _execute_branch_switch(
@@ -12268,7 +12256,7 @@ async def _execute_branch_switch(
     )
 
     try:
-        result = await client.switch_repository_branch(
+        result = client.switch_repository_branch(
             user_alias=user_alias, branch_name=branch_name, create=create
         )
 
@@ -12279,7 +12267,7 @@ async def _execute_branch_switch(
         console.print(f"❌ Failed to switch branch: {e}", style="red")
         raise
     finally:
-        await client.close()
+        client.close()
 
 
 def _display_repository_info(
@@ -12825,7 +12813,7 @@ def list_jobs(ctx, status: Optional[str], limit: int):
                 credentials=credentials,
                 project_root=project_root,
             ) as client:
-                jobs_response = await client.list_jobs(
+                jobs_response = client.list_jobs(
                     status=status,
                     limit=limit,
                 )
@@ -12938,7 +12926,7 @@ def cancel_job(ctx, job_id: str, force: bool):
                 credentials=credentials,
                 project_root=project_root,
             ) as client:
-                result = await client.cancel_job(job_id)
+                result = client.cancel_job(job_id)
                 return result
 
         # Run async function
@@ -13034,7 +13022,7 @@ def job_status(ctx, job_id: str):
                 credentials=credentials,
                 project_root=project_root,
             ) as client:
-                status = await client.get_job_status(job_id)
+                status = client.get_job_status(job_id)
                 return status
 
         # Run async function
@@ -13445,7 +13433,7 @@ def admin_users_create(
             )
 
         # Close the client
-        run_async(admin_client.close())
+        admin_client.close()
 
         # Handle JSON output
         if json_output:
@@ -13601,7 +13589,7 @@ def admin_users_list(ctx, limit: int, offset: int, json_output: bool):
             )
 
         # Close the client
-        run_async(admin_client.close())
+        admin_client.close()
 
         users = users_response.get("users", [])
         total = users_response.get("total", len(users))
@@ -13786,7 +13774,7 @@ def admin_users_show(ctx, username: str, json_output: bool):
             user_response = run_async(admin_client.get_user(username))
 
         # Close the client
-        run_async(admin_client.close())
+        admin_client.close()
 
         # Get user details
         user = user_response.get("user", {})
@@ -13949,7 +13937,7 @@ def admin_users_update(ctx, username: str, role: str, json_output: bool):
 
                 confirm = click.confirm("Are you sure you want to continue?")
                 if not confirm:
-                    run_async(admin_client.close())
+                    admin_client.close()
                     console.print("❌ Role update cancelled", style="yellow")
                     sys.exit(0)
 
@@ -13972,7 +13960,7 @@ def admin_users_update(ctx, username: str, role: str, json_output: bool):
             run_async(admin_client.update_user(username, role))
 
         # Close the client
-        run_async(admin_client.close())
+        admin_client.close()
 
         # Handle JSON output
         if json_output:
@@ -14127,7 +14115,7 @@ def admin_users_delete(ctx, username: str, force: bool, json_output: bool):
                     credentials=credentials,
                     project_root=project_root,
                 )
-                user_info = asyncio.run(temp_client.get_user(username))
+                user_info = temp_client.get_user(username)
                 user = user_info.get("user", {})
                 console.print(
                     f"User role: [yellow]{user.get('role', 'unknown')}[/yellow]"
@@ -14135,7 +14123,7 @@ def admin_users_delete(ctx, username: str, force: bool, json_output: bool):
                 console.print(
                     f"Created: [dim]{user.get('created_at', 'unknown')[:10]}[/dim]"
                 )
-                asyncio.run(temp_client.close())
+                temp_client.close()
             except Exception:
                 # If we can't get user info, continue with deletion prompt
                 pass
@@ -14156,7 +14144,7 @@ def admin_users_delete(ctx, username: str, force: bool, json_output: bool):
             run_async(admin_client.delete_user(username))
 
         # Close the client
-        run_async(admin_client.close())
+        admin_client.close()
 
         # Handle JSON output
         if json_output:
@@ -14338,7 +14326,7 @@ def admin_users_change_password(
                     style="dim yellow",
                 )
                 if not click.confirm("Are you sure you want to continue?"):
-                    run_async(admin_client.close())
+                    admin_client.close()
                     console.print("❌ Password change cancelled", style="yellow")
                     sys.exit(0)
 
@@ -14365,7 +14353,7 @@ def admin_users_change_password(
                 )
 
         finally:
-            run_async(admin_client.close())
+            admin_client.close()
 
     except ImportError as e:
         console.print(f"❌ Import error: {e}", style="red")
@@ -14466,7 +14454,7 @@ def admin_mcp_credentials_list(ctx, json_output: bool):
             console.print(f"Error: {e}", style="red")
         sys.exit(1)
     finally:
-        run_async(client.close())
+        client.close()
 
 
 @admin_mcp_credentials_group.command("create")
@@ -14502,7 +14490,7 @@ def admin_mcp_credentials_create(ctx, description: str, json_output: bool):
             console.print(f"Error: {e}", style="red")
         sys.exit(1)
     finally:
-        run_async(client.close())
+        client.close()
 
 
 @admin_mcp_credentials_group.command("delete")
@@ -14546,7 +14534,7 @@ def admin_mcp_credentials_delete(ctx, cred_id: str, confirm: bool, json_output: 
             console.print(f"Error: {e}", style="red")
         sys.exit(1)
     finally:
-        run_async(client.close())
+        client.close()
 
 
 @admin_mcp_credentials_group.command("list-user")
@@ -14595,7 +14583,7 @@ def admin_mcp_credentials_list_user(ctx, username: str, json_output: bool):
             console.print(f"Error: {e}", style="red")
         sys.exit(1)
     finally:
-        run_async(client.close())
+        client.close()
 
 
 @admin_mcp_credentials_group.command("create-for-user")
@@ -14640,7 +14628,7 @@ def admin_mcp_credentials_create_for_user(
             console.print(f"Error: {e}", style="red")
         sys.exit(1)
     finally:
-        run_async(client.close())
+        client.close()
 
 
 @admin_mcp_credentials_group.command("delete-for-user")
@@ -14690,7 +14678,7 @@ def admin_mcp_credentials_delete_for_user(
             console.print(f"Error: {e}", style="red")
         sys.exit(1)
     finally:
-        run_async(client.close())
+        client.close()
 
 
 @admin_mcp_credentials_group.command("list-all")
@@ -14738,7 +14726,7 @@ def admin_mcp_credentials_list_all(ctx, json_output: bool):
             console.print(f"Error: {e}", style="red")
         sys.exit(1)
     finally:
-        run_async(client.close())
+        client.close()
 
 
 # =============================================================================
@@ -15229,7 +15217,7 @@ def admin_repos_add(
                 )
 
         finally:
-            run_async(admin_client.close())
+            admin_client.close()
 
     except ImportError as e:
         console.print(f"❌ Import error: {e}", style="red")
@@ -15384,7 +15372,7 @@ def admin_repos_list(ctx, json_output: bool):
                     return await admin_client.list_golden_repositories()
                 finally:
                     # Ensure client is properly closed to avoid resource warnings
-                    await admin_client.close()
+                    admin_client.close()
 
             result = run_async(fetch_admin_data())
             repositories = result.get("golden_repositories", [])
@@ -15455,7 +15443,7 @@ def admin_repos_list(ctx, json_output: bool):
             console.print(table)
 
         finally:
-            run_async(admin_client.close())
+            admin_client.close()
 
     except Exception as e:
         error_str = str(e).lower()
@@ -15698,7 +15686,7 @@ def admin_repos_show(ctx, alias: str, json_output: bool):
             )
 
         finally:
-            run_async(admin_client.close())
+            admin_client.close()
 
     except Exception as e:
         error_str = str(e).lower()
@@ -15867,7 +15855,7 @@ def admin_repos_refresh(ctx, alias: str, json_output: bool):
                 )
 
         finally:
-            run_async(admin_client.close())
+            admin_client.close()
 
     except Exception as e:
         error_str = str(e).lower()
@@ -16067,7 +16055,7 @@ def admin_repos_branches(ctx, alias: str, detailed: bool, json_output: bool):
                 )
 
         finally:
-            run_async(admin_client.close())
+            admin_client.close()
 
     except Exception as e:
         error_str = str(e).lower()
@@ -16350,7 +16338,7 @@ def admin_repos_delete(ctx, alias: str, confirm: bool, force: bool, json_output:
                 )
 
         finally:
-            run_async(admin_client.close())
+            admin_client.close()
 
     except Exception as e:
         error_str = str(e).lower()
@@ -16492,7 +16480,7 @@ def admin_groups_list(ctx, json_output: bool):
                         )
                     console.print(table)
         finally:
-            run_async(client.close())
+            client.close()
 
     except Exception as e:
         if json_output:
@@ -16558,7 +16546,7 @@ def admin_groups_create(ctx, name: str, description: str, json_output: bool):
                     style="green",
                 )
         finally:
-            run_async(client.close())
+            client.close()
 
     except Exception as e:
         if json_output:
@@ -16628,7 +16616,7 @@ def admin_groups_show(ctx, group_id: int, json_output: bool):
                     f"Repositories: {', '.join(result.get('repos', [])) or 'None'}"
                 )
         finally:
-            run_async(client.close())
+            client.close()
 
     except Exception as e:
         if json_output:
@@ -16705,7 +16693,7 @@ def admin_groups_update(
             else:
                 console.print(f"Group {group_id} updated successfully", style="green")
         finally:
-            run_async(client.close())
+            client.close()
 
     except Exception as e:
         if json_output:
@@ -16770,7 +16758,7 @@ def admin_groups_delete(ctx, group_id: int, confirm: bool, json_output: bool):
             else:
                 console.print(f"Group {group_id} deleted successfully", style="green")
         finally:
-            run_async(client.close())
+            client.close()
 
     except Exception as e:
         if json_output:
@@ -16833,7 +16821,7 @@ def admin_groups_add_member(ctx, group_id: int, user: str, json_output: bool):
             else:
                 console.print(f"User '{user}' added to group {group_id}", style="green")
         finally:
-            run_async(client.close())
+            client.close()
 
     except Exception as e:
         if json_output:
@@ -16909,7 +16897,7 @@ def admin_groups_add_repos(ctx, group_id: int, repos: str, json_output: bool):
                     f"Added {added} repositories to group {group_id}", style="green"
                 )
         finally:
-            run_async(client.close())
+            client.close()
 
     except Exception as e:
         if json_output:
@@ -16974,7 +16962,7 @@ def admin_groups_remove_repo(ctx, group_id: int, repo: str, json_output: bool):
                     f"Repository '{repo}' removed from group {group_id}", style="green"
                 )
         finally:
-            run_async(client.close())
+            client.close()
 
     except Exception as e:
         if json_output:
@@ -17053,7 +17041,7 @@ def admin_groups_remove_repos(ctx, group_id: int, repos: str, json_output: bool)
                     style="green",
                 )
         finally:
-            run_async(client.close())
+            client.close()
 
     except Exception as e:
         if json_output:
@@ -17120,7 +17108,7 @@ def admin_api_keys_list(ctx, json_output: bool):
             console.print(f"Error: {e}", style="red")
         sys.exit(1)
     finally:
-        run_async(client.close())
+        client.close()
 
 
 @admin_api_keys_group.command("create")
@@ -17156,7 +17144,7 @@ def admin_api_keys_create(ctx, description: str, json_output: bool):
             console.print(f"Error: {e}", style="red")
         sys.exit(1)
     finally:
-        run_async(client.close())
+        client.close()
 
 
 @admin_api_keys_group.command("delete")
@@ -17200,7 +17188,7 @@ def admin_api_keys_delete(ctx, key_id: str, confirm: bool, json_output: bool):
             console.print(f"Error: {e}", style="red")
         sys.exit(1)
     finally:
-        run_async(client.close())
+        client.close()
 
 
 @cli.group("global")

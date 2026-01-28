@@ -501,7 +501,7 @@ async def get_current_user_for_mcp(request: Request) -> User:
         )
 
 
-async def _hybrid_auth_impl(
+def _hybrid_auth_impl(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials],
     require_admin: bool = False,
@@ -604,7 +604,7 @@ async def _hybrid_auth_impl(
     )
 
 
-async def get_current_user_hybrid(
+def get_current_user_hybrid(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> User:
@@ -624,10 +624,10 @@ async def get_current_user_hybrid(
     Raises:
         HTTPException: If authentication fails
     """
-    return await _hybrid_auth_impl(request, credentials, require_admin=False)
+    return _hybrid_auth_impl(request, credentials, require_admin=False)
 
 
-async def get_current_admin_user_hybrid(
+def get_current_admin_user_hybrid(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> User:
@@ -647,4 +647,4 @@ async def get_current_admin_user_hybrid(
     Raises:
         HTTPException: If not authenticated or not admin
     """
-    return await _hybrid_auth_impl(request, credentials, require_admin=True)
+    return _hybrid_auth_impl(request, credentials, require_admin=True)

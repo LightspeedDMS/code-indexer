@@ -68,14 +68,14 @@ class TestGetCachedContentHandler:
 
         assert "get_cached_content" in HANDLER_REGISTRY
 
-    @pytest.mark.asyncio
-    async def test_handler_returns_content_for_valid_handle(self, mock_user):
+    def test_handler_returns_content_for_valid_handle(self, mock_user):
         """Test handler returns content when cache handle is valid."""
         from code_indexer.server.mcp.handlers import handle_get_cached_content
         from code_indexer.server.cache.payload_cache import CacheRetrievalResult
 
-        mock_cache = AsyncMock()
-        mock_cache.retrieve = AsyncMock(
+        # PayloadCache.retrieve() is SYNC after Epic #48 conversion
+        mock_cache = Mock()
+        mock_cache.retrieve = Mock(
             return_value=CacheRetrievalResult(
                 content="Cached content page 0",
                 page=0,
@@ -89,7 +89,7 @@ class TestGetCachedContentHandler:
         ) as mock_state:
             mock_state.payload_cache = mock_cache
 
-            result = await handle_get_cached_content(
+            result = handle_get_cached_content(
                 {"handle": "test-uuid-handle", "page": 0}, mock_user
             )
 
@@ -104,14 +104,14 @@ class TestGetCachedContentHandler:
         assert data["total_pages"] == 2
         assert data["has_more"] is True
 
-    @pytest.mark.asyncio
-    async def test_handler_returns_error_for_invalid_handle(self, mock_user):
+    def test_handler_returns_error_for_invalid_handle(self, mock_user):
         """Test handler returns error when cache handle is not found."""
         from code_indexer.server.mcp.handlers import handle_get_cached_content
         from code_indexer.server.cache.payload_cache import CacheNotFoundError
 
-        mock_cache = AsyncMock()
-        mock_cache.retrieve = AsyncMock(
+        # PayloadCache.retrieve() is SYNC after Epic #48 conversion
+        mock_cache = Mock()
+        mock_cache.retrieve = Mock(
             side_effect=CacheNotFoundError("Cache handle not found: invalid-handle")
         )
 
@@ -120,7 +120,7 @@ class TestGetCachedContentHandler:
         ) as mock_state:
             mock_state.payload_cache = mock_cache
 
-            result = await handle_get_cached_content(
+            result = handle_get_cached_content(
                 {"handle": "invalid-handle", "page": 0}, mock_user
             )
 
@@ -131,14 +131,14 @@ class TestGetCachedContentHandler:
         assert "error" in data
         assert "cache_expired" in data["error"] or "not found" in data["error"].lower()
 
-    @pytest.mark.asyncio
-    async def test_handler_defaults_page_to_zero(self, mock_user):
+    def test_handler_defaults_page_to_zero(self, mock_user):
         """Test handler defaults page to 0 when not provided."""
         from code_indexer.server.mcp.handlers import handle_get_cached_content
         from code_indexer.server.cache.payload_cache import CacheRetrievalResult
 
-        mock_cache = AsyncMock()
-        mock_cache.retrieve = AsyncMock(
+        # PayloadCache.retrieve() is SYNC after Epic #48 conversion
+        mock_cache = Mock()
+        mock_cache.retrieve = Mock(
             return_value=CacheRetrievalResult(
                 content="Content",
                 page=0,
@@ -153,13 +153,12 @@ class TestGetCachedContentHandler:
             mock_state.payload_cache = mock_cache
 
             # Call without page parameter
-            await handle_get_cached_content({"handle": "test-handle"}, mock_user)
+            handle_get_cached_content({"handle": "test-handle"}, mock_user)
 
         # Verify retrieve was called with page=0
         mock_cache.retrieve.assert_called_once_with("test-handle", page=0)
 
-    @pytest.mark.asyncio
-    async def test_handler_returns_error_when_cache_unavailable(self, mock_user):
+    def test_handler_returns_error_when_cache_unavailable(self, mock_user):
         """Test handler returns error when payload_cache not initialized."""
         from code_indexer.server.mcp.handlers import handle_get_cached_content
 
@@ -169,7 +168,7 @@ class TestGetCachedContentHandler:
             # payload_cache is None
             mock_state.payload_cache = None
 
-            result = await handle_get_cached_content(
+            result = handle_get_cached_content(
                 {"handle": "test-handle", "page": 0}, mock_user
             )
 

@@ -2,6 +2,7 @@
 
 Story #680: S2 - FTS Search with Payload Control
 Story #683: S5 - Multi-repo Search with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 """
 
 import pytest
@@ -17,7 +18,7 @@ def temp_db_path():
 
 
 @pytest.fixture
-async def cache(temp_db_path):
+def cache(temp_db_path):
     """Create and initialize a PayloadCache instance for testing."""
     from code_indexer.server.cache.payload_cache import (
         PayloadCache,
@@ -26,13 +27,13 @@ async def cache(temp_db_path):
 
     config = PayloadCacheConfig(preview_size_chars=2000)
     cache = PayloadCache(db_path=temp_db_path, config=config)
-    await cache.initialize()
+    cache.initialize()  # Sync call
     yield cache
-    await cache.close()
+    cache.close()  # Sync call
 
 
 @pytest.fixture
-async def cache_100_chars(temp_db_path):
+def cache_100_chars(temp_db_path):
     """Create PayloadCache with 100 char preview for easy testing (Story #683)."""
     from code_indexer.server.cache.payload_cache import (
         PayloadCache,
@@ -41,6 +42,6 @@ async def cache_100_chars(temp_db_path):
 
     config = PayloadCacheConfig(preview_size_chars=100, max_fetch_size_chars=200)
     cache = PayloadCache(db_path=temp_db_path, config=config)
-    await cache.initialize()
+    cache.initialize()  # Sync call
     yield cache
-    await cache.close()
+    cache.close()  # Sync call

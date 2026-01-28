@@ -80,7 +80,7 @@ class TestSCIPResolutionQueueAC4:
         )
 
         # Start worker (will process queue)
-        await queue.start_worker()
+        queue.start_worker()
 
         # Give time for processing
         await asyncio.sleep(0.1)
@@ -125,7 +125,7 @@ class TestSCIPResolutionQueueAC4:
         )
 
         # Start worker
-        await queue.start_worker()
+        queue.start_worker()
 
         # Check status during processing
         await asyncio.sleep(0.05)  # Small delay to let first project start
@@ -171,7 +171,7 @@ class TestSCIPResolutionQueueAC4:
         assert queue.worker_task is None
 
         # Start worker
-        await queue.start_worker()
+        queue.start_worker()
         assert queue.is_running is True
         assert queue.worker_task is not None
 

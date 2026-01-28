@@ -49,7 +49,7 @@ class RemoteRepositoryService:
         self.api_client = api_client
         self.staleness_detector = staleness_detector
 
-    async def get_repository_analysis(
+    def get_repository_analysis(
         self, local_repo_url: str, local_branch: str
     ) -> RepositoryAnalysis:
         """Get complete repository analysis including staleness.
@@ -66,7 +66,7 @@ class RemoteRepositoryService:
         )
 
         # Get repositories from server
-        repositories_data = await self._fetch_repositories()
+        repositories_data = self._fetch_repositories()
 
         # Convert to repository info objects
         repositories = [
@@ -85,7 +85,7 @@ class RemoteRepositoryService:
         )
 
         # Calculate staleness for matching repositories
-        await self._calculate_staleness_for_repos(matching_repos, local_branch)
+        self._calculate_staleness_for_repos(matching_repos, local_branch)
 
         # Generate staleness summary
         staleness_summary = self._generate_staleness_summary(matching_repos)
@@ -98,14 +98,14 @@ class RemoteRepositoryService:
             staleness_summary=staleness_summary,
         )
 
-    async def _fetch_repositories(self) -> List[Dict]:
+    def _fetch_repositories(self) -> List[Dict]:
         """Fetch repositories from the server.
 
         Returns:
             List of repository dictionaries from server
         """
         try:
-            response = await self.api_client.get("/repositories")
+            response = self.api_client.get("/repositories")
             if response.status_code == 200:
                 data = response.json()
                 return data.get("repositories", []) if isinstance(data, dict) else []
@@ -175,7 +175,7 @@ class RemoteRepositoryService:
 
         return normalized.lower()
 
-    async def _calculate_staleness_for_repos(
+    def _calculate_staleness_for_repos(
         self, repositories: List[RepositoryInfo], local_branch: str
     ):
         """Calculate staleness information for repositories.
@@ -187,9 +187,7 @@ class RemoteRepositoryService:
         for repo in repositories:
             try:
                 # Get timestamps for repository/branch
-                timestamps = await self._get_repository_timestamps(
-                    repo.name, local_branch
-                )
+                timestamps = self._get_repository_timestamps(repo.name, local_branch)
 
                 if timestamps:
                     repo.local_timestamp = timestamps.get("local_timestamp")
@@ -223,9 +221,7 @@ class RemoteRepositoryService:
             except Exception as e:
                 logger.warning(f"Failed to calculate staleness for {repo.name}: {e}")
 
-    async def _get_repository_timestamps(
-        self, repo_name: str, branch: str
-    ) -> Optional[Dict]:
+    def _get_repository_timestamps(self, repo_name: str, branch: str) -> Optional[Dict]:
         """Get timestamps for a repository/branch combination.
 
         Args:
@@ -236,7 +232,7 @@ class RemoteRepositoryService:
             Dictionary with local and remote timestamps
         """
         try:
-            response = await self.api_client.get(
+            response = self.api_client.get(
                 f"/repositories/{repo_name}/branches/{branch}/timestamps"
             )
             if response.status_code == 200:
@@ -282,7 +278,7 @@ class RemoteRepositoryService:
             "unknown_repositories": [repo.name for repo in unknown_repos],
         }
 
-    async def get_repository_details(self, repo_name: str) -> Optional[Dict]:
+    def get_repository_details(self, repo_name: str) -> Optional[Dict]:
         """Get detailed information about a specific repository.
 
         Args:
@@ -292,7 +288,7 @@ class RemoteRepositoryService:
             Repository details or None if not found
         """
         try:
-            response = await self.api_client.get(f"/repositories/{repo_name}")
+            response = self.api_client.get(f"/repositories/{repo_name}")
             if response.status_code == 200:
                 data = response.json()
                 return data if isinstance(data, dict) else None
@@ -305,7 +301,7 @@ class RemoteRepositoryService:
             logger.error(f"Error getting repository details for {repo_name}: {e}")
             return None
 
-    async def get_repository_branches(self, repo_name: str) -> List[str]:
+    def get_repository_branches(self, repo_name: str) -> List[str]:
         """Get list of branches for a repository.
 
         Args:
@@ -315,7 +311,7 @@ class RemoteRepositoryService:
             List of branch names
         """
         try:
-            response = await self.api_client.get(f"/repositories/{repo_name}/branches")
+            response = self.api_client.get(f"/repositories/{repo_name}/branches")
             if response.status_code == 200:
                 data = response.json()
                 return data.get("branches", []) if isinstance(data, dict) else []

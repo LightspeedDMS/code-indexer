@@ -90,7 +90,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
         self.project_root = project_root
         self.credential_manager = ProjectCredentialManager()
 
-    async def login(self, username: str, password: str) -> AuthResponse:
+    def login(self, username: str, password: str) -> AuthResponse:
         """Authenticate user with server and store credentials securely.
 
         Args:
@@ -114,7 +114,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
 
             # Use session directly for login (no auth header needed)
             auth_endpoint = f"{self.server_url}/auth/login"
-            response = await self.session.post(auth_endpoint, json=auth_payload)
+            response = self.session.post(auth_endpoint, json=auth_payload)
 
             if response.status_code == 200:
                 auth_response = response.json()
@@ -125,7 +125,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
 
                 # Store credentials securely if project root provided
                 if self.project_root:
-                    await self._store_credentials_securely(username, password)
+                    self._store_credentials_securely(username, password)
 
                 # Update internal credentials for future API calls
                 self.credentials = {
@@ -170,7 +170,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise AuthenticationError(f"Unexpected error during login: {e}")
 
-    async def register(
+    def register(
         self, username: str, password: str, role: str = "user"
     ) -> AuthResponse:
         """Register new user account and automatically login.
@@ -198,7 +198,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
 
             # Use session directly for registration (no auth header needed)
             register_endpoint = f"{self.server_url}/auth/register"
-            response = await self.session.post(register_endpoint, json=register_payload)
+            response = self.session.post(register_endpoint, json=register_payload)
 
             if response.status_code == 201 or response.status_code == 200:
                 register_response = response.json()
@@ -207,7 +207,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
                 if register_response.get("access_token"):
                     # Auto-login successful
                     if self.project_root:
-                        await self._store_credentials_securely(username, password)
+                        self._store_credentials_securely(username, password)
 
                     self.credentials = {
                         "username": username,
@@ -221,7 +221,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
                     )
                 else:
                     # Need to login explicitly after registration
-                    return await self.login(username, password)
+                    return self.login(username, password)
 
             elif response.status_code == 409:
                 try:
@@ -289,7 +289,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
             logger.warning(f"Error during logout: {e}")
             # Don't raise exception - logout should always succeed
 
-    async def _store_credentials_securely(self, username: str, password: str) -> None:
+    def _store_credentials_securely(self, username: str, password: str) -> None:
         """Store credentials securely using AES-256 encryption.
 
         Args:
@@ -338,7 +338,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             logger.warning(f"Error clearing stored credentials: {e}")
 
-    async def change_password(
+    def change_password(
         self, current_password: str, new_password: str
     ) -> Dict[str, Any]:
         """Change user password with current password validation.
@@ -363,7 +363,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
             }
 
             # Make password change request using authenticated endpoint
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "PUT", "/api/users/change-password", json=password_payload
             )
 
@@ -372,7 +372,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
 
                 # Update stored credentials if successful and project root provided
                 if self.project_root and response_data.get("status") == "success":
-                    await self._store_credentials_securely(
+                    self._store_credentials_securely(
                         self.credentials.get("username", ""), new_password
                     )
                     # Update in-memory credentials
@@ -416,7 +416,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error during password change: {e}")
 
-    async def reset_password(self, username: str) -> Dict[str, Any]:
+    def reset_password(self, username: str) -> Dict[str, Any]:
         """Initiate password reset for specified username.
 
         Args:
@@ -437,7 +437,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
 
             # Use session directly for reset (no auth header needed)
             reset_endpoint = f"{self.server_url}/auth/reset-password"
-            response = await self.session.post(reset_endpoint, json=reset_payload)
+            response = self.session.post(reset_endpoint, json=reset_payload)
 
             if response.status_code == 200:
                 reset_response: Dict[str, Any] = response.json()
@@ -479,7 +479,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error during password reset: {e}")
 
-    async def get_auth_status(self) -> AuthStatus:
+    def get_auth_status(self) -> AuthStatus:
         """Get current authentication status with token validation.
 
         Returns:
@@ -516,7 +516,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
 
             # Try to get current token and parse it
             try:
-                current_token = await self._get_valid_token()
+                current_token = self._get_valid_token()
                 if current_token:
                     # Parse token information using JWT manager
                     token_claims = self.jwt_manager.get_token_claims(current_token)
@@ -534,7 +534,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
                     # If token is expired, try automatic refresh
                     if not status.token_valid:
                         try:
-                            refresh_response = await self.refresh_token()
+                            refresh_response = self.refresh_token()
                             if refresh_response.get("access_token"):
                                 status.token_valid = True
                                 status.last_refreshed = datetime.now()
@@ -557,9 +557,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
             if status.authenticated and status.token_valid:
                 try:
                     # Simple connectivity test using health endpoint
-                    health_response = await self._authenticated_request(
-                        "GET", "/health"
-                    )
+                    health_response = self._authenticated_request("GET", "/health")
                     status.server_reachable = health_response.status_code == 200
 
                     # Try to get server version if available
@@ -579,7 +577,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error getting auth status: {e}")
 
-    async def refresh_token(self) -> Dict[str, Any]:
+    def refresh_token(self) -> Dict[str, Any]:
         """Manually refresh authentication token.
 
         Returns:
@@ -592,7 +590,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
         """
         try:
             # Make refresh request using existing refresh token
-            response = await self._authenticated_request("POST", "/auth/refresh")
+            response = self._authenticated_request("POST", "/auth/refresh")
 
             if response.status_code == 200:
                 refresh_response: Dict[str, Any] = response.json()
@@ -603,7 +601,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
 
                 # Update stored credentials with new token if project root provided
                 if self.project_root:
-                    await self._store_credentials_securely(
+                    self._store_credentials_securely(
                         self.credentials.get("username", ""),
                         self.credentials.get("password", ""),
                     )
@@ -645,7 +643,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error during token refresh: {e}")
 
-    async def validate_credentials(self) -> bool:
+    def validate_credentials(self) -> bool:
         """Silently validate current credentials.
 
         Returns:
@@ -661,7 +659,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
                 return False
 
             # Try to get current token
-            current_token = await self._get_valid_token()
+            current_token = self._get_valid_token()
             if not current_token:
                 return False
 
@@ -669,7 +667,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
             if self.jwt_manager.is_token_expired(current_token):
                 # Try to refresh
                 try:
-                    refresh_response = await self.refresh_token()
+                    refresh_response = self.refresh_token()
                     access_token = refresh_response.get("access_token")
                     return bool(access_token)
                 except Exception:
@@ -677,7 +675,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
 
             # Token exists and is not expired - validate with server
             try:
-                response = await self._authenticated_request("GET", "/auth/validate")
+                response = self._authenticated_request("GET", "/auth/validate")
                 result: bool = response.status_code == 200
                 return result
             except Exception:
@@ -688,7 +686,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
             # Unexpected error during validation
             return False
 
-    async def check_credential_health(self) -> CredentialHealth:
+    def check_credential_health(self) -> CredentialHealth:
         """Comprehensive credential health check.
 
         Returns:
@@ -741,7 +739,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
 
             # Check 3: Validate JWT token structure and signature
             try:
-                current_token = await self._get_valid_token()
+                current_token = self._get_valid_token()
                 if current_token:
                     # Try to parse token
                     self.jwt_manager.get_token_claims(current_token)
@@ -760,7 +758,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
 
             # Check 4: Test server connectivity
             try:
-                response = await self._authenticated_request("GET", "/health")
+                response = self._authenticated_request("GET", "/health")
                 server_reachable = response.status_code == 200
             except Exception:
                 server_reachable = False

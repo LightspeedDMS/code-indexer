@@ -233,72 +233,83 @@ class TestServerURLValidation:
 class TestServerConnectivityTesting:
     """Test server connectivity validation."""
 
-    @pytest.mark.asyncio
-    async def test_server_connectivity_success(self):
+    def test_server_connectivity_success(self):
         """Test successful server connectivity check."""
         from code_indexer.remote.connectivity import test_server_connectivity
 
-        with patch("httpx.AsyncClient.get") as mock_get:
+        with patch(
+            "code_indexer.remote.connectivity.httpx.Client"
+        ) as mock_client_class:
+            mock_client = MagicMock()
             mock_response = MagicMock()
             mock_response.status_code = 200
-            mock_response.json.return_value = {"status": "ok"}
-            mock_get.return_value = mock_response
+            mock_client.get.return_value = mock_response
+            mock_client_class.return_value.__enter__.return_value = mock_client
 
-            # Should not raise any exception
-            await test_server_connectivity("https://cidx.example.com")
+            # Should not raise any exception (sync function - no await)
+            test_server_connectivity("https://cidx.example.com")
 
-            mock_get.assert_called_once()
+            mock_client.get.assert_called_once()
 
-    @pytest.mark.asyncio
-    async def test_server_connectivity_network_error(self):
+    def test_server_connectivity_network_error(self):
         """Test server connectivity with network error."""
         from code_indexer.remote.connectivity import (
             test_server_connectivity,
             ServerConnectivityError,
         )
 
-        with patch("httpx.AsyncClient.get") as mock_get:
-            mock_get.side_effect = httpx.NetworkError("Connection failed")
+        with patch(
+            "code_indexer.remote.connectivity.httpx.Client"
+        ) as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.get.side_effect = httpx.NetworkError("Connection failed")
+            mock_client_class.return_value.__enter__.return_value = mock_client
 
             with pytest.raises(ServerConnectivityError) as exc_info:
-                await test_server_connectivity("https://cidx.example.com")
+                test_server_connectivity("https://cidx.example.com")
 
             assert "Cannot connect to server" in str(exc_info.value)
             assert "Connection failed" in str(exc_info.value)
 
-    @pytest.mark.asyncio
-    async def test_server_connectivity_timeout_error(self):
+    def test_server_connectivity_timeout_error(self):
         """Test server connectivity with timeout error."""
         from code_indexer.remote.connectivity import (
             test_server_connectivity,
             ServerConnectivityError,
         )
 
-        with patch("httpx.AsyncClient.get") as mock_get:
-            mock_get.side_effect = httpx.TimeoutException("Timeout")
+        with patch(
+            "code_indexer.remote.connectivity.httpx.Client"
+        ) as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.get.side_effect = httpx.TimeoutException("Timeout")
+            mock_client_class.return_value.__enter__.return_value = mock_client
 
             with pytest.raises(ServerConnectivityError) as exc_info:
-                await test_server_connectivity("https://cidx.example.com")
+                test_server_connectivity("https://cidx.example.com")
 
             assert "Cannot connect to server" in str(exc_info.value)
             assert "Timeout" in str(exc_info.value)
 
-    @pytest.mark.asyncio
-    async def test_server_connectivity_unexpected_status_code(self):
+    def test_server_connectivity_unexpected_status_code(self):
         """Test server connectivity with unexpected HTTP status."""
         from code_indexer.remote.connectivity import (
             test_server_connectivity,
             ServerConnectivityError,
         )
 
-        with patch("httpx.AsyncClient.get") as mock_get:
+        with patch(
+            "code_indexer.remote.connectivity.httpx.Client"
+        ) as mock_client_class:
+            mock_client = MagicMock()
             mock_response = MagicMock()
             mock_response.status_code = 500
             mock_response.text = "Internal Server Error"
-            mock_get.return_value = mock_response
+            mock_client.get.return_value = mock_response
+            mock_client_class.return_value.__enter__.return_value = mock_client
 
             with pytest.raises(ServerConnectivityError) as exc_info:
-                await test_server_connectivity("https://cidx.example.com")
+                test_server_connectivity("https://cidx.example.com")
 
             assert "Server returned unexpected status" in str(exc_info.value)
             assert "500" in str(exc_info.value)
@@ -307,16 +318,15 @@ class TestServerConnectivityTesting:
 class TestCredentialValidation:
     """Test credential validation with server authentication."""
 
-    @pytest.mark.asyncio
-    async def test_credential_validation_success(self):
+    def test_credential_validation_success(self):
         """Test successful credential validation."""
         from code_indexer.remote.auth import validate_credentials
 
         with patch.object(CIDXRemoteAPIClient, "_authenticate") as mock_auth:
             mock_auth.return_value = "valid.jwt.token"
 
-            # Should return user info on success
-            user_info = await validate_credentials(
+            # Should return user info on success (sync function - no await)
+            user_info = validate_credentials(
                 "https://cidx.example.com", "testuser", "testpass123"
             )
 
@@ -324,8 +334,7 @@ class TestCredentialValidation:
             assert "username" in user_info
             mock_auth.assert_called_once()
 
-    @pytest.mark.asyncio
-    async def test_credential_validation_invalid_credentials(self):
+    def test_credential_validation_invalid_credentials(self):
         """Test credential validation with invalid credentials."""
         from code_indexer.remote.auth import (
             validate_credentials,
@@ -336,14 +345,11 @@ class TestCredentialValidation:
             mock_auth.side_effect = AuthenticationError("Invalid credentials")
 
             with pytest.raises(CredentialValidationError) as exc_info:
-                await validate_credentials(
-                    "https://cidx.example.com", "baduser", "badpass"
-                )
+                validate_credentials("https://cidx.example.com", "baduser", "badpass")
 
             assert "Invalid credentials" in str(exc_info.value)
 
-    @pytest.mark.asyncio
-    async def test_credential_validation_server_error(self):
+    def test_credential_validation_server_error(self):
         """Test credential validation with server error."""
         from code_indexer.remote.auth import (
             validate_credentials,
@@ -354,7 +360,7 @@ class TestCredentialValidation:
             mock_auth.side_effect = APIClientError("Server error", status_code=500)
 
             with pytest.raises(CredentialValidationError) as exc_info:
-                await validate_credentials(
+                validate_credentials(
                     "https://cidx.example.com", "testuser", "testpass123"
                 )
 
@@ -477,8 +483,7 @@ class TestRemoteConfigurationCreation:
 class TestEndToEndRemoteInitialization:
     """Test complete end-to-end remote initialization workflow."""
 
-    @pytest.mark.asyncio
-    async def test_remote_initialization_orchestrator_success(self):
+    def test_remote_initialization_orchestrator_success(self):
         """Test complete remote initialization orchestrator with mocked dependencies."""
         from code_indexer.remote.initialization import initialize_remote_mode
         from rich.console import Console
@@ -511,7 +516,7 @@ class TestEndToEndRemoteInitialization:
             ):
                 # Configure mocks for success case
                 mock_url_validate.return_value = "https://cidx.example.com"
-                mock_connectivity.return_value = None  # Async function, no return
+                mock_connectivity.return_value = None  # Sync function, no return
                 mock_credentials.return_value = {
                     "username": "testuser",
                     "permissions": ["read", "write"],
@@ -521,8 +526,8 @@ class TestEndToEndRemoteInitialization:
                 mock_remote_config = MagicMock()
                 mock_remote_config_class.return_value = mock_remote_config
 
-                # Should complete successfully
-                await initialize_remote_mode(
+                # Should complete successfully (sync function - no await)
+                initialize_remote_mode(
                     project_root=test_dir,
                     server_url="https://cidx.example.com",
                     username="testuser",
@@ -583,8 +588,7 @@ class TestEndToEndRemoteInitialization:
                 in result.stdout
             )
 
-    @pytest.mark.asyncio
-    async def test_remote_initialization_failure_cleanup(self):
+    def test_remote_initialization_failure_cleanup(self):
         """Test that remote initialization cleans up on failure."""
         from code_indexer.remote.initialization import initialize_remote_mode
         from code_indexer.remote.exceptions import RemoteInitializationError
@@ -618,9 +622,9 @@ class TestEndToEndRemoteInitialization:
                 mock_connectivity.return_value = None  # Success
                 mock_credentials.side_effect = Exception("Authentication failed")
 
-                # Should fail with RemoteInitializationError
+                # Should fail with RemoteInitializationError (sync function - no await)
                 with pytest.raises(RemoteInitializationError):
-                    await initialize_remote_mode(
+                    initialize_remote_mode(
                         project_root=test_dir,
                         server_url="https://cidx.example.com",
                         username="testuser",

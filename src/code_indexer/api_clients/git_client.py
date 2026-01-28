@@ -59,7 +59,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
 
     # Status/Inspection Methods
 
-    async def status(self, repository_alias: str) -> Dict[str, Any]:
+    def status(self, repository_alias: str) -> Dict[str, Any]:
         """Get working tree status.
 
         Args:
@@ -74,7 +74,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "GET", f"/api/v1/repos/{repository_alias}/git/status"
             )
 
@@ -100,7 +100,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error getting status: {e}")
 
-    async def diff(
+    def diff(
         self,
         repository_alias: str,
         path: Optional[str] = None,
@@ -132,7 +132,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             params["commit"] = commit
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "GET",
                 f"/api/v1/repos/{repository_alias}/git/diff",
                 params=params if params else None,
@@ -160,7 +160,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error getting diff: {e}")
 
-    async def log(
+    def log(
         self,
         repository_alias: str,
         limit: int = 20,
@@ -190,7 +190,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             params["path"] = path
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "GET",
                 f"/api/v1/repos/{repository_alias}/git/log",
                 params=params,
@@ -218,7 +218,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error getting log: {e}")
 
-    async def show_commit(
+    def show_commit(
         self,
         repository_alias: str,
         commit_hash: str,
@@ -247,7 +247,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         }
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "GET",
                 f"/api/v1/repos/{repository_alias}/git/show/{commit_hash}",
                 params=params,
@@ -280,7 +280,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
 
     # Staging/Commit Methods
 
-    async def stage(
+    def stage(
         self,
         repository_alias: str,
         files: list[str],
@@ -300,7 +300,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST",
                 f"/api/v1/repos/{repository_alias}/git/stage",
                 json={"file_paths": files},
@@ -328,7 +328,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error staging files: {e}")
 
-    async def unstage(
+    def unstage(
         self,
         repository_alias: str,
         files: list[str],
@@ -348,7 +348,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST",
                 f"/api/v1/repos/{repository_alias}/git/unstage",
                 json={"file_paths": files},
@@ -376,7 +376,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error unstaging files: {e}")
 
-    async def commit(
+    def commit(
         self,
         repository_alias: str,
         message: str,
@@ -406,7 +406,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             data["author_email"] = author_email
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST",
                 f"/api/v1/repos/{repository_alias}/git/commit",
                 json=data,
@@ -436,7 +436,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
 
     # Remote Operations Methods
 
-    async def push(
+    def push(
         self,
         repository_alias: str,
         remote: str = "origin",
@@ -462,7 +462,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             data["branch"] = branch
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST",
                 f"/api/v1/repos/{repository_alias}/git/push",
                 json=data,
@@ -490,7 +490,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error pushing: {e}")
 
-    async def pull(
+    def pull(
         self,
         repository_alias: str,
         remote: str = "origin",
@@ -516,7 +516,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             data["branch"] = branch
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST",
                 f"/api/v1/repos/{repository_alias}/git/pull",
                 json=data,
@@ -544,7 +544,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error pulling: {e}")
 
-    async def fetch(
+    def fetch(
         self,
         repository_alias: str,
         remote: str = "origin",
@@ -566,7 +566,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         data: Dict[str, Any] = {"remote": remote}
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST",
                 f"/api/v1/repos/{repository_alias}/git/fetch",
                 json=data,
@@ -596,7 +596,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
 
     # Recovery Methods
 
-    async def reset(
+    def reset(
         self,
         repository_alias: str,
         mode: str = "mixed",
@@ -625,7 +625,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             data["confirmation_token"] = confirmation_token
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST",
                 f"/api/v1/repos/{repository_alias}/git/reset",
                 json=data,
@@ -654,7 +654,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error resetting: {e}")
 
-    async def clean(
+    def clean(
         self,
         repository_alias: str,
         confirmation_token: Optional[str] = None,
@@ -677,7 +677,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             data["confirmation_token"] = confirmation_token
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST",
                 f"/api/v1/repos/{repository_alias}/git/clean",
                 json=data,
@@ -706,7 +706,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error cleaning: {e}")
 
-    async def merge_abort(self, repository_alias: str) -> Dict[str, Any]:
+    def merge_abort(self, repository_alias: str) -> Dict[str, Any]:
         """Abort a merge in progress.
 
         Args:
@@ -719,7 +719,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             APIClientError: If API request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST",
                 f"/api/v1/repos/{repository_alias}/git/merge-abort",
             )
@@ -746,7 +746,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error aborting merge: {e}")
 
-    async def checkout_file(
+    def checkout_file(
         self,
         repository_alias: str,
         file_path: str,
@@ -764,7 +764,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             APIClientError: If API request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST",
                 f"/api/v1/repos/{repository_alias}/git/checkout-file",
                 json={"file_path": file_path},
@@ -792,7 +792,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error checking out file: {e}")
 
-    async def branches(self, repository_alias: str) -> Dict[str, Any]:
+    def branches(self, repository_alias: str) -> Dict[str, Any]:
         """List all branches.
 
         Args:
@@ -805,7 +805,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             APIClientError: If API request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "GET",
                 f"/api/v1/repos/{repository_alias}/git/branches",
             )
@@ -832,7 +832,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error listing branches: {e}")
 
-    async def branch_create(
+    def branch_create(
         self,
         repository_alias: str,
         branch_name: str,
@@ -856,7 +856,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             data["start_point"] = start_point
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST",
                 f"/api/v1/repos/{repository_alias}/git/branch-create",
                 json=data,
@@ -884,7 +884,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error creating branch: {e}")
 
-    async def branch_switch(
+    def branch_switch(
         self,
         repository_alias: str,
         branch_name: str,
@@ -902,7 +902,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             APIClientError: If API request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST",
                 f"/api/v1/repos/{repository_alias}/git/branch-switch",
                 json={"branch_name": branch_name},
@@ -930,7 +930,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error switching branch: {e}")
 
-    async def branch_delete(
+    def branch_delete(
         self,
         repository_alias: str,
         branch_name: str,
@@ -955,7 +955,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             data["confirmation_token"] = confirmation_token
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST",
                 f"/api/v1/repos/{repository_alias}/git/branch-delete",
                 json=data,
@@ -984,7 +984,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error deleting branch: {e}")
 
-    async def blame(
+    def blame(
         self,
         repository_alias: str,
         file_path: str,
@@ -1002,7 +1002,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             APIClientError: If API request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "GET",
                 f"/api/v1/repos/{repository_alias}/git/blame",
                 params={"file_path": file_path},
@@ -1030,7 +1030,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error getting blame: {e}")
 
-    async def file_history(
+    def file_history(
         self,
         repository_alias: str,
         file_path: str,
@@ -1050,7 +1050,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             APIClientError: If API request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "GET",
                 f"/api/v1/repos/{repository_alias}/git/file-history",
                 params={"file_path": file_path, "limit": limit},
@@ -1078,7 +1078,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error getting file history: {e}")
 
-    async def search_commits(
+    def search_commits(
         self,
         repository_alias: str,
         query: str,
@@ -1098,7 +1098,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             APIClientError: If API request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "GET",
                 f"/api/v1/repos/{repository_alias}/git/search-commits",
                 params={"query": query, "limit": limit},
@@ -1126,7 +1126,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error searching commits: {e}")
 
-    async def search_diffs(
+    def search_diffs(
         self,
         repository_alias: str,
         pattern: str,
@@ -1146,7 +1146,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             APIClientError: If API request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "GET",
                 f"/api/v1/repos/{repository_alias}/git/search-diffs",
                 params={"pattern": pattern, "limit": limit},
@@ -1174,7 +1174,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error searching diffs: {e}")
 
-    async def cat_file(
+    def cat_file(
         self,
         repository_alias: str,
         file_path: str,
@@ -1198,7 +1198,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             params["revision"] = revision
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "GET",
                 f"/api/v1/repos/{repository_alias}/git/cat",
                 params=params,

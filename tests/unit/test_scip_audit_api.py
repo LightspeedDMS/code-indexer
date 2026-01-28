@@ -44,8 +44,7 @@ class TestSCIPAuditLogAPI:
         ) as mock_repo:
             yield mock_repo
 
-    @pytest.mark.asyncio
-    async def test_get_audit_log_success_admin(self, admin_user, mock_audit_repo):
+    def test_get_audit_log_success_admin(self, admin_user, mock_audit_repo):
         """Test successful audit log retrieval by admin user."""
         # Mock repository response
         mock_records = [
@@ -65,9 +64,9 @@ class TestSCIPAuditLogAPI:
         ]
         mock_audit_repo.query_audit_records.return_value = (mock_records, 1)
 
-        # Call handler
+        # Call handler (now sync after Epic #48)
         params = {}
-        response = await get_scip_audit_log(params, admin_user)
+        response = get_scip_audit_log(params, admin_user)
 
         # Verify response structure
         assert "content" in response
@@ -83,21 +82,19 @@ class TestSCIPAuditLogAPI:
         assert len(data["records"]) == 1
         assert data["total"] == 1
 
-    @pytest.mark.asyncio
-    async def test_get_audit_log_permission_denied_non_admin(
+    def test_get_audit_log_permission_denied_non_admin(
         self, normal_user, mock_audit_repo
     ):
         """Test that non-admin users are denied access."""
         params = {}
-        response = await get_scip_audit_log(params, normal_user)
+        response = get_scip_audit_log(params, normal_user)
 
         # Parse response
         data = json.loads(response["content"][0]["text"])
         assert data["success"] is False
         assert "permission" in data["error"].lower() or "admin" in data["error"].lower()
 
-    @pytest.mark.asyncio
-    async def test_get_audit_log_filter_by_job_id(self, admin_user, mock_audit_repo):
+    def test_get_audit_log_filter_by_job_id(self, admin_user, mock_audit_repo):
         """Test filtering audit log by job_id."""
         mock_records = [
             {
@@ -118,7 +115,7 @@ class TestSCIPAuditLogAPI:
 
         # Call handler with job_id filter
         params = {"job_id": "job-1"}
-        response = await get_scip_audit_log(params, admin_user)
+        response = get_scip_audit_log(params, admin_user)
 
         # Verify repository was called with correct filter
         mock_audit_repo.query_audit_records.assert_called_once()
@@ -130,15 +127,14 @@ class TestSCIPAuditLogAPI:
         assert data["success"] is True
         assert data["filters"]["job_id"] == "job-1"
 
-    @pytest.mark.asyncio
-    async def test_get_audit_log_filter_by_repo_alias(
+    def test_get_audit_log_filter_by_repo_alias(
         self, admin_user, mock_audit_repo
     ):
         """Test filtering audit log by repo_alias."""
         mock_audit_repo.query_audit_records.return_value = ([], 0)
 
         params = {"repo_alias": "my-repo"}
-        response = await get_scip_audit_log(params, admin_user)
+        response = get_scip_audit_log(params, admin_user)
 
         # Verify filter was passed
         call_kwargs = mock_audit_repo.query_audit_records.call_args.kwargs
@@ -147,15 +143,14 @@ class TestSCIPAuditLogAPI:
         data = json.loads(response["content"][0]["text"])
         assert data["filters"]["repo_alias"] == "my-repo"
 
-    @pytest.mark.asyncio
-    async def test_get_audit_log_filter_by_project_language(
+    def test_get_audit_log_filter_by_project_language(
         self, admin_user, mock_audit_repo
     ):
         """Test filtering audit log by project_language."""
         mock_audit_repo.query_audit_records.return_value = ([], 0)
 
         params = {"project_language": "python"}
-        response = await get_scip_audit_log(params, admin_user)
+        response = get_scip_audit_log(params, admin_user)
 
         # Verify filter
         call_kwargs = mock_audit_repo.query_audit_records.call_args.kwargs
@@ -164,15 +159,14 @@ class TestSCIPAuditLogAPI:
         data = json.loads(response["content"][0]["text"])
         assert data["filters"]["project_language"] == "python"
 
-    @pytest.mark.asyncio
-    async def test_get_audit_log_filter_by_build_system(
+    def test_get_audit_log_filter_by_build_system(
         self, admin_user, mock_audit_repo
     ):
         """Test filtering audit log by project_build_system."""
         mock_audit_repo.query_audit_records.return_value = ([], 0)
 
         params = {"project_build_system": "pip"}
-        response = await get_scip_audit_log(params, admin_user)
+        response = get_scip_audit_log(params, admin_user)
 
         # Verify filter
         call_kwargs = mock_audit_repo.query_audit_records.call_args.kwargs
@@ -181,34 +175,31 @@ class TestSCIPAuditLogAPI:
         data = json.loads(response["content"][0]["text"])
         assert data["filters"]["project_build_system"] == "pip"
 
-    @pytest.mark.asyncio
-    async def test_get_audit_log_pagination(self, admin_user, mock_audit_repo):
+    def test_get_audit_log_pagination(self, admin_user, mock_audit_repo):
         """Test pagination parameters."""
         mock_audit_repo.query_audit_records.return_value = ([], 0)
 
         params = {"limit": 50, "offset": 10}
-        await get_scip_audit_log(params, admin_user)
+        get_scip_audit_log(params, admin_user)
 
         # Verify pagination params
         call_kwargs = mock_audit_repo.query_audit_records.call_args.kwargs
         assert call_kwargs["limit"] == 50
         assert call_kwargs["offset"] == 10
 
-    @pytest.mark.asyncio
-    async def test_get_audit_log_default_pagination(self, admin_user, mock_audit_repo):
+    def test_get_audit_log_default_pagination(self, admin_user, mock_audit_repo):
         """Test default pagination values."""
         mock_audit_repo.query_audit_records.return_value = ([], 0)
 
         params = {}
-        await get_scip_audit_log(params, admin_user)
+        get_scip_audit_log(params, admin_user)
 
         # Verify defaults
         call_kwargs = mock_audit_repo.query_audit_records.call_args.kwargs
         assert call_kwargs["limit"] == 100  # Default limit
         assert call_kwargs["offset"] == 0  # Default offset
 
-    @pytest.mark.asyncio
-    async def test_get_audit_log_multiple_filters(self, admin_user, mock_audit_repo):
+    def test_get_audit_log_multiple_filters(self, admin_user, mock_audit_repo):
         """Test combining multiple filters."""
         mock_audit_repo.query_audit_records.return_value = ([], 0)
 
@@ -218,7 +209,7 @@ class TestSCIPAuditLogAPI:
             "project_language": "python",
             "limit": 20,
         }
-        response = await get_scip_audit_log(params, admin_user)
+        response = get_scip_audit_log(params, admin_user)
 
         # Verify all filters passed
         call_kwargs = mock_audit_repo.query_audit_records.call_args.kwargs
@@ -233,14 +224,13 @@ class TestSCIPAuditLogAPI:
         assert data["filters"]["repo_alias"] == "test-repo"
         assert data["filters"]["project_language"] == "python"
 
-    @pytest.mark.asyncio
-    async def test_get_audit_log_error_handling(self, admin_user, mock_audit_repo):
+    def test_get_audit_log_error_handling(self, admin_user, mock_audit_repo):
         """Test error handling when repository raises exception."""
         # Mock repository to raise exception
         mock_audit_repo.query_audit_records.side_effect = Exception("Database error")
 
         params = {}
-        response = await get_scip_audit_log(params, admin_user)
+        response = get_scip_audit_log(params, admin_user)
 
         # Verify error response
         data = json.loads(response["content"][0]["text"])
@@ -248,22 +238,20 @@ class TestSCIPAuditLogAPI:
         assert "error" in data
         assert "Database error" in data["error"]
 
-    @pytest.mark.asyncio
-    async def test_get_audit_log_invalid_limit(self, admin_user, mock_audit_repo):
+    def test_get_audit_log_invalid_limit(self, admin_user, mock_audit_repo):
         """Test handling of invalid limit parameter."""
         mock_audit_repo.query_audit_records.return_value = ([], 0)
 
         # Pass non-integer limit
         params = {"limit": "invalid"}
-        response = await get_scip_audit_log(params, admin_user)
+        response = get_scip_audit_log(params, admin_user)
 
         # Should handle gracefully (use default or return error)
         data = json.loads(response["content"][0]["text"])
         # Either success with default limit or error response is acceptable
         assert "success" in data
 
-    @pytest.mark.asyncio
-    async def test_get_audit_log_response_structure(self, admin_user, mock_audit_repo):
+    def test_get_audit_log_response_structure(self, admin_user, mock_audit_repo):
         """Test complete response structure matches specification."""
         mock_records = [
             {
@@ -283,7 +271,7 @@ class TestSCIPAuditLogAPI:
         mock_audit_repo.query_audit_records.return_value = (mock_records, 1)
 
         params = {"repo_alias": "test-repo"}
-        response = await get_scip_audit_log(params, admin_user)
+        response = get_scip_audit_log(params, admin_user)
 
         data = json.loads(response["content"][0]["text"])
 

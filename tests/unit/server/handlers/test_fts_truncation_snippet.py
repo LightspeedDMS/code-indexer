@@ -1,6 +1,7 @@
 """Unit tests for FTS snippet truncation logic.
 
 Story #680: S2 - FTS Search with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 AC1: FTS Snippet Truncation (code_snippet field)
 
 These tests follow TDD methodology - written BEFORE implementation.
@@ -29,10 +30,11 @@ class TestAC1SnippetTruncation:
                                     snippet_has_more=true, snippet_total_size
     When code_snippet <= 2000 chars: return full code_snippet, snippet_cache_handle=null,
                                      snippet_has_more=false
+
+    Story #50: _apply_fts_payload_truncation is now sync.
     """
 
-    @pytest.mark.asyncio
-    async def test_large_snippet_is_truncated(self, cache):
+    def test_large_snippet_is_truncated(self, cache):
         """Test that code_snippet > 2000 chars is truncated with cache handle."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -51,7 +53,7 @@ class TestAC1SnippetTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         assert len(truncated) == 1
         result = truncated[0]
@@ -73,8 +75,7 @@ class TestAC1SnippetTruncation:
         assert result["line_number"] == 10
         assert result["similarity_score"] == 0.95
 
-    @pytest.mark.asyncio
-    async def test_small_snippet_not_truncated(self, cache):
+    def test_small_snippet_not_truncated(self, cache):
         """Test that code_snippet <= 2000 chars is NOT truncated."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -93,7 +94,7 @@ class TestAC1SnippetTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -106,8 +107,7 @@ class TestAC1SnippetTruncation:
         assert "snippet_preview" not in result
         assert "snippet_total_size" not in result
 
-    @pytest.mark.asyncio
-    async def test_snippet_at_exact_boundary_not_truncated(self, cache):
+    def test_snippet_at_exact_boundary_not_truncated(self, cache):
         """Test that code_snippet exactly at 2000 chars is NOT truncated."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -119,7 +119,7 @@ class TestAC1SnippetTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -128,8 +128,7 @@ class TestAC1SnippetTruncation:
         assert result["snippet_cache_handle"] is None
         assert result["snippet_has_more"] is False
 
-    @pytest.mark.asyncio
-    async def test_empty_snippet_not_truncated(self, cache):
+    def test_empty_snippet_not_truncated(self, cache):
         """Test that empty code_snippet is handled correctly."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -140,7 +139,7 @@ class TestAC1SnippetTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
         assert result["code_snippet"] == ""

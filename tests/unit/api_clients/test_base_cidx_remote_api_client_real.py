@@ -60,13 +60,13 @@ class TestCIDXRemoteAPIClientRealAuthentication:
             server_url=real_server.base_url, credentials=real_credentials
         )
         yield client
-        await client.close()
+        client.close()
 
     @pytest.mark.asyncio
     async def test_real_authentication_success(self, real_api_client):
         """Test successful authentication with real server and JWT tokens."""
         # Get valid token through proper token management flow
-        token = await real_api_client._get_valid_token()
+        token = real_api_client._get_valid_token()
 
         # Verify we got a real JWT token
         assert token is not None
@@ -78,7 +78,7 @@ class TestCIDXRemoteAPIClientRealAuthentication:
         assert real_api_client._current_token == token
 
         # Verify token can be used for authenticated requests
-        response = await real_api_client._authenticated_request("GET", "/health")
+        response = real_api_client._authenticated_request("GET", "/health")
         assert response.status_code == 200
         health_data = response.json()
         assert health_data["status"] == "healthy"
@@ -99,17 +99,17 @@ class TestCIDXRemoteAPIClientRealAuthentication:
         try:
             # Should raise real authentication error from server
             with pytest.raises(AuthenticationError) as exc_info:
-                await client._authenticate()
+                client._authenticate()
 
             assert "Invalid credentials" in str(exc_info.value)
         finally:
-            await client.close()
+            client.close()
 
     @pytest.mark.asyncio
     async def test_real_token_refresh_workflow(self, real_api_client, real_server):
         """Test real token refresh using actual server communication."""
         # Get initial token
-        initial_token = await real_api_client._authenticate()
+        initial_token = real_api_client._authenticate()
         assert initial_token is not None
 
         # Wait a moment to ensure timestamp difference
@@ -126,7 +126,7 @@ class TestCIDXRemoteAPIClientRealAuthentication:
 
         # Force token refresh by making request with near-expiry token
         # This should trigger re-authentication
-        response = await real_api_client._authenticated_request("GET", "/health")
+        response = real_api_client._authenticated_request("GET", "/health")
         assert response.status_code == 200
 
         # Verify we got a new token (different from the near-expiry one)
@@ -149,7 +149,7 @@ class TestCIDXRemoteAPIClientRealAuthentication:
         assert all(token == tokens[0] for token in tokens)
 
         # Verify token is valid by making authenticated request
-        response = await real_api_client._authenticated_request("GET", "/health")
+        response = real_api_client._authenticated_request("GET", "/health")
         assert response.status_code == 200
 
 
@@ -189,15 +189,15 @@ class TestCIDXRemoteAPIClientRealRequests:
         )
 
         # Pre-authenticate
-        await client._authenticate()
+        client._authenticate()
 
         yield client
-        await client.close()
+        client.close()
 
     @pytest.mark.asyncio
     async def test_real_authenticated_get_request(self, authenticated_api_client):
         """Test real authenticated GET request."""
-        response = await authenticated_api_client._authenticated_request(
+        response = authenticated_api_client._authenticated_request(
             "GET", "/api/repositories"
         )
 
@@ -215,7 +215,7 @@ class TestCIDXRemoteAPIClientRealRequests:
     async def test_real_job_status_request(self, authenticated_api_client):
         """Test real job status retrieval."""
         # Test existing job
-        job_data = await authenticated_api_client.get_job_status("job-456")
+        job_data = authenticated_api_client.get_job_status("job-456")
 
         assert job_data["id"] == "job-456"
         assert job_data["repository_id"] == "repo-123"
@@ -226,7 +226,7 @@ class TestCIDXRemoteAPIClientRealRequests:
     async def test_real_job_not_found_error(self, authenticated_api_client):
         """Test real 404 error handling."""
         with pytest.raises(APIClientError) as exc_info:
-            await authenticated_api_client.get_job_status("nonexistent-job")
+            authenticated_api_client.get_job_status("nonexistent-job")
 
         assert exc_info.value.status_code == 404
         assert "Job not found" in str(exc_info.value)
@@ -237,15 +237,13 @@ class TestCIDXRemoteAPIClientRealRequests:
     ):
         """Test real job cancellation workflow."""
         # Cancel running job
-        result = await authenticated_api_client.cancel_job(
-            "job-456", "Test cancellation"
-        )
+        result = authenticated_api_client.cancel_job("job-456", "Test cancellation")
 
         assert "cancelled successfully" in result["message"]
         assert result["reason"] == "Test cancellation"
 
         # Verify job status was updated on server
-        updated_job = await authenticated_api_client.get_job_status("job-456")
+        updated_job = authenticated_api_client.get_job_status("job-456")
         assert updated_job["status"] == "cancelled"
 
     @pytest.mark.asyncio
@@ -266,7 +264,7 @@ class TestCIDXRemoteAPIClientRealRequests:
             client._current_token = "invalid.jwt.token"
 
             # This should trigger re-authentication and succeed
-            response = await client._authenticated_request("GET", "/health")
+            response = client._authenticated_request("GET", "/health")
             assert response.status_code == 200
 
             # Verify we got a new valid token
@@ -274,7 +272,7 @@ class TestCIDXRemoteAPIClientRealRequests:
             assert client._current_token is not None
 
         finally:
-            await client.close()
+            client.close()
 
 
 class TestCIDXRemoteAPIClientRealNetworkErrors:
@@ -304,7 +302,7 @@ class TestCIDXRemoteAPIClientRealNetworkErrors:
             with pytest.raises(
                 (NetworkConnectionError, DNSResolutionError, AuthenticationError)
             ) as exc_info:
-                await client._authenticate()
+                client._authenticate()
 
             # Should get a real network error
             assert (
@@ -315,7 +313,7 @@ class TestCIDXRemoteAPIClientRealNetworkErrors:
             )
 
         finally:
-            await client.close()
+            client.close()
 
     @pytest.mark.asyncio
     async def test_real_timeout_handling(self, real_server_with_errors):
@@ -338,7 +336,7 @@ class TestCIDXRemoteAPIClientRealNetworkErrors:
 
         try:
             with pytest.raises((NetworkTimeoutError, AuthenticationError)) as exc_info:
-                await client._authenticate()
+                client._authenticate()
 
             # Should get a real timeout error
             assert (
@@ -347,7 +345,7 @@ class TestCIDXRemoteAPIClientRealNetworkErrors:
             )
 
         finally:
-            await client.close()
+            client.close()
 
 
 class TestCIDXRemoteAPIClientRealResourceManagement:
@@ -373,12 +371,12 @@ class TestCIDXRemoteAPIClientRealResourceManagement:
         )
 
         # Use the client to create a session
-        await client._authenticate()
+        client._authenticate()
         session = client.session
         assert not session.is_closed
 
         # Close and verify cleanup
-        await client.close()
+        client.close()
         assert session.is_closed
 
     @pytest.mark.asyncio
@@ -395,7 +393,7 @@ class TestCIDXRemoteAPIClientRealResourceManagement:
         async with CIDXRemoteAPIClient(
             server_url=real_server_for_resources.base_url, credentials=credentials
         ) as client:
-            await client._authenticate()
+            client._authenticate()
             session_ref = client.session
             assert not session_ref.is_closed
 
@@ -421,7 +419,7 @@ class TestCIDXRemoteAPIClientRealResourceManagement:
             assert not original_session.is_closed
 
             # Close client
-            await client.close()
+            client.close()
             assert original_session.is_closed
 
             # Access session again should create new one
@@ -430,7 +428,7 @@ class TestCIDXRemoteAPIClientRealResourceManagement:
             assert not new_session.is_closed
 
         finally:
-            await client.close()
+            client.close()
 
 
 class TestRealJWTTokenManagerIntegration:
@@ -459,7 +457,7 @@ class TestRealJWTTokenManagerIntegration:
             assert client.jwt_manager is not None
             assert isinstance(client.jwt_manager, JWTTokenManager)
         finally:
-            await client.close()
+            client.close()
 
     @pytest.mark.asyncio
     async def test_real_token_validation_workflow(self, real_server_jwt):
@@ -476,7 +474,7 @@ class TestRealJWTTokenManagerIntegration:
 
         try:
             # Get real token from server
-            token = await client._authenticate()
+            token = client._authenticate()
 
             # Test real token validation
             is_expired = client.jwt_manager.is_token_expired(token)
@@ -487,11 +485,11 @@ class TestRealJWTTokenManagerIntegration:
             assert isinstance(is_near_expiry, bool)
 
             # Test token can be used successfully
-            response = await client._authenticated_request("GET", "/health")
+            response = client._authenticated_request("GET", "/health")
             assert response.status_code == 200
 
         finally:
-            await client.close()
+            client.close()
 
     @pytest.mark.asyncio
     async def test_real_expired_token_detection(self, real_server_jwt):
@@ -519,14 +517,14 @@ class TestRealJWTTokenManagerIntegration:
             assert is_expired
 
             # Making request should trigger re-authentication
-            response = await client._authenticated_request("GET", "/health")
+            response = client._authenticated_request("GET", "/health")
             assert response.status_code == 200
 
             # Should have new token now
             assert client._current_token != expired_token
 
         finally:
-            await client.close()
+            client.close()
 
 
 class TestRealPersistentTokenStorage:
@@ -606,11 +604,11 @@ class TestRealEndToEndIntegration:
                 server_url=server.base_url, credentials=credentials
             ) as client:
                 # 1. Real authentication
-                token = await client._authenticate()
+                token = client._authenticate()
                 assert token is not None
 
                 # 2. Real repository listing
-                repos_response = await client._authenticated_request(
+                repos_response = client._authenticated_request(
                     "GET", "/api/repositories"
                 )
                 assert repos_response.status_code == 200
@@ -618,17 +616,17 @@ class TestRealEndToEndIntegration:
                 assert len(repos_data["repositories"]) == 1
 
                 # 3. Real job status check
-                job_data = await client.get_job_status("integration-job")
+                job_data = client.get_job_status("integration-job")
                 assert job_data["status"] == "pending"
 
                 # 4. Real job cancellation
-                cancel_result = await client.cancel_job(
+                cancel_result = client.cancel_job(
                     "integration-job", "Integration test cleanup"
                 )
                 assert "cancelled successfully" in cancel_result["message"]
 
                 # 5. Verify real state change
-                updated_job = await client.get_job_status("integration-job")
+                updated_job = client.get_job_status("integration-job")
                 assert updated_job["status"] == "cancelled"
 
     @pytest.mark.asyncio
@@ -645,13 +643,13 @@ class TestRealEndToEndIntegration:
                 server_url=server.base_url, credentials=credentials
             ) as client:
                 # 1. Successful authentication
-                await client._authenticate()
+                client._authenticate()
 
                 # 2. Break authentication by setting invalid token
                 client._current_token = "broken.token.here"
 
                 # 3. Make request that should trigger re-authentication
-                response = await client._authenticated_request("GET", "/health")
+                response = client._authenticated_request("GET", "/health")
                 assert response.status_code == 200
 
                 # 4. Verify we got a new valid token
@@ -659,7 +657,7 @@ class TestRealEndToEndIntegration:
                 assert client._current_token is not None
 
                 # 5. Verify token works for subsequent requests
-                health_response = await client._authenticated_request("GET", "/health")
+                health_response = client._authenticated_request("GET", "/health")
                 assert health_response.status_code == 200
                 health_data = health_response.json()
                 assert health_data["status"] == "healthy"

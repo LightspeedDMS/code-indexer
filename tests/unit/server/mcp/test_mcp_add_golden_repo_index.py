@@ -41,8 +41,7 @@ def mock_golden_repo_manager():
 class TestAddGoldenRepoIndex:
     """Test add_golden_repo_index MCP tool handler."""
 
-    @pytest.mark.asyncio
-    async def test_add_index_success_semantic(
+    def test_add_index_success_semantic(
         self, mock_admin_user, mock_golden_repo_manager
     ):
         """Test AC1: add_golden_repo_index successfully submits job for semantic index."""
@@ -57,7 +56,7 @@ class TestAddGoldenRepoIndex:
 
             # Call handler
             args = {"alias": "test-repo", "index_type": "semantic"}
-            result = await handle_add_golden_repo_index(args, mock_admin_user)
+            result = handle_add_golden_repo_index(args, mock_admin_user)
 
             # Verify response structure
             assert "content" in result
@@ -76,8 +75,7 @@ class TestAddGoldenRepoIndex:
                 alias="test-repo", index_type="semantic", submitter_username="admin"
             )
 
-    @pytest.mark.asyncio
-    async def test_add_index_success_fts(
+    def test_add_index_success_fts(
         self, mock_admin_user, mock_golden_repo_manager
     ):
         """Test AC1: add_golden_repo_index successfully submits job for fts index."""
@@ -92,7 +90,7 @@ class TestAddGoldenRepoIndex:
 
             # Call handler
             args = {"alias": "test-repo", "index_type": "fts"}
-            result = await handle_add_golden_repo_index(args, mock_admin_user)
+            result = handle_add_golden_repo_index(args, mock_admin_user)
 
             # Verify response structure
             assert "content" in result
@@ -111,8 +109,7 @@ class TestAddGoldenRepoIndex:
                 alias="test-repo", index_type="fts", submitter_username="admin"
             )
 
-    @pytest.mark.asyncio
-    async def test_add_index_success_temporal(
+    def test_add_index_success_temporal(
         self, mock_admin_user, mock_golden_repo_manager
     ):
         """Test AC1: add_golden_repo_index successfully submits job for temporal index."""
@@ -125,15 +122,14 @@ class TestAddGoldenRepoIndex:
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
             args = {"alias": "test-repo", "index_type": "temporal"}
-            result = await handle_add_golden_repo_index(args, mock_admin_user)
+            result = handle_add_golden_repo_index(args, mock_admin_user)
 
             response_data = json.loads(result["content"][0]["text"])
             assert response_data["success"] is True
             assert response_data["job_id"] == "job-456-temporal"
             assert "temporal" in response_data["message"]
 
-    @pytest.mark.asyncio
-    async def test_add_index_success_scip(
+    def test_add_index_success_scip(
         self, mock_admin_user, mock_golden_repo_manager
     ):
         """Test AC1: add_golden_repo_index successfully submits job for scip index."""
@@ -144,15 +140,14 @@ class TestAddGoldenRepoIndex:
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
             args = {"alias": "test-repo", "index_type": "scip"}
-            result = await handle_add_golden_repo_index(args, mock_admin_user)
+            result = handle_add_golden_repo_index(args, mock_admin_user)
 
             response_data = json.loads(result["content"][0]["text"])
             assert response_data["success"] is True
             assert response_data["job_id"] == "job-789-scip"
             assert "scip" in response_data["message"]
 
-    @pytest.mark.asyncio
-    async def test_add_index_error_unknown_alias(
+    def test_add_index_error_unknown_alias(
         self, mock_admin_user, mock_golden_repo_manager
     ):
         """Test AC4: Error when golden repo alias not found."""
@@ -165,15 +160,14 @@ class TestAddGoldenRepoIndex:
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
             args = {"alias": "nonexistent-repo", "index_type": "semantic"}
-            result = await handle_add_golden_repo_index(args, mock_admin_user)
+            result = handle_add_golden_repo_index(args, mock_admin_user)
 
             response_data = json.loads(result["content"][0]["text"])
             assert response_data["success"] is False
             assert "error" in response_data
             assert "not found" in response_data["error"].lower()
 
-    @pytest.mark.asyncio
-    async def test_add_index_error_invalid_type(
+    def test_add_index_error_invalid_type(
         self, mock_admin_user, mock_golden_repo_manager
     ):
         """Test AC3: Error when invalid index_type provided."""
@@ -186,15 +180,14 @@ class TestAddGoldenRepoIndex:
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
             args = {"alias": "test-repo", "index_type": "invalid_type"}
-            result = await handle_add_golden_repo_index(args, mock_admin_user)
+            result = handle_add_golden_repo_index(args, mock_admin_user)
 
             response_data = json.loads(result["content"][0]["text"])
             assert response_data["success"] is False
             assert "error" in response_data
             assert "invalid" in response_data["error"].lower()
 
-    @pytest.mark.asyncio
-    async def test_add_index_error_already_exists(
+    def test_add_index_error_already_exists(
         self, mock_admin_user, mock_golden_repo_manager
     ):
         """Test AC5: Error when index type already exists."""
@@ -207,35 +200,33 @@ class TestAddGoldenRepoIndex:
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
             args = {"alias": "test-repo", "index_type": "semantic"}
-            result = await handle_add_golden_repo_index(args, mock_admin_user)
+            result = handle_add_golden_repo_index(args, mock_admin_user)
 
             response_data = json.loads(result["content"][0]["text"])
             assert response_data["success"] is False
             assert "error" in response_data
             assert "already exists" in response_data["error"].lower()
 
-    @pytest.mark.asyncio
-    async def test_add_index_error_missing_alias(self, mock_admin_user):
+    def test_add_index_error_missing_alias(self, mock_admin_user):
         """Test error when alias parameter is missing."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
 
             args = {"index_type": "semantic"}
-            result = await handle_add_golden_repo_index(args, mock_admin_user)
+            result = handle_add_golden_repo_index(args, mock_admin_user)
 
             response_data = json.loads(result["content"][0]["text"])
             assert response_data["success"] is False
             assert "error" in response_data
             assert "alias" in response_data["error"].lower()
 
-    @pytest.mark.asyncio
-    async def test_add_index_error_missing_index_type(self, mock_admin_user):
+    def test_add_index_error_missing_index_type(self, mock_admin_user):
         """Test error when index_type parameter is missing."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
 
             args = {"alias": "test-repo"}
-            result = await handle_add_golden_repo_index(args, mock_admin_user)
+            result = handle_add_golden_repo_index(args, mock_admin_user)
 
             response_data = json.loads(result["content"][0]["text"])
             assert response_data["success"] is False
@@ -246,8 +237,7 @@ class TestAddGoldenRepoIndex:
 class TestGetGoldenRepoIndexes:
     """Test get_golden_repo_indexes MCP tool handler."""
 
-    @pytest.mark.asyncio
-    async def test_get_indexes_success(self, mock_admin_user, mock_golden_repo_manager):
+    def test_get_indexes_success(self, mock_admin_user, mock_golden_repo_manager):
         """Test AC2: get_golden_repo_indexes returns structured status."""
         # Setup mock to return index status with separate semantic and fts
         mock_golden_repo_manager.get_golden_repo_indexes.return_value = {
@@ -277,7 +267,7 @@ class TestGetGoldenRepoIndexes:
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
             args = {"alias": "test-repo"}
-            result = await handle_get_golden_repo_indexes(args, mock_admin_user)
+            result = handle_get_golden_repo_indexes(args, mock_admin_user)
 
             # Verify response structure
             assert "content" in result
@@ -305,8 +295,7 @@ class TestGetGoldenRepoIndexes:
             assert temporal["exists"] is False
             assert temporal["path"] is None
 
-    @pytest.mark.asyncio
-    async def test_get_indexes_error_unknown_alias(
+    def test_get_indexes_error_unknown_alias(
         self, mock_admin_user, mock_golden_repo_manager
     ):
         """Test AC4: Error when golden repo alias not found."""
@@ -319,21 +308,20 @@ class TestGetGoldenRepoIndexes:
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
             args = {"alias": "nonexistent-repo"}
-            result = await handle_get_golden_repo_indexes(args, mock_admin_user)
+            result = handle_get_golden_repo_indexes(args, mock_admin_user)
 
             response_data = json.loads(result["content"][0]["text"])
             assert response_data["success"] is False
             assert "error" in response_data
             assert "not found" in response_data["error"].lower()
 
-    @pytest.mark.asyncio
-    async def test_get_indexes_error_missing_alias(self, mock_admin_user):
+    def test_get_indexes_error_missing_alias(self, mock_admin_user):
         """Test error when alias parameter is missing."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
 
             args = {}
-            result = await handle_get_golden_repo_indexes(args, mock_admin_user)
+            result = handle_get_golden_repo_indexes(args, mock_admin_user)
 
             response_data = json.loads(result["content"][0]["text"])
             assert response_data["success"] is False

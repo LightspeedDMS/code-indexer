@@ -1734,7 +1734,7 @@ class GoldenRepoManager:
         # Golden repositories are accessible to all authenticated users
         return user is not None
 
-    async def get_golden_repo_branches(
+    def get_golden_repo_branches(
         self, alias: str
     ) -> List["GoldenRepoBranchInfo"]:
         """
@@ -1763,7 +1763,7 @@ class GoldenRepoManager:
         branch_service = GoldenRepoBranchService(self)
         branches: List[
             "GoldenRepoBranchInfo"
-        ] = await branch_service.get_golden_repo_branches(alias)
+        ] = branch_service.get_golden_repo_branches(alias)
         return branches
 
     def add_index_to_golden_repo(

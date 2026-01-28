@@ -64,7 +64,7 @@ class GitHubProvider(RepositoryProviderBase):
         """Return the platform name."""
         return "github"
 
-    async def is_configured(self) -> bool:
+    def is_configured(self) -> bool:
         """Check if GitHub token is configured."""
         token_data = self._token_manager.get_token("github")
         return token_data is not None
@@ -252,7 +252,7 @@ class GitHubProvider(RepositoryProviderBase):
 
                 raise GitHubProviderError(f"GitHub API rate limit exceeded.{reset_msg}")
 
-    async def discover_repositories(
+    def discover_repositories(
         self, page: int = 1, page_size: int = 50, search: Optional[str] = None
     ) -> RepositoryDiscoveryResult:
         """
@@ -268,7 +268,7 @@ class GitHubProvider(RepositoryProviderBase):
         Raises:
             GitHubProviderError: If API call fails or token not configured
         """
-        if not await self.is_configured():
+        if not self.is_configured():
             raise GitHubProviderError(
                 "GitHub token not configured. "
                 "Please configure a GitHub token in the CI Tokens settings."

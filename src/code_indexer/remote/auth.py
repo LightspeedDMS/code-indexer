@@ -10,7 +10,7 @@ from code_indexer.api_clients.base_client import (
 from .exceptions import CredentialValidationError
 
 
-async def validate_credentials(
+def validate_credentials(
     server_url: str, username: str, password: str
 ) -> Dict[str, Any]:
     """Validate credentials with a remote CIDX server.
@@ -42,11 +42,11 @@ async def validate_credentials(
 
     try:
         # Create API client and attempt authentication
-        async with CIDXRemoteAPIClient(
+        with CIDXRemoteAPIClient(
             server_url=server_url, credentials=temp_credentials
         ) as client:
             # Attempt to authenticate - this will raise AuthenticationError if invalid
-            token = await client._authenticate()
+            token = client._authenticate()
 
             if not token:
                 raise CredentialValidationError(

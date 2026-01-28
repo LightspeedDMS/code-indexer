@@ -38,7 +38,7 @@ class TestSystemClientResponseParsing:
         with patch.object(
             system_client, "_authenticated_request", return_value=mock_response
         ):
-            result = await system_client.check_basic_health()
+            result = system_client.check_basic_health()
 
             # Should return a dictionary with the parsed JSON plus response_time_ms
             assert isinstance(result, dict)
@@ -62,7 +62,7 @@ class TestSystemClientResponseParsing:
         with patch.object(
             system_client, "_authenticated_request", return_value=mock_response
         ):
-            result = await system_client.check_detailed_health()
+            result = system_client.check_detailed_health()
 
             # Should return a dictionary with the parsed JSON plus response_time_ms
             assert isinstance(result, dict)
@@ -94,7 +94,7 @@ class TestSystemClientResponseParsing:
             system_client, "_authenticated_request", return_value=mock_response
         ):
             # This should not raise a TypeError about item assignment
-            result = await system_client.check_basic_health()
+            result = system_client.check_basic_health()
 
             # Verify the mock response object was not modified (it's still a Mock)
             assert not hasattr(mock_response, "__getitem__") or not hasattr(
@@ -117,7 +117,7 @@ class TestSystemClientResponseParsing:
             system_client, "_authenticated_request", return_value=mock_response
         ):
             # This should not raise a TypeError about item assignment
-            result = await system_client.check_detailed_health()
+            result = system_client.check_detailed_health()
 
             # Verify the mock response object was not modified (it's still a Mock)
             assert not hasattr(mock_response, "__getitem__") or not hasattr(
@@ -139,7 +139,7 @@ class TestSystemClientResponseParsing:
         with patch.object(
             system_client, "_authenticated_request", return_value=mock_response
         ):
-            result = await system_client.check_basic_health()
+            result = system_client.check_basic_health()
 
             # Response time should be present and reasonable (< 1000ms for a mock call)
             assert "response_time_ms" in result
@@ -166,4 +166,4 @@ class TestSystemClientResponseParsing:
             with pytest.raises(
                 APIClientError, match="Health check failed.*Invalid JSON"
             ):
-                await system_client.check_basic_health()
+                system_client.check_basic_health()

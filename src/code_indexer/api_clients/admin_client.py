@@ -50,7 +50,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
             project_root=project_root,
         )
 
-    async def create_user(
+    def create_user(
         self,
         username: str,
         password: str,
@@ -78,7 +78,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         }
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST", "/api/admin/users", json=user_data
             )
 
@@ -134,7 +134,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error creating user: {e}")
 
-    async def list_users(
+    def list_users(
         self,
         limit: int = 10,
         offset: int = 0,
@@ -160,7 +160,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         }
 
         try:
-            response = await self.get("/api/admin/users", params=params)
+            response = self.get("/api/admin/users", params=params)
 
             if response.status_code == 200:
                 return dict(response.json())
@@ -198,7 +198,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error listing users: {e}")
 
-    async def get_user(
+    def get_user(
         self,
         username: str,
     ) -> Dict[str, Any]:
@@ -218,7 +218,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         try:
             # Use list_users to get all users, then filter for the specific user
             # Note: Server doesn't have individual user GET endpoint, so we use list
-            response = await self.list_users(limit=1000, offset=0)
+            response = self.list_users(limit=1000, offset=0)
 
             users = response.get("users", [])
             for user in users:
@@ -243,7 +243,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error getting user: {e}")
 
-    async def update_user(
+    def update_user(
         self,
         username: str,
         role: str,
@@ -265,7 +265,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         user_data = {"role": role}
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "PUT", f"/api/admin/users/{username}", json=user_data
             )
 
@@ -316,7 +316,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error updating user: {e}")
 
-    async def delete_user(
+    def delete_user(
         self,
         username: str,
     ) -> Dict[str, Any]:
@@ -334,7 +334,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "DELETE", f"/api/admin/users/{username}"
             )
 
@@ -385,7 +385,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error deleting user: {e}")
 
-    async def change_user_password(
+    def change_user_password(
         self,
         username: str,
         new_password: str,
@@ -410,7 +410,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         }
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "PUT",
                 f"/api/admin/users/{username}/change-password",
                 json=password_data,
@@ -463,7 +463,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error changing password: {e}")
 
-    async def add_golden_repository(
+    def add_golden_repository(
         self,
         git_url: str,
         alias: str,
@@ -498,7 +498,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
             repo_data["description"] = description
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST", "/api/admin/golden-repos", json=repo_data
             )
 
@@ -555,7 +555,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error adding golden repository: {e}")
 
-    async def list_golden_repositories(self) -> Dict[str, Any]:
+    def list_golden_repositories(self) -> Dict[str, Any]:
         """List all golden repositories (admin only).
 
         Returns:
@@ -567,7 +567,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            response = await self.get("/api/admin/golden-repos")
+            response = self.get("/api/admin/golden-repos")
 
             if response.status_code == 200:
                 return dict(response.json())
@@ -606,7 +606,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error listing golden repositories: {e}")
 
-    async def refresh_golden_repository(self, alias: str) -> Dict[str, Any]:
+    def refresh_golden_repository(self, alias: str) -> Dict[str, Any]:
         """Refresh a golden repository (admin only).
 
         Args:
@@ -621,7 +621,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST", f"/api/admin/golden-repos/{alias}/refresh"
             )
 
@@ -665,7 +665,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error refreshing golden repository: {e}")
 
-    async def get_golden_repository_branches(self, alias: str) -> Dict[str, Any]:
+    def get_golden_repository_branches(self, alias: str) -> Dict[str, Any]:
         """Get branches for a golden repository.
 
         Args:
@@ -675,7 +675,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
             Dictionary with branch information
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "GET", f"/api/repos/golden/{alias}/branches"
             )
 
@@ -705,7 +705,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error getting repository branches: {e}")
 
-    async def delete_golden_repository(
+    def delete_golden_repository(
         self,
         alias: str,
         force: bool = False,
@@ -729,7 +729,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
             raise ValueError("Repository alias must be a non-empty string")
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "DELETE", f"/api/admin/golden-repos/{alias}"
             )
 
@@ -801,9 +801,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error deleting golden repository: {e}")
 
-    async def add_index_to_golden_repo(
-        self, alias: str, index_type: str
-    ) -> Dict[str, Any]:
+    def add_index_to_golden_repo(self, alias: str, index_type: str) -> Dict[str, Any]:
         """Add an index type to a golden repository (admin only).
 
         Args:
@@ -820,7 +818,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         """
         try:
             request_data = {"index_type": index_type}
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST", f"/api/admin/golden-repos/{alias}/indexes", json=request_data
             )
 
@@ -878,7 +876,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
                 f"Unexpected error adding index to golden repository: {e}"
             )
 
-    async def get_golden_repo_indexes(self, alias: str) -> Dict[str, Any]:
+    def get_golden_repo_indexes(self, alias: str) -> Dict[str, Any]:
         """Get index status for a golden repository (admin only).
 
         Args:
@@ -893,7 +891,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            response = await self.get(f"/api/admin/golden-repos/{alias}/indexes")
+            response = self.get(f"/api/admin/golden-repos/{alias}/indexes")
 
             if response.status_code == 200:
                 return dict(response.json())
@@ -935,14 +933,14 @@ class AdminAPIClient(CIDXRemoteAPIClient):
                 f"Unexpected error getting golden repository indexes: {e}"
             )
 
-    async def cleanup_jobs(self, max_age_hours: int = 24) -> Dict[str, Any]:  # type: ignore[empty-body]
+    def cleanup_jobs(self, max_age_hours: int = 24) -> Dict[str, Any]:  # type: ignore[empty-body]
         """Clean up old completed/failed background jobs (admin only).
 
         Note: Stub implementation - to be completed in future story.
         """
         pass
 
-    async def list_mcp_credentials(self, username: str) -> Dict[str, Any]:
+    def list_mcp_credentials(self, username: str) -> Dict[str, Any]:
         """List MCP credentials for a specific user (admin only).
 
         Args:
@@ -957,7 +955,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "GET", f"/api/admin/users/{username}/mcp-credentials"
             )
 
@@ -999,7 +997,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error listing MCP credentials: {e}")
 
-    async def create_mcp_credential(
+    def create_mcp_credential(
         self, username: str, name: Optional[str] = None
     ) -> Dict[str, Any]:
         """Create a new MCP credential for a user (admin only).
@@ -1021,7 +1019,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
             if name:
                 payload["name"] = name
 
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST", f"/api/admin/users/{username}/mcp-credentials", json=payload
             )
 
@@ -1063,7 +1061,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error creating MCP credential: {e}")
 
-    async def revoke_mcp_credential(
+    def revoke_mcp_credential(
         self, username: str, credential_id: str
     ) -> Dict[str, Any]:
         """Revoke an MCP credential for a user (admin only).
@@ -1081,7 +1079,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "DELETE",
                 f"/api/admin/users/{username}/mcp-credentials/{credential_id}",
             )
@@ -1124,7 +1122,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error revoking MCP credential: {e}")
 
-    async def list_all_mcp_credentials(self, limit: int = 100) -> Dict[str, Any]:
+    def list_all_mcp_credentials(self, limit: int = 100) -> Dict[str, Any]:
         """List all MCP credentials across all users (admin only).
 
         Args:
@@ -1139,7 +1137,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "GET", f"/api/admin/mcp-credentials?limit={limit}"
             )
 

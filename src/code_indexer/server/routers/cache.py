@@ -47,7 +47,7 @@ class CacheErrorResponse(BaseModel):
     summary="Retrieve cached content",
     description="Retrieve cached content by handle with pagination support",
 )
-async def get_cached_content(
+def get_cached_content(
     request: Request,
     handle: str,
     page: int = Query(default=0, ge=0, description="Page number (0-indexed)"),
@@ -74,7 +74,7 @@ async def get_cached_content(
         )
 
     try:
-        result = await payload_cache.retrieve(handle, page=page)
+        result = payload_cache.retrieve(handle, page=page)
         return CacheRetrievalResponse(
             content=result.content,
             page=result.page,

@@ -208,7 +208,7 @@ def _group_to_response(group: Group) -> GroupResponse:
 
 
 @router.get("", response_model=List[GroupResponse])
-async def list_groups(
+def list_groups(
     current_user: User = Depends(get_current_user),
     group_manager: GroupAccessManager = Depends(get_group_manager),
 ) -> List[GroupResponse]:
@@ -231,7 +231,7 @@ async def list_groups(
         409: {"description": "Group name already exists"},
     },
 )
-async def create_group(
+def create_group(
     request: CreateGroupRequest,
     current_user: User = Depends(get_current_admin_user),
     group_manager: GroupAccessManager = Depends(get_group_manager),
@@ -265,7 +265,7 @@ async def create_group(
 
 
 @router.get("/{group_id}", response_model=GroupDetailResponse)
-async def get_group(
+def get_group(
     group_id: int,
     current_user: User = Depends(get_current_user),
     group_manager: GroupAccessManager = Depends(get_group_manager),
@@ -310,7 +310,7 @@ async def get_group(
         409: {"description": "Group name already exists"},
     },
 )
-async def update_group(
+def update_group(
     group_id: int,
     request: UpdateGroupRequest,
     current_user: User = Depends(get_current_admin_user),
@@ -357,7 +357,7 @@ async def update_group(
 
 
 @router.post("/{group_id}/members", response_model=MessageResponse)
-async def assign_user_to_group(
+def assign_user_to_group(
     group_id: int,
     request: AssignUserRequest,
     current_user: User = Depends(get_current_admin_user),
@@ -396,7 +396,7 @@ async def assign_user_to_group(
         404: {"description": "Group not found"},
     },
 )
-async def delete_group(
+def delete_group(
     group_id: int,
     current_user: User = Depends(get_current_admin_user),
     group_manager: GroupAccessManager = Depends(get_group_manager),
@@ -459,7 +459,7 @@ async def delete_group(
         404: {"description": "Group not found"},
     },
 )
-async def add_repo_to_group(
+def add_repo_to_group(
     group_id: int,
     request: AddRepoRequest,
     response: Response,
@@ -524,7 +524,7 @@ async def add_repo_to_group(
         404: {"description": "Group or repository access not found"},
     },
 )
-async def remove_repo_from_group(
+def remove_repo_from_group(
     group_id: int,
     repo_name: str,
     current_user: User = Depends(get_current_admin_user),
@@ -574,7 +574,7 @@ async def remove_repo_from_group(
         404: {"description": "Group not found"},
     },
 )
-async def bulk_remove_repos_from_group(
+def bulk_remove_repos_from_group(
     group_id: int,
     request: BulkRemoveReposRequest,
     current_user: User = Depends(get_current_admin_user),
@@ -654,7 +654,7 @@ class UsersListResponse(BaseModel):
 
 
 @users_router.get("", response_model=UsersListResponse)
-async def list_users(
+def list_users(
     limit: Optional[int] = None,
     offset: int = 0,
     current_user: User = Depends(get_current_admin_user),
@@ -688,7 +688,7 @@ class MoveUserToGroupRequest(BaseModel):
         404: {"description": "User or group not found"},
     },
 )
-async def move_user_to_group(
+def move_user_to_group(
     user_id: str,
     request: MoveUserToGroupRequest,
     current_user: User = Depends(get_current_admin_user),
@@ -748,7 +748,7 @@ audit_router = APIRouter(prefix="/api/v1/audit-logs", tags=["audit"])
 
 
 @audit_router.get("", response_model=AuditLogsListResponse)
-async def get_audit_logs(
+def get_audit_logs(
     action_type: Optional[str] = None,
     target_type: Optional[str] = None,
     admin_id: Optional[str] = None,

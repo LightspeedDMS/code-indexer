@@ -96,22 +96,37 @@ class TestHandlerRegistry:
                 handler_name in HANDLER_REGISTRY
             ), f"Handler '{handler_name}' not registered"
 
-    def test_all_handlers_are_coroutines(self):
-        """Verify all handlers are async functions."""
+    def test_handlers_are_sync_for_thread_pool_execution(self):
+        """Verify handlers are sync functions for FastAPI thread pool execution.
+
+        Story #51: Thread Pool-Enabled MCP Handlers
+        Handlers are now synchronous to enable FastAPI's thread pool execution
+        for true concurrent operation. Only the delegation handler remains async
+        because it uses httpx.AsyncClient for external API calls.
+        """
         import inspect
 
+        # Handlers that must remain async:
+        # - execute_delegation_function: uses httpx.AsyncClient
+        # - poll_delegation_job: uses asyncio.Future for callback-based completion
+        async_exceptions = {"execute_delegation_function", "poll_delegation_job"}
+
         for handler_name, handler_func in HANDLER_REGISTRY.items():
-            assert inspect.iscoroutinefunction(
-                handler_func
-            ), f"Handler '{handler_name}' is not an async function"
+            if handler_name in async_exceptions:
+                assert inspect.iscoroutinefunction(
+                    handler_func
+                ), f"Handler '{handler_name}' should be async (uses AsyncClient)"
+            else:
+                assert not inspect.iscoroutinefunction(
+                    handler_func
+                ), f"Handler '{handler_name}' should be sync for thread pool execution"
 
 
-@pytest.mark.asyncio
 @pytest.mark.e2e
 class TestSearchCode:
     """Test search_code handler."""
 
-    async def test_search_code_success(self, mock_user):
+    def test_search_code_success(self, mock_user):
         """Test successful code search."""
         params = {
             "query_text": "authentication",
@@ -143,7 +158,7 @@ class TestSearchCode:
                 }
             )
 
-            result = await search_code(params, mock_user)
+            result = search_code(params, mock_user)
 
             # MCP format: parse content array
             import json
@@ -157,7 +172,7 @@ class TestSearchCode:
             assert data["success"] is True
             assert "results" in data
 
-    async def test_search_code_error_handling(self, mock_user):
+    def test_search_code_error_handling(self, mock_user):
         """Test search_code error handling."""
         params = {"query_text": "test"}
 
@@ -168,7 +183,7 @@ class TestSearchCode:
                 side_effect=Exception("Search failed")
             )
 
-            result = await search_code(params, mock_user)
+            result = search_code(params, mock_user)
 
             # MCP format: parse content array
             import json
@@ -179,7 +194,7 @@ class TestSearchCode:
             assert "error" in data
             assert data["results"] == []
 
-    async def test_search_code_with_activated_repository(self, mock_user):
+    def test_search_code_with_activated_repository(self, mock_user):
         """Test search_code uses semantic_query_manager for activated repositories."""
         params = {
             "query_text": "function",
@@ -213,7 +228,7 @@ class TestSearchCode:
                 }
             )
 
-            result = await search_code(params, mock_user)
+            result = search_code(params, mock_user)
 
             # MCP format: parse content array
             import json
@@ -236,8 +251,11 @@ class TestSearchCode:
                 path_filter=None,
                 exclude_path=None,
                 accuracy="balanced",
+                # Search mode (Story #503 - FTS Bug Fix)
+                search_mode="semantic",
                 # Temporal parameters (Story #446)
                 time_range=None,
+                time_range_all=False,
                 at_commit=None,
                 include_removed=False,
                 show_evolution=False,
@@ -254,7 +272,7 @@ class TestSearchCode:
                 chunk_type=None,
             )
 
-    async def test_search_code_with_fts_parameters(self, mock_user):
+    def test_search_code_with_fts_parameters(self, mock_user):
         """Test search_code passes FTS parameters through to semantic_query_manager.
 
         This is a RED test proving Phase 2 requirement: FTS parameters must be
@@ -287,7 +305,7 @@ class TestSearchCode:
                 }
             )
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             # Verify FTS parameters were passed to query manager
             mock_query_manager.query_user_repositories.assert_called_once_with(
@@ -302,8 +320,11 @@ class TestSearchCode:
                 path_filter=None,
                 exclude_path=None,
                 accuracy="balanced",
+                # Search mode (Story #503 - FTS Bug Fix)
+                search_mode="semantic",
                 # Temporal parameters (Story #446)
                 time_range=None,
+                time_range_all=False,
                 at_commit=None,
                 include_removed=False,
                 show_evolution=False,
@@ -321,12 +342,11 @@ class TestSearchCode:
             )
 
 
-@pytest.mark.asyncio
 @pytest.mark.e2e
 class TestDiscoverRepositories:
     """Test discover_repositories handler."""
 
-    async def test_discover_repositories_success(self, mock_user):
+    def test_discover_repositories_success(self, mock_user):
         """Test successful repository discovery.
 
         Should list all golden repositories from golden_repo_manager.
@@ -338,7 +358,7 @@ class TestDiscoverRepositories:
                 return_value=[{"alias": "repo1"}, {"alias": "repo2"}]
             )
 
-            result = await discover_repositories(params, mock_user)
+            result = discover_repositories(params, mock_user)
 
             # Verify list_golden_repos was called
             mock_manager.list_golden_repos.assert_called_once()
@@ -354,12 +374,11 @@ class TestDiscoverRepositories:
             assert data["repositories"][1]["alias"] == "repo2"
 
 
-@pytest.mark.asyncio
 @pytest.mark.e2e
 class TestListRepositories:
     """Test list_repositories handler."""
 
-    async def test_list_repositories_success(self, mock_user):
+    def test_list_repositories_success(self, mock_user):
         """Test successful repository listing."""
         mock_repos = [
             {"user_alias": "repo1", "golden_repo_alias": "golden1"},
@@ -372,18 +391,18 @@ class TestListRepositories:
                 "code_indexer.server.mcp.handlers._get_golden_repos_dir"
             ) as mock_get_dir,
             patch(
-                "code_indexer.server.mcp.handlers.GlobalRegistry"
-            ) as mock_registry_class,
+                "code_indexer.server.mcp.handlers.get_server_global_registry"
+            ) as mock_get_registry,
         ):
             mock_manager.list_activated_repositories = Mock(return_value=mock_repos)
             mock_get_dir.return_value = "/mock/golden-repos"
 
-            # Mock GlobalRegistry instance and its list_global_repos method
+            # Mock get_server_global_registry to return a mock registry instance
             mock_registry_instance = Mock()
             mock_registry_instance.list_global_repos = Mock(return_value=[])
-            mock_registry_class.return_value = mock_registry_instance
+            mock_get_registry.return_value = mock_registry_instance
 
-            result = await list_repositories({}, mock_user)
+            result = list_repositories({}, mock_user)
 
             # MCP format: parse content array
             import json
@@ -393,14 +412,14 @@ class TestListRepositories:
             assert data["success"] is True
             assert len(data["repositories"]) == 2
 
-    async def test_list_repositories_error_handling(self, mock_user):
+    def test_list_repositories_error_handling(self, mock_user):
         """Test list_repositories error handling."""
         with patch("code_indexer.server.app.activated_repo_manager") as mock_manager:
             mock_manager.list_activated_repositories = Mock(
                 side_effect=Exception("DB error")
             )
 
-            result = await list_repositories({}, mock_user)
+            result = list_repositories({}, mock_user)
 
             # MCP format: parse content array
             import json
@@ -411,12 +430,11 @@ class TestListRepositories:
             assert data["repositories"] == []
 
 
-@pytest.mark.asyncio
 @pytest.mark.e2e
 class TestActivateRepository:
     """Test activate_repository handler."""
 
-    async def test_activate_single_repository(self, mock_user):
+    def test_activate_single_repository(self, mock_user):
         """Test activating a single repository."""
         params = {
             "golden_repo_alias": "my-repo",
@@ -426,7 +444,7 @@ class TestActivateRepository:
         with patch("code_indexer.server.app.activated_repo_manager") as mock_manager:
             mock_manager.activate_repository = Mock(return_value="job-123")
 
-            result = await activate_repository(params, mock_user)
+            result = activate_repository(params, mock_user)
 
             # MCP format: parse content array
             import json
@@ -436,7 +454,7 @@ class TestActivateRepository:
             assert data["success"] is True
             assert data["job_id"] == "job-123"
 
-    async def test_activate_composite_repository(self, mock_user):
+    def test_activate_composite_repository(self, mock_user):
         """Test activating a composite repository."""
         params = {
             "golden_repo_aliases": ["repo1", "repo2"],
@@ -446,7 +464,7 @@ class TestActivateRepository:
         with patch("code_indexer.server.app.activated_repo_manager") as mock_manager:
             mock_manager.activate_repository = Mock(return_value="job-456")
 
-            result = await activate_repository(params, mock_user)
+            result = activate_repository(params, mock_user)
 
             # MCP format: parse content array
             import json
@@ -457,19 +475,18 @@ class TestActivateRepository:
             assert data["job_id"] == "job-456"
 
 
-@pytest.mark.asyncio
 @pytest.mark.e2e
 class TestDeactivateRepository:
     """Test deactivate_repository handler."""
 
-    async def test_deactivate_repository_success(self, mock_user):
+    def test_deactivate_repository_success(self, mock_user):
         """Test successful repository deactivation."""
         params = {"user_alias": "my-repo"}
 
         with patch("code_indexer.server.app.activated_repo_manager") as mock_manager:
             mock_manager.deactivate_repository = Mock(return_value="job-789")
 
-            result = await deactivate_repository(params, mock_user)
+            result = deactivate_repository(params, mock_user)
 
             # MCP format: parse content array
             import json
@@ -480,12 +497,11 @@ class TestDeactivateRepository:
             assert data["job_id"] == "job-789"
 
 
-@pytest.mark.asyncio
 @pytest.mark.e2e
 class TestAdminHandlers:
     """Test admin-only handlers."""
 
-    async def test_add_golden_repo(self, mock_admin_user):
+    def test_add_golden_repo(self, mock_admin_user):
         """Test adding a golden repository."""
         params = {
             "url": "https://github.com/user/repo.git",
@@ -501,7 +517,7 @@ class TestAdminHandlers:
                 }
             )
 
-            result = await add_golden_repo(params, mock_admin_user)
+            result = add_golden_repo(params, mock_admin_user)
 
             # MCP format: parse content array
             import json
@@ -511,7 +527,7 @@ class TestAdminHandlers:
             assert data["success"] is True
             assert "message" in data
 
-    async def test_remove_golden_repo(self, mock_admin_user):
+    def test_remove_golden_repo(self, mock_admin_user):
         """Test removing a golden repository."""
         params = {"alias": "my-golden-repo"}
 
@@ -519,7 +535,7 @@ class TestAdminHandlers:
             # Mock to return job_id (async version)
             mock_manager.remove_golden_repo = Mock(return_value="test-job-id-12345")
 
-            result = await remove_golden_repo(params, mock_admin_user)
+            result = remove_golden_repo(params, mock_admin_user)
 
             # MCP format: parse content array
             import json
@@ -530,7 +546,7 @@ class TestAdminHandlers:
             assert data["job_id"] == "test-job-id-12345"
             assert "removal started" in data["message"]
 
-    async def test_list_users(self, mock_admin_user):
+    def test_list_users(self, mock_admin_user):
         """Test listing all users."""
         mock_users = [
             Mock(
@@ -548,7 +564,7 @@ class TestAdminHandlers:
         with patch("code_indexer.server.app.user_manager") as mock_manager:
             mock_manager.get_all_users = Mock(return_value=mock_users)
 
-            result = await list_users({}, mock_admin_user)
+            result = list_users({}, mock_admin_user)
 
             # MCP format: parse content array
             import json
@@ -558,7 +574,7 @@ class TestAdminHandlers:
             assert data["success"] is True
             assert data["total"] == 2
 
-    async def test_create_user(self, mock_admin_user):
+    def test_create_user(self, mock_admin_user):
         """Test creating a new user."""
         params = {
             "username": "newuser",
@@ -575,7 +591,7 @@ class TestAdminHandlers:
         with patch("code_indexer.server.app.user_manager") as mock_manager:
             mock_manager.create_user = Mock(return_value=mock_new_user)
 
-            result = await create_user(params, mock_admin_user)
+            result = create_user(params, mock_admin_user)
 
             # MCP format: parse content array
             import json
@@ -586,12 +602,11 @@ class TestAdminHandlers:
             assert data["user"]["username"] == "newuser"
 
 
-@pytest.mark.asyncio
 @pytest.mark.e2e
 class TestFileHandlers:
     """Test file-related handlers."""
 
-    async def test_list_files(self, mock_user):
+    def test_list_files(self, mock_user):
         """Test listing files in a repository."""
         params = {"repository_alias": "my-repo", "path": "src/"}
 
@@ -601,7 +616,7 @@ class TestFileHandlers:
                 return_value={"files": ["file1.py", "file2.py"]}
             )
 
-            result = await list_files(params, mock_user)
+            result = list_files(params, mock_user)
 
             # MCP format: parse content array
             import json
@@ -611,7 +626,7 @@ class TestFileHandlers:
             assert data["success"] is True
             assert len(data["files"]) == 2
 
-    async def test_list_files_with_fileinfo_objects(self, mock_user):
+    def test_list_files_with_fileinfo_objects(self, mock_user):
         """Test list_files properly serializes FileInfo objects with datetime fields."""
         from code_indexer.server.models.api_models import (
             FileInfo,
@@ -649,7 +664,7 @@ class TestFileHandlers:
         with patch("code_indexer.server.app.file_service") as mock_service:
             mock_service.list_files = Mock(return_value=mock_response)
 
-            result = await list_files(params, mock_user)
+            result = list_files(params, mock_user)
 
             # MCP format: parse content array
             import json
@@ -678,7 +693,7 @@ class TestFileHandlers:
             assert data["files"][1]["language"] == "python"
             assert data["files"][1]["is_indexed"] is False
 
-    async def test_list_files_path_parameter_lists_directory_contents(self, mock_user):
+    def test_list_files_path_parameter_lists_directory_contents(self, mock_user):
         """Test that path parameter lists files IN the specified directory.
 
         This test proves the bug: path="code/src/access" should return files
@@ -732,7 +747,7 @@ class TestFileHandlers:
         with patch("code_indexer.server.app.file_service") as mock_service:
             mock_service.list_files = Mock(return_value=mock_response)
 
-            result = await list_files(params, mock_user)
+            result = list_files(params, mock_user)
 
             # Verify the service was called with correct path_pattern
             # Expected: "code/src/access/**/*" (list files IN directory)
@@ -756,7 +771,7 @@ class TestFileHandlers:
             assert data["files"][1]["path"] == "code/src/access/permissions.py"
             assert data["files"][2]["path"] == "code/src/access/roles.py"
 
-    async def test_list_files_with_recursive_false(self, mock_user):
+    def test_list_files_with_recursive_false(self, mock_user):
         """Test that recursive=false uses non-recursive pattern (path/*)."""
         from code_indexer.server.models.api_models import (
             FileInfo,
@@ -795,7 +810,7 @@ class TestFileHandlers:
         with patch("code_indexer.server.app.file_service") as mock_service:
             mock_service.list_files = Mock(return_value=mock_response)
 
-            result = await list_files(params, mock_user)
+            result = list_files(params, mock_user)
 
             # Verify non-recursive pattern
             call_args = mock_service.list_files.call_args
@@ -811,7 +826,7 @@ class TestFileHandlers:
             assert data["success"] is True
             assert len(data["files"]) == 2
 
-    async def test_list_files_with_path_and_pattern(self, mock_user):
+    def test_list_files_with_path_and_pattern(self, mock_user):
         """Test combining path and path_pattern parameters."""
         from code_indexer.server.models.api_models import (
             FileInfo,
@@ -851,7 +866,7 @@ class TestFileHandlers:
         with patch("code_indexer.server.app.file_service") as mock_service:
             mock_service.list_files = Mock(return_value=mock_response)
 
-            result = await list_files(params, mock_user)
+            result = list_files(params, mock_user)
 
             # Verify combined pattern: path + recursive + pattern
             call_args = mock_service.list_files.call_args
@@ -867,7 +882,7 @@ class TestFileHandlers:
             assert data["success"] is True
             assert len(data["files"]) == 2
 
-    async def test_get_file_content(self, mock_user):
+    def test_get_file_content(self, mock_user):
         """Test getting file content."""
         params = {
             "repository_alias": "my-repo",
@@ -883,7 +898,7 @@ class TestFileHandlers:
                 }
             )
 
-            result = await get_file_content(params, mock_user)
+            result = get_file_content(params, mock_user)
 
             # MCP format: parse content array
             import json
@@ -910,7 +925,7 @@ class TestFileHandlers:
             assert "metadata" in data
             assert data["metadata"]["size"] == 100
 
-    async def test_get_file_content_error(self, mock_user):
+    def test_get_file_content_error(self, mock_user):
         """Test get_file_content error handling returns MCP-compliant format."""
         params = {
             "repository_alias": "my-repo",
@@ -923,7 +938,7 @@ class TestFileHandlers:
                 side_effect=Exception("File not found")
             )
 
-            result = await get_file_content(params, mock_user)
+            result = get_file_content(params, mock_user)
 
             # MCP format: parse content array
             import json
@@ -938,7 +953,7 @@ class TestFileHandlers:
             ), "content must be an array even on error"
             assert data["content"] == [], "content should be empty array on error"
 
-    async def test_browse_directory(self, mock_user):
+    def test_browse_directory(self, mock_user):
         """Test browsing directory structure.
 
         FileListingService doesn't have browse_directory method.
@@ -971,7 +986,7 @@ class TestFileHandlers:
             ]
             mock_service.list_files = Mock(return_value=mock_response)
 
-            result = await browse_directory(params, mock_user)
+            result = browse_directory(params, mock_user)
 
             # Verify list_files was called (not browse_directory which doesn't exist)
             mock_service.list_files.assert_called_once()
@@ -986,12 +1001,11 @@ class TestFileHandlers:
             assert len(data["structure"]["files"]) >= 1
 
 
-@pytest.mark.asyncio
 @pytest.mark.e2e
 class TestHealthCheck:
     """Test health check handler."""
 
-    async def test_check_health(self, mock_user):
+    def test_check_health(self, mock_user):
         """Test system health check."""
         with patch(
             "code_indexer.server.services.health_service.health_service"
@@ -1002,7 +1016,7 @@ class TestHealthCheck:
             )
             mock_service.get_system_health = Mock(return_value=mock_response)
 
-            result = await check_health({}, mock_user)
+            result = check_health({}, mock_user)
 
             # MCP format: parse content array
             import json
@@ -1015,12 +1029,11 @@ class TestHealthCheck:
             assert "health" in data
 
 
-@pytest.mark.asyncio
 @pytest.mark.e2e
 class TestRepositoryStatus:
     """Test get_repository_status handler."""
 
-    async def test_get_repository_status_activated_repo(self, mock_user):
+    def test_get_repository_status_activated_repo(self, mock_user):
         """Test getting status for activated repository.
 
         Should look in activated repos (user workspace) not golden repos.
@@ -1043,7 +1056,7 @@ class TestRepositoryStatus:
                 }
             )
 
-            result = await get_repository_status(params, mock_user)
+            result = get_repository_status(params, mock_user)
 
             # Verify correct method called with username
             mock_manager.get_repository_details.assert_called_once_with(
@@ -1060,12 +1073,11 @@ class TestRepositoryStatus:
             assert data["status"]["activation_status"] == "activated"
 
 
-@pytest.mark.asyncio
 @pytest.mark.e2e
 class TestStatisticsHandlers:
     """Test statistics handlers."""
 
-    async def test_get_repository_statistics(self, mock_user):
+    def test_get_repository_statistics(self, mock_user):
         """Test getting repository statistics."""
         params = {"repository_alias": "my-repo"}
 
@@ -1078,7 +1090,7 @@ class TestStatisticsHandlers:
             )
             mock_service.get_repository_stats = Mock(return_value=mock_response)
 
-            result = await get_repository_statistics(params, mock_user)
+            result = get_repository_statistics(params, mock_user)
 
             # MCP format: parse content array
             import json
@@ -1088,7 +1100,7 @@ class TestStatisticsHandlers:
             assert data["success"] is True
             assert "statistics" in data
 
-    async def test_get_job_statistics(self, mock_user):
+    def test_get_job_statistics(self, mock_user):
         """Test getting job statistics.
 
         BackgroundJobManager doesn't have get_job_statistics method.
@@ -1099,7 +1111,7 @@ class TestStatisticsHandlers:
             mock_manager.get_pending_job_count = Mock(return_value=10)
             mock_manager.get_failed_job_count = Mock(return_value=2)
 
-            result = await get_job_statistics({}, mock_user)
+            result = get_job_statistics({}, mock_user)
 
             # Verify actual methods called
             mock_manager.get_active_job_count.assert_called_once()
@@ -1119,12 +1131,11 @@ class TestStatisticsHandlers:
             assert data["statistics"]["total"] == 17  # 5 + 10 + 2
 
 
-@pytest.mark.asyncio
 @pytest.mark.e2e
 class TestCompositeRepository:
     """Test composite repository management."""
 
-    async def test_create_composite_repository(self, mock_user):
+    def test_create_composite_repository(self, mock_user):
         """Test creating a composite repository."""
         params = {
             "operation": "create",
@@ -1135,7 +1146,7 @@ class TestCompositeRepository:
         with patch("code_indexer.server.app.activated_repo_manager") as mock_manager:
             mock_manager.activate_repository = Mock(return_value="job-composite-1")
 
-            result = await manage_composite_repository(params, mock_user)
+            result = manage_composite_repository(params, mock_user)
 
             # MCP format: parse content array
             import json
@@ -1145,7 +1156,7 @@ class TestCompositeRepository:
             assert data["success"] is True
             assert data["job_id"] == "job-composite-1"
 
-    async def test_delete_composite_repository(self, mock_user):
+    def test_delete_composite_repository(self, mock_user):
         """Test deleting a composite repository."""
         params = {
             "operation": "delete",
@@ -1155,7 +1166,7 @@ class TestCompositeRepository:
         with patch("code_indexer.server.app.activated_repo_manager") as mock_manager:
             mock_manager.deactivate_repository = Mock(return_value="job-deactivate-1")
 
-            result = await manage_composite_repository(params, mock_user)
+            result = manage_composite_repository(params, mock_user)
 
             # MCP format: parse content array
             import json
@@ -1165,12 +1176,11 @@ class TestCompositeRepository:
             assert data["success"] is True
 
 
-@pytest.mark.asyncio
 @pytest.mark.e2e
 class TestSyncRepository:
     """Test sync_repository handler."""
 
-    async def test_sync_repository_submits_background_job(self, mock_user):
+    def test_sync_repository_submits_background_job(self, mock_user):
         """Test that sync_repository correctly submits a background job."""
         from code_indexer.server.mcp.handlers import sync_repository
 
@@ -1194,7 +1204,7 @@ class TestSyncRepository:
             mock_job_mgr.submit_job = Mock(return_value="job-sync-123")
             mock_exec_sync.return_value = {"status": "completed"}
 
-            result = await sync_repository(params, mock_user)
+            result = sync_repository(params, mock_user)
 
             # Verify submit_job was called with correct signature
             mock_job_mgr.submit_job.assert_called_once()

@@ -310,7 +310,7 @@ class TestSearchCompositeIntegration:
         ]
 
         with patch.object(manager, "_parse_cli_output", return_value=mock_results):
-            results = await manager.search_composite(
+            results = manager.search_composite(
                 repo_path=Path("/tmp/composite"), query="authentication", limit=10
             )
 
@@ -336,7 +336,7 @@ class TestSearchCompositeIntegration:
                 )
             ],
         ):
-            results = await manager.search_composite(
+            results = manager.search_composite(
                 repo_path=Path("/tmp/test"), query="test", limit=10
             )
 

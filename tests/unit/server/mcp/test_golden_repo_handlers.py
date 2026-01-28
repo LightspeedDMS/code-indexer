@@ -30,11 +30,10 @@ def mock_regular_user():
     return user
 
 
-@pytest.mark.asyncio
 class TestAddGoldenRepoHandler:
     """Test add_golden_repo handler parameter mapping and audit trail."""
 
-    async def test_handler_passes_actual_username(self, mock_admin_user):
+    def test_handler_passes_actual_username(self, mock_admin_user):
         """Test that handler passes actual user username (not hardcoded 'admin')."""
         mcp_params = {
             "url": "https://github.com/user/repo.git",
@@ -45,7 +44,7 @@ class TestAddGoldenRepoHandler:
         with patch("code_indexer.server.app.golden_repo_manager") as mock_manager:
             mock_manager.add_golden_repo = Mock(return_value="test-job-id-12345")
 
-            result = await add_golden_repo(mcp_params, mock_admin_user)
+            result = add_golden_repo(mcp_params, mock_admin_user)
 
             # Verify the handler called the manager with actual username
             mock_manager.add_golden_repo.assert_called_once_with(
@@ -65,7 +64,7 @@ class TestAddGoldenRepoHandler:
             assert response_data["success"] is True
             assert response_data["job_id"] == "test-job-id-12345"
 
-    async def test_handler_passes_different_username(self):
+    def test_handler_passes_different_username(self):
         """Test that handler passes different usernames correctly."""
         # Create user with different username
         user = Mock(spec=User)
@@ -81,25 +80,24 @@ class TestAddGoldenRepoHandler:
         with patch("code_indexer.server.app.golden_repo_manager") as mock_manager:
             mock_manager.add_golden_repo = Mock(return_value="job-123")
 
-            await add_golden_repo(mcp_params, user)
+            add_golden_repo(mcp_params, user)
 
             # Verify correct username passed
             call_kwargs = mock_manager.add_golden_repo.call_args[1]
             assert call_kwargs["submitter_username"] == "bob"
 
 
-@pytest.mark.asyncio
 class TestRemoveGoldenRepoHandler:
     """Test remove_golden_repo handler parameter mapping and audit trail."""
 
-    async def test_handler_passes_actual_username(self, mock_admin_user):
+    def test_handler_passes_actual_username(self, mock_admin_user):
         """Test that handler passes actual user username to remove operation."""
         mcp_params = {"alias": "test-repo"}
 
         with patch("code_indexer.server.app.golden_repo_manager") as mock_manager:
             mock_manager.remove_golden_repo = Mock(return_value="test-job-id-67890")
 
-            result = await remove_golden_repo(mcp_params, mock_admin_user)
+            result = remove_golden_repo(mcp_params, mock_admin_user)
 
             # Verify the handler called the manager with actual username
             mock_manager.remove_golden_repo.assert_called_once_with(
@@ -115,7 +113,7 @@ class TestRemoveGoldenRepoHandler:
             assert response_data["success"] is True
             assert response_data["job_id"] == "test-job-id-67890"
 
-    async def test_handler_passes_different_username(self):
+    def test_handler_passes_different_username(self):
         """Test that handler passes different usernames correctly."""
         # Create user with different username
         user = Mock(spec=User)
@@ -127,7 +125,7 @@ class TestRemoveGoldenRepoHandler:
         with patch("code_indexer.server.app.golden_repo_manager") as mock_manager:
             mock_manager.remove_golden_repo = Mock(return_value="job-456")
 
-            await remove_golden_repo(mcp_params, user)
+            remove_golden_repo(mcp_params, user)
 
             # Verify correct username passed
             mock_manager.remove_golden_repo.assert_called_once_with(
@@ -136,18 +134,17 @@ class TestRemoveGoldenRepoHandler:
             )
 
 
-@pytest.mark.asyncio
 class TestRefreshGoldenRepoHandler:
     """Test refresh_golden_repo handler parameter mapping and audit trail."""
 
-    async def test_handler_passes_actual_username(self, mock_admin_user):
+    def test_handler_passes_actual_username(self, mock_admin_user):
         """Test that handler passes actual user username to refresh operation."""
         mcp_params = {"alias": "test-repo"}
 
         with patch("code_indexer.server.app.golden_repo_manager") as mock_manager:
             mock_manager.refresh_golden_repo = Mock(return_value="test-job-id-11111")
 
-            result = await refresh_golden_repo(mcp_params, mock_admin_user)
+            result = refresh_golden_repo(mcp_params, mock_admin_user)
 
             # Verify the handler called the manager with actual username
             mock_manager.refresh_golden_repo.assert_called_once_with(
@@ -163,7 +160,7 @@ class TestRefreshGoldenRepoHandler:
             assert response_data["success"] is True
             assert response_data["job_id"] == "test-job-id-11111"
 
-    async def test_handler_passes_different_username(self):
+    def test_handler_passes_different_username(self):
         """Test that handler passes different usernames correctly."""
         # Create user with different username
         user = Mock(spec=User)
@@ -175,7 +172,7 @@ class TestRefreshGoldenRepoHandler:
         with patch("code_indexer.server.app.golden_repo_manager") as mock_manager:
             mock_manager.refresh_golden_repo = Mock(return_value="job-789")
 
-            await refresh_golden_repo(mcp_params, user)
+            refresh_golden_repo(mcp_params, user)
 
             # Verify correct username passed
             mock_manager.refresh_golden_repo.assert_called_once_with(

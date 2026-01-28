@@ -113,7 +113,7 @@ class TestSCIPSelfHealingServiceAC1:
         service = SCIPSelfHealingService(job_manager=job_manager, repo_root=tmp_path)
 
         # Act: Handle SCIP failure
-        await service.handle_scip_failure(
+        service.handle_scip_failure(
             job_id=job_id,
             generation_result=generation_result,
             repo_alias="test-repo",
@@ -151,7 +151,7 @@ class TestSCIPSelfHealingServiceAC1:
         service = SCIPSelfHealingService(job_manager=job_manager, repo_root=tmp_path)
 
         # Act
-        await service.handle_scip_failure(
+        service.handle_scip_failure(
             job_id=job_id,
             generation_result=generation_result,
             repo_alias="test-repo",
@@ -204,7 +204,7 @@ class TestSCIPSelfHealingServiceAC1:
         service = SCIPSelfHealingService(job_manager=job_manager, repo_root=tmp_path)
 
         # Act
-        await service.handle_scip_failure(
+        service.handle_scip_failure(
             job_id=job_id,
             generation_result=generation_result,
             repo_alias="test-repo",

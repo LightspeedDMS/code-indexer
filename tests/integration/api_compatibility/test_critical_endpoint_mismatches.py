@@ -54,7 +54,7 @@ class TestRepositoryActivationEndpointMismatch:
 
         # This should fail because client calls the wrong endpoint
         with pytest.raises(ActivationError) as exc_info:
-            await mock_client.activate_repository(
+            mock_client.activate_repository(
                 golden_alias="test-repo", branch="main", user_alias="test-user"
             )
 
@@ -168,7 +168,7 @@ class TestRepositoryListingEndpointMismatch:
 
         # This may fail due to endpoint mismatch
         with pytest.raises(Exception):  # Could be various exceptions
-            await mock_query_client.list_repositories()
+            mock_query_client.list_repositories()
 
         # Verify the endpoint called
         mock_query_client._authenticated_request.assert_called_once_with(
@@ -226,7 +226,7 @@ class TestRepositoryDeactivationEndpointMismatch:
         mock_client._authenticated_request.return_value = mock_response
 
         with pytest.raises(ActivationError):
-            await mock_client.deactivate_repository("test-user-repo")
+            mock_client.deactivate_repository("test-user-repo")
 
         # Verify wrong endpoint called
         mock_client._authenticated_request.assert_called_once_with(

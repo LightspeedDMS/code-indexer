@@ -508,7 +508,7 @@ class RealAuthenticatedHTTPClient(RealHTTPClient):
             # If 401 Unauthorized, try to refresh token and retry
             if hasattr(e, "response") and e.response.status_code == 401:
                 if self._refresh_token:
-                    await self.refresh_token()
+                    self.refresh_token()
                     return await self.request(method, endpoint, **kwargs)
                 else:
                     # No refresh token, re-authenticate

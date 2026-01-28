@@ -1,6 +1,7 @@
 """Unit tests for Hybrid Search truncation - mixed result handling.
 
 Story #682: S4 - Hybrid Search with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 Tests: AC4 - Mixed Result Handling
 
 These tests follow TDD methodology - written BEFORE verification.
@@ -11,10 +12,12 @@ from unittest.mock import patch
 
 
 class TestAC4MixedResultHandling:
-    """AC4: Mixed Result Handling - different result types with different fields."""
+    """AC4: Mixed Result Handling - different result types with different fields.
 
-    @pytest.mark.asyncio
-    async def test_semantic_only_result_in_hybrid_search(self, cache):
+    Story #50: _apply_payload_truncation and _apply_fts_payload_truncation are now sync.
+    """
+
+    def test_semantic_only_result_in_hybrid_search(self, cache):
         """Test result with only semantic content (no FTS fields)."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -36,8 +39,8 @@ class TestAC4MixedResultHandling:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
+            truncated = _apply_payload_truncation(truncated)  # Sync call
 
         result = truncated[0]
 
@@ -53,8 +56,7 @@ class TestAC4MixedResultHandling:
         assert "match_text" not in result
         assert "match_text_preview" not in result
 
-    @pytest.mark.asyncio
-    async def test_fts_only_result_in_hybrid_search(self, cache):
+    def test_fts_only_result_in_hybrid_search(self, cache):
         """Test result with only FTS fields (no semantic content)."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -78,8 +80,8 @@ class TestAC4MixedResultHandling:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
+            truncated = _apply_payload_truncation(truncated)  # Sync call
 
         result = truncated[0]
 
@@ -98,8 +100,7 @@ class TestAC4MixedResultHandling:
         assert "content" not in result
         assert "preview" not in result
 
-    @pytest.mark.asyncio
-    async def test_mixed_results_list(self, cache):
+    def test_mixed_results_list(self, cache):
         """Test a list with semantic, FTS, and hybrid results."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -137,8 +138,8 @@ class TestAC4MixedResultHandling:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
+            truncated = _apply_payload_truncation(truncated)  # Sync call
 
         # Verify semantic result
         semantic_result = truncated[0]
@@ -166,8 +167,7 @@ class TestAC4MixedResultHandling:
         assert hybrid_result["match_text_preview"] == "E" * 2000
         assert hybrid_result["match_text_has_more"] is True
 
-    @pytest.mark.asyncio
-    async def test_score_fields_preserved(self, cache):
+    def test_score_fields_preserved(self, cache):
         """Test that all score fields are preserved without modification."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -191,8 +191,8 @@ class TestAC4MixedResultHandling:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
+            truncated = _apply_payload_truncation(truncated)  # Sync call
 
         result = truncated[0]
 

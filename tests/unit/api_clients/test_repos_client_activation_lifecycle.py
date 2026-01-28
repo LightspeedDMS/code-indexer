@@ -48,7 +48,7 @@ class TestRepositoryActivationAPI:
         with patch.object(
             repos_client, "_authenticated_request", return_value=mock_response
         ):
-            result = await repos_client.activate_repository(
+            result = repos_client.activate_repository(
                 golden_alias="web-service", user_alias="my-repo", target_branch="main"
             )
 
@@ -67,7 +67,7 @@ class TestRepositoryActivationAPI:
         with patch.object(
             repos_client, "_authenticated_request", return_value=mock_response
         ) as mock_request:
-            await repos_client.activate_repository(
+            repos_client.activate_repository(
                 golden_alias="web-service",
                 user_alias="my-repo",
                 target_branch="feature-branch",
@@ -95,7 +95,7 @@ class TestRepositoryActivationAPI:
             repos_client, "_authenticated_request", return_value=mock_response
         ) as mock_request:
             # Call with only required parameters
-            await repos_client.activate_repository(
+            repos_client.activate_repository(
                 golden_alias="web-service", user_alias="my-repo"
             )
 
@@ -121,7 +121,7 @@ class TestRepositoryActivationAPI:
             repos_client, "_authenticated_request", return_value=mock_response
         ):
             with pytest.raises(APIClientError) as exc_info:
-                await repos_client.activate_repository(
+                repos_client.activate_repository(
                     golden_alias="web-service", user_alias="existing-repo"
                 )
 
@@ -139,7 +139,7 @@ class TestRepositoryActivationAPI:
             repos_client, "_authenticated_request", return_value=mock_response
         ):
             with pytest.raises(APIClientError) as exc_info:
-                await repos_client.activate_repository(
+                repos_client.activate_repository(
                     golden_alias="nonexistent", user_alias="my-repo"
                 )
 
@@ -159,7 +159,7 @@ class TestRepositoryActivationAPI:
             repos_client, "_authenticated_request", return_value=mock_response
         ):
             with pytest.raises(APIClientError) as exc_info:
-                await repos_client.activate_repository(
+                repos_client.activate_repository(
                     golden_alias="web-service", user_alias="my-repo"
                 )
 
@@ -202,7 +202,7 @@ class TestRepositoryDeactivationAPI:
         with patch.object(
             repos_client, "_authenticated_request", return_value=mock_response
         ):
-            result = await repos_client.deactivate_repository(
+            result = repos_client.deactivate_repository(
                 user_alias="my-repo", force=False
             )
 
@@ -220,7 +220,7 @@ class TestRepositoryDeactivationAPI:
         with patch.object(
             repos_client, "_authenticated_request", return_value=mock_response
         ) as mock_request:
-            await repos_client.deactivate_repository(user_alias="my-repo", force=True)
+            repos_client.deactivate_repository(user_alias="my-repo", force=True)
 
             # Should call DELETE /api/repos/{user_alias}
             mock_request.assert_called_once_with(
@@ -240,7 +240,7 @@ class TestRepositoryDeactivationAPI:
             repos_client, "_authenticated_request", return_value=mock_response
         ):
             with pytest.raises(APIClientError) as exc_info:
-                await repos_client.deactivate_repository(
+                repos_client.deactivate_repository(
                     user_alias="nonexistent", force=False
                 )
 
@@ -260,9 +260,7 @@ class TestRepositoryDeactivationAPI:
             repos_client, "_authenticated_request", return_value=mock_response
         ):
             with pytest.raises(APIClientError) as exc_info:
-                await repos_client.deactivate_repository(
-                    user_alias="busy-repo", force=False
-                )
+                repos_client.deactivate_repository(user_alias="busy-repo", force=False)
 
             assert "running operations" in str(exc_info.value)
             assert exc_info.value.status_code == 409
@@ -281,7 +279,7 @@ class TestRepositoryDeactivationAPI:
         with patch.object(
             repos_client, "_authenticated_request", return_value=mock_response
         ) as mock_request:
-            result = await repos_client.deactivate_repository(
+            result = repos_client.deactivate_repository(
                 user_alias="problematic-repo", force=True
             )
 
@@ -329,7 +327,7 @@ class TestActivationProgressMonitoring:
         with patch.object(
             repos_client, "_authenticated_request", return_value=mock_response
         ):
-            result = await repos_client.get_activation_progress(activation_id="act-123")
+            result = repos_client.get_activation_progress(activation_id="act-123")
 
             assert result["status"] == "in_progress"
             assert result["progress_percent"] == 65.0
@@ -345,7 +343,7 @@ class TestActivationProgressMonitoring:
         with patch.object(
             repos_client, "_authenticated_request", return_value=mock_response
         ) as mock_request:
-            await repos_client.get_activation_progress(activation_id="act-456")
+            repos_client.get_activation_progress(activation_id="act-456")
 
             # Should call GET /api/repos/activation/{activation_id}/progress
             mock_request.assert_called_once_with(
@@ -365,7 +363,7 @@ class TestActivationProgressMonitoring:
             repos_client, "_authenticated_request", return_value=mock_response
         ):
             with pytest.raises(APIClientError) as exc_info:
-                await repos_client.get_activation_progress(activation_id="nonexistent")
+                repos_client.get_activation_progress(activation_id="nonexistent")
 
             assert "Activation not found" in str(exc_info.value)
             assert exc_info.value.status_code == 404
@@ -387,7 +385,7 @@ class TestActivationProgressMonitoring:
         with patch.object(
             repos_client, "_authenticated_request", return_value=mock_response
         ):
-            result = await repos_client.get_activation_progress(activation_id="act-789")
+            result = repos_client.get_activation_progress(activation_id="act-789")
 
             assert result["status"] == "completed"
             assert result["progress_percent"] == 100.0
@@ -410,9 +408,7 @@ class TestActivationProgressMonitoring:
         with patch.object(
             repos_client, "_authenticated_request", return_value=mock_response
         ):
-            result = await repos_client.get_activation_progress(
-                activation_id="act-error"
-            )
+            result = repos_client.get_activation_progress(activation_id="act-error")
 
             assert result["status"] == "failed"
             assert "error_message" in result

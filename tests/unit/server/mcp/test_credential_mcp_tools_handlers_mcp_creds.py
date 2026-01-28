@@ -55,8 +55,7 @@ class TestListMCPCredentialsHandler:
         ]
         return manager
 
-    @pytest.mark.asyncio
-    async def test_list_mcp_credentials_returns_success_true(
+    def test_list_mcp_credentials_returns_success_true(
         self, normal_user, mock_mcp_credential_manager
     ):
         """list_mcp_credentials handler returns success=True on valid call."""
@@ -66,14 +65,13 @@ class TestListMCPCredentialsHandler:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["list_mcp_credentials"]
-            result = await handler({}, normal_user)
+            result = handler({}, normal_user)
 
             assert "content" in result
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    @pytest.mark.asyncio
-    async def test_list_mcp_credentials_returns_credentials_array(
+    def test_list_mcp_credentials_returns_credentials_array(
         self, normal_user, mock_mcp_credential_manager
     ):
         """list_mcp_credentials handler returns credentials array."""
@@ -83,7 +81,7 @@ class TestListMCPCredentialsHandler:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["list_mcp_credentials"]
-            result = await handler({}, normal_user)
+            result = handler({}, normal_user)
 
             content = json.loads(result["content"][0]["text"])
             assert "credentials" in content
@@ -112,8 +110,7 @@ class TestCreateMCPCredentialHandler:
         }
         return manager
 
-    @pytest.mark.asyncio
-    async def test_create_mcp_credential_returns_success(
+    def test_create_mcp_credential_returns_success(
         self, normal_user, mock_mcp_credential_manager
     ):
         """create_mcp_credential handler returns success on valid creation."""
@@ -123,13 +120,12 @@ class TestCreateMCPCredentialHandler:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["create_mcp_credential"]
-            result = await handler({"description": "Test credential"}, normal_user)
+            result = handler({"description": "Test credential"}, normal_user)
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    @pytest.mark.asyncio
-    async def test_create_mcp_credential_returns_credential_id(
+    def test_create_mcp_credential_returns_credential_id(
         self, normal_user, mock_mcp_credential_manager
     ):
         """create_mcp_credential handler returns credential_id."""
@@ -139,13 +135,12 @@ class TestCreateMCPCredentialHandler:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["create_mcp_credential"]
-            result = await handler({}, normal_user)
+            result = handler({}, normal_user)
 
             content = json.loads(result["content"][0]["text"])
             assert "credential_id" in content
 
-    @pytest.mark.asyncio
-    async def test_create_mcp_credential_returns_full_credential(
+    def test_create_mcp_credential_returns_full_credential(
         self, normal_user, mock_mcp_credential_manager
     ):
         """create_mcp_credential returns full credential (one-time display)."""
@@ -155,7 +150,7 @@ class TestCreateMCPCredentialHandler:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["create_mcp_credential"]
-            result = await handler({}, normal_user)
+            result = handler({}, normal_user)
 
             content = json.loads(result["content"][0]["text"])
             # The credential should contain either 'credential' or 'client_secret'
@@ -177,8 +172,7 @@ class TestDeleteMCPCredentialHandler:
         manager.revoke_credential.return_value = True
         return manager
 
-    @pytest.mark.asyncio
-    async def test_delete_mcp_credential_returns_success(
+    def test_delete_mcp_credential_returns_success(
         self, normal_user, mock_mcp_credential_manager
     ):
         """delete_mcp_credential handler returns success=True on valid deletion."""
@@ -188,16 +182,15 @@ class TestDeleteMCPCredentialHandler:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["delete_mcp_credential"]
-            result = await handler({"credential_id": "cred-123"}, normal_user)
+            result = handler({"credential_id": "cred-123"}, normal_user)
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    @pytest.mark.asyncio
-    async def test_delete_mcp_credential_missing_credential_id_fails(self, normal_user):
+    def test_delete_mcp_credential_missing_credential_id_fails(self, normal_user):
         """delete_mcp_credential fails when credential_id is missing."""
         handler = HANDLER_REGISTRY["delete_mcp_credential"]
-        result = await handler({}, normal_user)
+        result = handler({}, normal_user)
 
         content = json.loads(result["content"][0]["text"])
         assert content["success"] is False

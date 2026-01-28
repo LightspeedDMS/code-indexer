@@ -13,7 +13,7 @@ This information appears in BOTH metadata and top-level response for backward co
 import json
 from datetime import datetime
 from typing import cast
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock, Mock
 import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -53,8 +53,7 @@ class TestGetFileContentPaginationInfo:
             mock_app.file_service = mock_service
             yield mock_service, mock_app
 
-    @pytest.mark.asyncio
-    async def test_truncated_content_returns_total_pages_in_metadata(
+    def test_truncated_content_returns_total_pages_in_metadata(
         self, mock_user, mock_file_service
     ):
         """Truncated content metadata must include total_pages."""
@@ -73,9 +72,9 @@ class TestGetFileContentPaginationInfo:
             },
         }
 
-        # Mock payload cache
-        mock_cache = AsyncMock()
-        mock_cache.store = AsyncMock(return_value="cache_handle_abc123")
+        # Mock payload cache (Epic #48: sync, not async)
+        mock_cache = MagicMock()
+        mock_cache.store = Mock(return_value="cache_handle_abc123")
         # max_fetch_size_chars determines pages: 10000 / 500 = 20 pages
         mock_cache.config.max_fetch_size_chars = 500
         mock_app.app.state.payload_cache = mock_cache
@@ -94,7 +93,7 @@ class TestGetFileContentPaginationInfo:
                 "file_path": "large_file.py",
             }
 
-            mcp_response = await handlers.get_file_content(params, mock_user)
+            mcp_response = handlers.get_file_content(params, mock_user)
             data = _extract_response_data(mcp_response)
 
             # Verify metadata includes total_pages
@@ -102,8 +101,7 @@ class TestGetFileContentPaginationInfo:
             assert "total_pages" in metadata, "metadata must include total_pages"
             assert metadata["total_pages"] > 0, "total_pages must be > 0 for truncated content"
 
-    @pytest.mark.asyncio
-    async def test_truncated_content_returns_has_more_in_metadata(
+    def test_truncated_content_returns_has_more_in_metadata(
         self, mock_user, mock_file_service
     ):
         """Truncated content metadata must include has_more=True."""
@@ -118,8 +116,9 @@ class TestGetFileContentPaginationInfo:
             "metadata": {"size": 10000, "path": "large_file.py"},
         }
 
-        mock_cache = AsyncMock()
-        mock_cache.store = AsyncMock(return_value="cache_handle_abc123")
+        # Epic #48: sync, not async
+        mock_cache = MagicMock()
+        mock_cache.store = Mock(return_value="cache_handle_abc123")
         mock_cache.config.max_fetch_size_chars = 500
         mock_app.app.state.payload_cache = mock_cache
 
@@ -136,15 +135,14 @@ class TestGetFileContentPaginationInfo:
                 "file_path": "large_file.py",
             }
 
-            mcp_response = await handlers.get_file_content(params, mock_user)
+            mcp_response = handlers.get_file_content(params, mock_user)
             data = _extract_response_data(mcp_response)
 
             metadata = data.get("metadata", {})
             assert "has_more" in metadata, "metadata must include has_more"
             assert metadata["has_more"] is True, "has_more must be True for truncated content"
 
-    @pytest.mark.asyncio
-    async def test_truncated_content_returns_total_pages_at_top_level(
+    def test_truncated_content_returns_total_pages_at_top_level(
         self, mock_user, mock_file_service
     ):
         """Truncated content must include total_pages at top level for flat clients."""
@@ -159,8 +157,9 @@ class TestGetFileContentPaginationInfo:
             "metadata": {"size": 10000, "path": "large_file.py"},
         }
 
-        mock_cache = AsyncMock()
-        mock_cache.store = AsyncMock(return_value="cache_handle_abc123")
+        # Epic #48: sync, not async
+        mock_cache = MagicMock()
+        mock_cache.store = Mock(return_value="cache_handle_abc123")
         mock_cache.config.max_fetch_size_chars = 500
         mock_app.app.state.payload_cache = mock_cache
 
@@ -177,15 +176,14 @@ class TestGetFileContentPaginationInfo:
                 "file_path": "large_file.py",
             }
 
-            mcp_response = await handlers.get_file_content(params, mock_user)
+            mcp_response = handlers.get_file_content(params, mock_user)
             data = _extract_response_data(mcp_response)
 
             # Top-level should also have total_pages
             assert "total_pages" in data, "top-level response must include total_pages"
             assert data["total_pages"] > 0
 
-    @pytest.mark.asyncio
-    async def test_truncated_content_returns_has_more_at_top_level(
+    def test_truncated_content_returns_has_more_at_top_level(
         self, mock_user, mock_file_service
     ):
         """Truncated content must include has_more at top level for flat clients."""
@@ -200,8 +198,9 @@ class TestGetFileContentPaginationInfo:
             "metadata": {"size": 10000, "path": "large_file.py"},
         }
 
-        mock_cache = AsyncMock()
-        mock_cache.store = AsyncMock(return_value="cache_handle_abc123")
+        # Epic #48: sync, not async
+        mock_cache = MagicMock()
+        mock_cache.store = Mock(return_value="cache_handle_abc123")
         mock_cache.config.max_fetch_size_chars = 500
         mock_app.app.state.payload_cache = mock_cache
 
@@ -218,14 +217,13 @@ class TestGetFileContentPaginationInfo:
                 "file_path": "large_file.py",
             }
 
-            mcp_response = await handlers.get_file_content(params, mock_user)
+            mcp_response = handlers.get_file_content(params, mock_user)
             data = _extract_response_data(mcp_response)
 
             assert "has_more" in data, "top-level response must include has_more"
             assert data["has_more"] is True
 
-    @pytest.mark.asyncio
-    async def test_small_content_total_pages_zero(self, mock_user, mock_file_service):
+    def test_small_content_total_pages_zero(self, mock_user, mock_file_service):
         """Non-truncated content should have total_pages=0."""
         from code_indexer.server.mcp import handlers
 
@@ -238,7 +236,8 @@ class TestGetFileContentPaginationInfo:
             "metadata": {"size": 17, "path": "small_file.py"},
         }
 
-        mock_cache = AsyncMock()
+        # Epic #48: sync, not async
+        mock_cache = MagicMock()
         mock_cache.config.max_fetch_size_chars = 500
         mock_app.app.state.payload_cache = mock_cache
 
@@ -255,15 +254,14 @@ class TestGetFileContentPaginationInfo:
                 "file_path": "small_file.py",
             }
 
-            mcp_response = await handlers.get_file_content(params, mock_user)
+            mcp_response = handlers.get_file_content(params, mock_user)
             data = _extract_response_data(mcp_response)
 
             # Non-truncated should have total_pages=0
             total_pages = data.get("total_pages") or data.get("metadata", {}).get("total_pages")
             assert total_pages == 0, "Non-truncated content should have total_pages=0"
 
-    @pytest.mark.asyncio
-    async def test_small_content_has_more_false(self, mock_user, mock_file_service):
+    def test_small_content_has_more_false(self, mock_user, mock_file_service):
         """Non-truncated content should have has_more=False."""
         from code_indexer.server.mcp import handlers
 
@@ -276,7 +274,8 @@ class TestGetFileContentPaginationInfo:
             "metadata": {"size": 17, "path": "small_file.py"},
         }
 
-        mock_cache = AsyncMock()
+        # Epic #48: sync, not async
+        mock_cache = MagicMock()
         mock_cache.config.max_fetch_size_chars = 500
         mock_app.app.state.payload_cache = mock_cache
 
@@ -293,7 +292,7 @@ class TestGetFileContentPaginationInfo:
                 "file_path": "small_file.py",
             }
 
-            mcp_response = await handlers.get_file_content(params, mock_user)
+            mcp_response = handlers.get_file_content(params, mock_user)
             data = _extract_response_data(mcp_response)
 
             has_more = data.get("has_more")
@@ -301,8 +300,7 @@ class TestGetFileContentPaginationInfo:
                 has_more = data.get("metadata", {}).get("has_more")
             assert has_more is False, "Non-truncated content should have has_more=False"
 
-    @pytest.mark.asyncio
-    async def test_total_pages_calculation_correct(self, mock_user, mock_file_service):
+    def test_total_pages_calculation_correct(self, mock_user, mock_file_service):
         """Verify total_pages is calculated correctly based on content size and max_fetch_size_chars."""
         from code_indexer.server.mcp import handlers
 
@@ -316,8 +314,9 @@ class TestGetFileContentPaginationInfo:
             "metadata": {"size": 2500, "path": "file.py"},
         }
 
-        mock_cache = AsyncMock()
-        mock_cache.store = AsyncMock(return_value="cache_handle_123")
+        # Epic #48: sync, not async
+        mock_cache = MagicMock()
+        mock_cache.store = Mock(return_value="cache_handle_123")
         mock_cache.config.max_fetch_size_chars = 500
         mock_app.app.state.payload_cache = mock_cache
 
@@ -334,7 +333,7 @@ class TestGetFileContentPaginationInfo:
                 "file_path": "file.py",
             }
 
-            mcp_response = await handlers.get_file_content(params, mock_user)
+            mcp_response = handlers.get_file_content(params, mock_user)
             data = _extract_response_data(mcp_response)
 
             total_pages = data.get("total_pages") or data.get("metadata", {}).get("total_pages")

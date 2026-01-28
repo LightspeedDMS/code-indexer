@@ -6,10 +6,9 @@ Following TDD principles with comprehensive error scenario coverage.
 """
 
 import pytest
-import asyncio
 import time
 from pathlib import Path
-from unittest.mock import patch, AsyncMock, Mock
+from unittest.mock import patch, Mock
 
 import httpx
 from rich.console import Console
@@ -238,23 +237,20 @@ class TestRetryLogicWithExponentialBackoff:
         assert config.backoff_multiplier == 1.5
         assert config.jitter_enabled is False
 
-    @pytest.mark.asyncio
-    async def test_exponential_backoff_timing(self):
+    def test_exponential_backoff_timing(self):
         """Test exponential backoff timing follows expected pattern."""
         handler = NetworkErrorHandler()
         config = RetryConfig(
             jitter_enabled=False
         )  # Disable jitter for predictable testing
 
-        async def mock_operation():
+        def mock_operation():
             raise NetworkConnectionError("Connection failed")
 
         start_time = time.time()
 
         with pytest.raises(NetworkConnectionError):
-            await handler.retry_with_backoff(
-                mock_operation, config, progress_callback=None
-            )
+            handler.retry_with_backoff(mock_operation, config, progress_callback=None)
 
         # Should have attempted: initial + 3 retries = 4 total attempts
         # Delays should be approximately: 1s, 2s, 4s between attempts
@@ -262,26 +258,25 @@ class TestRetryLogicWithExponentialBackoff:
         assert elapsed >= 7.0  # 1 + 2 + 4 = 7 seconds minimum
         assert elapsed < 10.0  # Allow some tolerance
 
-    @pytest.mark.asyncio
-    async def test_retry_with_jitter(self):
+    def test_retry_with_jitter(self):
         """Test retry logic includes jitter to prevent thundering herd."""
         handler = NetworkErrorHandler()
         config = RetryConfig(max_retries=2, jitter_enabled=True)
 
         delays = []
 
-        async def mock_sleep(delay):
+        def mock_sleep(delay):
             delays.append(delay)
             # Don't actually sleep in tests
             pass
 
-        with patch("asyncio.sleep", side_effect=mock_sleep):
+        with patch("time.sleep", side_effect=mock_sleep):
 
-            async def mock_operation():
+            def mock_operation():
                 raise NetworkConnectionError("Connection failed")
 
             with pytest.raises(NetworkConnectionError):
-                await handler.retry_with_backoff(
+                handler.retry_with_backoff(
                     mock_operation, config, progress_callback=None
                 )
 
@@ -294,51 +289,47 @@ class TestRetryLogicWithExponentialBackoff:
         # Second delay should be around 2s ± jitter
         assert 1.0 <= delays[1] <= 3.0
 
-    @pytest.mark.asyncio
-    async def test_retry_success_after_failures(self):
+    def test_retry_success_after_failures(self):
         """Test successful operation after some failures."""
         handler = NetworkErrorHandler()
         config = RetryConfig(max_retries=3)
 
         attempt_count = 0
 
-        async def mock_operation():
+        def mock_operation():
             nonlocal attempt_count
             attempt_count += 1
             if attempt_count < 3:
                 raise NetworkConnectionError("Connection failed")
             return {"success": True}
 
-        result = await handler.retry_with_backoff(
-            mock_operation, config, progress_callback=None
-        )
+        with patch("time.sleep"):  # Don't actually sleep in tests
+            result = handler.retry_with_backoff(
+                mock_operation, config, progress_callback=None
+            )
 
         assert result == {"success": True}
         assert attempt_count == 3
 
-    @pytest.mark.asyncio
-    async def test_no_retry_for_permanent_errors(self):
+    def test_no_retry_for_permanent_errors(self):
         """Test that permanent errors are not retried."""
         handler = NetworkErrorHandler()
         config = RetryConfig(max_retries=3)
 
         attempt_count = 0
 
-        async def mock_operation():
+        def mock_operation():
             nonlocal attempt_count
             attempt_count += 1
             raise AuthenticationError("Invalid credentials")
 
         with pytest.raises(AuthenticationError):
-            await handler.retry_with_backoff(
-                mock_operation, config, progress_callback=None
-            )
+            handler.retry_with_backoff(mock_operation, config, progress_callback=None)
 
         # Should only attempt once for permanent errors
         assert attempt_count == 1
 
-    @pytest.mark.asyncio
-    async def test_progress_indication_during_retries(self):
+    def test_progress_indication_during_retries(self):
         """Test progress indication is called during retry attempts."""
         handler = NetworkErrorHandler()
         config = RetryConfig(max_retries=2)
@@ -348,22 +339,19 @@ class TestRetryLogicWithExponentialBackoff:
         def progress_callback(message: str, retry_count: int, max_retries: int):
             progress_calls.append((message, retry_count, max_retries))
 
-        async def mock_operation():
+        def mock_operation():
             raise NetworkTimeoutError("Request timed out")
 
-        with patch("asyncio.sleep"):  # Don't actually sleep in tests
+        with patch("time.sleep"):  # Don't actually sleep in tests
             with pytest.raises(NetworkTimeoutError):
-                await handler.retry_with_backoff(
-                    mock_operation, config, progress_callback
-                )
+                handler.retry_with_backoff(mock_operation, config, progress_callback)
 
         # Should have progress calls for each retry attempt
         assert len(progress_calls) == 2
         assert progress_calls[0] == ("Retrying after connection error...", 1, 2)
         assert progress_calls[1] == ("Retrying after connection error...", 2, 2)
 
-    @pytest.mark.asyncio
-    async def test_timeout_limits_respected(self):
+    def test_timeout_limits_respected(self):
         """Test that retry attempts respect reasonable timeout limits."""
         handler = NetworkErrorHandler()
         config = RetryConfig(
@@ -372,14 +360,14 @@ class TestRetryLogicWithExponentialBackoff:
             max_delay=60.0,
         )
 
-        async def mock_operation():
+        def mock_operation():
             raise NetworkConnectionError("Connection failed")
 
         start_time = time.time()
 
-        with patch("asyncio.sleep"):  # Don't actually sleep in tests
+        with patch("time.sleep"):  # Don't actually sleep in tests
             with pytest.raises(NetworkConnectionError):
-                await handler.retry_with_backoff(
+                handler.retry_with_backoff(
                     mock_operation, config, progress_callback=None
                 )
 
@@ -528,44 +516,43 @@ class TestCIDXRemoteAPIClientNetworkErrorHandling:
             server_url="https://test-server.com", credentials=credentials
         )
 
-    @pytest.mark.asyncio
-    async def test_connection_error_handling_in_authenticated_request(self, api_client):
+    def test_connection_error_handling_in_authenticated_request(self, api_client):
         """Test connection errors are properly handled in authenticated requests."""
         # Mock the session and its request method
-        mock_session = AsyncMock()
+        mock_session = Mock()
         mock_session.request.side_effect = httpx.ConnectError("Connection refused")
+        mock_session.is_closed = False
 
         with (
-            patch.object(type(api_client), "session", mock_session),
+            patch.object(api_client, "_session", mock_session),
             patch.object(api_client, "_get_valid_token", return_value="test-token"),
         ):
             with pytest.raises(NetworkConnectionError) as exc_info:
-                await api_client._authenticated_request("GET", "/test-endpoint")
+                api_client._authenticated_request("GET", "/test-endpoint")
 
             assert "Cannot connect to server" in str(exc_info.value)
             assert hasattr(exc_info.value, "user_guidance")
 
-    @pytest.mark.asyncio
-    async def test_timeout_error_handling_in_authenticated_request(self, api_client):
+    def test_timeout_error_handling_in_authenticated_request(self, api_client):
         """Test timeout errors are properly handled in authenticated requests."""
-        mock_session = AsyncMock()
+        mock_session = Mock()
         mock_session.request.side_effect = httpx.ReadTimeout("Request timeout")
+        mock_session.is_closed = False
 
         with (
-            patch.object(type(api_client), "session", mock_session),
+            patch.object(api_client, "_session", mock_session),
             patch.object(api_client, "_get_valid_token", return_value="test-token"),
         ):
             with pytest.raises(NetworkTimeoutError) as exc_info:
-                await api_client._authenticated_request("GET", "/test-endpoint")
+                api_client._authenticated_request("GET", "/test-endpoint")
 
             assert "Request timed out" in str(exc_info.value)
 
-    @pytest.mark.asyncio
-    async def test_server_error_retry_logic(self, api_client):
+    def test_server_error_retry_logic(self, api_client):
         """Test that 5xx server errors trigger retry logic."""
         retry_count = 0
 
-        async def mock_request(*args, **kwargs):
+        def mock_request(*args, **kwargs):
             nonlocal retry_count
             retry_count += 1
 
@@ -582,25 +569,25 @@ class TestCIDXRemoteAPIClientNetworkErrorHandling:
                 mock_response.json.return_value = {"result": "success"}
                 return mock_response
 
-        mock_session = AsyncMock()
+        mock_session = Mock()
         mock_session.request.side_effect = mock_request
+        mock_session.is_closed = False
 
         with (
-            patch.object(type(api_client), "session", mock_session),
+            patch.object(api_client, "_session", mock_session),
             patch.object(api_client, "_get_valid_token", return_value="test-token"),
-            patch("asyncio.sleep"),
+            patch("time.sleep"),
         ):  # Don't actually sleep in tests
-            response = await api_client._authenticated_request("GET", "/test-endpoint")
+            response = api_client._authenticated_request("GET", "/test-endpoint")
 
             assert response.status_code == 200
             assert retry_count == 2  # Initial attempt + 1 retry
 
-    @pytest.mark.asyncio
-    async def test_authentication_errors_not_retried(self, api_client):
+    def test_authentication_errors_not_retried(self, api_client):
         """Test that 401 authentication errors follow existing token refresh logic."""
         attempt_count = 0
 
-        async def mock_request(*args, **kwargs):
+        def mock_request(*args, **kwargs):
             nonlocal attempt_count
             attempt_count += 1
 
@@ -610,25 +597,25 @@ class TestCIDXRemoteAPIClientNetworkErrorHandling:
             # Return response instead of raising exception
             return mock_response
 
-        mock_session = AsyncMock()
+        mock_session = Mock()
         mock_session.request.side_effect = mock_request
+        mock_session.is_closed = False
 
         with (
-            patch.object(type(api_client), "session", mock_session),
+            patch.object(api_client, "_session", mock_session),
             patch.object(api_client, "_get_valid_token", return_value="test-token"),
         ):
             with pytest.raises(AuthenticationError):
-                await api_client._authenticated_request("GET", "/test-endpoint")
+                api_client._authenticated_request("GET", "/test-endpoint")
 
             # Should attempt twice (initial + retry after token refresh)
             assert attempt_count == 2
 
-    @pytest.mark.asyncio
-    async def test_rate_limit_error_with_retry_after(self, api_client):
+    def test_rate_limit_error_with_retry_after(self, api_client):
         """Test rate limit errors respect Retry-After header."""
         attempt_count = 0
 
-        async def mock_request(*args, **kwargs):
+        def mock_request(*args, **kwargs):
             nonlocal attempt_count
             attempt_count += 1
 
@@ -646,15 +633,16 @@ class TestCIDXRemoteAPIClientNetworkErrorHandling:
                 mock_response.json.return_value = {"result": "success"}
                 return mock_response
 
-        mock_session = AsyncMock()
+        mock_session = Mock()
         mock_session.request.side_effect = mock_request
+        mock_session.is_closed = False
 
         with (
-            patch.object(type(api_client), "session", mock_session),
+            patch.object(api_client, "_session", mock_session),
             patch.object(api_client, "_get_valid_token", return_value="test-token"),
-            patch("asyncio.sleep") as mock_sleep,
+            patch("time.sleep") as mock_sleep,
         ):
-            response = await api_client._authenticated_request("GET", "/test-endpoint")
+            response = api_client._authenticated_request("GET", "/test-endpoint")
 
             assert response.status_code == 200
             # Should have waited with exponential backoff (not specific retry-after in this context)
@@ -679,66 +667,65 @@ class TestGracefulDegradation:
                 project_root=project_root,
             )
 
-    @pytest.mark.asyncio
-    async def test_server_unreachable_graceful_failure(self, api_client):
+    def test_server_unreachable_graceful_failure(self, api_client):
         """Test graceful failure when server becomes unreachable."""
-        mock_session = AsyncMock()
+        mock_session = Mock()
         mock_session.request.side_effect = httpx.ConnectError(
             "Name or service not known"
         )
+        mock_session.is_closed = False
 
         with (
-            patch.object(type(api_client), "session", mock_session),
+            patch.object(api_client, "_session", mock_session),
             patch.object(api_client, "_get_valid_token", return_value="test-token"),
         ):
             with pytest.raises(DNSResolutionError) as exc_info:
-                await api_client._authenticated_request("GET", "/test-endpoint")
+                api_client._authenticated_request("GET", "/test-endpoint")
 
             # Should not crash, should provide clear error message
             assert "Cannot resolve server address" in str(exc_info.value)
             assert hasattr(exc_info.value, "user_guidance")
 
-    @pytest.mark.asyncio
-    async def test_configuration_preserved_after_network_failure(self, api_client):
+    def test_configuration_preserved_after_network_failure(self, api_client):
         """Test that local configuration is preserved after network failures."""
         # Simulate network failure
-        mock_session = AsyncMock()
+        mock_session = Mock()
         mock_session.request.side_effect = httpx.ConnectError("Connection failed")
+        mock_session.is_closed = False
 
         with (
-            patch.object(type(api_client), "session", mock_session),
+            patch.object(api_client, "_session", mock_session),
             patch.object(api_client, "_get_valid_token", return_value="test-token"),
         ):
             with pytest.raises(NetworkConnectionError):
-                await api_client._authenticated_request("GET", "/test-endpoint")
+                api_client._authenticated_request("GET", "/test-endpoint")
 
         # Configuration should still be accessible
         assert api_client.server_url == "https://unreachable-server.com"
         assert api_client.credentials["username"] == "testuser"
 
-    @pytest.mark.asyncio
-    async def test_no_crash_on_unexpected_network_errors(self, api_client):
+    def test_no_crash_on_unexpected_network_errors(self, api_client):
         """Test system doesn't crash on unexpected network errors."""
-        mock_session = AsyncMock()
+        mock_session = Mock()
         # Simulate unexpected network error
         mock_session.request.side_effect = Exception("Unexpected network error")
+        mock_session.is_closed = False
 
         with (
-            patch.object(type(api_client), "session", mock_session),
+            patch.object(api_client, "_session", mock_session),
             patch.object(api_client, "_get_valid_token", return_value="test-token"),
         ):
             with pytest.raises(APIClientError) as exc_info:
-                await api_client._authenticated_request("GET", "/test-endpoint")
+                api_client._authenticated_request("GET", "/test-endpoint")
 
             # Should wrap unexpected errors gracefully
             assert "Unexpected error" in str(exc_info.value)
 
-    @pytest.mark.asyncio
-    async def test_recovery_after_network_restoration(self, api_client):
+    def test_recovery_after_network_restoration(self, api_client):
         """Test system can recover after network is restored."""
         attempt_count = 0
 
-        async def mock_request(*args, **kwargs):
+        def mock_request(*args, **kwargs):
             nonlocal attempt_count
             attempt_count += 1
 
@@ -752,15 +739,16 @@ class TestGracefulDegradation:
                 mock_response.json.return_value = {"result": "success"}
                 return mock_response
 
-        mock_session = AsyncMock()
+        mock_session = Mock()
         mock_session.request.side_effect = mock_request
+        mock_session.is_closed = False
 
         with (
-            patch.object(type(api_client), "session", mock_session),
+            patch.object(api_client, "_session", mock_session),
             patch.object(api_client, "_get_valid_token", return_value="test-token"),
-            patch("asyncio.sleep"),
+            patch("time.sleep"),
         ):  # Don't actually sleep in tests
-            response = await api_client._authenticated_request("GET", "/test-endpoint")
+            response = api_client._authenticated_request("GET", "/test-endpoint")
 
             # Should eventually succeed after network restoration
             assert response.status_code == 200
@@ -769,8 +757,7 @@ class TestGracefulDegradation:
 class TestPerformanceRequirements:
     """Test performance requirements for network error handling."""
 
-    @pytest.mark.asyncio
-    async def test_error_classification_overhead(self):
+    def test_error_classification_overhead(self):
         """Test error classification adds minimal overhead."""
         handler = NetworkErrorHandler()
 
@@ -789,20 +776,19 @@ class TestPerformanceRequirements:
         # Should complete within reasonable time (< 100ms for 100 classifications)
         assert elapsed < 0.1
 
-    @pytest.mark.asyncio
-    async def test_retry_timeout_limits(self):
+    def test_retry_timeout_limits(self):
         """Test retry attempts don't exceed 30 seconds total."""
         handler = NetworkErrorHandler()
         config = RetryConfig(max_retries=3)
 
-        async def mock_operation():
+        def mock_operation():
             raise NetworkConnectionError("Connection failed")
 
         start_time = time.time()
 
-        with patch("asyncio.sleep"):  # Don't actually sleep, just measure logic time
+        with patch("time.sleep"):  # Don't actually sleep, just measure logic time
             with pytest.raises(NetworkConnectionError):
-                await handler.retry_with_backoff(
+                handler.retry_with_backoff(
                     mock_operation, config, progress_callback=None
                 )
 
@@ -811,8 +797,7 @@ class TestPerformanceRequirements:
         # Logic should complete quickly even with retry configuration
         assert elapsed < 1.0
 
-    @pytest.mark.asyncio
-    async def test_memory_usage_during_retries(self):
+    def test_memory_usage_during_retries(self):
         """Test memory usage doesn't increase during retry scenarios."""
         handler = NetworkErrorHandler()
         config = RetryConfig(max_retries=5)
@@ -821,13 +806,13 @@ class TestPerformanceRequirements:
 
         tracemalloc.start()
 
-        async def mock_operation():
+        def mock_operation():
             # Create some temporary objects that should be cleaned up
             raise NetworkConnectionError("Connection failed")
 
-        with patch("asyncio.sleep"):
+        with patch("time.sleep"):
             with pytest.raises(NetworkConnectionError):
-                await handler.retry_with_backoff(
+                handler.retry_with_backoff(
                     mock_operation, config, progress_callback=None
                 )
 
@@ -850,25 +835,24 @@ class TestIntegrationWithCircuitBreaker:
             server_url="https://test-server.com", credentials=credentials
         )
 
-    @pytest.mark.asyncio
-    async def test_network_errors_trigger_circuit_breaker(self, api_client):
+    def test_network_errors_trigger_circuit_breaker(self, api_client):
         """Test that network errors contribute to circuit breaker state."""
         # Force multiple authentication failures through network errors
-        mock_session = AsyncMock()
+        mock_session = Mock()
         mock_session.post.side_effect = httpx.ConnectError("Connection refused")
+        mock_session.is_closed = False
 
-        with patch.object(type(api_client), "session", mock_session):
+        with patch.object(api_client, "_session", mock_session):
             # Generate enough failures to trip circuit breaker
             for i in range(5):
                 with pytest.raises((NetworkConnectionError, CircuitBreakerOpenError)):
-                    await api_client._authenticate()
+                    api_client._authenticate()
 
             # Circuit breaker should now be open
             with pytest.raises(CircuitBreakerOpenError):
-                await api_client._authenticate()
+                api_client._authenticate()
 
-    @pytest.mark.asyncio
-    async def test_circuit_breaker_prevents_unnecessary_retries(self, api_client):
+    def test_circuit_breaker_prevents_unnecessary_retries(self, api_client):
         """Test circuit breaker prevents retries when open."""
         # Trip the circuit breaker
         api_client._circuit_breaker_open = True
@@ -876,7 +860,7 @@ class TestIntegrationWithCircuitBreaker:
 
         attempt_count = 0
 
-        async def mock_operation():
+        def mock_operation():
             nonlocal attempt_count
             attempt_count += 1
             raise NetworkConnectionError("Connection failed")
@@ -886,7 +870,7 @@ class TestIntegrationWithCircuitBreaker:
 
         # Should fail immediately due to circuit breaker, not attempt retries
         with pytest.raises(CircuitBreakerOpenError):
-            await api_client._authenticate()
+            api_client._authenticate()
 
         # No retries should have been attempted
         assert attempt_count == 0
@@ -895,8 +879,7 @@ class TestIntegrationWithCircuitBreaker:
 class TestProgressIndication:
     """Test progress indication during retry attempts."""
 
-    @pytest.mark.asyncio
-    async def test_progress_callback_called_during_retries(self):
+    def test_progress_callback_called_during_retries(self):
         """Test progress callback is called with proper parameters."""
         handler = NetworkErrorHandler()
         config = RetryConfig(max_retries=2)
@@ -913,14 +896,12 @@ class TestProgressIndication:
                 }
             )
 
-        async def mock_operation():
+        def mock_operation():
             raise NetworkTimeoutError("Request timed out")
 
-        with patch("asyncio.sleep"):
+        with patch("time.sleep"):
             with pytest.raises(NetworkTimeoutError):
-                await handler.retry_with_backoff(
-                    mock_operation, config, progress_callback
-                )
+                handler.retry_with_backoff(mock_operation, config, progress_callback)
 
         # Should have 2 progress calls for 2 retries
         assert len(progress_calls) == 2
@@ -931,8 +912,7 @@ class TestProgressIndication:
         assert progress_calls[1]["retry_count"] == 2
         assert progress_calls[1]["max_retries"] == 2
 
-    @pytest.mark.asyncio
-    async def test_progress_updates_every_two_seconds(self):
+    def test_progress_updates_every_two_seconds(self):
         """Test progress indication updates at least every 2 seconds during retries."""
         handler = NetworkErrorHandler()
         config = RetryConfig(
@@ -945,23 +925,21 @@ class TestProgressIndication:
         def progress_callback(message: str, retry_count: int, max_retries: int):
             progress_calls.append(time.time())
 
-        async def mock_operation():
+        def mock_operation():
             raise NetworkConnectionError("Connection failed")
 
         # Mock sleep to simulate time passing
-        async def mock_sleep(delay):
+        def mock_sleep(delay):
             # Simulate progress updates during long delays
             if delay >= 2.0:
                 # Call progress callback multiple times during long sleep
                 for i in range(int(delay // 2)):
                     progress_callback(f"Waiting... ({i+1}/{int(delay//2)})", 1, 1)
-                    await asyncio.sleep(0.01)  # Small actual delay for testing
+                    time.sleep(0.01)  # Small actual delay for testing
 
-        with patch("asyncio.sleep", side_effect=mock_sleep):
+        with patch("time.sleep", side_effect=mock_sleep):
             with pytest.raises(NetworkConnectionError):
-                await handler.retry_with_backoff(
-                    mock_operation, config, progress_callback
-                )
+                handler.retry_with_backoff(mock_operation, config, progress_callback)
 
         # Should have multiple progress updates during long delay
         assert len(progress_calls) >= 2

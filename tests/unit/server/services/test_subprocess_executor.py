@@ -261,3 +261,71 @@ class TestSearchExecutionResult:
         assert result.status == ExecutionStatus.ERROR
         assert result.exit_code == 1
         assert result.error_message == "Command failed"
+
+
+class TestSubprocessExecutorSync:
+    """Test suite for SubprocessExecutor sync methods (Story #51)."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.executor = SubprocessExecutor(max_workers=2)
+        self.temp_dir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        """Clean up test fixtures."""
+        self.executor.shutdown()
+        import shutil
+
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir)
+
+    def test_execute_with_limits_sync_successful_command(self):
+        """Test successful sync command execution with file output."""
+        output_file = Path(self.temp_dir) / "sync_output.txt"
+
+        result = self.executor.execute_with_limits_sync(
+            command=["echo", "sync test output"],
+            working_dir=self.temp_dir,
+            timeout_seconds=5,
+            output_file_path=str(output_file),
+        )
+
+        assert result.status == ExecutionStatus.SUCCESS
+        assert result.exit_code == 0
+        assert result.timed_out is False
+        assert result.output_file == str(output_file)
+        assert output_file.exists()
+
+        # Verify output was written to file
+        content = output_file.read_text()
+        assert "sync test output" in content
+
+    def test_execute_with_limits_sync_timeout(self):
+        """Test sync command that exceeds timeout is terminated."""
+        output_file = Path(self.temp_dir) / "sync_timeout_output.txt"
+
+        result = self.executor.execute_with_limits_sync(
+            command=["sleep", "10"],
+            working_dir=self.temp_dir,
+            timeout_seconds=1,
+            output_file_path=str(output_file),
+        )
+
+        assert result.status == ExecutionStatus.TIMEOUT
+        assert result.timed_out is True
+        assert result.timeout_seconds == 1
+
+    def test_execute_with_limits_sync_error(self):
+        """Test sync command that fails with non-zero exit code."""
+        output_file = Path(self.temp_dir) / "sync_error_output.txt"
+
+        result = self.executor.execute_with_limits_sync(
+            command=["ls", "/nonexistent/directory/path"],
+            working_dir=self.temp_dir,
+            timeout_seconds=5,
+            output_file_path=str(output_file),
+        )
+
+        assert result.status == ExecutionStatus.ERROR
+        assert result.exit_code != 0
+        assert result.error_message is not None

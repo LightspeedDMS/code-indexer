@@ -82,7 +82,7 @@ class TestAdminAPIClientGoldenReposMaintenanceRealServer:
 
         try:
             # List golden repositories (should work even if empty)
-            result = await admin_client.list_golden_repositories()
+            result = admin_client.list_golden_repositories()
 
             # Verify response structure
             assert "golden_repositories" in result
@@ -92,7 +92,7 @@ class TestAdminAPIClientGoldenReposMaintenanceRealServer:
             assert result["total"] >= 0
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     @pytest.mark.asyncio
     async def test_list_golden_repositories_insufficient_privileges_with_regular_user(
@@ -107,12 +107,12 @@ class TestAdminAPIClientGoldenReposMaintenanceRealServer:
 
         try:
             with pytest.raises(AuthenticationError) as exc_info:
-                await admin_client.list_golden_repositories()
+                admin_client.list_golden_repositories()
 
             assert "admin role required" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     @pytest.mark.asyncio
     async def test_refresh_golden_repository_not_found(
@@ -127,13 +127,13 @@ class TestAdminAPIClientGoldenReposMaintenanceRealServer:
 
         try:
             with pytest.raises(APIClientError) as exc_info:
-                await admin_client.refresh_golden_repository("non-existent-repo")
+                admin_client.refresh_golden_repository("non-existent-repo")
 
             assert exc_info.value.status_code == 404
             assert "not found" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     @pytest.mark.asyncio
     async def test_refresh_golden_repository_insufficient_privileges_with_regular_user(
@@ -148,12 +148,12 @@ class TestAdminAPIClientGoldenReposMaintenanceRealServer:
 
         try:
             with pytest.raises(AuthenticationError) as exc_info:
-                await admin_client.refresh_golden_repository("test-repo")
+                admin_client.refresh_golden_repository("test-repo")
 
             assert "admin role required" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     @pytest.mark.asyncio
     async def test_authentication_error_with_invalid_credentials_for_list(
@@ -173,10 +173,10 @@ class TestAdminAPIClientGoldenReposMaintenanceRealServer:
 
         try:
             with pytest.raises(AuthenticationError):
-                await admin_client.list_golden_repositories()
+                admin_client.list_golden_repositories()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     @pytest.mark.asyncio
     async def test_authentication_error_with_invalid_credentials_for_refresh(
@@ -196,10 +196,10 @@ class TestAdminAPIClientGoldenReposMaintenanceRealServer:
 
         try:
             with pytest.raises(AuthenticationError):
-                await admin_client.refresh_golden_repository("test-repo")
+                admin_client.refresh_golden_repository("test-repo")
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     @pytest.mark.asyncio
     async def test_network_error_with_invalid_server_url_for_list(
@@ -214,10 +214,10 @@ class TestAdminAPIClientGoldenReposMaintenanceRealServer:
 
         try:
             with pytest.raises((NetworkError, APIClientError)):
-                await admin_client.list_golden_repositories()
+                admin_client.list_golden_repositories()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     @pytest.mark.asyncio
     async def test_network_error_with_invalid_server_url_for_refresh(
@@ -232,10 +232,10 @@ class TestAdminAPIClientGoldenReposMaintenanceRealServer:
 
         try:
             with pytest.raises((NetworkError, APIClientError)):
-                await admin_client.refresh_golden_repository("test-repo")
+                admin_client.refresh_golden_repository("test-repo")
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
 
 class TestAdminAPIClientMethodSignatures:
@@ -252,9 +252,9 @@ class TestAdminAPIClientMethodSignatures:
         assert hasattr(admin_client, "list_golden_repositories")
         assert callable(getattr(admin_client, "list_golden_repositories"))
 
-        # Verify it's a coroutine function
+        # Verify it's a sync function (not a coroutine)
         method = getattr(admin_client, "list_golden_repositories")
-        assert asyncio.iscoroutinefunction(method)
+        assert not asyncio.iscoroutinefunction(method)
 
     def test_refresh_golden_repository_method_signature(self):
         """Test refresh_golden_repository method signature."""
@@ -267,9 +267,9 @@ class TestAdminAPIClientMethodSignatures:
         assert hasattr(admin_client, "refresh_golden_repository")
         assert callable(getattr(admin_client, "refresh_golden_repository"))
 
-        # Verify it's a coroutine function
+        # Verify it's a sync function (not a coroutine)
         method = getattr(admin_client, "refresh_golden_repository")
-        assert asyncio.iscoroutinefunction(method)
+        assert not asyncio.iscoroutinefunction(method)
 
     def test_refresh_golden_repository_requires_alias_parameter(self):
         """Test that refresh_golden_repository requires alias parameter."""
@@ -281,4 +281,4 @@ class TestAdminAPIClientMethodSignatures:
         # Should raise TypeError if called without required alias parameter
         with pytest.raises(TypeError):
             # This should fail even after implementation if no alias provided
-            asyncio.run(admin_client.refresh_golden_repository())
+            admin_client.refresh_golden_repository()

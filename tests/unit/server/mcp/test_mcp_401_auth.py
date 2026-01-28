@@ -54,5 +54,5 @@ class TestMCP401Authentication:
                 ), f"Expected resource_metadata parameter, got: {www_auth}"
 
                 assert (
-                    "/.well-known/oauth-authorization-server" in www_auth
+                    "/.well-known/oauth-protected-resource" in www_auth
                 ), f"Expected OAuth discovery URL, got: {www_auth}"

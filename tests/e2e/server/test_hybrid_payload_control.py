@@ -30,7 +30,7 @@ class TestHybridPayloadCacheE2E:
     """E2E tests for Hybrid PayloadCache truncation functionality."""
 
     @pytest.fixture
-    async def cache_with_standard_config(self, tmp_path):
+    def cache_with_standard_config(self, tmp_path):
         """Create PayloadCache with standard settings."""
         config = PayloadCacheConfig(
             preview_size_chars=2000,
@@ -38,9 +38,9 @@ class TestHybridPayloadCacheE2E:
             cache_ttl_seconds=900,
         )
         cache = PayloadCache(db_path=tmp_path / "test_cache.db", config=config)
-        await cache.initialize()
+        cache.initialize()
         yield cache
-        await cache.close()
+        cache.close()
 
     @pytest.mark.asyncio
     async def test_hybrid_all_fields_truncation_workflow(self, cache_with_standard_config):
@@ -72,8 +72,8 @@ class TestHybridPayloadCacheE2E:
             mock_state.payload_cache = cache_with_standard_config
 
             # Apply both truncations as hybrid mode does
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)
+            truncated = _apply_payload_truncation(truncated)
 
         result = truncated[0]
 
@@ -89,9 +89,9 @@ class TestHybridPayloadCacheE2E:
         assert len({content_handle, snippet_handle, match_text_handle}) == 3
 
         # Retrieve each and verify correct content
-        content_retrieved = await cache_with_standard_config.retrieve(content_handle, page=0)
-        snippet_retrieved = await cache_with_standard_config.retrieve(snippet_handle, page=0)
-        match_text_retrieved = await cache_with_standard_config.retrieve(match_text_handle, page=0)
+        content_retrieved = cache_with_standard_config.retrieve(content_handle, page=0)
+        snippet_retrieved = cache_with_standard_config.retrieve(snippet_handle, page=0)
+        match_text_retrieved = cache_with_standard_config.retrieve(match_text_handle, page=0)
 
         assert content_retrieved.content == large_content
         assert snippet_retrieved.content == large_snippet
@@ -102,7 +102,7 @@ class TestHybridMcpCacheRetrievalE2E:
     """E2E tests for MCP get_cached_content tool with hybrid field handles."""
 
     @pytest.fixture
-    async def cache(self, tmp_path):
+    def cache(self, tmp_path):
         """Create PayloadCache for testing."""
         config = PayloadCacheConfig(
             preview_size_chars=2000,
@@ -110,9 +110,9 @@ class TestHybridMcpCacheRetrievalE2E:
             cache_ttl_seconds=900,
         )
         cache = PayloadCache(db_path=tmp_path / "test_cache.db", config=config)
-        await cache.initialize()
+        cache.initialize()
         yield cache
-        await cache.close()
+        cache.close()
 
     @pytest.fixture
     def mock_user(self):
@@ -150,8 +150,8 @@ class TestHybridMcpCacheRetrievalE2E:
             "code_indexer.server.mcp.handlers.app_module.app.state"
         ) as mock_state:
             mock_state.payload_cache = cache
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)
+            truncated = _apply_payload_truncation(truncated)
 
         result = truncated[0]
         content_handle = result["cache_handle"]
@@ -193,7 +193,7 @@ class TestHybridRestApiCacheRetrievalE2E:
     """E2E tests for REST API cache retrieval with hybrid field handles."""
 
     @pytest.fixture
-    async def cache(self, tmp_path):
+    def cache(self, tmp_path):
         """Create PayloadCache for testing."""
         config = PayloadCacheConfig(
             preview_size_chars=2000,
@@ -201,9 +201,9 @@ class TestHybridRestApiCacheRetrievalE2E:
             cache_ttl_seconds=900,
         )
         cache = PayloadCache(db_path=tmp_path / "test_cache.db", config=config)
-        await cache.initialize()
+        cache.initialize()
         yield cache
-        await cache.close()
+        cache.close()
 
     @pytest.fixture
     def app_with_cache(self, cache):
@@ -236,8 +236,8 @@ class TestHybridRestApiCacheRetrievalE2E:
             "code_indexer.server.mcp.handlers.app_module.app.state"
         ) as mock_state:
             mock_state.payload_cache = cache
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)
+            truncated = _apply_payload_truncation(truncated)
 
         content_handle = truncated[0]["cache_handle"]
 
@@ -278,8 +278,8 @@ class TestHybridRestApiCacheRetrievalE2E:
             "code_indexer.server.mcp.handlers.app_module.app.state"
         ) as mock_state:
             mock_state.payload_cache = cache
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)
+            truncated = _apply_payload_truncation(truncated)
 
         result = truncated[0]
         content_handle = result["cache_handle"]
@@ -323,8 +323,8 @@ class TestHybridRestApiCacheRetrievalE2E:
             "code_indexer.server.mcp.handlers.app_module.app.state"
         ) as mock_state:
             mock_state.payload_cache = cache
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)
+            truncated = _apply_payload_truncation(truncated)
 
         content_handle = truncated[0]["cache_handle"]
 

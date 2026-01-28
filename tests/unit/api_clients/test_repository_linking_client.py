@@ -5,7 +5,7 @@ following TDD principles with no mocks.
 """
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 from code_indexer.api_clients.repository_linking_client import (
     RepositoryLinkingClient,
@@ -72,11 +72,11 @@ class TestRepositoryLinkingClientDiscovery:
         with patch.object(
             linking_client,
             "_authenticated_request",
-            return_value=AsyncMock(
+            return_value=MagicMock(
                 status_code=200, json=lambda: mock_discovery_response
             ),
         ):
-            result = await linking_client.discover_repositories(
+            result = linking_client.discover_repositories(
                 "https://github.com/example/cidx.git"
             )
 
@@ -110,9 +110,9 @@ class TestRepositoryLinkingClientDiscovery:
         with patch.object(
             linking_client,
             "_authenticated_request",
-            return_value=AsyncMock(status_code=200, json=lambda: mock_empty_response),
+            return_value=MagicMock(status_code=200, json=lambda: mock_empty_response),
         ):
-            result = await linking_client.discover_repositories(
+            result = linking_client.discover_repositories(
                 "https://github.com/nonexistent/repo.git"
             )
 
@@ -135,7 +135,7 @@ class TestRepositoryLinkingClientDiscovery:
 
         for invalid_url in invalid_urls:
             with pytest.raises(ValueError) as exc_info:
-                await linking_client.discover_repositories(invalid_url)
+                linking_client.discover_repositories(invalid_url)
 
             assert "Invalid git URL" in str(exc_info.value)
 
@@ -145,12 +145,12 @@ class TestRepositoryLinkingClientDiscovery:
         with patch.object(
             linking_client,
             "_authenticated_request",
-            return_value=AsyncMock(
+            return_value=MagicMock(
                 status_code=500, json=lambda: {"detail": "Internal server error"}
             ),
         ):
             with pytest.raises(RepositoryNotFoundError) as exc_info:
-                await linking_client.discover_repositories(
+                linking_client.discover_repositories(
                     "https://github.com/example/repo.git"
                 )
 
@@ -218,11 +218,11 @@ class TestRepositoryLinkingClientBranches:
         with patch.object(
             linking_client,
             "_authenticated_request",
-            return_value=AsyncMock(
+            return_value=MagicMock(
                 status_code=200, json=lambda: mock_branches_response
             ),
         ):
-            branches = await linking_client.get_golden_repository_branches("cidx-main")
+            branches = linking_client.get_golden_repository_branches("cidx-main")
 
             assert len(branches) == 3
             assert all(isinstance(branch, BranchInfo) for branch in branches)
@@ -247,12 +247,12 @@ class TestRepositoryLinkingClientBranches:
         with patch.object(
             linking_client,
             "_authenticated_request",
-            return_value=AsyncMock(
+            return_value=MagicMock(
                 status_code=404, json=lambda: {"detail": "Repository not found"}
             ),
         ):
             with pytest.raises(RepositoryNotFoundError) as exc_info:
-                await linking_client.get_golden_repository_branches("nonexistent-repo")
+                linking_client.get_golden_repository_branches("nonexistent-repo")
 
             assert "Repository not found" in str(exc_info.value)
 
@@ -264,9 +264,9 @@ class TestRepositoryLinkingClientBranches:
         with patch.object(
             linking_client,
             "_authenticated_request",
-            return_value=AsyncMock(status_code=200, json=lambda: mock_empty_response),
+            return_value=MagicMock(status_code=200, json=lambda: mock_empty_response),
         ):
-            branches = await linking_client.get_golden_repository_branches("empty-repo")
+            branches = linking_client.get_golden_repository_branches("empty-repo")
 
             assert len(branches) == 0
 
@@ -309,11 +309,11 @@ class TestRepositoryLinkingClientActivation:
         with patch.object(
             linking_client,
             "_authenticated_request",
-            return_value=AsyncMock(
+            return_value=MagicMock(
                 status_code=201, json=lambda: mock_activation_response
             ),
         ):
-            result = await linking_client.activate_repository(
+            result = linking_client.activate_repository(
                 golden_alias="cidx-main",
                 branch="master",
                 user_alias="cidx-main-testuser",
@@ -337,13 +337,13 @@ class TestRepositoryLinkingClientActivation:
         with patch.object(
             linking_client,
             "_authenticated_request",
-            return_value=AsyncMock(
+            return_value=MagicMock(
                 status_code=400,
                 json=lambda: {"detail": "Branch 'nonexistent' not found"},
             ),
         ):
             with pytest.raises(BranchNotFoundError) as exc_info:
-                await linking_client.activate_repository(
+                linking_client.activate_repository(
                     golden_alias="cidx-main",
                     branch="nonexistent",
                     user_alias="cidx-main-testuser",
@@ -357,13 +357,13 @@ class TestRepositoryLinkingClientActivation:
         with patch.object(
             linking_client,
             "_authenticated_request",
-            return_value=AsyncMock(
+            return_value=MagicMock(
                 status_code=403,
                 json=lambda: {"detail": "Insufficient permissions for repository"},
             ),
         ):
             with pytest.raises(ActivationError) as exc_info:
-                await linking_client.activate_repository(
+                linking_client.activate_repository(
                     golden_alias="private-repo",
                     branch="master",
                     user_alias="private-repo-testuser",
@@ -377,7 +377,7 @@ class TestRepositoryLinkingClientActivation:
         with patch.object(
             linking_client,
             "_authenticated_request",
-            return_value=AsyncMock(
+            return_value=MagicMock(
                 status_code=409,
                 json=lambda: {
                     "detail": "Repository already activated",
@@ -386,7 +386,7 @@ class TestRepositoryLinkingClientActivation:
             ),
         ):
             with pytest.raises(ActivationError) as exc_info:
-                await linking_client.activate_repository(
+                linking_client.activate_repository(
                     golden_alias="cidx-main",
                     branch="master",
                     user_alias="cidx-main-testuser",
@@ -400,7 +400,7 @@ class TestRepositoryLinkingClientActivation:
         with patch.object(
             linking_client,
             "_authenticated_request",
-            return_value=AsyncMock(
+            return_value=MagicMock(
                 status_code=429,
                 json=lambda: {
                     "detail": "Repository activation quota exceeded",
@@ -410,7 +410,7 @@ class TestRepositoryLinkingClientActivation:
             ),
         ):
             with pytest.raises(ActivationError) as exc_info:
-                await linking_client.activate_repository(
+                linking_client.activate_repository(
                     golden_alias="another-repo",
                     branch="master",
                     user_alias="another-repo-testuser",
@@ -452,7 +452,7 @@ class TestRepositoryLinkingClientInputValidation:
 
         for invalid_input in invalid_inputs:
             with pytest.raises(ValueError):
-                await linking_client.discover_repositories(invalid_input)
+                linking_client.discover_repositories(invalid_input)
 
     @pytest.mark.asyncio
     async def test_get_branches_alias_validation(self, linking_client):
@@ -468,26 +468,26 @@ class TestRepositoryLinkingClientInputValidation:
 
         for invalid_alias in invalid_aliases:
             with pytest.raises(ValueError):
-                await linking_client.get_golden_repository_branches(invalid_alias)
+                linking_client.get_golden_repository_branches(invalid_alias)
 
     @pytest.mark.asyncio
     async def test_activate_repository_parameter_validation(self, linking_client):
         """Test parameter validation for repository activation."""
         # Test invalid golden_alias
         with pytest.raises(ValueError):
-            await linking_client.activate_repository(
+            linking_client.activate_repository(
                 golden_alias="", branch="master", user_alias="valid-alias"
             )
 
         # Test invalid branch
         with pytest.raises(ValueError):
-            await linking_client.activate_repository(
+            linking_client.activate_repository(
                 golden_alias="valid-alias", branch="", user_alias="valid-alias"
             )
 
         # Test invalid user_alias
         with pytest.raises(ValueError):
-            await linking_client.activate_repository(
+            linking_client.activate_repository(
                 golden_alias="valid-alias", branch="master", user_alias=""
             )
 

@@ -28,8 +28,7 @@ def mock_user():
 class TestCaseSensitiveParameter:
     """Test case_sensitive parameter."""
 
-    @pytest.mark.asyncio
-    async def test_case_sensitive_accepts_true(self, mock_user):
+    def test_case_sensitive_accepts_true(self, mock_user):
         """Test case_sensitive accepts True value."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
@@ -49,7 +48,7 @@ class TestCaseSensitiveParameter:
                 "case_sensitive": True,
             }
 
-            result = await search_code(params, mock_user)
+            result = search_code(params, mock_user)
 
             # Verify case_sensitive parameter was passed
             mock_app.semantic_query_manager.query_user_repositories.assert_called_once()
@@ -63,8 +62,7 @@ class TestCaseSensitiveParameter:
             assert len(result["content"]) == 1
             assert result["content"][0]["type"] == "text"
 
-    @pytest.mark.asyncio
-    async def test_case_sensitive_defaults_to_false(self, mock_user):
+    def test_case_sensitive_defaults_to_false(self, mock_user):
         """Test case_sensitive defaults to False when not provided."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
@@ -83,7 +81,7 @@ class TestCaseSensitiveParameter:
                 "search_mode": "fts",
             }
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             # Verify case_sensitive defaults to False
             call_kwargs = (
@@ -95,8 +93,7 @@ class TestCaseSensitiveParameter:
 class TestFuzzyParameter:
     """Test fuzzy parameter."""
 
-    @pytest.mark.asyncio
-    async def test_fuzzy_accepts_true(self, mock_user):
+    def test_fuzzy_accepts_true(self, mock_user):
         """Test fuzzy accepts True value."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
@@ -116,7 +113,7 @@ class TestFuzzyParameter:
                 "fuzzy": True,
             }
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             # Verify fuzzy parameter was passed
             call_kwargs = (
@@ -124,8 +121,7 @@ class TestFuzzyParameter:
             )
             assert call_kwargs["fuzzy"] is True
 
-    @pytest.mark.asyncio
-    async def test_fuzzy_defaults_to_false(self, mock_user):
+    def test_fuzzy_defaults_to_false(self, mock_user):
         """Test fuzzy defaults to False when not provided."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
@@ -144,7 +140,7 @@ class TestFuzzyParameter:
                 "search_mode": "fts",
             }
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             # Verify fuzzy defaults to False
             call_kwargs = (
@@ -156,8 +152,7 @@ class TestFuzzyParameter:
 class TestEditDistanceParameter:
     """Test edit_distance parameter."""
 
-    @pytest.mark.asyncio
-    async def test_edit_distance_accepts_valid_range(self, mock_user):
+    def test_edit_distance_accepts_valid_range(self, mock_user):
         """Test edit_distance accepts values 0-3."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
@@ -179,7 +174,7 @@ class TestEditDistanceParameter:
                     "edit_distance": distance,
                 }
 
-                await search_code(params, mock_user)
+                search_code(params, mock_user)
 
                 # Verify edit_distance parameter was passed
                 call_kwargs = (
@@ -187,8 +182,7 @@ class TestEditDistanceParameter:
                 )
                 assert call_kwargs["edit_distance"] == distance
 
-    @pytest.mark.asyncio
-    async def test_edit_distance_defaults_to_zero(self, mock_user):
+    def test_edit_distance_defaults_to_zero(self, mock_user):
         """Test edit_distance defaults to 0 when not provided."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
@@ -207,7 +201,7 @@ class TestEditDistanceParameter:
                 "search_mode": "fts",
             }
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             # Verify edit_distance defaults to 0
             call_kwargs = (
@@ -219,8 +213,7 @@ class TestEditDistanceParameter:
 class TestSnippetLinesParameter:
     """Test snippet_lines parameter."""
 
-    @pytest.mark.asyncio
-    async def test_snippet_lines_accepts_valid_range(self, mock_user):
+    def test_snippet_lines_accepts_valid_range(self, mock_user):
         """Test snippet_lines accepts values 0-50."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
@@ -242,7 +235,7 @@ class TestSnippetLinesParameter:
                     "snippet_lines": lines,
                 }
 
-                await search_code(params, mock_user)
+                search_code(params, mock_user)
 
                 # Verify snippet_lines parameter was passed
                 call_kwargs = (
@@ -250,8 +243,7 @@ class TestSnippetLinesParameter:
                 )
                 assert call_kwargs["snippet_lines"] == lines
 
-    @pytest.mark.asyncio
-    async def test_snippet_lines_defaults_to_five(self, mock_user):
+    def test_snippet_lines_defaults_to_five(self, mock_user):
         """Test snippet_lines defaults to 5 when not provided."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
@@ -270,7 +262,7 @@ class TestSnippetLinesParameter:
                 "search_mode": "fts",
             }
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             # Verify snippet_lines defaults to 5
             call_kwargs = (
@@ -282,8 +274,7 @@ class TestSnippetLinesParameter:
 class TestRegexParameter:
     """Test regex parameter."""
 
-    @pytest.mark.asyncio
-    async def test_regex_accepts_true_with_fts_mode(self, mock_user):
+    def test_regex_accepts_true_with_fts_mode(self, mock_user):
         """Test regex accepts True with search_mode='fts'."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
@@ -303,7 +294,7 @@ class TestRegexParameter:
                 "regex": True,
             }
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             # Verify regex parameter was passed
             call_kwargs = (
@@ -311,8 +302,7 @@ class TestRegexParameter:
             )
             assert call_kwargs["regex"] is True
 
-    @pytest.mark.asyncio
-    async def test_regex_accepts_true_with_hybrid_mode(self, mock_user):
+    def test_regex_accepts_true_with_hybrid_mode(self, mock_user):
         """Test regex accepts True with search_mode='hybrid'."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
@@ -332,7 +322,7 @@ class TestRegexParameter:
                 "regex": True,
             }
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             # Verify regex parameter was passed
             call_kwargs = (
@@ -340,8 +330,7 @@ class TestRegexParameter:
             )
             assert call_kwargs["regex"] is True
 
-    @pytest.mark.asyncio
-    async def test_regex_defaults_to_false(self, mock_user):
+    def test_regex_defaults_to_false(self, mock_user):
         """Test regex defaults to False when not provided."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
@@ -360,7 +349,7 @@ class TestRegexParameter:
                 "search_mode": "fts",
             }
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             # Verify regex defaults to False
             call_kwargs = (
@@ -372,8 +361,7 @@ class TestRegexParameter:
 class TestParameterCombinations:
     """Test combinations and validation rules for Phase 2 parameters."""
 
-    @pytest.mark.asyncio
-    async def test_all_phase2_parameters_together(self, mock_user):
+    def test_all_phase2_parameters_together(self, mock_user):
         """Test all Phase 2 parameters can be used together (except incompatible ones)."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
@@ -398,7 +386,7 @@ class TestParameterCombinations:
                 # regex=False (default, compatible with fuzzy)
             }
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             # Verify all parameters were passed
             call_kwargs = (
@@ -410,8 +398,7 @@ class TestParameterCombinations:
             assert call_kwargs["snippet_lines"] == 10
             assert call_kwargs["regex"] is False
 
-    @pytest.mark.asyncio
-    async def test_regex_with_case_sensitive_and_snippet_lines(self, mock_user):
+    def test_regex_with_case_sensitive_and_snippet_lines(self, mock_user):
         """Test regex can be combined with case_sensitive and snippet_lines (not fuzzy/edit_distance)."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
@@ -434,7 +421,7 @@ class TestParameterCombinations:
                 # fuzzy=False, edit_distance=0 (defaults, compatible with regex)
             }
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             # Verify parameters were passed correctly
             call_kwargs = (

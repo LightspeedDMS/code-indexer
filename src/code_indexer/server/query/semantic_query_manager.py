@@ -205,7 +205,7 @@ class SemanticQueryManager:
             )
             raise
 
-    async def search(
+    def search(
         self,
         repo_path: Path,
         query: str,
@@ -237,7 +237,7 @@ class SemanticQueryManager:
                     f"Routing query to composite handler for repository: {repo_path}",
                     extra={"correlation_id": get_correlation_id()},
                 )
-                return await self.search_composite(
+                return self.search_composite(
                     repo_path,
                     query,
                     limit=limit,
@@ -250,7 +250,7 @@ class SemanticQueryManager:
                 f"Routing query to single repository handler for: {repo_path}",
                 extra={"correlation_id": get_correlation_id()},
             )
-            return await self.search_single(
+            return self.search_single(
                 repo_path,
                 query,
                 limit=limit,
@@ -265,7 +265,7 @@ class SemanticQueryManager:
             )
             raise
 
-    async def search_single(
+    def search_single(
         self,
         repo_path: Path,
         query: str,
@@ -299,7 +299,7 @@ class SemanticQueryManager:
             str(repo_path), repository_alias, query, limit, min_score, file_extensions
         )
 
-    async def search_composite(
+    def search_composite(
         self,
         repo_path: Path,
         query: str,

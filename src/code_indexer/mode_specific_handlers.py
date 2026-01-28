@@ -93,7 +93,7 @@ async def display_remote_status(project_root: Path) -> None:
         console.print("🔍 Checking server health...", style="yellow")
         from .remote.health_checker import check_remote_server_health
 
-        health_result = await check_remote_server_health(project_root)
+        health_result = check_remote_server_health(project_root)
 
         # Create status information using REAL server health data
         status_info = {

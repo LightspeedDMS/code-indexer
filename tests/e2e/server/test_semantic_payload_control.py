@@ -27,7 +27,7 @@ class TestPayloadCacheE2E:
     """E2E tests for PayloadCache functionality."""
 
     @pytest.fixture
-    async def cache_with_short_ttl(self, tmp_path):
+    def cache_with_short_ttl(self, tmp_path):
         """Create PayloadCache with short TTL for expiration testing."""
         config = PayloadCacheConfig(
             preview_size_chars=100,
@@ -36,13 +36,13 @@ class TestPayloadCacheE2E:
             cleanup_interval_seconds=1,
         )
         cache = PayloadCache(db_path=tmp_path / "test_cache.db", config=config)
-        await cache.initialize()
+        cache.initialize()
         cache.start_background_cleanup()
         yield cache
-        await cache.close()
+        cache.close()
 
     @pytest.fixture
-    async def standard_cache(self, tmp_path):
+    def standard_cache(self, tmp_path):
         """Create PayloadCache with standard settings."""
         config = PayloadCacheConfig(
             preview_size_chars=2000,
@@ -50,61 +50,58 @@ class TestPayloadCacheE2E:
             cache_ttl_seconds=900,
         )
         cache = PayloadCache(db_path=tmp_path / "test_cache.db", config=config)
-        await cache.initialize()
+        cache.initialize()
         yield cache
-        await cache.close()
+        cache.close()
 
-    @pytest.mark.asyncio
-    async def test_large_content_truncation_workflow(self, standard_cache):
+    def test_large_content_truncation_workflow(self, standard_cache):
         """E2E: Large content is truncated with cache handle for later retrieval."""
         large_content = "X" * 3000
 
-        result = await standard_cache.truncate_result(large_content)
+        result = standard_cache.truncate_result(large_content)
 
         assert result["has_more"] is True
         assert result["preview"] == "X" * 2000
         assert result["cache_handle"] is not None
         assert result["total_size"] == 3000
 
-        retrieved = await standard_cache.retrieve(result["cache_handle"], page=0)
+        retrieved = standard_cache.retrieve(result["cache_handle"], page=0)
         assert retrieved.content == "X" * 3000
         assert retrieved.page == 0
         assert retrieved.has_more is False
 
-    @pytest.mark.asyncio
-    async def test_small_content_no_truncation(self, standard_cache):
+    def test_small_content_no_truncation(self, standard_cache):
         """E2E: Small content is returned in full without caching."""
         small_content = "Small content under 2000 chars"
 
-        result = await standard_cache.truncate_result(small_content)
+        result = standard_cache.truncate_result(small_content)
 
         assert result["has_more"] is False
         assert result["cache_handle"] is None
         assert result["content"] == small_content
         assert "preview" not in result
 
-    @pytest.mark.asyncio
-    async def test_pagination_workflow(self, standard_cache):
+    def test_pagination_workflow(self, standard_cache):
         """E2E: Large content can be retrieved in pages."""
         page1_content = "A" * 5000
         page2_content = "B" * 5000
         page3_content = "C" * 2500
         full_content = page1_content + page2_content + page3_content
 
-        handle = await standard_cache.store(full_content)
+        handle = standard_cache.store(full_content)
 
-        result0 = await standard_cache.retrieve(handle, page=0)
+        result0 = standard_cache.retrieve(handle, page=0)
         assert result0.content == page1_content
         assert result0.page == 0
         assert result0.total_pages == 3
         assert result0.has_more is True
 
-        result1 = await standard_cache.retrieve(handle, page=1)
+        result1 = standard_cache.retrieve(handle, page=1)
         assert result1.content == page2_content
         assert result1.page == 1
         assert result1.has_more is True
 
-        result2 = await standard_cache.retrieve(handle, page=2)
+        result2 = standard_cache.retrieve(handle, page=2)
         assert result2.content == page3_content
         assert result2.page == 2
         assert result2.has_more is False
@@ -113,22 +110,22 @@ class TestPayloadCacheE2E:
     async def test_ttl_expiration_workflow(self, cache_with_short_ttl):
         """E2E: Cache entries expire after TTL and cleanup removes them."""
         content = "Content that will expire"
-        handle = await cache_with_short_ttl.store(content)
+        handle = cache_with_short_ttl.store(content)
 
-        result = await cache_with_short_ttl.retrieve(handle, page=0)
+        result = cache_with_short_ttl.retrieve(handle, page=0)
         assert result.content == content
 
         await asyncio.sleep(4)
 
         with pytest.raises(CacheNotFoundError):
-            await cache_with_short_ttl.retrieve(handle, page=0)
+            cache_with_short_ttl.retrieve(handle, page=0)
 
 
 class TestRestApiCacheRetrievalE2E:
     """E2E tests for REST API cache retrieval endpoint."""
 
     @pytest.fixture
-    async def cache(self, tmp_path):
+    def cache(self, tmp_path):
         """Create PayloadCache for testing."""
         config = PayloadCacheConfig(
             preview_size_chars=100,
@@ -136,9 +133,9 @@ class TestRestApiCacheRetrievalE2E:
             cache_ttl_seconds=900,
         )
         cache = PayloadCache(db_path=tmp_path / "test_cache.db", config=config)
-        await cache.initialize()
+        cache.initialize()
         yield cache
-        await cache.close()
+        cache.close()
 
     @pytest.fixture
     def app_with_cache(self, cache):
@@ -160,7 +157,7 @@ class TestRestApiCacheRetrievalE2E:
         from httpx import AsyncClient, ASGITransport
 
         large_content = "Y" * 500
-        truncated = await cache.truncate_result(large_content)
+        truncated = cache.truncate_result(large_content)
 
         assert truncated["has_more"] is True
         handle = truncated["cache_handle"]

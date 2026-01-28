@@ -113,7 +113,7 @@ class RepositoryInfo(BaseModel):
 class RemoteQueryClient(CIDXRemoteAPIClient):
     """Client for remote semantic search operations."""
 
-    async def execute_query(
+    def execute_query(
         self,
         query: Optional[str] = None,
         repository_alias: Optional[str] = None,
@@ -160,7 +160,7 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
         if repository_alias is None:
             # Get list of repositories and use the first one
             try:
-                repositories = await self.list_repositories()
+                repositories = self.list_repositories()
                 if repositories:
                     repository_alias = repositories[0].id
                 else:
@@ -212,9 +212,7 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
             payload["path_filter"] = path_filter.strip()
 
         try:
-            response = await self._authenticated_request(
-                "POST", query_endpoint, json=payload
-            )
+            response = self._authenticated_request("POST", query_endpoint, json=payload)
 
             if response.status_code == 200:
                 query_data = response.json()
@@ -257,7 +255,7 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
                 raise QueryExecutionError(f"Query execution failed: {e}")
             raise QueryExecutionError(f"Unexpected query error: {e}")
 
-    async def get_repository_info(self, repository_alias: str) -> RepositoryInfo:
+    def get_repository_info(self, repository_alias: str) -> RepositoryInfo:
         """Get comprehensive information about remote repository.
 
         Args:
@@ -286,7 +284,7 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
         info_endpoint = f"/api/repositories/{repository_alias}"
 
         try:
-            response = await self._authenticated_request("GET", info_endpoint)
+            response = self._authenticated_request("GET", info_endpoint)
 
             if response.status_code == 200:
                 repo_data = response.json()
@@ -321,7 +319,7 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
                 f"Unexpected error getting repository info: {e}"
             )
 
-    async def get_query_history(
+    def get_query_history(
         self, repository_alias: str, limit: int = 50
     ) -> List[Dict[str, Any]]:
         """Get query history for a repository.
@@ -356,7 +354,7 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
         # This avoids calling non-existent endpoints
         return []
 
-    async def get_repository_statistics(self, repository_alias: str) -> Dict[str, Any]:
+    def get_repository_statistics(self, repository_alias: str) -> Dict[str, Any]:
         """Get detailed statistics for a repository.
 
         Uses the repository details endpoint which includes statistics.
@@ -386,7 +384,7 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
         details_endpoint = f"/api/repositories/{repository_alias}"
 
         try:
-            response = await self._authenticated_request("GET", details_endpoint)
+            response = self._authenticated_request("GET", details_endpoint)
 
             if response.status_code == 200:
                 repository_data = response.json()
@@ -433,7 +431,7 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
                 f"Unexpected error getting repository statistics: {e}"
             )
 
-    async def list_repositories(self) -> List[RepositoryInfo]:
+    def list_repositories(self) -> List[RepositoryInfo]:
         """List all repositories available to the user.
 
         Returns:
@@ -447,7 +445,7 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
         repositories_endpoint = "/api/repos"
 
         try:
-            response = await self._authenticated_request("GET", repositories_endpoint)
+            response = self._authenticated_request("GET", repositories_endpoint)
 
             if response.status_code == 200:
                 repos_data = response.json()
@@ -483,7 +481,7 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
                 raise APIClientError(f"Failed to list repositories: {e}")
             raise APIClientError(f"Unexpected error listing repositories: {e}")
 
-    async def get_repository(self, repository_id: str) -> RepositoryInfo:
+    def get_repository(self, repository_id: str) -> RepositoryInfo:
         """Get information about a specific repository.
 
         Args:
@@ -507,7 +505,7 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
 
         # Use the existing get_repository_info method with repository_id as alias
         try:
-            return await self.get_repository_info(repository_id)
+            return self.get_repository_info(repository_id)
         except RepositoryAccessError as e:
             # Convert "Repository not found" to more descriptive message
             if "not found" in str(e).lower():
@@ -614,7 +612,7 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
 
         return payload
 
-    async def execute_multi_repo_query(
+    def execute_multi_repo_query(
         self,
         repositories: List[str],
         query: str,
@@ -668,7 +666,7 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
         multi_query_endpoint = "/api/query/multi"
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST", multi_query_endpoint, json=payload
             )
 

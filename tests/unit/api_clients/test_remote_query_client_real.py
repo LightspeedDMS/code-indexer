@@ -94,7 +94,7 @@ class TestRealRemoteQueryClientSemanticSearch:
         yield client
 
         # Proper cleanup with isolation
-        await client.close()
+        client.close()
         await isolation_manager.teardown_isolated_test("real_query_client")
 
     @pytest.mark.asyncio
@@ -103,7 +103,7 @@ class TestRealRemoteQueryClientSemanticSearch:
 
         # Execute real query with rate limit protection
         async def execute_query():
-            return await real_query_client.execute_query(
+            return real_query_client.execute_query(
                 repository_alias="auth-repo",
                 query="authentication function",
                 limit=10,
@@ -131,7 +131,7 @@ class TestRealRemoteQueryClientSemanticSearch:
 
         # Execute query with filters and rate limit protection
         async def execute_filtered_query():
-            return await real_query_client.execute_query(
+            return real_query_client.execute_query(
                 repository_alias="api-repo",
                 query="endpoint handler",
                 limit=5,
@@ -141,7 +141,7 @@ class TestRealRemoteQueryClientSemanticSearch:
             )
 
         results = await with_rate_limit_protection(execute_filtered_query)
-        results = await real_query_client.execute_query(
+        results = real_query_client.execute_query(
             query="database connection",
             limit=5,
             min_score=0.5,
@@ -157,12 +157,12 @@ class TestRealRemoteQueryClientSemanticSearch:
     async def test_real_query_limit_parameter(self, real_query_client):
         """Test query limit parameter with real server."""
         # Test with small limit
-        limited_results = await real_query_client.execute_query(
+        limited_results = real_query_client.execute_query(
             query="function definition", limit=2, min_score=0.0
         )
 
         # Test with larger limit
-        expanded_results = await real_query_client.execute_query(
+        expanded_results = real_query_client.execute_query(
             query="function definition", limit=10, min_score=0.0
         )
 
@@ -177,12 +177,12 @@ class TestRealRemoteQueryClientSemanticSearch:
     async def test_real_query_score_filtering(self, real_query_client):
         """Test minimum score filtering with real results."""
         # Query with low score threshold
-        low_threshold_results = await real_query_client.execute_query(
+        low_threshold_results = real_query_client.execute_query(
             query="test query", limit=10, min_score=0.1
         )
 
         # Query with high score threshold
-        high_threshold_results = await real_query_client.execute_query(
+        high_threshold_results = real_query_client.execute_query(
             query="test query", limit=10, min_score=0.8
         )
 
@@ -197,18 +197,18 @@ class TestRealRemoteQueryClientSemanticSearch:
     async def test_real_empty_query_handling(self, real_query_client):
         """Test handling of empty query strings."""
         with pytest.raises(ValueError) as exc_info:
-            await real_query_client.execute_query(query="", limit=10)
+            real_query_client.execute_query(query="", limit=10)
         assert "empty" in str(exc_info.value).lower()
 
     @pytest.mark.asyncio
     async def test_real_invalid_limit_handling(self, real_query_client):
         """Test handling of invalid limit parameters."""
         with pytest.raises(ValueError) as exc_info:
-            await real_query_client.execute_query(query="test query", limit=0)
+            real_query_client.execute_query(query="test query", limit=0)
         assert "limit" in str(exc_info.value).lower()
 
         with pytest.raises(ValueError) as exc_info:
-            await real_query_client.execute_query(query="test query", limit=-1)
+            real_query_client.execute_query(query="test query", limit=-1)
         assert "limit" in str(exc_info.value).lower()
 
 
@@ -251,12 +251,12 @@ class TestRealRemoteQueryClientRepositoryInfo:
             server_url=real_server_multi_repo.base_url, credentials=credentials
         )
         yield client
-        await client.close()
+        client.close()
 
     @pytest.mark.asyncio
     async def test_real_list_repositories(self, real_multi_query_client):
         """Test listing repositories from real server."""
-        repositories = await real_multi_query_client.list_repositories()
+        repositories = real_multi_query_client.list_repositories()
 
         # Verify we get real repository data
         assert isinstance(repositories, list)
@@ -280,7 +280,7 @@ class TestRealRemoteQueryClientRepositoryInfo:
     async def test_real_get_repository_by_id(self, real_multi_query_client):
         """Test getting specific repository by ID from real server."""
         # Get specific repository
-        repo = await real_multi_query_client.get_repository("repo-1")
+        repo = real_multi_query_client.get_repository("repo-1")
 
         # Verify repository details
         assert isinstance(repo, RepositoryInfo)
@@ -295,14 +295,14 @@ class TestRealRemoteQueryClientRepositoryInfo:
     async def test_real_get_nonexistent_repository(self, real_multi_query_client):
         """Test handling of nonexistent repository requests."""
         with pytest.raises(RepositoryAccessError) as exc_info:
-            await real_multi_query_client.get_repository("nonexistent-repo")
+            real_multi_query_client.get_repository("nonexistent-repo")
 
         assert "not found" in str(exc_info.value).lower()
 
     @pytest.mark.asyncio
     async def test_real_repository_branches_info(self, real_multi_query_client):
         """Test branch information from real repository data."""
-        repo = await real_multi_query_client.get_repository("repo-2")
+        repo = real_multi_query_client.get_repository("repo-2")
 
         # Verify branch information
         assert isinstance(repo.branches, list)
@@ -326,12 +326,12 @@ class TestRealRemoteQueryClientRepositoryInfo:
             )
 
             try:
-                repositories = await client.list_repositories()
+                repositories = client.list_repositories()
                 # Should return empty list, not error
                 assert isinstance(repositories, list)
                 assert len(repositories) == 0
             finally:
-                await client.close()
+                client.close()
 
 
 class TestRealRemoteQueryClientErrorHandling:
@@ -355,7 +355,7 @@ class TestRealRemoteQueryClientErrorHandling:
             try:
                 # Should fail authentication
                 with pytest.raises(RepositoryAccessError) as exc_info:
-                    await client.execute_query("test query", limit=5)
+                    client.execute_query("test query", limit=5)
 
                 assert (
                     "authentication" in str(exc_info.value).lower()
@@ -363,7 +363,7 @@ class TestRealRemoteQueryClientErrorHandling:
                 )
 
             finally:
-                await client.close()
+                client.close()
 
     @pytest.mark.asyncio
     async def test_real_connection_error(self):
@@ -381,7 +381,7 @@ class TestRealRemoteQueryClientErrorHandling:
         try:
             # Should fail with connection error
             with pytest.raises(RepositoryAccessError) as exc_info:
-                await client.execute_query("test query", limit=5)
+                client.execute_query("test query", limit=5)
 
             error_msg = str(exc_info.value).lower()
             assert (
@@ -392,7 +392,7 @@ class TestRealRemoteQueryClientErrorHandling:
             )
 
         finally:
-            await client.close()
+            client.close()
 
     @pytest.mark.asyncio
     async def test_real_server_error_handling(self):
@@ -414,7 +414,7 @@ class TestRealRemoteQueryClientErrorHandling:
 
                 # Should handle server error appropriately
                 with pytest.raises(QueryExecutionError) as exc_info:
-                    await client.execute_query("test query", limit=5)
+                    client.execute_query("test query", limit=5)
 
                 assert (
                     "server" in str(exc_info.value).lower()
@@ -422,7 +422,7 @@ class TestRealRemoteQueryClientErrorHandling:
                 )
 
             finally:
-                await client.close()
+                client.close()
 
 
 class TestRealRemoteQueryClientResourceManagement:
@@ -445,7 +445,7 @@ class TestRealRemoteQueryClientResourceManagement:
                 server_url=server.base_url, credentials=credentials
             ) as client:
                 # Verify client is functional
-                repositories = await client.list_repositories()
+                repositories = client.list_repositories()
                 assert isinstance(repositories, list)
 
                 # Get reference to session for later checking
@@ -470,7 +470,7 @@ class TestRealRemoteQueryClientResourceManagement:
 
             try:
                 # Use client
-                repositories = await client.list_repositories()
+                repositories = client.list_repositories()
                 assert isinstance(repositories, list)
 
                 # Get session reference
@@ -479,7 +479,7 @@ class TestRealRemoteQueryClientResourceManagement:
 
             finally:
                 # Manual cleanup
-                await client.close()
+                client.close()
                 assert session.is_closed
 
     @pytest.mark.asyncio
@@ -497,9 +497,9 @@ class TestRealRemoteQueryClientResourceManagement:
             )
 
             # Multiple close calls should not cause errors
-            await client.close()
-            await client.close()  # Should not raise exception
-            await client.close()  # Should not raise exception
+            client.close()
+            client.close()  # Should not raise exception
+            client.close()  # Should not raise exception
 
 
 class TestRealRemoteQueryClientEndToEnd:
@@ -528,25 +528,25 @@ class TestRealRemoteQueryClientEndToEnd:
                 server_url=server.base_url, credentials=credentials
             ) as client:
                 # 1. List repositories
-                repositories = await client.list_repositories()
+                repositories = client.list_repositories()
                 assert len(repositories) >= 1
 
                 repo = next(r for r in repositories if r.id == "e2e-repo")
                 assert repo.name == "E2E Test Repository"
 
                 # 2. Get specific repository
-                specific_repo = await client.get_repository("e2e-repo")
+                specific_repo = client.get_repository("e2e-repo")
                 assert specific_repo.id == "e2e-repo"
                 assert "main" in specific_repo.branches
 
                 # 3. Execute query
-                query_results = await client.execute_query(
+                query_results = client.execute_query(
                     query="test implementation", limit=5, min_score=0.0
                 )
                 assert isinstance(query_results, list)
 
                 # 4. Execute filtered query
-                filtered_results = await client.execute_query(
+                filtered_results = client.execute_query(
                     query="test function", limit=3, min_score=0.2, language="python"
                 )
                 assert isinstance(filtered_results, list)
@@ -574,18 +574,18 @@ class TestRealRemoteQueryClientEndToEnd:
                 server_url=server.base_url, credentials=credentials
             ) as client:
                 # 1. Successful operation
-                repositories = await client.list_repositories()
+                repositories = client.list_repositories()
                 assert isinstance(repositories, list)
 
                 # 2. Error scenario - invalid repository
                 with pytest.raises(RepositoryAccessError):
-                    await client.get_repository("invalid-repo-id")
+                    client.get_repository("invalid-repo-id")
 
                 # 3. Recovery - client should still work
-                repositories_after_error = await client.list_repositories()
+                repositories_after_error = client.list_repositories()
                 assert isinstance(repositories_after_error, list)
                 assert len(repositories_after_error) == len(repositories)
 
                 # 4. Valid query after error
-                results = await client.execute_query("recovery test", limit=5)
+                results = client.execute_query("recovery test", limit=5)
                 assert isinstance(results, list)

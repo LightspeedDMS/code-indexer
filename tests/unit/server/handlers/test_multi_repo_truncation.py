@@ -1,6 +1,7 @@
 """Unit tests for Multi-repo Search Payload Control (Story #683).
 
 S5: Multi-repo Search with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 Depends on: S1 (semantic truncation) - already implemented
 
 These tests verify that:
@@ -15,10 +16,12 @@ import pytest
 
 
 class TestMultiRepoContentTruncation:
-    """AC1: Multi-repo Content Truncation tests."""
+    """AC1: Multi-repo Content Truncation tests.
 
-    @pytest.mark.asyncio
-    async def test_large_content_from_repo_alpha_truncated(self, cache_100_chars):
+    Story #50: _apply_payload_truncation and PayloadCache are now sync.
+    """
+
+    def test_large_content_from_repo_alpha_truncated(self, cache_100_chars):
         """Large content from repo-alpha gets preview + cache_handle + repository preserved."""
         from code_indexer.server.mcp.handlers import _apply_payload_truncation
         from code_indexer.server import app as app_module
@@ -36,7 +39,7 @@ class TestMultiRepoContentTruncation:
                 }
             ]
 
-            truncated = await _apply_payload_truncation(results)
+            truncated = _apply_payload_truncation(results)  # Sync call
 
             assert len(truncated) == 1
             result = truncated[0]
@@ -61,8 +64,7 @@ class TestMultiRepoContentTruncation:
             else:
                 app_module.app.state.payload_cache = original
 
-    @pytest.mark.asyncio
-    async def test_small_content_returns_full_with_repository(self, cache_100_chars):
+    def test_small_content_returns_full_with_repository(self, cache_100_chars):
         """Small content returns full content with repository preserved."""
         from code_indexer.server.mcp.handlers import _apply_payload_truncation
         from code_indexer.server import app as app_module
@@ -80,7 +82,7 @@ class TestMultiRepoContentTruncation:
                 }
             ]
 
-            truncated = await _apply_payload_truncation(results)
+            truncated = _apply_payload_truncation(results)  # Sync call
 
             assert len(truncated) == 1
             result = truncated[0]
@@ -104,10 +106,12 @@ class TestMultiRepoContentTruncation:
 
 
 class TestPerResultCacheHandleIndependence:
-    """AC2: Per-Repository Result Independence tests."""
+    """AC2: Per-Repository Result Independence tests.
 
-    @pytest.mark.asyncio
-    async def test_multiple_repos_get_independent_handles(self, cache_100_chars):
+    Story #50: _apply_payload_truncation and PayloadCache are now sync.
+    """
+
+    def test_multiple_repos_get_independent_handles(self, cache_100_chars):
         """Results from different repos get independent cache handles."""
         from code_indexer.server.mcp.handlers import _apply_payload_truncation
         from code_indexer.server import app as app_module
@@ -131,7 +135,7 @@ class TestPerResultCacheHandleIndependence:
                 },
             ]
 
-            truncated = await _apply_payload_truncation(results)
+            truncated = _apply_payload_truncation(results)  # Sync call
 
             assert len(truncated) == 2
 
@@ -152,8 +156,7 @@ class TestPerResultCacheHandleIndependence:
             else:
                 app_module.app.state.payload_cache = original
 
-    @pytest.mark.asyncio
-    async def test_same_repo_multiple_results_get_independent_handles(
+    def test_same_repo_multiple_results_get_independent_handles(
         self, cache_100_chars
     ):
         """Multiple results from SAME repo get independent cache handles."""
@@ -179,7 +182,7 @@ class TestPerResultCacheHandleIndependence:
                 },
             ]
 
-            truncated = await _apply_payload_truncation(results)
+            truncated = _apply_payload_truncation(results)  # Sync call
 
             assert len(truncated) == 2
 
@@ -206,10 +209,12 @@ class TestPerResultCacheHandleIndependence:
 
 
 class TestRepositoryAttributionPreservation:
-    """AC6: Repository Attribution Preservation tests."""
+    """AC6: Repository Attribution Preservation tests.
 
-    @pytest.mark.asyncio
-    async def test_all_metadata_fields_preserved_after_truncation(
+    Story #50: _apply_payload_truncation and PayloadCache are now sync.
+    """
+
+    def test_all_metadata_fields_preserved_after_truncation(
         self, cache_100_chars
     ):
         """All metadata fields preserved after truncation (only content fields modified)."""
@@ -233,7 +238,7 @@ class TestRepositoryAttributionPreservation:
                 }
             ]
 
-            truncated = await _apply_payload_truncation(results)
+            truncated = _apply_payload_truncation(results)  # Sync call
 
             result = truncated[0]
 
@@ -261,10 +266,12 @@ class TestRepositoryAttributionPreservation:
 
 
 class TestCacheRetrievalWithoutRepoContext:
-    """AC5: Cache Retrieval for Multi-repo Results tests."""
+    """AC5: Cache Retrieval for Multi-repo Results tests.
 
-    @pytest.mark.asyncio
-    async def test_handle_retrieval_without_repo_context(self, cache_100_chars):
+    Story #50: _apply_payload_truncation and PayloadCache are now sync.
+    """
+
+    def test_handle_retrieval_without_repo_context(self, cache_100_chars):
         """Cache handle can be retrieved without any repository context."""
         from code_indexer.server.mcp.handlers import _apply_payload_truncation
         from code_indexer.server import app as app_module
@@ -282,11 +289,11 @@ class TestCacheRetrievalWithoutRepoContext:
                 }
             ]
 
-            truncated = await _apply_payload_truncation(results)
+            truncated = _apply_payload_truncation(results)  # Sync call
             handle = truncated[0]["cache_handle"]
 
-            # Retrieve using ONLY the handle - no repo context needed
-            retrieved = await cache_100_chars.retrieve(handle, page=0)
+            # Retrieve using ONLY the handle - no repo context needed (sync call)
+            retrieved = cache_100_chars.retrieve(handle, page=0)
 
             # Should get the full content back
             assert "FULL_CONTENT_" in retrieved.content
@@ -297,8 +304,7 @@ class TestCacheRetrievalWithoutRepoContext:
             else:
                 app_module.app.state.payload_cache = original
 
-    @pytest.mark.asyncio
-    async def test_handles_from_different_repos_all_retrievable(self, cache_100_chars):
+    def test_handles_from_different_repos_all_retrievable(self, cache_100_chars):
         """Handles from different repos can all be retrieved using same API."""
         from code_indexer.server.mcp.handlers import _apply_payload_truncation
         from code_indexer.server import app as app_module
@@ -322,13 +328,13 @@ class TestCacheRetrievalWithoutRepoContext:
                 },
             ]
 
-            truncated = await _apply_payload_truncation(results)
+            truncated = _apply_payload_truncation(results)  # Sync call
 
-            # Retrieve both handles - no repo context needed
-            retrieved_alpha = await cache_100_chars.retrieve(
+            # Retrieve both handles - no repo context needed (sync calls)
+            retrieved_alpha = cache_100_chars.retrieve(
                 truncated[0]["cache_handle"], page=0
             )
-            retrieved_beta = await cache_100_chars.retrieve(
+            retrieved_beta = cache_100_chars.retrieve(
                 truncated[1]["cache_handle"], page=0
             )
 
@@ -344,10 +350,12 @@ class TestCacheRetrievalWithoutRepoContext:
 
 
 class TestMixedResultsTruncation:
-    """Tests for mixed truncated and non-truncated results from multiple repos."""
+    """Tests for mixed truncated and non-truncated results from multiple repos.
 
-    @pytest.mark.asyncio
-    async def test_mixed_large_and_small_content_from_multiple_repos(
+    Story #50: _apply_payload_truncation and PayloadCache are now sync.
+    """
+
+    def test_mixed_large_and_small_content_from_multiple_repos(
         self, cache_100_chars
     ):
         """Mix of large and small content from multiple repos handled correctly."""
@@ -385,7 +393,7 @@ class TestMixedResultsTruncation:
                 },
             ]
 
-            truncated = await _apply_payload_truncation(results)
+            truncated = _apply_payload_truncation(results)  # Sync call
 
             assert len(truncated) == 4
 

@@ -1,6 +1,7 @@
 """Unit tests for FTS match_text truncation logic.
 
 Story #680: S2 - FTS Search with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 AC2: FTS Match Text Truncation (match_text field)
 
 These tests follow TDD methodology - written BEFORE implementation.
@@ -18,10 +19,11 @@ class TestAC2MatchTextTruncation:
                                   match_text_has_more=true, match_text_total_size
     When match_text <= 2000 chars: return full match_text, match_text_cache_handle=null,
                                    match_text_has_more=false
+
+    Story #50: _apply_fts_payload_truncation is now sync.
     """
 
-    @pytest.mark.asyncio
-    async def test_large_match_text_is_truncated(self, cache):
+    def test_large_match_text_is_truncated(self, cache):
         """Test that match_text > 2000 chars is truncated with cache handle."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -39,7 +41,7 @@ class TestAC2MatchTextTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -55,8 +57,7 @@ class TestAC2MatchTextTruncation:
         # Original match_text should be removed
         assert "match_text" not in result
 
-    @pytest.mark.asyncio
-    async def test_small_match_text_not_truncated(self, cache):
+    def test_small_match_text_not_truncated(self, cache):
         """Test that match_text <= 2000 chars is NOT truncated."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -68,7 +69,7 @@ class TestAC2MatchTextTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -81,8 +82,7 @@ class TestAC2MatchTextTruncation:
         assert "match_text_preview" not in result
         assert "match_text_total_size" not in result
 
-    @pytest.mark.asyncio
-    async def test_match_text_at_exact_boundary_not_truncated(self, cache):
+    def test_match_text_at_exact_boundary_not_truncated(self, cache):
         """Test that match_text exactly at 2000 chars is NOT truncated."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -94,7 +94,7 @@ class TestAC2MatchTextTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -103,8 +103,7 @@ class TestAC2MatchTextTruncation:
         assert result["match_text_cache_handle"] is None
         assert result["match_text_has_more"] is False
 
-    @pytest.mark.asyncio
-    async def test_missing_match_text_handled_gracefully(self, cache):
+    def test_missing_match_text_handled_gracefully(self, cache):
         """Test that results without match_text field are handled gracefully."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -116,7 +115,7 @@ class TestAC2MatchTextTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 

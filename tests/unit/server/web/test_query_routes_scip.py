@@ -65,7 +65,7 @@ class TestSCIPQueryExecution:
             # Call query_submit with SCIP parameters
             # This should NOT raise an error even though parameters don't exist yet
             try:
-                _ = await query_submit(
+                _ = query_submit(
                     request=request,
                     query_text="CacheEntry",
                     repository="test-repo",
@@ -154,7 +154,7 @@ class TestSCIPQueryExecution:
 
             # Execute query
             try:
-                _ = await query_submit(
+                _ = query_submit(
                     request=request,
                     query_text="CacheEntry",
                     repository="test-repo",
@@ -231,7 +231,7 @@ class TestSCIPQueryExecution:
             patch("code_indexer.server.web.routes._add_to_query_history"),
         ):
             try:
-                _ = await query_submit(
+                _ = query_submit(
                     request=request,
                     query_text="CacheEntry",
                     repository="test-repo",
@@ -331,7 +331,7 @@ class TestSCIPQueryExecution:
                 mock_engine_class.return_value = mock_engine
 
                 try:
-                    _ = await query_submit(
+                    _ = query_submit(
                         request=request,
                         query_text="TestSymbol",
                         repository="test-repo",
@@ -410,7 +410,7 @@ class TestSCIPQueryExecution:
             mock_engine_class.return_value = mock_engine
 
             try:
-                _ = await query_submit(
+                _ = query_submit(
                     request=request,
                     query_text="CacheEntry",
                     repository="test-repo",
@@ -491,7 +491,7 @@ class TestSCIPQueryExecution:
             mock_engine_class.return_value = mock_engine
 
             try:
-                _ = await query_submit(
+                _ = query_submit(
                     request=request,
                     query_text="CacheEntry",
                     repository="test-repo",
@@ -583,7 +583,7 @@ class TestSCIPQueryExecution:
             mock_engine_class.return_value = mock_engine
 
             try:
-                _ = await query_submit(
+                _ = query_submit(
                     request=request,
                     query_text="CacheEntry",
                     repository="test-repo",
@@ -684,7 +684,7 @@ class TestSCIPQueryExecution:
             patch("code_indexer.server.web.routes._add_to_query_history"),
         ):
             try:
-                _ = await query_submit(
+                _ = query_submit(
                     request=request,
                     query_text="UserService",
                     repository="test-repo",
@@ -760,7 +760,7 @@ class TestSCIPQueryExecution:
             mock_engine_class.return_value = mock_engine
 
             try:
-                _ = await query_submit(
+                _ = query_submit(
                     request=request,
                     query_text="main UserService",
                     repository="test-repo",
@@ -828,7 +828,7 @@ class TestSCIPQueryExecution:
             patch("code_indexer.server.web.routes._add_to_query_history"),
         ):
             # Execute query with invalid input (single symbol, no space)
-            await query_submit(
+            query_submit(
                 request=request,
                 query_text="single_symbol",
                 repository="test-repo",
@@ -916,7 +916,7 @@ class TestSCIPQueryExecution:
             patch("code_indexer.server.web.routes._add_to_query_history"),
         ):
             try:
-                _ = await query_submit(
+                _ = query_submit(
                     request=request,
                     query_text="UserService",
                     repository="test-repo",

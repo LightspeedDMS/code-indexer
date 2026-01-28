@@ -5,7 +5,7 @@ to establish TDD red-green-refactor cycle.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 from code_indexer.api_clients import RemoteQueryClient
 from code_indexer.remote_status import RemoteStatusDisplayer
 from code_indexer.remote.services.repository_service import RemoteRepositoryService
@@ -46,7 +46,7 @@ class TestBusinessLogicFixtureFailures:
     def test_remote_status_displayer_correct_constructor(self, tmp_path):
         """Test that shows correct RemoteStatusDisplayer constructor."""
         # Create mock repository service
-        mock_api_client = AsyncMock()
+        mock_api_client = MagicMock()
         mock_staleness_detector = MagicMock()
         mock_repository_service = RemoteRepositoryService(
             api_client=mock_api_client, staleness_detector=mock_staleness_detector
@@ -68,7 +68,7 @@ class TestBusinessLogicFixtureFailures:
         # Tests can provide mock services directly
 
         # Create mock services with test credentials
-        mock_api_client = AsyncMock()
+        mock_api_client = MagicMock()
         mock_staleness_detector = MagicMock()
 
         # Configure mock API client with test credentials

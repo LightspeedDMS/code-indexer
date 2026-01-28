@@ -6,7 +6,7 @@ following TDD methodology and MESSI Rule #1 (anti-mock).
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 from pathlib import Path
 
 from src.code_indexer.api_clients.admin_client import AdminAPIClient
@@ -47,10 +47,10 @@ class TestAdminAPIClientDeleteGoldenRepository:
         mock_response.status_code = 204
         mock_response.text = ""
 
-        admin_client._authenticated_request = AsyncMock(return_value=mock_response)
+        admin_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Test successful deletion
-        result = await admin_client.delete_golden_repository("test-repo")
+        result = admin_client.delete_golden_repository("test-repo")
 
         # Should return empty dict for 204 No Content
         assert result == {}
@@ -67,10 +67,10 @@ class TestAdminAPIClientDeleteGoldenRepository:
         mock_response.status_code = 204
         mock_response.text = ""
 
-        admin_client._authenticated_request = AsyncMock(return_value=mock_response)
+        admin_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Test with force=True (should not affect API call)
-        result = await admin_client.delete_golden_repository("test-repo", force=True)
+        result = admin_client.delete_golden_repository("test-repo", force=True)
 
         assert result == {}
         admin_client._authenticated_request.assert_called_once_with(
@@ -87,11 +87,11 @@ class TestAdminAPIClientDeleteGoldenRepository:
         mock_response.status_code = 404
         mock_response.json.return_value = {"detail": "Repository 'test-repo' not found"}
 
-        admin_client._authenticated_request = AsyncMock(return_value=mock_response)
+        admin_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should raise APIClientError with 404
         with pytest.raises(APIClientError) as exc_info:
-            await admin_client.delete_golden_repository("nonexistent-repo")
+            admin_client.delete_golden_repository("nonexistent-repo")
 
         assert exc_info.value.status_code == 404
         assert "not found" in str(exc_info.value).lower()
@@ -106,11 +106,11 @@ class TestAdminAPIClientDeleteGoldenRepository:
         mock_response.status_code = 403
         mock_response.json.return_value = {"detail": "Insufficient privileges"}
 
-        admin_client._authenticated_request = AsyncMock(return_value=mock_response)
+        admin_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should raise AuthenticationError
         with pytest.raises(AuthenticationError) as exc_info:
-            await admin_client.delete_golden_repository("test-repo")
+            admin_client.delete_golden_repository("test-repo")
 
         assert "admin role required" in str(exc_info.value).lower()
 
@@ -126,11 +126,11 @@ class TestAdminAPIClientDeleteGoldenRepository:
             "detail": "Cannot delete repository with active instances"
         }
 
-        admin_client._authenticated_request = AsyncMock(return_value=mock_response)
+        admin_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should raise APIClientError with 409
         with pytest.raises(APIClientError) as exc_info:
-            await admin_client.delete_golden_repository("test-repo")
+            admin_client.delete_golden_repository("test-repo")
 
         assert exc_info.value.status_code == 409
         assert "conflict" in str(exc_info.value).lower()
@@ -147,11 +147,11 @@ class TestAdminAPIClientDeleteGoldenRepository:
             "detail": "Repository deletion failed due to service unavailability"
         }
 
-        admin_client._authenticated_request = AsyncMock(return_value=mock_response)
+        admin_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should raise APIClientError with 503
         with pytest.raises(APIClientError) as exc_info:
-            await admin_client.delete_golden_repository("test-repo")
+            admin_client.delete_golden_repository("test-repo")
 
         assert exc_info.value.status_code == 503
         assert "service unavailable" in str(exc_info.value).lower()
@@ -166,11 +166,11 @@ class TestAdminAPIClientDeleteGoldenRepository:
         mock_response.status_code = 500
         mock_response.json.return_value = {"detail": "Internal server error"}
 
-        admin_client._authenticated_request = AsyncMock(return_value=mock_response)
+        admin_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should raise APIClientError with 500
         with pytest.raises(APIClientError) as exc_info:
-            await admin_client.delete_golden_repository("test-repo")
+            admin_client.delete_golden_repository("test-repo")
 
         assert exc_info.value.status_code == 500
         assert "failed to delete" in str(exc_info.value).lower()
@@ -185,11 +185,11 @@ class TestAdminAPIClientDeleteGoldenRepository:
         mock_response.status_code = 404
         mock_response.json.side_effect = ValueError("Invalid JSON")
 
-        admin_client._authenticated_request = AsyncMock(return_value=mock_response)
+        admin_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should handle JSON decode error gracefully
         with pytest.raises(APIClientError) as exc_info:
-            await admin_client.delete_golden_repository("test-repo")
+            admin_client.delete_golden_repository("test-repo")
 
         assert exc_info.value.status_code == 404
         assert "repository not found" in str(exc_info.value).lower()
@@ -200,13 +200,13 @@ class TestAdminAPIClientDeleteGoldenRepository:
     ):
         """Test network errors are properly propagated."""
         # Mock network error
-        admin_client._authenticated_request = AsyncMock(
+        admin_client._authenticated_request = MagicMock(
             side_effect=NetworkError("Connection failed")
         )
 
         # Should propagate NetworkError
         with pytest.raises(NetworkError):
-            await admin_client.delete_golden_repository("test-repo")
+            admin_client.delete_golden_repository("test-repo")
 
     @pytest.mark.asyncio
     async def test_delete_golden_repository_unexpected_error_handling(
@@ -214,13 +214,13 @@ class TestAdminAPIClientDeleteGoldenRepository:
     ):
         """Test unexpected exceptions are wrapped in APIClientError."""
         # Mock unexpected exception
-        admin_client._authenticated_request = AsyncMock(
+        admin_client._authenticated_request = MagicMock(
             side_effect=ValueError("Unexpected error")
         )
 
         # Should wrap unexpected errors
         with pytest.raises(APIClientError) as exc_info:
-            await admin_client.delete_golden_repository("test-repo")
+            admin_client.delete_golden_repository("test-repo")
 
         assert (
             "unexpected error deleting golden repository" in str(exc_info.value).lower()
@@ -234,15 +234,15 @@ class TestAdminAPIClientDeleteGoldenRepository:
         # Mock response
         mock_response = MagicMock()
         mock_response.status_code = 204
-        admin_client._authenticated_request = AsyncMock(return_value=mock_response)
+        admin_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Test with empty alias
         with pytest.raises((ValueError, TypeError)):
-            await admin_client.delete_golden_repository("")
+            admin_client.delete_golden_repository("")
 
         # Test with None alias
         with pytest.raises((ValueError, TypeError)):
-            await admin_client.delete_golden_repository(None)
+            admin_client.delete_golden_repository(None)
 
     @pytest.mark.asyncio
     async def test_delete_golden_repository_signature_validation(self, admin_client):

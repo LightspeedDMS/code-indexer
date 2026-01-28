@@ -7,7 +7,7 @@ They will FAIL until proper API client integration is implemented.
 
 import pytest
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 from code_indexer.remote_status import RemoteStatusDisplayer
 from code_indexer.remote.services.repository_service import RemoteRepositoryService
 from code_indexer.api_clients.base_client import (
@@ -54,7 +54,7 @@ class TestRealAPIIntegrationRequirements:
     def status_displayer(self, mock_project_with_config):
         """Create RemoteStatusDisplayer with mock config."""
         # Create mock services for dependency injection
-        mock_api_client = AsyncMock()
+        mock_api_client = MagicMock()
         mock_staleness_detector = MagicMock()
         mock_repository_service = RemoteRepositoryService(
             api_client=mock_api_client, staleness_detector=mock_staleness_detector
@@ -78,7 +78,7 @@ class TestRealAPIIntegrationRequirements:
             "last_commit_sha": "abc123def456",
             "indexing_progress": 100,
         }
-        status_displayer.repository_service.get_repository_details = AsyncMock(
+        status_displayer.repository_service.get_repository_details = MagicMock(
             return_value=test_repository_details
         )
 
@@ -113,7 +113,7 @@ class TestRealAPIIntegrationRequirements:
         repository_alias = "test-repo"
 
         # Configure mock repository service to raise authentication error
-        status_displayer.repository_service.get_repository_details = AsyncMock(
+        status_displayer.repository_service.get_repository_details = MagicMock(
             side_effect=AuthenticationError("Invalid credentials")
         )
 
@@ -126,7 +126,7 @@ class TestRealAPIIntegrationRequirements:
         repository_alias = "test-repo"
 
         # Configure mock repository service to raise network error
-        status_displayer.repository_service.get_repository_details = AsyncMock(
+        status_displayer.repository_service.get_repository_details = MagicMock(
             side_effect=NetworkError("Connection failed")
         )
 
@@ -141,7 +141,7 @@ class TestRealAPIIntegrationRequirements:
         repository_alias = "nonexistent-repo"
 
         # Configure mock repository service to return None (simulating repository not found)
-        status_displayer.repository_service.get_repository_details = AsyncMock(
+        status_displayer.repository_service.get_repository_details = MagicMock(
             return_value=None
         )
 
@@ -170,7 +170,7 @@ class TestRealAPIIntegrationRequirements:
             "last_commit_sha": "def456abc789",
             "indexing_progress": 100,
         }
-        status_displayer.repository_service.get_repository_details = AsyncMock(
+        status_displayer.repository_service.get_repository_details = MagicMock(
             return_value=test_repository_details
         )
 
@@ -204,7 +204,7 @@ class TestRealAPIIntegrationRequirements:
         repository_alias = "test-repo"
 
         # Configure mock repository service to raise authentication error
-        status_displayer.repository_service.get_repository_details = AsyncMock(
+        status_displayer.repository_service.get_repository_details = MagicMock(
             side_effect=AuthenticationError("Token expired")
         )
 
@@ -220,7 +220,7 @@ class TestRealAPIIntegrationRequirements:
         repository_alias = "test-repo"
 
         # Configure mock repository service to raise network error
-        status_displayer.repository_service.get_repository_details = AsyncMock(
+        status_displayer.repository_service.get_repository_details = MagicMock(
             side_effect=NetworkError("Connection timeout")
         )
 
@@ -245,7 +245,7 @@ class TestRealAPIIntegrationRequirements:
             "last_commit_sha": "abc123",
             "indexing_progress": 100,
         }
-        status_displayer.repository_service.get_repository_details = AsyncMock(
+        status_displayer.repository_service.get_repository_details = MagicMock(
             return_value=test_repository_details
         )
 
@@ -275,7 +275,7 @@ class TestRealAPIIntegrationRequirements:
             "last_commit_sha": "abc123",
             "indexing_progress": 100,
         }
-        status_displayer.repository_service.get_repository_details = AsyncMock(
+        status_displayer.repository_service.get_repository_details = MagicMock(
             return_value=test_repository_details
         )
 

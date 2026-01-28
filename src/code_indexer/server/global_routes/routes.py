@@ -116,7 +116,7 @@ class ConfigUpdateResponse(BaseModel):
 
 # Endpoints
 @router.get("/repos", response_model=GlobalReposResponse)
-async def list_global_repos(
+def list_global_repos(
     user: User = Depends(get_current_user),
 ) -> GlobalReposResponse:
     """
@@ -136,7 +136,7 @@ async def list_global_repos(
 
 
 @router.get("/repos/{alias}/status")
-async def get_repo_status(
+def get_repo_status(
     alias: str, user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """
@@ -164,7 +164,7 @@ async def get_repo_status(
 
 
 @router.get("/config", response_model=ConfigResponse)
-async def get_global_config(user: User = Depends(get_current_user)) -> ConfigResponse:
+def get_global_config(user: User = Depends(get_current_user)) -> ConfigResponse:
     """
     Get global configuration.
 
@@ -182,7 +182,7 @@ async def get_global_config(user: User = Depends(get_current_user)) -> ConfigRes
 
 
 @router.put("/config", response_model=ConfigUpdateResponse)
-async def update_global_config(
+def update_global_config(
     config: GlobalConfigUpdate, user: User = Depends(get_current_user)
 ) -> ConfigUpdateResponse:
     """

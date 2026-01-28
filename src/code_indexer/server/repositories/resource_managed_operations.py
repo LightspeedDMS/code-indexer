@@ -214,13 +214,13 @@ class ResourceManagedActivatedRepoOperations:
 
                 # Real git operations would be implemented here
                 # For demonstration, we track the operation completion
-                async def git_fetch_task():
+                def git_fetch_task():
                     # Real git fetch would happen here
                     sync_log.write("Git fetch completed\n")
                     sync_log.flush()
                     return "fetch_completed"
 
-                async def git_merge_task():
+                def git_merge_task():
                     # Real git merge would happen here
                     sync_log.write("Git merge completed\n")
                     sync_log.flush()
@@ -430,7 +430,7 @@ async def integrate_resource_manager_with_existing_operations():
 
     # Example: Using resource-managed operations
     try:
-        result = await resource_managed_golden.add_golden_repo_with_resource_management(
+        result = resource_managed_golden.add_golden_repo_with_resource_management(
             repo_url="https://github.com/example/repo.git", alias="example-repo"
         )
         logger.info(
@@ -457,7 +457,7 @@ async def integrate_resource_manager_with_existing_operations():
 
 
 # Server lifecycle integration
-async def setup_server_with_resource_management():
+def setup_server_with_resource_management():
     """
     Example of how to set up CIDX server with integrated resource management.
 

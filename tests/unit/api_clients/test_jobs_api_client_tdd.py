@@ -86,7 +86,7 @@ class TestJobsAPIClientTDD:
         try:
             yield client
         finally:
-            await client.close()
+            client.close()
 
     async def test_jobs_client_initialization(self, jobs_client):
         """Test that JobsAPIClient can be initialized properly."""
@@ -98,7 +98,7 @@ class TestJobsAPIClientTDD:
         """Test that list_jobs method exists and handles authentication."""
         # This test should pass now since we have real server integration
         # We should NOT get an AttributeError - the method should exist
-        jobs_response = await jobs_client.list_jobs()
+        jobs_response = jobs_client.list_jobs()
 
         # Should get a valid response structure
         assert "jobs" in jobs_response
@@ -106,7 +106,7 @@ class TestJobsAPIClientTDD:
     async def test_list_jobs_with_valid_auth_returns_job_list(self, jobs_client):
         """Test that list_jobs returns properly formatted job list with valid auth."""
         # This will fail initially - drives implementation
-        jobs_response = await jobs_client.list_jobs()
+        jobs_response = jobs_client.list_jobs()
 
         # Verify response structure matches API specification
         assert "jobs" in jobs_response
@@ -118,7 +118,7 @@ class TestJobsAPIClientTDD:
     async def test_list_jobs_with_status_filter(self, jobs_client):
         """Test that list_jobs supports status filtering."""
         # This drives the filtering implementation
-        jobs_response = await jobs_client.list_jobs(status="running")
+        jobs_response = jobs_client.list_jobs(status="running")
 
         # Verify filtering is applied
         assert "jobs" in jobs_response
@@ -129,7 +129,7 @@ class TestJobsAPIClientTDD:
     async def test_list_jobs_with_limit_parameter(self, jobs_client):
         """Test that list_jobs supports limit parameter."""
         limit = 5
-        jobs_response = await jobs_client.list_jobs(limit=limit)
+        jobs_response = jobs_client.list_jobs(limit=limit)
 
         assert "jobs" in jobs_response
         assert jobs_response["limit"] == limit
@@ -137,7 +137,7 @@ class TestJobsAPIClientTDD:
 
     async def test_list_jobs_job_structure_validation(self, jobs_client):
         """Test that returned jobs have expected structure."""
-        jobs_response = await jobs_client.list_jobs(limit=1)
+        jobs_response = jobs_client.list_jobs(limit=1)
 
         if jobs_response["jobs"]:  # If any jobs exist
             job = jobs_response["jobs"][0]
@@ -174,9 +174,9 @@ class TestJobsAPIClientTDD:
 
         try:
             with pytest.raises((NetworkError, DNSResolutionError)):
-                await client.list_jobs()
+                client.list_jobs()
         finally:
-            await client.close()
+            client.close()
 
     async def test_list_jobs_authentication_error_handling(
         self, real_server, project_root
@@ -195,15 +195,15 @@ class TestJobsAPIClientTDD:
 
         try:
             with pytest.raises(AuthenticationError):
-                await client.list_jobs()
+                client.list_jobs()
         finally:
-            await client.close()
+            client.close()
 
     async def test_get_job_status_method_exists(self, jobs_client):
         """Test that get_job_status method exists and works."""
         # This will drive implementation of individual job status retrieval
         with pytest.raises((APIClientError, AttributeError)):
-            await jobs_client.get_job_status("non-existent-job")
+            jobs_client.get_job_status("non-existent-job")
 
     async def test_jobs_client_inherits_from_base_client(self, jobs_client):
         """Test that JobsAPIClient properly inherits from CIDXRemoteAPIClient."""

@@ -193,6 +193,177 @@ setting = config.some_setting
 
 ---
 
+## CRITICAL: TESTING WORKFLOW GOLDEN RULES
+
+**ABSOLUTE PROHIBITION**: NEVER run fast-automation.sh after every small change. That's idiotic and wastes time.
+
+**THE CORRECT WORKFLOW**:
+
+1. **During development - TARGETED TESTS ONLY**:
+   - Change `base_client.py` -> run `pytest tests/unit/api_clients/test_base_*.py -v --tb=short`
+   - Change `auth_client.py` -> run `pytest tests/unit/api_clients/test_auth_*.py -v --tb=short`
+   - Change `handlers.py` -> run `pytest tests/unit/server/mcp/test_handlers*.py -v --tb=short`
+   - Targeted tests give fast feedback (seconds, not minutes)
+
+2. **fast-automation.sh - FINAL GATE ONLY**:
+   - Run ONLY after ALL changes are complete
+   - This is the final validation before marking work done
+   - Use 600000ms (10 minute) timeout: `./fast-automation.sh` with Bash timeout parameter
+
+**WHY THIS MATTERS**:
+- Targeted tests: seconds of feedback
+- fast-automation.sh: 6-7 minutes for 865+ tests
+- Running fast-automation after every change = hours wasted waiting
+
+**TESTING HIERARCHY**:
+```
+1. Targeted unit tests (FAST - seconds)
+   |
+   v
+2. Manual testing (verify feature works)
+   |
+   v
+3. fast-automation.sh (FINAL GATE - must pass before done)
+```
+
+**VIOLATION = WASTED TIME**: Running full test suite during iterative development is a fundamental workflow failure.
+
+**RECORDED**: 2026-01-27 - Established as golden rule after repeated time waste from running full suite during development.
+
+---
+
+## CRITICAL: fast-automation.sh EXECUTION PROCEDURE
+
+**THIS IS NOT OPTIONAL. THIS IS THE LAW.**
+
+### The Goal
+
+**Clean fast-automation.sh run**: Zero failures, completes in under 10 minutes.
+
+If this goal is not met, you MUST fix the problem before considering work complete.
+
+### Step-by-Step Execution Procedure
+
+**STEP 1: Launch with Hard Timeout**
+
+```bash
+# MANDATORY: Use 600000ms (10 minute) timeout parameter in Bash tool
+./fast-automation.sh
+```
+
+The Bash tool timeout parameter is the HARD KILL mechanism. When 10 minutes hits, the process dies.
+
+**STEP 2: Capture Output**
+
+The output MUST contain:
+- Test results (passed/failed counts)
+- `--durations` telemetry (slowest tests) - fast-automation.sh should include this
+- Any failure tracebacks
+
+**STEP 3: Analyze Results**
+
+Three possible outcomes:
+
+| Outcome | What Happened | Required Action |
+|---------|---------------|-----------------|
+| **SUCCESS** | Completed <10min, zero failures | DONE. Work is complete. |
+| **TIMEOUT** | Hit 10 minute limit, killed | Go to TIMEOUT REMEDIATION |
+| **FAILURES** | Completed but tests failed | Go to FAILURE REMEDIATION |
+
+### TIMEOUT REMEDIATION (Mandatory Procedure)
+
+**ABSOLUTE PROHIBITION**: NEVER "continue monitoring" after timeout. The process is DEAD. Fix the problem.
+
+**Step T1**: Extract slowest tests from output
+- Look for `--durations` section showing slowest tests
+- If not visible, run: `pytest tests/ --durations=20 --collect-only -q` to identify slow tests
+
+**Step T2**: Identify tests exceeding thresholds
+- Tests >30 seconds: MUST be excluded from fast-automation.sh
+- Tests >10 seconds: SHOULD be optimized or excluded
+- Tests >5 seconds: Note for potential optimization
+
+**Step T3**: Fix or exclude slow tests
+
+Option A - Optimize the test:
+```python
+# Before: Slow test doing unnecessary work
+def test_something():
+    expensive_setup()  # Remove if not needed
+    ...
+
+# After: Optimized
+@pytest.fixture(scope="module")  # Cache expensive setup
+def cached_setup():
+    return expensive_setup()
+
+def test_something(cached_setup):
+    ...
+```
+
+Option B - Mark as slow and exclude:
+```python
+@pytest.mark.slow
+def test_inherently_slow_operation():
+    ...
+```
+
+Ensure fast-automation.sh excludes slow tests:
+```bash
+pytest tests/ -m "not slow" --durations=20
+```
+
+**Step T4**: Re-run fast-automation.sh
+- Same 10-minute hard timeout
+- Repeat until SUCCESS outcome
+
+### FAILURE REMEDIATION (Mandatory Procedure)
+
+**Step F1**: Identify all failing tests from output
+
+**Step F2**: Fix each failure
+- Read the test code
+- Read the code being tested
+- Understand what broke
+- Fix the root cause (not symptoms)
+
+**Step F3**: Run targeted tests to verify fix
+```bash
+pytest tests/path/to/failing_test.py -v --tb=short
+```
+
+**Step F4**: Re-run fast-automation.sh
+- Same 10-minute hard timeout
+- Repeat until SUCCESS outcome
+
+### Performance Standards
+
+| Metric | Target | Action Threshold | Exclusion Threshold |
+|--------|--------|------------------|---------------------|
+| Individual test | <5 seconds | >10 seconds: investigate | >30 seconds: exclude |
+| Total suite | <10 minutes | >10 minutes: HARD KILL | N/A |
+
+### Red Flags Requiring Immediate Investigation
+
+- fast-automation.sh exceeds 10 minutes (HARD KILL, fix immediately)
+- Any single test exceeds 30 seconds (exclude from fast suite)
+- Test failures on code you didn't touch (regression - investigate)
+- Flaky tests (pass sometimes, fail sometimes) - fix or exclude
+
+### What "Continue Monitoring" Actually Means
+
+**IT MEANS NOTHING. THERE IS NO SUCH THING.**
+
+- Process hit 10 minutes? It's DEAD. Fix the problem.
+- Process still running at 10 minutes? KILL IT. The timeout should have done this.
+- Want to "see if it finishes"? NO. 10 minutes is the law.
+
+**VIOLATION = FUNDAMENTAL FAILURE**: Allowing fast-automation.sh to run beyond 10 minutes violates the core testing workflow. There are no exceptions.
+
+**RECORDED**: 2026-01-28 - After "continue monitoring" anti-pattern wasted time instead of fixing slow tests.
+
+---
+
 ## 1. CRITICAL BUSINESS INSIGHT - Query is Everything
 
 **THE SINGLE MOST IMPORTANT FEATURE**: Query capability is the core value proposition of CIDX. All query features available in CLI MUST be available in MCP/REST APIs with full parity.
@@ -425,7 +596,6 @@ src/code_indexer/__init__.py:9    # __version__ = "X.Y.Z" (pyproject.toml reads 
 ```
 README.md:5                       # Version badge in header
 CHANGELOG.md                      # Add new version entry at top (## [X.Y.Z] - YYYY-MM-DD)
-RELEASE_NOTES.md:3                # Current Version: X.Y.Z header
 docs/architecture.md:301          # Server response example showing version
 docs/query-guide.md:739           # Verification scope version reference
 docs/query-guide.md:883           # Version Reference line
@@ -450,7 +620,7 @@ test-fixtures/                    # Test fixture versions are test data, not rel
 # Edit src/code_indexer/__init__.py - change __version__
 
 # 2. Update documentation
-# Edit README.md, CHANGELOG.md, RELEASE_NOTES.md, docs/architecture.md, docs/query-guide.md
+# Edit README.md, CHANGELOG.md, docs/architecture.md, docs/query-guide.md
 
 # 3. Search for any remaining old version references
 grep -r "OLD_VERSION" --include="*.md" --include="*.py" .

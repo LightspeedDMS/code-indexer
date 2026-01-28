@@ -64,7 +64,7 @@ class GitLabProvider(RepositoryProviderBase):
         """Return the platform name."""
         return "gitlab"
 
-    async def is_configured(self) -> bool:
+    def is_configured(self) -> bool:
         """Check if GitLab token is configured."""
         token_data = self._token_manager.get_token("gitlab")
         return token_data is not None
@@ -198,7 +198,7 @@ class GitLabProvider(RepositoryProviderBase):
             is_private=project.get("visibility") == "private",
         )
 
-    async def discover_repositories(
+    def discover_repositories(
         self, page: int = 1, page_size: int = 50, search: Optional[str] = None
     ) -> RepositoryDiscoveryResult:
         """
@@ -214,7 +214,7 @@ class GitLabProvider(RepositoryProviderBase):
         Raises:
             GitLabProviderError: If API call fails or token not configured
         """
-        if not await self.is_configured():
+        if not self.is_configured():
             raise GitLabProviderError(
                 "GitLab token not configured. "
                 "Please configure a GitLab token in the CI Tokens settings."

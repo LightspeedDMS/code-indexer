@@ -179,7 +179,7 @@ async def multi_repository_definition(
         service = get_scip_multi_service()
 
         # Execute definition lookup
-        response = await service.definition(request)
+        response = service.definition(request)
 
         # Log response summary
         logger.info(
@@ -255,7 +255,7 @@ async def multi_repository_references(
         service = get_scip_multi_service()
 
         # Execute references lookup
-        response = await service.references(request)
+        response = service.references(request)
 
         # Log response summary
         logger.info(
@@ -331,7 +331,7 @@ async def multi_repository_dependencies(
         service = get_scip_multi_service()
 
         # Execute dependencies analysis
-        response = await service.dependencies(request)
+        response = service.dependencies(request)
 
         # Log response summary
         logger.info(
@@ -407,7 +407,7 @@ async def multi_repository_dependents(
         service = get_scip_multi_service()
 
         # Execute dependents analysis
-        response = await service.dependents(request)
+        response = service.dependents(request)
 
         # Log response summary
         logger.info(
@@ -486,7 +486,7 @@ async def multi_repository_callchain(
         service = get_scip_multi_service()
 
         # Execute callchain tracing
-        response = await service.callchain(request)
+        response = service.callchain(request)
 
         # Log response summary
         logger.info(

@@ -1,21 +1,20 @@
 """Payload Cache for semantic search result truncation.
 
 Story #679: S1 - Semantic Search with Payload Control (Foundation)
+Story #50: Converted from async to sync for FastAPI thread pool execution.
 
 Provides SQLite-based caching for large content with TTL-based eviction.
 """
 
-import asyncio
 import logging
 import math
+import sqlite3
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
-
-import aiosqlite
 
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import CacheConfig
@@ -104,17 +103,22 @@ class PayloadCache:
         self._cleanup_thread: Optional[threading.Thread] = None
         self._stop_cleanup = threading.Event()
 
-    async def initialize(self) -> None:
-        """Initialize database with WAL mode and create schema."""
+    def initialize(self) -> None:
+        """Initialize database with WAL mode and create schema.
+
+        Story #50: Converted from async to sync for FastAPI thread pool execution.
+        Uses connection-per-operation pattern for thread safety.
+        """
         # Ensure parent directory exists
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        async with aiosqlite.connect(str(self.db_path)) as db:
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        try:
             # Enable WAL mode for concurrent access
-            await db.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA journal_mode=WAL")
 
             # Create table
-            await db.execute(
+            conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS payload_cache (
                     handle TEXT PRIMARY KEY,
@@ -126,17 +130,22 @@ class PayloadCache:
             )
 
             # Create index for TTL cleanup
-            await db.execute(
+            conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_payload_cache_created_at
                 ON payload_cache(created_at)
                 """
             )
 
-            await db.commit()
+            conn.commit()
+        finally:
+            conn.close()
 
-    async def close(self) -> None:
-        """Close the cache and cleanup resources."""
+    def close(self) -> None:
+        """Close the cache and cleanup resources.
+
+        Story #50: Converted from async to sync.
+        """
         self.stop_background_cleanup()
 
     def start_background_cleanup(self) -> None:
@@ -159,20 +168,21 @@ class PayloadCache:
             self._cleanup_thread.join(timeout=2.0)
 
     def _cleanup_loop(self) -> None:
-        """Background cleanup loop running in separate thread."""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            while not self._stop_cleanup.wait(self.config.cleanup_interval_seconds):
-                try:
-                    loop.run_until_complete(self.cleanup_expired())
-                except Exception as e:
-                    logger.warning(f"Cleanup failed: {e}")
-        finally:
-            loop.close()
+        """Background cleanup loop running in separate thread.
 
-    async def store(self, content: str) -> str:
+        Story #50: Simplified since cleanup_expired() is now sync.
+        """
+        while not self._stop_cleanup.wait(self.config.cleanup_interval_seconds):
+            try:
+                self.cleanup_expired()
+            except Exception as e:
+                logger.warning(f"Cleanup failed: {e}")
+
+    def store(self, content: str) -> str:
         """Store content and return a UUID4 handle.
+
+        Story #50: Converted from async to sync for FastAPI thread pool execution.
+        Uses connection-per-operation pattern for thread safety.
 
         Args:
             content: Content to cache
@@ -184,22 +194,26 @@ class PayloadCache:
         created_at = time.time()
         total_size = len(content)
 
-        async with aiosqlite.connect(str(self.db_path)) as db:
-            await db.execute(
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        try:
+            conn.execute(
                 """
                 INSERT INTO payload_cache (handle, content, created_at, total_size)
                 VALUES (?, ?, ?, ?)
                 """,
                 (handle, content, created_at, total_size),
             )
-            await db.commit()
+            conn.commit()
+        finally:
+            conn.close()
 
         return handle
 
-    async def store_with_key(self, key: str, content: str) -> None:
+    def store_with_key(self, key: str, content: str) -> None:
         """Store content with explicit key.
 
         Story #720: Delegation Result Caching
+        Story #50: Converted from async to sync for FastAPI thread pool execution.
 
         Unlike store() which generates UUID4, this uses the provided key.
         If key already exists, updates the content and timestamp.
@@ -211,21 +225,25 @@ class PayloadCache:
         created_at = time.time()
         total_size = len(content)
 
-        async with aiosqlite.connect(str(self.db_path)) as db:
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        try:
             # Use INSERT OR REPLACE to handle updates
-            await db.execute(
+            conn.execute(
                 """
                 INSERT OR REPLACE INTO payload_cache (handle, content, created_at, total_size)
                 VALUES (?, ?, ?, ?)
                 """,
                 (key, content, created_at, total_size),
             )
-            await db.commit()
+            conn.commit()
+        finally:
+            conn.close()
 
-    async def has_key(self, key: str) -> bool:
+    def has_key(self, key: str) -> bool:
         """Check if a key exists in the cache without retrieving content.
 
         Story #720: Delegation Result Caching
+        Story #50: Converted from async to sync for FastAPI thread pool execution.
 
         Efficiently checks existence using COUNT(*) without loading content.
 
@@ -235,16 +253,21 @@ class PayloadCache:
         Returns:
             True if key exists in cache, False otherwise
         """
-        async with aiosqlite.connect(str(self.db_path)) as db:
-            async with db.execute(
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        try:
+            cursor = conn.execute(
                 "SELECT COUNT(*) FROM payload_cache WHERE handle = ?",
                 (key,),
-            ) as cursor:
-                row = await cursor.fetchone()
-                return row[0] > 0 if row else False
+            )
+            row = cursor.fetchone()
+            return row[0] > 0 if row else False
+        finally:
+            conn.close()
 
-    async def retrieve(self, handle: str, page: int = 0) -> CacheRetrievalResult:
+    def retrieve(self, handle: str, page: int = 0) -> CacheRetrievalResult:
         """Retrieve cached content by handle with pagination.
+
+        Story #50: Converted from async to sync for FastAPI thread pool execution.
 
         Args:
             handle: UUID4 handle from store()
@@ -259,12 +282,15 @@ class PayloadCache:
         if page < 0:
             raise CacheNotFoundError(f"Invalid page number: {page}")
 
-        async with aiosqlite.connect(str(self.db_path)) as db:
-            async with db.execute(
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        try:
+            cursor = conn.execute(
                 "SELECT content, total_size FROM payload_cache WHERE handle = ?",
                 (handle,),
-            ) as cursor:
-                row = await cursor.fetchone()
+            )
+            row = cursor.fetchone()
+        finally:
+            conn.close()
 
         if row is None:
             raise CacheNotFoundError(f"Cache handle not found: {handle}")
@@ -295,8 +321,10 @@ class PayloadCache:
             has_more=has_more,
         )
 
-    async def truncate_result(self, content: str) -> dict:
+    def truncate_result(self, content: str) -> dict:
         """Truncate content for semantic search response (AC3).
+
+        Story #50: Converted from async to sync for FastAPI thread pool execution.
 
         For content larger than preview_size_chars:
             Returns preview, cache_handle, has_more=True, total_size
@@ -314,7 +342,7 @@ class PayloadCache:
 
         if len(content) > preview_size:
             # Large content: store full content and return preview
-            cache_handle = await self.store(content)
+            cache_handle = self.store(content)
             return {
                 "preview": content[:preview_size],
                 "cache_handle": cache_handle,
@@ -329,26 +357,31 @@ class PayloadCache:
                 "has_more": False,
             }
 
-    async def cleanup_expired(self) -> int:
+    def cleanup_expired(self) -> int:
         """Delete cache entries older than cache_ttl_seconds.
+
+        Story #50: Converted from async to sync for FastAPI thread pool execution.
 
         Returns:
             Number of entries deleted
         """
         cutoff_time = time.time() - self.config.cache_ttl_seconds
 
-        async with aiosqlite.connect(str(self.db_path)) as db:
-            async with db.execute(
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        try:
+            cursor = conn.execute(
                 "SELECT COUNT(*) FROM payload_cache WHERE created_at < ?",
                 (cutoff_time,),
-            ) as cursor:
-                row = await cursor.fetchone()
-                count = row[0] if row else 0
+            )
+            row = cursor.fetchone()
+            count = row[0] if row else 0
 
-            await db.execute(
+            conn.execute(
                 "DELETE FROM payload_cache WHERE created_at < ?",
                 (cutoff_time,),
             )
-            await db.commit()
+            conn.commit()
+        finally:
+            conn.close()
 
         return count

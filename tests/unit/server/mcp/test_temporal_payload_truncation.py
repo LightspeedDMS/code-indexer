@@ -39,7 +39,7 @@ def temp_db_path():
 
 
 @pytest.fixture
-async def cache(temp_db_path):
+def cache(temp_db_path):
     """Create and initialize a PayloadCache instance for testing."""
     from code_indexer.server.cache.payload_cache import (
         PayloadCache,
@@ -48,16 +48,15 @@ async def cache(temp_db_path):
 
     config = PayloadCacheConfig(preview_size_chars=PREVIEW_SIZE)
     cache = PayloadCache(db_path=temp_db_path, config=config)
-    await cache.initialize()
+    cache.initialize()
     yield cache
-    await cache.close()
+    cache.close()
 
 
 class TestTemporalCodeSnippetTruncation:
     """Tests for code_snippet truncation in temporal search results."""
 
-    @pytest.mark.asyncio
-    async def test_large_code_snippet_is_truncated(self, cache):
+    def test_large_code_snippet_is_truncated(self, cache):
         """Test that code_snippet > preview_size chars is truncated with cache handle."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -86,7 +85,7 @@ class TestTemporalCodeSnippetTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)
 
         assert len(truncated) == 1
         result = truncated[0]
@@ -111,8 +110,7 @@ class TestTemporalCodeSnippetTruncation:
         assert result["temporal_context"]["commit_count"] == 3
         assert result["metadata"]["commit_hash"] == "abc123"
 
-    @pytest.mark.asyncio
-    async def test_small_code_snippet_not_truncated(self, cache):
+    def test_small_code_snippet_not_truncated(self, cache):
         """Test that code_snippet <= preview_size chars is NOT truncated."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -131,7 +129,7 @@ class TestTemporalCodeSnippetTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)
 
         result = truncated[0]
 
@@ -144,8 +142,7 @@ class TestTemporalCodeSnippetTruncation:
         assert "code_snippet_preview" not in result
         assert "code_snippet_total_size" not in result
 
-    @pytest.mark.asyncio
-    async def test_code_snippet_at_exact_boundary_not_truncated(self, cache):
+    def test_code_snippet_at_exact_boundary_not_truncated(self, cache):
         """Test that code_snippet exactly at preview_size chars is NOT truncated."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -157,7 +154,7 @@ class TestTemporalCodeSnippetTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)
 
         result = truncated[0]
 
@@ -166,8 +163,7 @@ class TestTemporalCodeSnippetTruncation:
         assert result["code_snippet_cache_handle"] is None
         assert result["code_snippet_has_more"] is False
 
-    @pytest.mark.asyncio
-    async def test_code_snippet_empty_not_truncated(self, cache):
+    def test_code_snippet_empty_not_truncated(self, cache):
         """Test that empty code_snippet is handled correctly."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -178,7 +174,7 @@ class TestTemporalCodeSnippetTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)
 
         result = truncated[0]
 
@@ -186,8 +182,7 @@ class TestTemporalCodeSnippetTruncation:
         assert result["code_snippet_cache_handle"] is None
         assert result["code_snippet_has_more"] is False
 
-    @pytest.mark.asyncio
-    async def test_code_snippet_unicode_truncated_at_char_boundary(self, cache):
+    def test_code_snippet_unicode_truncated_at_char_boundary(self, cache):
         """Test that Unicode code_snippet is truncated at char boundary, not byte."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -201,7 +196,7 @@ class TestTemporalCodeSnippetTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)
 
         result = truncated[0]
 
@@ -210,8 +205,7 @@ class TestTemporalCodeSnippetTruncation:
         assert result["code_snippet_preview"] == "\U0001f600" * PREVIEW_SIZE
         assert result["code_snippet_total_size"] == PREVIEW_SIZE + 1000
 
-    @pytest.mark.asyncio
-    async def test_cache_not_available_returns_original(self, cache):
+    def test_cache_not_available_returns_original(self, cache):
         """Test that results are unchanged when cache is not available."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -223,7 +217,7 @@ class TestTemporalCodeSnippetTruncation:
         ) as mock_state:
             mock_state.payload_cache = None  # No cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)
 
         # Results should be unchanged
         assert truncated[0]["code_snippet"] == large_snippet

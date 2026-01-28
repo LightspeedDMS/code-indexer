@@ -196,7 +196,7 @@ class TestErrorHandling:
         """Test handles no matches without error."""
         with patch("code_indexer.global_repos.regex_search.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="", stderr="", returncode=1)
-            result = await ripgrep_service.search("nonexistent_pattern")
+            result = ripgrep_service.search("nonexistent_pattern")
         assert result.total_matches == 0
         assert result.truncated is False
 
@@ -223,14 +223,14 @@ class TestErrorHandling:
         )
         with patch("code_indexer.global_repos.regex_search.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout=rg_output, stderr="", returncode=0)
-            result = await ripgrep_service.search("content")
+            result = ripgrep_service.search("content")
         assert result.total_matches == 1
 
     @pytest.mark.asyncio
     async def test_raises_for_nonexistent_path(self, ripgrep_service):
         """Test error raised for nonexistent path."""
         with pytest.raises(ValueError, match="Path does not exist"):
-            await ripgrep_service.search("pattern", path="nonexistent")
+            ripgrep_service.search("pattern", path="nonexistent")
 
 
 class TestGrepPathBasedIncludePatterns:
@@ -275,7 +275,7 @@ class TestGrepPathBasedIncludePatterns:
     ):
         """Test grep backend correctly handles path-based include patterns like **/widgets/*.java."""
         # This test SHOULD pass after fix: grep backend should find files in widgets/ directory
-        result = await grep_service.search(
+        result = grep_service.search(
             pattern="class", include_patterns=["**/widgets/*.java"]
         )
 
@@ -304,7 +304,7 @@ class TestGrepPathBasedIncludePatterns:
         self, grep_service, test_repo_with_structure
     ):
         """Test grep backend handles multiple path-based patterns."""
-        result = await grep_service.search(
+        result = grep_service.search(
             pattern="class", include_patterns=["**/widgets/*.java", "**/utils/*.java"]
         )
 
@@ -324,7 +324,7 @@ class TestGrepPathBasedIncludePatterns:
     ):
         """Test grep backend still handles simple filename patterns correctly."""
         # Simple filename pattern without path separators should work as before
-        result = await grep_service.search(pattern="class", include_patterns=["*.java"])
+        result = grep_service.search(pattern="class", include_patterns=["*.java"])
 
         # Should find all .java files
         assert result.total_matches >= 4, "Should find all 4 .java files"
@@ -335,7 +335,7 @@ class TestGrepPathBasedIncludePatterns:
     ):
         """Test grep backend handles mixed path-based and simple filename patterns."""
         # Mix of path-based pattern and simple filename pattern
-        result = await grep_service.search(
+        result = grep_service.search(
             pattern="class", include_patterns=["**/widgets/*.java", "Main.java"]
         )
 
@@ -414,7 +414,7 @@ class TestFindFilesDoubleStarPattern:
         Expected: 4 matches (one SalesGoalsWidget.java in each version directory)
         Actual: 0 matches (BUG)
         """
-        result = await grep_service_deep.search(
+        result = grep_service_deep.search(
             pattern="class", include_patterns=["**/SalesGoalsWidget.java"]
         )
 
@@ -446,7 +446,7 @@ class TestFindFilesDoubleStarPattern:
         This test SHOULD PASS - verifies that simple patterns work correctly.
         This provides evidence that the bug is specific to **/ prefix.
         """
-        result = await grep_service_deep.search(
+        result = grep_service_deep.search(
             pattern="class", include_patterns=["SalesGoalsWidget.java"]
         )
 
@@ -464,7 +464,7 @@ class TestFindFilesDoubleStarPattern:
         This test SHOULD PASS - verifies that **/ with directory works.
         This confirms the bug is specific to **/filename.ext (no directory).
         """
-        result = await grep_service_deep.search(
+        result = grep_service_deep.search(
             pattern="class", include_patterns=["**/widgets/*.java"]
         )
 
@@ -498,7 +498,7 @@ class TestFindFilesDoubleStarPattern:
         This is the ACTUAL bug - the test_double_star_filename_pattern_finds_all_matches
         passes because it matches 4 files, and grep outputs filenames for multiple files.
         """
-        result = await grep_service_deep.search(
+        result = grep_service_deep.search(
             pattern="class", include_patterns=["**/Main.java"]
         )
 
@@ -531,7 +531,7 @@ class TestFindFilesDoubleStarPattern:
         (test_double_star_filename_pattern_finds_all_matches) provides equivalent
         coverage for the pattern matching logic.
         """
-        result = await ripgrep_service_deep.search(
+        result = ripgrep_service_deep.search(
             pattern="class", include_patterns=["**/SalesGoalsWidget.java"]
         )
 
@@ -604,7 +604,7 @@ class TestGlobPatternParity:
         REQUIREMENT: Pattern dir/**/file.ext must match file under dir at any depth.
         CURRENT BUG: find -path doesn't expand ** in middle of path correctly.
         """
-        result = await grep_service_glob.search(
+        result = grep_service_glob.search(
             pattern="class", include_patterns=["code/**/SalesGoalsWidget.java"]
         )
 
@@ -626,7 +626,7 @@ class TestGlobPatternParity:
         REQUIREMENT: Explicit path patterns must work like ripgrep -g.
         CURRENT BUG: find -path requires ./ prefix and doesn't match explicit paths.
         """
-        result = await grep_service_glob.search(
+        result = grep_service_glob.search(
             pattern="class", include_patterns=["code/src/Main.java"]
         )
 
@@ -649,7 +649,7 @@ class TestGlobPatternParity:
 
         REQUIREMENT: Mixed patterns (explicit, **, simple) must all work together.
         """
-        result = await grep_service_glob.search(
+        result = grep_service_glob.search(
             pattern="class",
             include_patterns=[
                 "code/**/SalesGoalsWidget.java",  # ** in middle
@@ -720,7 +720,7 @@ class TestGrepContextLines:
             "line 1\nline 2\nline 3\nMATCH line 4\nline 5\nline 6\nline 7\n"
         )
 
-        result = await grep_service_context.search(
+        result = grep_service_context.search(
             pattern="MATCH",
             context_lines=2,
         )
@@ -768,7 +768,7 @@ class TestGrepContextLines:
             "line 8\n"
         )
 
-        result = await grep_service_context.search(
+        result = grep_service_context.search(
             pattern="MATCH",
             context_lines=1,
         )
@@ -819,7 +819,7 @@ class TestGrepContextLines:
             "MATCH line 4\n"  # Match at end (no context after)
         )
 
-        result = await grep_service_context.search(
+        result = grep_service_context.search(
             pattern="MATCH",
             context_lines=1,
         )
@@ -863,7 +863,7 @@ class TestGrepContextLines:
         test_file = context_test_repo / "nocontext.py"
         test_file.write_text("line 1\nMATCH line 2\nline 3\n")
 
-        result = await grep_service_context.search(
+        result = grep_service_context.search(
             pattern="MATCH",
             context_lines=0,
         )
@@ -914,8 +914,8 @@ class TestGrepContextLines:
             ripgrep_service = RegexSearchService(context_test_repo)
 
         # Search with both backends
-        grep_result = await grep_service.search(pattern="MATCH", context_lines=1)
-        ripgrep_result = await ripgrep_service.search(pattern="MATCH", context_lines=1)
+        grep_result = grep_service.search(pattern="MATCH", context_lines=1)
+        ripgrep_result = ripgrep_service.search(pattern="MATCH", context_lines=1)
 
         # Both should find 1 match
         assert grep_result.total_matches == 1

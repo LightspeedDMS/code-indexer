@@ -8,8 +8,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Optional, TYPE_CHECKING
 from datetime import datetime, timezone
-import aiohttp
-import asyncio
+import httpx
 
 from .api_clients.repository_linking_client import (
     RepositoryNotFoundError,
@@ -37,9 +36,7 @@ class RemoteStatusDisplayer:
         """
         self.repository_service = repository_service
 
-    async def display_status(
-        self, local_repo_url: str, local_branch: str
-    ) -> Dict[str, Any]:
+    def display_status(self, local_repo_url: str, local_branch: str) -> Dict[str, Any]:
         """Display comprehensive remote mode status information.
 
         Args:
@@ -49,7 +46,7 @@ class RemoteStatusDisplayer:
         Returns:
             Status information dictionary
         """
-        analysis = await self.repository_service.get_repository_analysis(
+        analysis = self.repository_service.get_repository_analysis(
             local_repo_url, local_branch
         )
         return self._format_analysis_for_display(analysis)
@@ -84,7 +81,7 @@ class RemoteStatusDisplayer:
             ],
         }
 
-    async def get_repository_status(self, repository_alias: str) -> Any:
+    def get_repository_status(self, repository_alias: str) -> Any:
         """Get status for a specific repository.
 
         Args:
@@ -99,7 +96,7 @@ class RemoteStatusDisplayer:
             RepositoryNotFoundError: If repository is not found
             APIClientError: If API request fails
         """
-        details = await self.repository_service.get_repository_details(repository_alias)
+        details = self.repository_service.get_repository_details(repository_alias)
         if details:
             return RepositoryStatus(
                 repository_alias=repository_alias,
@@ -115,7 +112,7 @@ class RemoteStatusDisplayer:
         else:
             raise RepositoryNotFoundError(f"Repository {repository_alias} not found")
 
-    async def check_staleness(self, local_timestamp: str, repository_alias: str) -> Any:
+    def check_staleness(self, local_timestamp: str, repository_alias: str) -> Any:
         """Check if repository is stale compared to remote.
 
         Args:
@@ -131,7 +128,7 @@ class RemoteStatusDisplayer:
             RepositoryNotFoundError: If repository is not found
             APIClientError: If API request fails
         """
-        details = await self.repository_service.get_repository_details(repository_alias)
+        details = self.repository_service.get_repository_details(repository_alias)
         if details and details.get("last_updated"):
             remote_timestamp = details.get("last_updated")
             if remote_timestamp is not None:
@@ -200,7 +197,7 @@ class RemoteConnectionHealthChecker:
         self.server_url = remote_config.get("server_url")
         self.encrypted_credentials = remote_config.get("encrypted_credentials")
 
-    async def check_connection_health(self) -> Dict[str, Any]:
+    def check_connection_health(self) -> Dict[str, Any]:
         """Test various aspects of remote connection health.
 
         Returns:
@@ -215,35 +212,30 @@ class RemoteConnectionHealthChecker:
 
         try:
             # Test basic server connectivity
-            async with aiohttp.ClientSession() as session:
-                health_url = f"{self.server_url}/health"
+            health_url = f"{self.server_url}/health"
 
-                try:
-                    async with session.get(health_url, timeout=10) as response:
-                        health_results["server_reachable"] = True
+            try:
+                response = httpx.get(health_url, timeout=10)
+                health_results["server_reachable"] = True
 
-                        if response.status == 200:
-                            health_results["connection_health"] = "healthy"
-                            health_results["authentication_valid"] = True
-                            health_results["repository_accessible"] = True
-                        elif response.status == 401:
-                            health_results["connection_health"] = (
-                                "authentication_failed"
-                            )
-                            health_results["authentication_valid"] = False
-                        elif response.status == 403:
-                            health_results["connection_health"] = (
-                                "repository_access_denied"
-                            )
-                            health_results["authentication_valid"] = True
-                            health_results["repository_accessible"] = False
-                        else:
-                            health_results["connection_health"] = "server_error"
+                if response.status_code == 200:
+                    health_results["connection_health"] = "healthy"
+                    health_results["authentication_valid"] = True
+                    health_results["repository_accessible"] = True
+                elif response.status_code == 401:
+                    health_results["connection_health"] = "authentication_failed"
+                    health_results["authentication_valid"] = False
+                elif response.status_code == 403:
+                    health_results["connection_health"] = "repository_access_denied"
+                    health_results["authentication_valid"] = True
+                    health_results["repository_accessible"] = False
+                else:
+                    health_results["connection_health"] = "server_error"
 
-                except asyncio.TimeoutError:
-                    health_results["connection_health"] = "timeout"
-                except aiohttp.ClientError:
-                    health_results["connection_health"] = "connection_error"
+            except httpx.TimeoutException:
+                health_results["connection_health"] = "timeout"
+            except httpx.RequestError:
+                health_results["connection_health"] = "connection_error"
 
         except ConnectionError:
             health_results["connection_health"] = "server_unreachable"
@@ -268,7 +260,7 @@ class RepositoryStalenessAnalyzer:
         self.remote_config = remote_config
         self.repository_link = remote_config.get("repository_link", {})
 
-    async def analyze_staleness(self) -> Dict[str, Any]:
+    def analyze_staleness(self) -> Dict[str, Any]:
         """Analyze repository staleness and local vs remote differences.
 
         Returns:
@@ -292,11 +284,11 @@ class RepositoryStalenessAnalyzer:
             # git_service = GitTopologyService(self.project_root)
 
             # Get current branch
-            current_branch = await self._get_current_branch()
+            current_branch = self._get_current_branch()
             staleness_results["local_branch"] = current_branch
 
             # Check for uncommitted changes
-            has_changes = await self._check_uncommitted_changes()
+            has_changes = self._check_uncommitted_changes()
             staleness_results["uncommitted_changes"] = has_changes
 
             # Determine staleness status
@@ -313,7 +305,7 @@ class RepositoryStalenessAnalyzer:
 
         return staleness_results
 
-    async def _get_current_branch(self) -> Optional[str]:
+    def _get_current_branch(self) -> Optional[str]:
         """Get the current git branch name.
 
         Returns:
@@ -333,7 +325,7 @@ class RepositoryStalenessAnalyzer:
         except subprocess.CalledProcessError:
             return None
 
-    async def _check_uncommitted_changes(self) -> bool:
+    def _check_uncommitted_changes(self) -> bool:
         """Check if there are uncommitted changes in the repository.
 
         Returns:

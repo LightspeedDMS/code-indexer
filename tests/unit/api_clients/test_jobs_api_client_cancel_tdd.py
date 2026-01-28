@@ -79,7 +79,7 @@ class TestJobsAPIClientCancelRealServer:
         try:
             yield client
         finally:
-            await client.close()
+            client.close()
 
     def test_cancel_job_method_exists(self, api_client):
         """Test that cancel_job method exists and is callable."""
@@ -91,7 +91,7 @@ class TestJobsAPIClientCancelRealServer:
         job_id = "job-cancellable-1"
 
         # Cancel a running job using real API
-        result = await api_client.cancel_job(job_id)
+        result = api_client.cancel_job(job_id)
 
         # Verify response structure from real server
         assert "id" in result or "job_id" in result
@@ -106,7 +106,7 @@ class TestJobsAPIClientCancelRealServer:
 
         # Try to cancel nonexistent job using real API
         with pytest.raises(APIClientError) as exc_info:
-            await api_client.cancel_job(job_id)
+            api_client.cancel_job(job_id)
 
         # Verify real server response
         assert exc_info.value.status_code == 404
@@ -118,7 +118,7 @@ class TestJobsAPIClientCancelRealServer:
 
         # Try to cancel completed job using real API
         with pytest.raises(APIClientError) as exc_info:
-            await api_client.cancel_job(job_id)
+            api_client.cancel_job(job_id)
 
         # Real server should return conflict error
         assert exc_info.value.status_code in [400, 409]
@@ -142,9 +142,9 @@ class TestJobsAPIClientCancelRealServer:
             job_id = "job-cancellable-1"
             # Real authentication failure
             with pytest.raises(AuthenticationError):
-                await client.cancel_job(job_id)
+                client.cancel_job(job_id)
         finally:
-            await client.close()
+            client.close()
 
     async def test_cancel_job_with_failed_job(self, api_client):
         """Test job cancellation with failed job using real server."""
@@ -152,7 +152,7 @@ class TestJobsAPIClientCancelRealServer:
 
         # Try to cancel failed job using real API
         with pytest.raises(APIClientError) as exc_info:
-            await api_client.cancel_job(job_id)
+            api_client.cancel_job(job_id)
 
         # Real server should indicate job cannot be cancelled
         assert exc_info.value.status_code in [400, 409]
@@ -165,14 +165,14 @@ class TestJobsAPIClientCancelRealServer:
         job_id = "job-cancellable-1"
 
         # First cancellation should succeed
-        result = await api_client.cancel_job(job_id)
+        result = api_client.cancel_job(job_id)
         job_id_field = result.get("id") or result.get("job_id")
         assert job_id_field == job_id
 
         # Second cancellation might fail or succeed depending on server implementation
         # Just verify we get a proper response (no unhandled exceptions)
         try:
-            await api_client.cancel_job(job_id)
+            api_client.cancel_job(job_id)
         except APIClientError as e:
             # Acceptable outcome - job already cancelled
             assert e.status_code in [400, 404, 409]
@@ -200,22 +200,22 @@ class TestJobsAPIClientCancelRealServer:
         # Test the complete workflow: list jobs, get status, cancel job
 
         # First, list jobs to see what's available
-        jobs_response = await api_client.list_jobs()
+        jobs_response = api_client.list_jobs()
         assert "jobs" in jobs_response or "items" in jobs_response
 
         # Get status of cancellable job
         job_id = "job-cancellable-1"
-        status_response = await api_client.get_job_status(job_id)
+        status_response = api_client.get_job_status(job_id)
         assert status_response["id"] == job_id
         assert status_response["status"] == "running"
 
         # Cancel the job
-        cancel_response = await api_client.cancel_job(job_id)
+        cancel_response = api_client.cancel_job(job_id)
         job_id_field = cancel_response.get("id") or cancel_response.get("job_id")
         assert job_id_field == job_id
 
         # Verify status may have changed (depending on server implementation)
-        final_status = await api_client.get_job_status(job_id)
+        final_status = api_client.get_job_status(job_id)
         assert final_status["id"] == job_id
         # Status should be cancelled, cancelling, or still running (server-dependent)
         assert final_status["status"] in ["cancelled", "cancelling", "running"]
@@ -226,17 +226,17 @@ class TestJobsAPIClientCancelRealServer:
 
         # 1. Nonexistent job
         with pytest.raises(APIClientError) as exc_info:
-            await api_client.cancel_job("job-does-not-exist-999")
+            api_client.cancel_job("job-does-not-exist-999")
         assert exc_info.value.status_code == 404
 
         # 2. Completed job
         with pytest.raises(APIClientError) as exc_info:
-            await api_client.cancel_job("job-completed-2")
+            api_client.cancel_job("job-completed-2")
         assert exc_info.value.status_code in [400, 409]
 
         # 3. Failed job
         with pytest.raises(APIClientError) as exc_info:
-            await api_client.cancel_job("job-failed-3")
+            api_client.cancel_job("job-failed-3")
         assert exc_info.value.status_code in [400, 409]
 
         # All errors should be properly classified APIClientErrors

@@ -2,6 +2,7 @@
 Unit tests for TruncationHelper class.
 
 Story #33: File Content Returns Cache Handle on Truncation
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 Tests AC6: TruncationHelper class created for reuse
 """
 
@@ -70,7 +71,7 @@ class TestTruncationHelperBasic:
         )
 
     @pytest.fixture
-    async def payload_cache(self, tmp_path: Path):
+    def payload_cache(self, tmp_path: Path):
         """Create a real PayloadCache for testing."""
         from code_indexer.server.cache.payload_cache import (
             PayloadCache,
@@ -84,18 +85,18 @@ class TestTruncationHelperBasic:
             cache_ttl_seconds=3600,
         )
         cache = PayloadCache(db_path, config)
-        await cache.initialize()
-        return cache
+        cache.initialize()
+        yield cache
+        cache.close()
 
     @pytest.fixture
-    async def truncation_helper(self, payload_cache, content_limits):
+    def truncation_helper(self, payload_cache, content_limits):
         """Create TruncationHelper instance for testing."""
         from code_indexer.server.cache.truncation_helper import TruncationHelper
 
         return TruncationHelper(payload_cache, content_limits)
 
-    @pytest.mark.asyncio
-    async def test_init_with_dependencies(self, payload_cache, content_limits):
+    def test_init_with_dependencies(self, payload_cache, content_limits):
         """Test TruncationHelper can be instantiated with required dependencies."""
         from code_indexer.server.cache.truncation_helper import TruncationHelper
 
@@ -104,8 +105,7 @@ class TestTruncationHelperBasic:
         assert helper.payload_cache is payload_cache
         assert helper.content_limits is content_limits
 
-    @pytest.mark.asyncio
-    async def test_estimate_tokens(self, truncation_helper):
+    def test_estimate_tokens(self, truncation_helper):
         """Test token estimation uses chars_per_token ratio."""
         # With chars_per_token=4, 100 chars = 25 tokens
         tokens = truncation_helper.estimate_tokens("a" * 100)
@@ -119,14 +119,13 @@ class TestTruncationHelperBasic:
         tokens = truncation_helper.estimate_tokens("abcd")
         assert tokens == 1
 
-    @pytest.mark.asyncio
-    async def test_truncate_and_cache_small_content_no_truncation(
+    def test_truncate_and_cache_small_content_no_truncation(
         self, truncation_helper
     ):
         """Test that small content is not truncated and no cache handle is returned."""
         small_content = "Small content under limit"  # 25 chars = ~6 tokens
 
-        result = await truncation_helper.truncate_and_cache(
+        result = truncation_helper.truncate_and_cache(
             content=small_content,
             content_type="file",
         )
@@ -137,15 +136,14 @@ class TestTruncationHelperBasic:
         assert result.original_tokens == truncation_helper.estimate_tokens(small_content)
         assert result.preview_tokens == result.original_tokens
 
-    @pytest.mark.asyncio
-    async def test_truncate_and_cache_large_content_is_truncated(
+    def test_truncate_and_cache_large_content_is_truncated(
         self, truncation_helper, payload_cache
     ):
         """Test that large content is truncated and cache handle is returned."""
         # Content limits: 100 tokens * 4 chars/token = 400 chars max
         large_content = "x" * 1000  # 1000 chars = 250 tokens, exceeds 100 token limit
 
-        result = await truncation_helper.truncate_and_cache(
+        result = truncation_helper.truncate_and_cache(
             content=large_content,
             content_type="file",
         )
@@ -160,20 +158,19 @@ class TestTruncationHelperBasic:
         all_content = ""
         page = 0
         while True:
-            cached = await payload_cache.retrieve(result.cache_handle, page=page)
+            cached = payload_cache.retrieve(result.cache_handle, page=page)
             all_content += cached.content
             if not cached.has_more:
                 break
             page += 1
         assert all_content == large_content
 
-    @pytest.mark.asyncio
-    async def test_truncate_and_cache_exact_limit_not_truncated(self, truncation_helper):
+    def test_truncate_and_cache_exact_limit_not_truncated(self, truncation_helper):
         """Test content at exactly the token limit is not truncated."""
         # 100 tokens * 4 chars = 400 chars exactly at limit
         exact_content = "a" * 400
 
-        result = await truncation_helper.truncate_and_cache(
+        result = truncation_helper.truncate_and_cache(
             content=exact_content,
             content_type="file",
         )

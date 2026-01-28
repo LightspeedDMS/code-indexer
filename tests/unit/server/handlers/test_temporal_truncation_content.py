@@ -1,6 +1,7 @@
 """Unit tests for Temporal content truncation logic (AC1).
 
 Story #681: S3 - Temporal Search with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 
 AC1: Temporal Content Truncation
 - When content > 2000 chars: return content_preview, content_cache_handle,
@@ -30,10 +31,12 @@ class TestTemporalTruncationFunctionExists:
 
 
 class TestAC1TemporalContentTruncation:
-    """AC1: Temporal Content Truncation tests."""
+    """AC1: Temporal Content Truncation tests.
 
-    @pytest.mark.asyncio
-    async def test_large_content_is_truncated(self, cache):
+    Story #50: _apply_temporal_payload_truncation is now sync.
+    """
+
+    def test_large_content_is_truncated(self, cache):
         """Test that content > 2000 chars is truncated with cache handle."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -55,7 +58,7 @@ class TestAC1TemporalContentTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         assert len(truncated) == 1
         result = truncated[0]
@@ -77,8 +80,7 @@ class TestAC1TemporalContentTruncation:
         assert result["similarity_score"] == 0.95
         assert result["temporal_context"]["commit_hash"] == "abc123"
 
-    @pytest.mark.asyncio
-    async def test_small_content_not_truncated(self, cache):
+    def test_small_content_not_truncated(self, cache):
         """Test that content <= 2000 chars is NOT truncated."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -97,7 +99,7 @@ class TestAC1TemporalContentTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -110,8 +112,7 @@ class TestAC1TemporalContentTruncation:
         assert "content_preview" not in result
         assert "content_total_size" not in result
 
-    @pytest.mark.asyncio
-    async def test_content_at_exact_boundary_not_truncated(self, cache):
+    def test_content_at_exact_boundary_not_truncated(self, cache):
         """Test that content exactly at 2000 chars is NOT truncated."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -123,7 +124,7 @@ class TestAC1TemporalContentTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -132,8 +133,7 @@ class TestAC1TemporalContentTruncation:
         assert result["content_cache_handle"] is None
         assert result["content_has_more"] is False
 
-    @pytest.mark.asyncio
-    async def test_cache_not_available_returns_original(self, cache):
+    def test_cache_not_available_returns_original(self, cache):
         """Test that results are unchanged when cache is not available."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -145,7 +145,7 @@ class TestAC1TemporalContentTruncation:
         ) as mock_state:
             mock_state.payload_cache = None  # No cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         # Results should be unchanged
         assert truncated[0]["content"] == large_content

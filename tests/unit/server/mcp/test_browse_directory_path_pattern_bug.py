@@ -51,8 +51,7 @@ def create_mock_file_service():
 class TestBrowseDirectoryPathPatternCombination:
     """Tests for absolute vs relative path_pattern handling."""
 
-    @pytest.mark.asyncio
-    async def test_absolute_path_pattern_not_combined_with_path(self, mock_user):
+    def test_absolute_path_pattern_not_combined_with_path(self, mock_user):
         """
         Test that absolute path_pattern is NOT combined with path parameter.
 
@@ -70,7 +69,7 @@ class TestBrowseDirectoryPathPatternCombination:
                 "recursive": True,
             }
 
-            await browse_directory(params, mock_user)
+            browse_directory(params, mock_user)
 
             call_kwargs = mock_file_service.list_files.call_args.kwargs
             query_params = call_kwargs["query_params"]
@@ -78,8 +77,7 @@ class TestBrowseDirectoryPathPatternCombination:
             # Should use absolute pattern directly, NOT combine with path
             assert query_params.path_pattern == "code/src/**/*.java"
 
-    @pytest.mark.asyncio
-    async def test_relative_path_pattern_combined_with_path(self, mock_user):
+    def test_relative_path_pattern_combined_with_path(self, mock_user):
         """
         Test that relative path_pattern IS combined with path parameter.
 
@@ -97,7 +95,7 @@ class TestBrowseDirectoryPathPatternCombination:
                 "recursive": True,
             }
 
-            await browse_directory(params, mock_user)
+            browse_directory(params, mock_user)
 
             call_kwargs = mock_file_service.list_files.call_args.kwargs
             query_params = call_kwargs["query_params"]
@@ -105,8 +103,7 @@ class TestBrowseDirectoryPathPatternCombination:
             # Should combine path + pattern
             assert query_params.path_pattern == "src/**/*.py"
 
-    @pytest.mark.asyncio
-    async def test_path_pattern_with_glob_stars_is_absolute(self, mock_user):
+    def test_path_pattern_with_glob_stars_is_absolute(self, mock_user):
         """
         Test that path_pattern containing '**/' is treated as absolute.
         """
@@ -121,7 +118,7 @@ class TestBrowseDirectoryPathPatternCombination:
                 "recursive": True,
             }
 
-            await browse_directory(params, mock_user)
+            browse_directory(params, mock_user)
 
             call_kwargs = mock_file_service.list_files.call_args.kwargs
             query_params = call_kwargs["query_params"]
@@ -129,8 +126,7 @@ class TestBrowseDirectoryPathPatternCombination:
             # Should use pattern directly
             assert query_params.path_pattern == "**/*.java"
 
-    @pytest.mark.asyncio
-    async def test_original_failing_case(self, mock_user):
+    def test_original_failing_case(self, mock_user):
         """
         Test the exact failing case from the bug report.
 
@@ -148,7 +144,7 @@ class TestBrowseDirectoryPathPatternCombination:
                 "recursive": True,
             }
 
-            await browse_directory(params, mock_user)
+            browse_directory(params, mock_user)
 
             call_kwargs = mock_file_service.list_files.call_args.kwargs
             query_params = call_kwargs["query_params"]
@@ -159,8 +155,7 @@ class TestBrowseDirectoryPathPatternCombination:
                 "code/src/dms/core/access/**/code/src" not in query_params.path_pattern
             )
 
-    @pytest.mark.asyncio
-    async def test_path_pattern_without_path_unchanged(self, mock_user):
+    def test_path_pattern_without_path_unchanged(self, mock_user):
         """
         Test that path_pattern without path parameter is used directly.
 
@@ -175,7 +170,7 @@ class TestBrowseDirectoryPathPatternCombination:
                 "path_pattern": "code/src/**/*.java",
             }
 
-            await browse_directory(params, mock_user)
+            browse_directory(params, mock_user)
 
             call_kwargs = mock_file_service.list_files.call_args.kwargs
             query_params = call_kwargs["query_params"]
@@ -183,8 +178,7 @@ class TestBrowseDirectoryPathPatternCombination:
             # Should use pattern exactly as provided
             assert query_params.path_pattern == "code/src/**/*.java"
 
-    @pytest.mark.asyncio
-    async def test_simple_filename_pattern_is_relative(self, mock_user):
+    def test_simple_filename_pattern_is_relative(self, mock_user):
         """
         Test that simple filename patterns (no slashes) are treated as relative.
         """
@@ -199,7 +193,7 @@ class TestBrowseDirectoryPathPatternCombination:
                 "recursive": False,
             }
 
-            await browse_directory(params, mock_user)
+            browse_directory(params, mock_user)
 
             call_kwargs = mock_file_service.list_files.call_args.kwargs
             query_params = call_kwargs["query_params"]
@@ -207,8 +201,7 @@ class TestBrowseDirectoryPathPatternCombination:
             # Should combine with path
             assert query_params.path_pattern == "src/utils/*.py"
 
-    @pytest.mark.asyncio
-    async def test_pattern_with_subdirectory_is_absolute(self, mock_user):
+    def test_pattern_with_subdirectory_is_absolute(self, mock_user):
         """
         Test that patterns with subdirectories (containing '/') are absolute.
         """
@@ -223,7 +216,7 @@ class TestBrowseDirectoryPathPatternCombination:
                 "recursive": True,
             }
 
-            await browse_directory(params, mock_user)
+            browse_directory(params, mock_user)
 
             call_kwargs = mock_file_service.list_files.call_args.kwargs
             query_params = call_kwargs["query_params"]
@@ -231,8 +224,7 @@ class TestBrowseDirectoryPathPatternCombination:
             # Should use pattern directly, ignore path
             assert query_params.path_pattern == "src/main/*.py"
 
-    @pytest.mark.asyncio
-    async def test_non_recursive_with_absolute_pattern(self, mock_user):
+    def test_non_recursive_with_absolute_pattern(self, mock_user):
         """
         Test non-recursive mode with absolute pattern (should still use pattern directly).
         """
@@ -247,7 +239,7 @@ class TestBrowseDirectoryPathPatternCombination:
                 "recursive": False,
             }
 
-            await browse_directory(params, mock_user)
+            browse_directory(params, mock_user)
 
             call_kwargs = mock_file_service.list_files.call_args.kwargs
             query_params = call_kwargs["query_params"]
@@ -255,8 +247,7 @@ class TestBrowseDirectoryPathPatternCombination:
             # Should use pattern directly
             assert query_params.path_pattern == "code/src/*.java"
 
-    @pytest.mark.asyncio
-    async def test_brace_expansion_pattern_is_relative(self, mock_user):
+    def test_brace_expansion_pattern_is_relative(self, mock_user):
         """
         Test that brace expansion patterns without '/' are treated as relative.
         """
@@ -271,7 +262,7 @@ class TestBrowseDirectoryPathPatternCombination:
                 "recursive": True,
             }
 
-            await browse_directory(params, mock_user)
+            browse_directory(params, mock_user)
 
             call_kwargs = mock_file_service.list_files.call_args.kwargs
             query_params = call_kwargs["query_params"]

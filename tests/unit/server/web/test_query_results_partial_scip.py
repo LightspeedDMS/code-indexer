@@ -71,7 +71,7 @@ class TestSCIPQueryExecutionInPartialEndpoint:
             mock_engine_class.return_value = mock_engine
 
             # Execute partial endpoint
-            await query_results_partial_post(
+            query_results_partial_post(
                 request=request,
                 query_text="CacheEntry",
                 repository="test-repo",
@@ -141,7 +141,7 @@ class TestSCIPQueryExecutionInPartialEndpoint:
             patch("code_indexer.server.web.routes.templates") as mock_templates,
             patch("code_indexer.server.web.routes._add_to_query_history"),
         ):
-            await query_results_partial_post(
+            query_results_partial_post(
                 request=request,
                 query_text="CacheEntry",
                 repository="test-repo",
@@ -211,7 +211,7 @@ class TestSCIPQueryExecutionInPartialEndpoint:
             )
             mock_engine_class.return_value = mock_engine
 
-            await query_results_partial_post(
+            query_results_partial_post(
                 request=request,
                 query_text="CacheEntry",
                 repository="test-repo",

@@ -39,8 +39,7 @@ class TestQuickReferenceDisplayName:
             created_at=datetime.now(),
         )
 
-    @pytest.mark.asyncio
-    async def test_quick_reference_includes_aka_line(self, test_user):
+    def test_quick_reference_includes_aka_line(self, test_user):
         """AC3: Quick reference should include a.k.a. line with display name."""
         mock_config = MagicMock()
         mock_config.service_display_name = "Neo"
@@ -52,15 +51,14 @@ class TestQuickReferenceDisplayName:
             mock_service.get_config.return_value = mock_config
             mock_get_service.return_value = mock_service
 
-            mcp_response = await quick_reference({}, test_user)
+            mcp_response = quick_reference({}, test_user)
 
         result = _extract_mcp_data(mcp_response)
         assert result["success"] is True
         assert "server_identity" in result
         assert result["server_identity"] == "This server is CIDX (a.k.a. Neo)."
 
-    @pytest.mark.asyncio
-    async def test_quick_reference_aka_with_custom_name(self, test_user):
+    def test_quick_reference_aka_with_custom_name(self, test_user):
         """AC3: a.k.a. line should use configured custom display name."""
         mock_config = MagicMock()
         mock_config.service_display_name = "ProductionServer"
@@ -72,13 +70,12 @@ class TestQuickReferenceDisplayName:
             mock_service.get_config.return_value = mock_config
             mock_get_service.return_value = mock_service
 
-            mcp_response = await quick_reference({}, test_user)
+            mcp_response = quick_reference({}, test_user)
 
         result = _extract_mcp_data(mcp_response)
         assert result["server_identity"] == "This server is CIDX (a.k.a. ProductionServer)."
 
-    @pytest.mark.asyncio
-    async def test_quick_reference_aka_empty_name_fallback(self, test_user):
+    def test_quick_reference_aka_empty_name_fallback(self, test_user):
         """AC3/AC5: Empty display name should fall back to 'Neo' in a.k.a. line."""
         mock_config = MagicMock()
         mock_config.service_display_name = ""
@@ -90,7 +87,7 @@ class TestQuickReferenceDisplayName:
             mock_service.get_config.return_value = mock_config
             mock_get_service.return_value = mock_service
 
-            mcp_response = await quick_reference({}, test_user)
+            mcp_response = quick_reference({}, test_user)
 
         result = _extract_mcp_data(mcp_response)
         assert result["server_identity"] == "This server is CIDX (a.k.a. Neo)."

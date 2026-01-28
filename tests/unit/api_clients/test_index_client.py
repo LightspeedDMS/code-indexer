@@ -6,7 +6,7 @@ Following TDD methodology - tests written before implementation.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 
 class TestIndexAPIClientImport:
@@ -80,7 +80,7 @@ class TestIndexAPIClientTriggerMethod:
     async def test_trigger_calls_correct_endpoint(self, index_client):
         """Test trigger calls the correct REST endpoint."""
         with patch.object(
-            index_client, "_authenticated_request", new_callable=AsyncMock
+            index_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 202
@@ -92,7 +92,7 @@ class TestIndexAPIClientTriggerMethod:
             }
             mock_request.return_value = mock_response
 
-            _ = await index_client.trigger("my-repo")
+            _ = index_client.trigger("my-repo")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -103,7 +103,7 @@ class TestIndexAPIClientTriggerMethod:
     async def test_trigger_with_clear_option(self, index_client):
         """Test trigger with clear option."""
         with patch.object(
-            index_client, "_authenticated_request", new_callable=AsyncMock
+            index_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 202
@@ -115,7 +115,7 @@ class TestIndexAPIClientTriggerMethod:
             }
             mock_request.return_value = mock_response
 
-            await index_client.trigger("my-repo", clear=True)
+            index_client.trigger("my-repo", clear=True)
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -125,7 +125,7 @@ class TestIndexAPIClientTriggerMethod:
     async def test_trigger_with_index_types(self, index_client):
         """Test trigger with specific index types."""
         with patch.object(
-            index_client, "_authenticated_request", new_callable=AsyncMock
+            index_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 202
@@ -137,7 +137,7 @@ class TestIndexAPIClientTriggerMethod:
             }
             mock_request.return_value = mock_response
 
-            await index_client.trigger(
+            index_client.trigger(
                 "my-repo",
                 index_types=["semantic", "scip"],
             )
@@ -150,7 +150,7 @@ class TestIndexAPIClientTriggerMethod:
     async def test_trigger_returns_job_info(self, index_client):
         """Test trigger returns job information."""
         with patch.object(
-            index_client, "_authenticated_request", new_callable=AsyncMock
+            index_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 202
@@ -162,7 +162,7 @@ class TestIndexAPIClientTriggerMethod:
             }
             mock_request.return_value = mock_response
 
-            result = await index_client.trigger("my-repo")
+            result = index_client.trigger("my-repo")
 
             assert "job_id" in result
             assert result["job_id"] == "job-456"
@@ -193,7 +193,7 @@ class TestIndexAPIClientStatusMethod:
     async def test_status_calls_correct_endpoint(self, index_client):
         """Test status calls the correct REST endpoint."""
         with patch.object(
-            index_client, "_authenticated_request", new_callable=AsyncMock
+            index_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -221,7 +221,7 @@ class TestIndexAPIClientStatusMethod:
             }
             mock_request.return_value = mock_response
 
-            _ = await index_client.status("my-repo")
+            _ = index_client.status("my-repo")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -232,7 +232,7 @@ class TestIndexAPIClientStatusMethod:
     async def test_status_returns_index_information(self, index_client):
         """Test status returns detailed index information."""
         with patch.object(
-            index_client, "_authenticated_request", new_callable=AsyncMock
+            index_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -245,7 +245,7 @@ class TestIndexAPIClientStatusMethod:
             }
             mock_request.return_value = mock_response
 
-            result = await index_client.status("my-repo")
+            result = index_client.status("my-repo")
 
             assert "repository" in result
             assert "indexes" in result
@@ -277,7 +277,7 @@ class TestIndexAPIClientAddTypeMethod:
     async def test_add_type_calls_correct_endpoint(self, index_client):
         """Test add_type calls the correct REST endpoint."""
         with patch.object(
-            index_client, "_authenticated_request", new_callable=AsyncMock
+            index_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -289,7 +289,7 @@ class TestIndexAPIClientAddTypeMethod:
             }
             mock_request.return_value = mock_response
 
-            _ = await index_client.add_type("my-repo", "temporal")
+            _ = index_client.add_type("my-repo", "temporal")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -301,7 +301,7 @@ class TestIndexAPIClientAddTypeMethod:
     async def test_add_type_returns_result(self, index_client):
         """Test add_type returns the operation result."""
         with patch.object(
-            index_client, "_authenticated_request", new_callable=AsyncMock
+            index_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -313,7 +313,7 @@ class TestIndexAPIClientAddTypeMethod:
             }
             mock_request.return_value = mock_response
 
-            result = await index_client.add_type("my-repo", "scip")
+            result = index_client.add_type("my-repo", "scip")
 
             assert result["added"] is True
             assert result["type"] == "scip"
@@ -340,7 +340,7 @@ class TestIndexAPIClientErrorHandling:
         from code_indexer.api_clients.base_client import APIClientError
 
         with patch.object(
-            index_client, "_authenticated_request", new_callable=AsyncMock
+            index_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 404
@@ -350,7 +350,7 @@ class TestIndexAPIClientErrorHandling:
             mock_request.return_value = mock_response
 
             with pytest.raises(APIClientError) as exc_info:
-                await index_client.trigger("nonexistent")
+                index_client.trigger("nonexistent")
 
             assert "not found" in str(exc_info.value).lower()
 
@@ -360,7 +360,7 @@ class TestIndexAPIClientErrorHandling:
         from code_indexer.api_clients.base_client import APIClientError
 
         with patch.object(
-            index_client, "_authenticated_request", new_callable=AsyncMock
+            index_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 404
@@ -370,7 +370,7 @@ class TestIndexAPIClientErrorHandling:
             mock_request.return_value = mock_response
 
             with pytest.raises(APIClientError) as exc_info:
-                await index_client.status("nonexistent")
+                index_client.status("nonexistent")
 
             assert "not found" in str(exc_info.value).lower()
 
@@ -380,7 +380,7 @@ class TestIndexAPIClientErrorHandling:
         from code_indexer.api_clients.base_client import APIClientError
 
         with patch.object(
-            index_client, "_authenticated_request", new_callable=AsyncMock
+            index_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 400
@@ -390,6 +390,6 @@ class TestIndexAPIClientErrorHandling:
             mock_request.return_value = mock_response
 
             with pytest.raises(APIClientError) as exc_info:
-                await index_client.add_type("my-repo", "invalid")
+                index_client.add_type("my-repo", "invalid")
 
             assert "invalid" in str(exc_info.value).lower()

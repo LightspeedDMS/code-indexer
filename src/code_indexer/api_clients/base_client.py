@@ -4,9 +4,9 @@ Provides common HTTP functionality, authentication, and token management
 for all CIDX remote API operations.
 """
 
-import asyncio
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Callable, cast
@@ -88,9 +88,9 @@ class CIDXRemoteAPIClient:
         self.credentials = credentials
         self.project_root = project_root
         self.jwt_manager = JWTTokenManager()
-        self._session: Optional[httpx.AsyncClient] = None
+        self._session: Optional[httpx.Client] = None
         self._current_token: Optional[str] = None
-        self._auth_lock = asyncio.Lock()
+        self._auth_lock = threading.Lock()
 
         # Initialize persistent token manager if project root provided
         self._persistent_token_manager: Optional[PersistentTokenManager] = None
@@ -114,7 +114,7 @@ class CIDXRemoteAPIClient:
         self._circuit_breaker_timeout = 300  # 5 minutes
 
         # Request rate limiting
-        self._request_semaphore = asyncio.Semaphore(10)  # 10 concurrent requests
+        self._request_semaphore = threading.Semaphore(10)  # 10 concurrent requests
 
         # Network error handling
         self._network_error_handler = NetworkErrorHandler()
@@ -145,7 +145,7 @@ class CIDXRemoteAPIClient:
         return self.server_url
 
     @property
-    def session(self) -> httpx.AsyncClient:
+    def session(self) -> httpx.Client:
         """Get or create HTTP session with optimized configuration."""
         if self._session is None or self._session.is_closed:
             # Configure timeouts according to requirements
@@ -163,7 +163,7 @@ class CIDXRemoteAPIClient:
                 keepalive_expiry=30.0,  # 30s keepalive expiry
             )
 
-            self._session = httpx.AsyncClient(
+            self._session = httpx.Client(
                 timeout=timeouts,
                 limits=limits,
                 headers={"Content-Type": "application/json"},
@@ -217,7 +217,7 @@ class CIDXRemoteAPIClient:
         self._auth_failures = 0
         self._circuit_breaker_open = False
 
-    async def _authenticate(self) -> str:
+    def _authenticate(self) -> str:
         """Authenticate with server and get JWT token with persistent storage.
 
         Returns:
@@ -239,7 +239,7 @@ class CIDXRemoteAPIClient:
         }
 
         try:
-            response = await self.session.post(auth_endpoint, json=auth_payload)
+            response = self.session.post(auth_endpoint, json=auth_payload)
 
             if response.status_code == 200:
                 auth_response = response.json()
@@ -251,7 +251,7 @@ class CIDXRemoteAPIClient:
                 self._record_auth_success()
 
                 # Store token persistently if possible
-                await self._store_token_persistently(cast(str, token))
+                self._store_token_persistently(cast(str, token))
 
                 return cast(str, token)
 
@@ -296,7 +296,7 @@ class CIDXRemoteAPIClient:
         # This should never be reached as all paths above either return or raise
         raise AuthenticationError("Unexpected code path in authentication")
 
-    async def _store_token_persistently(self, token: str) -> None:
+    def _store_token_persistently(self, token: str) -> None:
         """Store JWT token persistently if manager is available.
 
         Args:
@@ -329,7 +329,7 @@ class CIDXRemoteAPIClient:
         except Exception as e:
             logger.warning(f"Failed to store token persistently: {e}")
 
-    async def _load_persistent_token(self) -> Optional[str]:
+    def _load_persistent_token(self) -> Optional[str]:
         """Load JWT token from persistent storage if valid.
 
         Returns:
@@ -357,7 +357,7 @@ class CIDXRemoteAPIClient:
             logger.warning(f"Failed to load persistent token: {e}")
             return None
 
-    async def _get_valid_token(self) -> str:
+    def _get_valid_token(self) -> str:
         """Get valid JWT token with persistent storage and automatic refresh.
 
         Returns:
@@ -367,7 +367,7 @@ class CIDXRemoteAPIClient:
             AuthenticationError: If authentication fails
             NetworkError: If network operation fails
         """
-        async with self._auth_lock:
+        with self._auth_lock:
             # Check if we already have a valid token in memory
             if self._current_token:
                 try:
@@ -390,7 +390,7 @@ class CIDXRemoteAPIClient:
 
             # Try to load from persistent storage if no valid token in memory
             if self._current_token is None:
-                persistent_token = await self._load_persistent_token()
+                persistent_token = self._load_persistent_token()
                 if persistent_token:
                     self._current_token = persistent_token
                     logger.debug("Loaded persistent token")
@@ -400,14 +400,14 @@ class CIDXRemoteAPIClient:
             # Only one thread should reach this point due to the lock
             if self._current_token is None:
                 logger.debug("No token found, authenticating...")
-                self._current_token = await self._authenticate()
+                self._current_token = self._authenticate()
                 logger.debug("Authentication complete")
                 return self._current_token
 
             # Should never reach here, but return token if we have one
             return self._current_token
 
-    async def _authenticated_request(
+    def _authenticated_request(
         self,
         method: str,
         endpoint: str,
@@ -436,7 +436,7 @@ class CIDXRemoteAPIClient:
             APIClientError: If API returns other error status
         """
         # Apply rate limiting
-        async with self._request_semaphore:
+        with self._request_semaphore:
             url = f"{self.server_url}{endpoint}"
             max_retries = 2
             retry_count = 0
@@ -445,14 +445,14 @@ class CIDXRemoteAPIClient:
             while retry_count < max_retries:
                 try:
                     # Get valid token
-                    token = await self._get_valid_token()
+                    token = self._get_valid_token()
 
                     # Add authorization header
                     headers = kwargs.pop("headers", {})
                     headers["Authorization"] = f"Bearer {token}"
 
                     # Make request
-                    response = await self.session.request(
+                    response = self.session.request(
                         method, url, headers=headers, **kwargs
                     )
 
@@ -500,7 +500,7 @@ class CIDXRemoteAPIClient:
                                         retry_count + 1,
                                         max_retries,
                                     )
-                                await asyncio.sleep(delay)
+                                time.sleep(delay)
                                 retry_count += 1
                                 continue
                             raise network_error
@@ -533,7 +533,7 @@ class CIDXRemoteAPIClient:
                                     retry_count + 1,
                                     max_retries,
                                 )
-                            await asyncio.sleep(delay)
+                            time.sleep(delay)
                             retry_count += 1
                             continue
                         raise network_error
@@ -561,7 +561,7 @@ class CIDXRemoteAPIClient:
                 raise last_network_error
             raise AuthenticationError("Failed to authenticate after retries")
 
-    async def get(self, endpoint: str, **kwargs) -> httpx.Response:
+    def get(self, endpoint: str, **kwargs) -> httpx.Response:
         """Make authenticated GET request.
 
         Args:
@@ -581,9 +581,9 @@ class CIDXRemoteAPIClient:
             RateLimitError: If rate limited (429)
             APIClientError: If API returns other error status
         """
-        return await self._authenticated_request("GET", endpoint, **kwargs)
+        return self._authenticated_request("GET", endpoint, **kwargs)
 
-    async def get_job_status(self, job_id: str) -> Dict[str, Any]:
+    def get_job_status(self, job_id: str) -> Dict[str, Any]:
         """Get job status from server.
 
         Args:
@@ -598,9 +598,7 @@ class CIDXRemoteAPIClient:
             NetworkError: If network request fails
         """
         try:
-            response = await self._authenticated_request(
-                "GET", f"/api/jobs/{job_id}/status"
-            )
+            response = self._authenticated_request("GET", f"/api/jobs/{job_id}/status")
 
             if response.status_code == 200:
                 return dict(response.json())
@@ -627,7 +625,7 @@ class CIDXRemoteAPIClient:
                 raise
             raise APIClientError(f"Unexpected error getting job status: {e}")
 
-    async def cancel_job(self, job_id: str) -> Dict[str, Any]:
+    def cancel_job(self, job_id: str) -> Dict[str, Any]:
         """Cancel a job on the server.
 
         Args:
@@ -642,9 +640,7 @@ class CIDXRemoteAPIClient:
             NetworkError: If network request fails
         """
         try:
-            response = await self._authenticated_request(
-                "DELETE", f"/api/jobs/{job_id}"
-            )
+            response = self._authenticated_request("DELETE", f"/api/jobs/{job_id}")
 
             if response.status_code == 200:
                 return dict(response.json())
@@ -678,10 +674,10 @@ class CIDXRemoteAPIClient:
         except Exception as e:
             raise APIClientError(f"Unexpected error cancelling job: {e}")
 
-    async def close(self) -> None:
+    def close(self) -> None:
         """Close HTTP session and clean up resources with security cleanup."""
         if self._session and not self._session.is_closed:
-            await self._session.aclose()
+            self._session.close()
 
         # Clean up sensitive data from memory
         if self._persistent_token_manager:
@@ -701,13 +697,13 @@ class CIDXRemoteAPIClient:
             # Clear the string reference
             self._current_token = None
 
-    async def __aenter__(self):
-        """Async context manager entry."""
+    def __enter__(self):
+        """Context manager entry."""
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit."""
-        await self.close()
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
+        self.close()
 
     def __del__(self):
         """Cleanup when object is destroyed."""

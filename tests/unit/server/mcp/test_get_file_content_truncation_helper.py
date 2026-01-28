@@ -8,7 +8,7 @@ FileService, allowing TruncationHelper to handle truncation with cache_handle su
 import json
 from datetime import datetime
 from typing import cast
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock, Mock
 import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -39,9 +39,12 @@ def mock_user():
 
 @pytest.fixture
 def mock_payload_cache():
-    """Create configured mock payload cache."""
-    cache = AsyncMock()
-    cache.store = AsyncMock(return_value="cache-handle-123")
+    """Create configured mock payload cache.
+
+    Epic #48: Handlers are now sync, so cache must use Mock (not AsyncMock).
+    """
+    cache = MagicMock()
+    cache.store = Mock(return_value="cache-handle-123")
     cache.config = MagicMock()
     cache.config.max_fetch_size_chars = MAX_FETCH_SIZE_CHARS
     return cache
@@ -98,8 +101,7 @@ def _mock_config_service(token_limit):
 class TestMcpHandlerSkipTruncation:
     """Test that MCP handler calls FileService with skip_truncation=True."""
 
-    @pytest.mark.asyncio
-    async def test_handler_calls_file_service_with_skip_truncation_true(
+    def test_handler_calls_file_service_with_skip_truncation_true(
         self, mock_user
     ):
         """Verify MCP handler calls get_file_content with skip_truncation=True."""
@@ -114,7 +116,7 @@ class TestMcpHandlerSkipTruncation:
             mock_app.app.state.payload_cache = None
 
             params = {"repository_alias": "test-repo", "file_path": "test.py"}
-            await handlers.get_file_content(params, mock_user)
+            handlers.get_file_content(params, mock_user)
 
             mock_file_service.get_file_content.assert_called_once()
             call_kwargs = mock_file_service.get_file_content.call_args[1]
@@ -122,8 +124,7 @@ class TestMcpHandlerSkipTruncation:
                 "MCP handler MUST call FileService with skip_truncation=True"
             )
 
-    @pytest.mark.asyncio
-    async def test_handler_calls_by_path_with_skip_truncation_true(self, mock_user):
+    def test_handler_calls_by_path_with_skip_truncation_true(self, mock_user):
         """Verify MCP handler calls get_file_content_by_path with skip_truncation=True."""
         from code_indexer.server.mcp import handlers
 
@@ -157,7 +158,7 @@ class TestMcpHandlerSkipTruncation:
             mock_app.app.state.payload_cache = None
 
             params = {"repository_alias": "test-repo-global", "file_path": "test.py"}
-            await handlers.get_file_content(params, mock_user)
+            handlers.get_file_content(params, mock_user)
 
             mock_file_service.get_file_content_by_path.assert_called_once()
             call_kwargs = mock_file_service.get_file_content_by_path.call_args[1]
@@ -167,8 +168,7 @@ class TestMcpHandlerSkipTruncation:
 class TestTruncationHelperIntegration:
     """Test TruncationHelper receives full content and generates cache_handle."""
 
-    @pytest.mark.asyncio
-    async def test_truncation_helper_receives_full_content(
+    def test_truncation_helper_receives_full_content(
         self, mock_user, mock_payload_cache
     ):
         """Verify TruncationHelper receives full (untruncated) content."""
@@ -192,14 +192,13 @@ class TestTruncationHelperIntegration:
                 )
 
                 params = {"repository_alias": "test-repo", "file_path": "large_file.py"}
-                await handlers.get_file_content(params, mock_user)
+                handlers.get_file_content(params, mock_user)
 
                 mock_payload_cache.store.assert_called_once()
                 stored_content = mock_payload_cache.store.call_args[0][0]
                 assert stored_content == large_content
 
-    @pytest.mark.asyncio
-    async def test_cache_handle_returned_for_large_file(
+    def test_cache_handle_returned_for_large_file(
         self, mock_user, mock_payload_cache
     ):
         """Verify cache_handle is returned in response when content is truncated."""
@@ -224,7 +223,7 @@ class TestTruncationHelperIntegration:
                 )
 
                 params = {"repository_alias": "test-repo", "file_path": "huge_file.py"}
-                mcp_response = await handlers.get_file_content(params, mock_user)
+                mcp_response = handlers.get_file_content(params, mock_user)
 
                 data = _extract_response_data(mcp_response)
                 assert data.get("cache_handle") == "cache-handle-xyz"
@@ -235,8 +234,7 @@ class TestTruncationHelperIntegration:
 class TestBackwardCompatibility:
     """Test that existing functionality is preserved."""
 
-    @pytest.mark.asyncio
-    async def test_small_file_no_truncation(self, mock_user, mock_payload_cache):
+    def test_small_file_no_truncation(self, mock_user, mock_payload_cache):
         """Verify small files are returned without truncation or cache_handle."""
         from code_indexer.server.mcp import handlers
 
@@ -258,7 +256,7 @@ class TestBackwardCompatibility:
                 )
 
                 params = {"repository_alias": "test-repo", "file_path": "small.py"}
-                mcp_response = await handlers.get_file_content(params, mock_user)
+                mcp_response = handlers.get_file_content(params, mock_user)
 
                 data = _extract_response_data(mcp_response)
                 assert data.get("cache_handle") is None

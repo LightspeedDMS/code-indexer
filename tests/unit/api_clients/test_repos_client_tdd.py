@@ -89,7 +89,7 @@ class TestActivatedRepositoryOperations:
         with patch.object(
             mock_client, "_authenticated_request", return_value=mock_response
         ):
-            repositories = await mock_client.list_activated_repositories()
+            repositories = mock_client.list_activated_repositories()
 
         assert len(repositories) == 2
         assert repositories[0].alias == "web-app"
@@ -121,9 +121,7 @@ class TestActivatedRepositoryOperations:
         with patch.object(
             mock_client, "_authenticated_request", return_value=mock_response
         ) as mock_request:
-            repositories = await mock_client.list_activated_repositories(
-                filter_pattern="web"
-            )
+            repositories = mock_client.list_activated_repositories(filter_pattern="web")
 
         # Verify the request was made with correct parameters
         mock_request.assert_called_once_with(
@@ -145,7 +143,7 @@ class TestActivatedRepositoryOperations:
         with patch.object(
             mock_client, "_authenticated_request", return_value=mock_response
         ):
-            repositories = await mock_client.list_activated_repositories()
+            repositories = mock_client.list_activated_repositories()
 
         assert len(repositories) == 0
 
@@ -158,7 +156,7 @@ class TestActivatedRepositoryOperations:
             side_effect=AuthenticationError("Token expired"),
         ):
             with pytest.raises(AuthenticationError, match="Token expired"):
-                await mock_client.list_activated_repositories()
+                mock_client.list_activated_repositories()
 
     @pytest.mark.asyncio
     async def test_list_activated_repositories_network_error(self, mock_client):
@@ -171,7 +169,7 @@ class TestActivatedRepositoryOperations:
             mock_client, "_authenticated_request", return_value=mock_response
         ):
             with pytest.raises(APIClientError, match="Failed to list repositories"):
-                await mock_client.list_activated_repositories()
+                mock_client.list_activated_repositories()
 
 
 class TestGoldenRepositoryOperations:
@@ -218,7 +216,7 @@ class TestGoldenRepositoryOperations:
         with patch.object(
             mock_client, "_authenticated_request", return_value=mock_response
         ):
-            repositories = await mock_client.list_available_repositories()
+            repositories = mock_client.list_available_repositories()
 
         assert len(repositories) == 2
         assert repositories[0].alias == "web-framework"
@@ -250,9 +248,7 @@ class TestGoldenRepositoryOperations:
         with patch.object(
             mock_client, "_authenticated_request", return_value=mock_response
         ) as mock_request:
-            repositories = await mock_client.list_available_repositories(
-                search_term="web"
-            )
+            repositories = mock_client.list_available_repositories(search_term="web")
 
         # Verify the request was made with correct parameters
         mock_request.assert_called_once_with(
@@ -274,7 +270,7 @@ class TestGoldenRepositoryOperations:
         with patch.object(
             mock_client, "_authenticated_request", return_value=mock_response
         ):
-            repositories = await mock_client.list_available_repositories()
+            repositories = mock_client.list_available_repositories()
 
         assert len(repositories) == 0
 
@@ -327,7 +323,7 @@ class TestRepositoryDiscoveryOperations:
         with patch.object(
             mock_client, "_authenticated_request", return_value=mock_response
         ):
-            result = await mock_client.discover_repositories("github.com/myorg")
+            result = mock_client.discover_repositories("github.com/myorg")
 
         assert len(result.discovered_repositories) == 2
         assert result.source == "github.com/myorg"
@@ -364,7 +360,7 @@ class TestRepositoryDiscoveryOperations:
         with patch.object(
             mock_client, "_authenticated_request", return_value=mock_response
         ):
-            result = await mock_client.discover_repositories(
+            result = mock_client.discover_repositories(
                 "https://git.example.com/user/custom-repo.git"
             )
 
@@ -401,7 +397,7 @@ class TestRepositoryDiscoveryOperations:
         with patch.object(
             mock_client, "_authenticated_request", return_value=mock_response
         ):
-            result = await mock_client.discover_repositories("github.com/org")
+            result = mock_client.discover_repositories("github.com/org")
 
         assert len(result.discovered_repositories) == 1
         assert len(result.access_errors) == 2
@@ -418,7 +414,7 @@ class TestRepositoryDiscoveryOperations:
             mock_client, "_authenticated_request", return_value=mock_response
         ):
             with pytest.raises(APIClientError, match="Failed to discover repositories"):
-                await mock_client.discover_repositories("invalid-source")
+                mock_client.discover_repositories("invalid-source")
 
 
 class TestRepositoryStatusOperations:
@@ -469,7 +465,7 @@ class TestRepositoryStatusOperations:
         with patch.object(
             mock_client, "_authenticated_request", return_value=mock_response
         ):
-            summary = await mock_client.get_repository_status_summary()
+            summary = mock_client.get_repository_status_summary()
 
         assert summary.activated_repositories.total_count == 3
         assert summary.activated_repositories.synced_count == 1
@@ -503,7 +499,7 @@ class TestRepositoryStatusOperations:
         with patch.object(
             mock_client, "_authenticated_request", return_value=mock_response
         ):
-            summary = await mock_client.get_repository_status_summary()
+            summary = mock_client.get_repository_status_summary()
 
         assert summary.activated_repositories.total_count == 0
         assert summary.available_repositories.total_count == 5
@@ -623,7 +619,7 @@ class TestErrorHandling:
             mock_client, "_authenticated_request", return_value=mock_response
         ):
             with pytest.raises(APIClientError, match="Invalid response format"):
-                await mock_client.list_activated_repositories()
+                mock_client.list_activated_repositories()
 
     @pytest.mark.asyncio
     async def test_server_error_handling(self, mock_client):
@@ -636,7 +632,7 @@ class TestErrorHandling:
             mock_client, "_authenticated_request", return_value=mock_response
         ):
             with pytest.raises(APIClientError, match="Failed to list repositories"):
-                await mock_client.list_activated_repositories()
+                mock_client.list_activated_repositories()
 
     @pytest.mark.asyncio
     async def test_rate_limit_error_handling(self, mock_client):
@@ -649,4 +645,4 @@ class TestErrorHandling:
             mock_client, "_authenticated_request", return_value=mock_response
         ):
             with pytest.raises(APIClientError, match="Failed to get repository status"):
-                await mock_client.get_repository_status_summary()
+                mock_client.get_repository_status_summary()

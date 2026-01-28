@@ -159,8 +159,7 @@ class TestRemoteConfigurationFormatMismatch:
         is_valid = detector._validate_remote_config(config_path)
         assert is_valid is True  # Validation succeeds with correct field name
 
-    @pytest.mark.asyncio
-    async def test_full_remote_initialization_creates_usable_config_after_fix(
+    def test_full_remote_initialization_creates_usable_config_after_fix(
         self, temp_project_root, mock_validation_steps
     ):
         """Test end-to-end: remote initialization creates config that mode detector recognizes.
@@ -175,7 +174,7 @@ class TestRemoteConfigurationFormatMismatch:
         temp_project_root.mkdir(parents=True)
 
         # Act: Run complete remote initialization
-        await initialize_remote_mode(
+        initialize_remote_mode(
             project_root=temp_project_root,
             server_url="http://127.0.0.1:8095",
             username="admin",
@@ -315,8 +314,7 @@ class TestRemoteConfigurationFormatAfterFix:
                 "credentials": mock_creds,
             }
 
-    @pytest.mark.asyncio
-    async def test_initialization_creates_correct_format_after_fix(
+    def test_initialization_creates_correct_format_after_fix(
         self, temp_project_root, mock_validation_steps
     ):
         """Test that initialization creates config with 'encrypted_credentials' field after fix.
@@ -327,7 +325,7 @@ class TestRemoteConfigurationFormatAfterFix:
         temp_project_root.mkdir(parents=True)
 
         # Act: Run complete remote initialization
-        await initialize_remote_mode(
+        initialize_remote_mode(
             project_root=temp_project_root,
             server_url="http://127.0.0.1:8095",
             username="admin",
@@ -359,8 +357,7 @@ class TestRemoteConfigurationFormatAfterFix:
         assert "created_at" in config_data
         assert "updated_at" in config_data
 
-    @pytest.mark.asyncio
-    async def test_end_to_end_remote_mode_after_fix(
+    def test_end_to_end_remote_mode_after_fix(
         self, temp_project_root, mock_validation_steps
     ):
         """Test complete remote mode flow works after fixing configuration format.
@@ -371,7 +368,7 @@ class TestRemoteConfigurationFormatAfterFix:
         temp_project_root.mkdir(parents=True)
 
         # Act 1: Run complete remote initialization
-        await initialize_remote_mode(
+        initialize_remote_mode(
             project_root=temp_project_root,
             server_url="http://127.0.0.1:8095",
             username="admin",

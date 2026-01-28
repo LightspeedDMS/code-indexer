@@ -100,8 +100,7 @@ class TestCredentialHandlersNoAttributeError:
     NOT raise AttributeError for missing module attributes.
     """
 
-    @pytest.mark.asyncio
-    async def test_create_api_key_handler_no_attribute_error(self, normal_user):
+    def test_create_api_key_handler_no_attribute_error(self, normal_user):
         """
         Verify create_api_key handler does NOT raise AttributeError.
 
@@ -114,7 +113,7 @@ class TestCredentialHandlersNoAttributeError:
         # It may return an error response if user_manager is not fully initialized,
         # but it should not raise AttributeError for missing module attribute
         try:
-            result = await handler({"description": "Test key"}, normal_user)
+            result = handler({"description": "Test key"}, normal_user)
             # If we get here, no AttributeError - check for proper MCP response format
             assert "content" in result, "Handler should return MCP-compliant response"
             content = json.loads(result["content"][0]["text"])
@@ -125,8 +124,7 @@ class TestCredentialHandlersNoAttributeError:
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
-    @pytest.mark.asyncio
-    async def test_list_mcp_credentials_handler_no_attribute_error(self, normal_user):
+    def test_list_mcp_credentials_handler_no_attribute_error(self, normal_user):
         """
         Verify list_mcp_credentials handler does NOT raise AttributeError.
 
@@ -135,7 +133,7 @@ class TestCredentialHandlersNoAttributeError:
         handler = HANDLER_REGISTRY["list_mcp_credentials"]
 
         try:
-            result = await handler({}, normal_user)
+            result = handler({}, normal_user)
             assert "content" in result, "Handler should return MCP-compliant response"
             content = json.loads(result["content"][0]["text"])
             if "error" in content:
@@ -144,8 +142,7 @@ class TestCredentialHandlersNoAttributeError:
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
-    @pytest.mark.asyncio
-    async def test_create_mcp_credential_handler_no_attribute_error(self, normal_user):
+    def test_create_mcp_credential_handler_no_attribute_error(self, normal_user):
         """
         Verify create_mcp_credential handler does NOT raise AttributeError.
 
@@ -154,7 +151,7 @@ class TestCredentialHandlersNoAttributeError:
         handler = HANDLER_REGISTRY["create_mcp_credential"]
 
         try:
-            result = await handler({"description": "Test"}, normal_user)
+            result = handler({"description": "Test"}, normal_user)
             assert "content" in result, "Handler should return MCP-compliant response"
             content = json.loads(result["content"][0]["text"])
             if "error" in content:
@@ -163,8 +160,7 @@ class TestCredentialHandlersNoAttributeError:
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
-    @pytest.mark.asyncio
-    async def test_delete_mcp_credential_handler_no_attribute_error(self, normal_user):
+    def test_delete_mcp_credential_handler_no_attribute_error(self, normal_user):
         """
         Verify delete_mcp_credential handler does NOT raise AttributeError.
 
@@ -173,7 +169,7 @@ class TestCredentialHandlersNoAttributeError:
         handler = HANDLER_REGISTRY["delete_mcp_credential"]
 
         try:
-            result = await handler({"credential_id": "cred-123"}, normal_user)
+            result = handler({"credential_id": "cred-123"}, normal_user)
             assert "content" in result, "Handler should return MCP-compliant response"
             content = json.loads(result["content"][0]["text"])
             if "error" in content:
@@ -198,13 +194,12 @@ class TestAdminCredentialHandlersNoAttributeError:
             created_at=datetime.now(timezone.utc),
         )
 
-    @pytest.mark.asyncio
-    async def test_admin_list_user_mcp_credentials_no_attribute_error(self, admin_user):
+    def test_admin_list_user_mcp_credentials_no_attribute_error(self, admin_user):
         """Verify admin_list_user_mcp_credentials does NOT raise AttributeError."""
         handler = HANDLER_REGISTRY["admin_list_user_mcp_credentials"]
 
         try:
-            result = await handler({"username": "testuser"}, admin_user)
+            result = handler({"username": "testuser"}, admin_user)
             assert "content" in result, "Handler should return MCP-compliant response"
             content = json.loads(result["content"][0]["text"])
             if "error" in content:
@@ -213,13 +208,12 @@ class TestAdminCredentialHandlersNoAttributeError:
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
-    @pytest.mark.asyncio
-    async def test_admin_create_user_mcp_credential_no_attribute_error(self, admin_user):
+    def test_admin_create_user_mcp_credential_no_attribute_error(self, admin_user):
         """Verify admin_create_user_mcp_credential does NOT raise AttributeError."""
         handler = HANDLER_REGISTRY["admin_create_user_mcp_credential"]
 
         try:
-            result = await handler({"username": "testuser", "description": "Test"}, admin_user)
+            result = handler({"username": "testuser", "description": "Test"}, admin_user)
             assert "content" in result, "Handler should return MCP-compliant response"
             content = json.loads(result["content"][0]["text"])
             if "error" in content:
@@ -228,13 +222,12 @@ class TestAdminCredentialHandlersNoAttributeError:
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
-    @pytest.mark.asyncio
-    async def test_admin_delete_user_mcp_credential_no_attribute_error(self, admin_user):
+    def test_admin_delete_user_mcp_credential_no_attribute_error(self, admin_user):
         """Verify admin_delete_user_mcp_credential does NOT raise AttributeError."""
         handler = HANDLER_REGISTRY["admin_delete_user_mcp_credential"]
 
         try:
-            result = await handler({"username": "testuser", "credential_id": "cred-123"}, admin_user)
+            result = handler({"username": "testuser", "credential_id": "cred-123"}, admin_user)
             assert "content" in result, "Handler should return MCP-compliant response"
             content = json.loads(result["content"][0]["text"])
             if "error" in content:
@@ -243,13 +236,12 @@ class TestAdminCredentialHandlersNoAttributeError:
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
-    @pytest.mark.asyncio
-    async def test_admin_list_all_mcp_credentials_no_attribute_error(self, admin_user):
+    def test_admin_list_all_mcp_credentials_no_attribute_error(self, admin_user):
         """Verify admin_list_all_mcp_credentials does NOT raise AttributeError."""
         handler = HANDLER_REGISTRY["admin_list_all_mcp_credentials"]
 
         try:
-            result = await handler({}, admin_user)
+            result = handler({}, admin_user)
             assert "content" in result, "Handler should return MCP-compliant response"
             content = json.loads(result["content"][0]["text"])
             if "error" in content:

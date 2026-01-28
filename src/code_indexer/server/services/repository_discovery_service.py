@@ -71,7 +71,7 @@ class RepositoryDiscoveryService:
                 access_control_manager=access_control_manager,
             )
 
-    async def discover_repositories(
+    def discover_repositories(
         self,
         repo_url: str,
         user: User,
@@ -111,7 +111,7 @@ class RepositoryDiscoveryService:
                 (
                     golden_matches,
                     activated_matches,
-                ) = await self.repository_matcher.find_all_matching_repositories(
+                ) = repository_matcher.find_all_matching_repositories(
                     canonical_url=normalized_url.canonical_form,
                     user=user,
                 )
@@ -178,7 +178,7 @@ class RepositoryDiscoveryService:
             description=f"Repository {match_result.alias} ({match_result.repository_type.value})",
         )
 
-    async def validate_repository_access(
+    def validate_repository_access(
         self,
         repo_url: str,
         user: User,
@@ -197,7 +197,7 @@ class RepositoryDiscoveryService:
             RepositoryDiscoveryError: If validation fails
         """
         try:
-            discovery_result = await self.discover_repositories(repo_url, user)
+            discovery_result = self.discover_repositories(repo_url, user)
             return discovery_result.total_matches > 0
         except RepositoryDiscoveryError:
             raise
@@ -206,7 +206,7 @@ class RepositoryDiscoveryService:
             logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
             raise RepositoryDiscoveryError(error_msg) from e
 
-    async def get_repository_suggestions(
+    def get_repository_suggestions(
         self,
         repo_url: str,
         user: User,
@@ -229,7 +229,7 @@ class RepositoryDiscoveryService:
         try:
             # For now, implement as exact match discovery
             # In the future, this could include fuzzy matching, domain suggestions, etc.
-            discovery_result = await self.discover_repositories(repo_url, user)
+            discovery_result = self.discover_repositories(repo_url, user)
 
             all_suggestions = (
                 discovery_result.golden_repositories

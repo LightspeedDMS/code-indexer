@@ -109,7 +109,7 @@ class TestDelegationJobTracker:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-12345")
+        tracker.register_job("job-12345")
 
         # Verify the job is registered (internal state check)
         assert "job-12345" in tracker._pending_jobs
@@ -129,10 +129,10 @@ class TestDelegationJobTracker:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-12345")
+        tracker.register_job("job-12345")
         original_future = tracker._pending_jobs["job-12345"]
 
-        await tracker.register_job("job-12345")
+        tracker.register_job("job-12345")
 
         assert tracker._pending_jobs["job-12345"] is original_future
 
@@ -151,7 +151,7 @@ class TestDelegationJobTracker:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-12345")
+        tracker.register_job("job-12345")
 
         result = JobResult(
             job_id="job-12345",
@@ -161,7 +161,7 @@ class TestDelegationJobTracker:
             error=None,
         )
 
-        success = await tracker.complete_job(result)
+        success = tracker.complete_job(result)
 
         assert success is True
         assert tracker._pending_jobs["job-12345"].done()
@@ -191,7 +191,7 @@ class TestDelegationJobTracker:
             error=None,
         )
 
-        success = await tracker.complete_job(result)
+        success = tracker.complete_job(result)
 
         assert success is False
 
@@ -210,7 +210,7 @@ class TestDelegationJobTracker:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-12345")
+        tracker.register_job("job-12345")
 
         result1 = JobResult(
             job_id="job-12345",
@@ -227,8 +227,8 @@ class TestDelegationJobTracker:
             error=None,
         )
 
-        success1 = await tracker.complete_job(result1)
-        success2 = await tracker.complete_job(result2)
+        success1 = tracker.complete_job(result1)
+        success2 = tracker.complete_job(result2)
 
         assert success1 is True
         assert success2 is False
@@ -248,7 +248,7 @@ class TestDelegationJobTracker:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-12345")
+        tracker.register_job("job-12345")
 
         result = JobResult(
             job_id="job-12345",
@@ -259,7 +259,7 @@ class TestDelegationJobTracker:
         )
 
         # Complete the job (simulating callback)
-        await tracker.complete_job(result)
+        tracker.complete_job(result)
 
         # Wait should return immediately with the result
         returned_result = await tracker.wait_for_job("job-12345", timeout=1.0)
@@ -281,7 +281,7 @@ class TestDelegationJobTracker:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-12345")
+        tracker.register_job("job-12345")
 
         result = JobResult(
             job_id="job-12345",
@@ -294,7 +294,7 @@ class TestDelegationJobTracker:
         # Schedule completion after a short delay
         async def complete_after_delay():
             await asyncio.sleep(0.1)
-            await tracker.complete_job(result)
+            tracker.complete_job(result)
 
         # Run completion and wait concurrently
         wait_task = asyncio.create_task(tracker.wait_for_job("job-12345", timeout=5.0))
@@ -319,7 +319,7 @@ class TestDelegationJobTracker:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-12345")
+        tracker.register_job("job-12345")
 
         # Wait with a very short timeout
         returned_result = await tracker.wait_for_job("job-12345", timeout=0.05)
@@ -360,7 +360,7 @@ class TestDelegationJobTracker:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-12345")
+        tracker.register_job("job-12345")
 
         result = JobResult(
             job_id="job-12345",
@@ -370,7 +370,7 @@ class TestDelegationJobTracker:
             error=None,
         )
 
-        await tracker.complete_job(result)
+        tracker.complete_job(result)
         await tracker.wait_for_job("job-12345", timeout=1.0)
 
         assert "job-12345" not in tracker._pending_jobs
@@ -389,14 +389,14 @@ class TestDelegationJobTracker:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-12345")
+        tracker.register_job("job-12345")
 
         result = await tracker.wait_for_job("job-12345", timeout=0.05)
 
         assert result is None
         # Job should STILL be registered - timeout doesn't remove it
         assert "job-12345" in tracker._pending_jobs
-        assert await tracker.has_job("job-12345") is True
+        assert tracker.has_job("job-12345") is True
 
     @pytest.mark.asyncio
     async def test_can_retry_wait_after_timeout(self):
@@ -413,14 +413,14 @@ class TestDelegationJobTracker:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-retry-test")
+        tracker.register_job("job-retry-test")
 
         # First wait times out
         result1 = await tracker.wait_for_job("job-retry-test", timeout=0.05)
         assert result1 is None
 
         # Job still exists
-        assert await tracker.has_job("job-retry-test") is True
+        assert tracker.has_job("job-retry-test") is True
 
         # Now complete the job (simulating callback arriving late)
         job_result = JobResult(
@@ -430,7 +430,7 @@ class TestDelegationJobTracker:
             exit_code=0,
             error=None,
         )
-        await tracker.complete_job(job_result)
+        tracker.complete_job(job_result)
 
         # Second wait should return the result immediately
         result2 = await tracker.wait_for_job("job-retry-test", timeout=1.0)
@@ -438,7 +438,7 @@ class TestDelegationJobTracker:
         assert result2.output == "Late callback result"
 
         # Now job should be removed (completed successfully)
-        assert await tracker.has_job("job-retry-test") is False
+        assert tracker.has_job("job-retry-test") is False
 
     @pytest.mark.asyncio
     async def test_multiple_concurrent_jobs(self):
@@ -455,8 +455,8 @@ class TestDelegationJobTracker:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-A")
-        await tracker.register_job("job-B")
+        tracker.register_job("job-A")
+        tracker.register_job("job-B")
 
         result_a = JobResult(
             job_id="job-A", status="completed", output="Result A", exit_code=0, error=None
@@ -466,8 +466,8 @@ class TestDelegationJobTracker:
         )
 
         # Complete job B first, then job A
-        await tracker.complete_job(result_b)
-        await tracker.complete_job(result_a)
+        tracker.complete_job(result_b)
+        tracker.complete_job(result_a)
 
         returned_a = await tracker.wait_for_job("job-A", timeout=1.0)
         returned_b = await tracker.wait_for_job("job-B", timeout=1.0)
@@ -493,7 +493,7 @@ class TestDelegationJobTracker:
 
         async def register_complete_wait(job_num: int) -> bool:
             job_id = f"job-{job_num}"
-            await tracker.register_job(job_id)
+            tracker.register_job(job_id)
             result = JobResult(
                 job_id=job_id,
                 status="completed",
@@ -501,7 +501,7 @@ class TestDelegationJobTracker:
                 exit_code=0,
                 error=None,
             )
-            await tracker.complete_job(result)
+            tracker.complete_job(result)
             returned = await tracker.wait_for_job(job_id, timeout=1.0)
             return returned is not None and returned.output == f"Output {job_num}"
 
@@ -525,16 +525,16 @@ class TestDelegationJobTracker:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-to-cancel")
+        tracker.register_job("job-to-cancel")
 
         # Verify job exists
-        assert await tracker.has_job("job-to-cancel") is True
+        assert tracker.has_job("job-to-cancel") is True
 
         # Cancel the job
-        result = await tracker.cancel_job("job-to-cancel")
+        result = tracker.cancel_job("job-to-cancel")
 
         assert result is True
-        assert await tracker.has_job("job-to-cancel") is False
+        assert tracker.has_job("job-to-cancel") is False
 
     @pytest.mark.asyncio
     async def test_cancel_job_returns_false_for_nonexistent_job(self):
@@ -551,7 +551,7 @@ class TestDelegationJobTracker:
 
         tracker = DelegationJobTracker.get_instance()
 
-        result = await tracker.cancel_job("nonexistent-job")
+        result = tracker.cancel_job("nonexistent-job")
 
         assert result is False
 
@@ -570,7 +570,7 @@ class TestDelegationJobTracker:
         )
 
         tracker = DelegationJobTracker.get_instance()
-        await tracker.register_job("job-completed")
+        tracker.register_job("job-completed")
 
         # Complete the job
         job_result = JobResult(
@@ -580,13 +580,13 @@ class TestDelegationJobTracker:
             exit_code=0,
             error=None,
         )
-        await tracker.complete_job(job_result)
+        tracker.complete_job(job_result)
 
         # Wait to consume the result (removes from tracker)
         await tracker.wait_for_job("job-completed", timeout=1.0)
 
         # Now try to cancel - should fail because job was already consumed
-        result = await tracker.cancel_job("job-completed")
+        result = tracker.cancel_job("job-completed")
 
         assert result is False
 
@@ -622,7 +622,7 @@ class TestDelegationJobTrackerCacheIntegration:
             yield Path(tmpdir) / "payload_cache.db"
 
     @pytest.fixture
-    async def payload_cache(self, temp_db_path):
+    def payload_cache(self, temp_db_path):
         """Create and initialize a PayloadCache instance for testing."""
         from code_indexer.server.cache.payload_cache import (
             PayloadCache,
@@ -631,9 +631,9 @@ class TestDelegationJobTrackerCacheIntegration:
 
         config = PayloadCacheConfig()
         cache = PayloadCache(db_path=temp_db_path, config=config)
-        await cache.initialize()
+        cache.initialize()
         yield cache
-        await cache.close()
+        cache.close()
 
     @pytest.mark.asyncio
     async def test_complete_job_caches_result(self, payload_cache):
@@ -651,7 +651,7 @@ class TestDelegationJobTrackerCacheIntegration:
 
         tracker = DelegationJobTracker.get_instance()
         tracker.set_payload_cache(payload_cache)
-        await tracker.register_job("job-cache-test")
+        tracker.register_job("job-cache-test")
 
         result = JobResult(
             job_id="job-cache-test",
@@ -661,16 +661,16 @@ class TestDelegationJobTrackerCacheIntegration:
             error=None,
         )
 
-        await tracker.complete_job(result)
+        tracker.complete_job(result)
 
         # Verify result is cached
         cache_key = "delegation:job-cache-test"
-        assert await payload_cache.has_key(cache_key) is True
+        assert payload_cache.has_key(cache_key) is True
 
         # Verify cached content is correct JSON
         import json
 
-        cached = await payload_cache.retrieve(cache_key, page=0)
+        cached = payload_cache.retrieve(cache_key, page=0)
         cached_result = json.loads(cached.content)
         assert cached_result["job_id"] == "job-cache-test"
         assert cached_result["status"] == "completed"
@@ -703,10 +703,10 @@ class TestDelegationJobTrackerCacheIntegration:
             "exit_code": 0,
             "error": None,
         }
-        await payload_cache.store_with_key(cache_key, json.dumps(cached_result))
+        payload_cache.store_with_key(cache_key, json.dumps(cached_result))
 
         # Register job (simulating new poll attempt after timeout)
-        await tracker.register_job(job_id)
+        tracker.register_job(job_id)
 
         # wait_for_job should return cached result immediately
         # Using short timeout to verify it doesn't actually wait
@@ -733,7 +733,7 @@ class TestDelegationJobTrackerCacheIntegration:
 
         tracker = DelegationJobTracker.get_instance()
         tracker.set_payload_cache(payload_cache)
-        await tracker.register_job("job-no-cache")
+        tracker.register_job("job-no-cache")
 
         # Complete the job (this will also cache the result)
         result = JobResult(
@@ -743,7 +743,7 @@ class TestDelegationJobTrackerCacheIntegration:
             exit_code=0,
             error=None,
         )
-        await tracker.complete_job(result)
+        tracker.complete_job(result)
 
         # wait_for_job should return the result
         returned = await tracker.wait_for_job("job-no-cache", timeout=1.0)
@@ -767,7 +767,7 @@ class TestDelegationJobTrackerCacheIntegration:
 
         tracker = DelegationJobTracker.get_instance()
         tracker.set_payload_cache(payload_cache)
-        await tracker.register_job("job-retry-scenario")
+        tracker.register_job("job-retry-scenario")
 
         # First wait times out
         result1 = await tracker.wait_for_job("job-retry-scenario", timeout=0.01)
@@ -781,11 +781,11 @@ class TestDelegationJobTrackerCacheIntegration:
             exit_code=0,
             error=None,
         )
-        await tracker.complete_job(callback_result)
+        tracker.complete_job(callback_result)
 
         # Re-register job for retry (simulating new poll from client)
         # Job was removed after callback, so we need to re-register
-        await tracker.register_job("job-retry-scenario")
+        tracker.register_job("job-retry-scenario")
 
         # Second wait should get cached result immediately
         result2 = await tracker.wait_for_job("job-retry-scenario", timeout=0.01)
@@ -810,7 +810,7 @@ class TestDelegationJobTrackerCacheIntegration:
 
         tracker = DelegationJobTracker.get_instance()
         # Do NOT set payload_cache
-        await tracker.register_job("job-no-cache-configured")
+        tracker.register_job("job-no-cache-configured")
 
         result = JobResult(
             job_id="job-no-cache-configured",
@@ -819,7 +819,7 @@ class TestDelegationJobTrackerCacheIntegration:
             exit_code=0,
             error=None,
         )
-        await tracker.complete_job(result)
+        tracker.complete_job(result)
 
         returned = await tracker.wait_for_job("job-no-cache-configured", timeout=1.0)
 
@@ -843,7 +843,7 @@ class TestDelegationJobTrackerCacheIntegration:
 
         tracker = DelegationJobTracker.get_instance()
         tracker.set_payload_cache(payload_cache)
-        await tracker.register_job("job-failed-cache")
+        tracker.register_job("job-failed-cache")
 
         result = JobResult(
             job_id="job-failed-cache",
@@ -852,11 +852,11 @@ class TestDelegationJobTrackerCacheIntegration:
             exit_code=1,
             error="Repository clone failed: authentication denied",
         )
-        await tracker.complete_job(result)
+        tracker.complete_job(result)
 
         # Verify failed result is cached
         cache_key = "delegation:job-failed-cache"
-        cached = await payload_cache.retrieve(cache_key, page=0)
+        cached = payload_cache.retrieve(cache_key, page=0)
         cached_result = json.loads(cached.content)
         assert cached_result["status"] == "failed"
         assert "authentication denied" in cached_result["error"]

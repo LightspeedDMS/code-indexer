@@ -50,7 +50,7 @@ class TestGitHubProviderConfiguration:
             golden_repo_manager=golden_repo_manager,
         )
 
-        assert await provider.is_configured() is True
+        assert provider.is_configured() is True
 
     @pytest.mark.asyncio
     async def test_is_configured_returns_false_when_no_token(self):
@@ -68,7 +68,7 @@ class TestGitHubProviderConfiguration:
             golden_repo_manager=golden_repo_manager,
         )
 
-        assert await provider.is_configured() is False
+        assert provider.is_configured() is False
 
     def test_default_base_url_is_github_api(self):
         """Test that default base URL is api.github.com."""
@@ -127,7 +127,7 @@ class TestGitHubProviderDiscovery:
         mock_response.raise_for_status = MagicMock()
 
         with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = await provider.discover_repositories(page=1, page_size=50)
+            result = provider.discover_repositories(page=1, page_size=50)
 
         assert isinstance(result, RepositoryDiscoveryResult)
         assert result.platform == "github"
@@ -177,7 +177,7 @@ class TestGitHubProviderDiscovery:
         mock_response.raise_for_status = MagicMock()
 
         with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = await provider.discover_repositories(page=1, page_size=50)
+            result = provider.discover_repositories(page=1, page_size=50)
 
         assert len(result.repositories) == 1
         repo = result.repositories[0]
@@ -222,7 +222,7 @@ class TestGitHubProviderDiscovery:
         mock_response.raise_for_status = MagicMock()
 
         with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = await provider.discover_repositories(page=2, page_size=50)
+            result = provider.discover_repositories(page=2, page_size=50)
 
         assert result.total_pages == 3
         assert result.page == 2
@@ -355,7 +355,7 @@ class TestGitHubProviderExclusion:
         mock_response.raise_for_status = MagicMock()
 
         with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = await provider.discover_repositories(page=1, page_size=50)
+            result = provider.discover_repositories(page=1, page_size=50)
 
         # Should only return the new project
         assert len(result.repositories) == 1
@@ -407,7 +407,7 @@ class TestGitHubProviderExclusion:
         mock_response.raise_for_status = MagicMock()
 
         with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = await provider.discover_repositories(page=1, page_size=50)
+            result = provider.discover_repositories(page=1, page_size=50)
 
         # Should be filtered out
         assert len(result.repositories) == 0
@@ -459,7 +459,7 @@ class TestGitHubProviderExclusion:
         mock_response.raise_for_status = MagicMock()
 
         with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = await provider.discover_repositories(page=1, page_size=50)
+            result = provider.discover_repositories(page=1, page_size=50)
 
         # GitHub repo should NOT be excluded - different host
         assert len(result.repositories) == 1
@@ -504,7 +504,7 @@ class TestGitHubProviderSortingOrder:
             return mock_response
 
         with patch.object(provider, "_make_api_request", side_effect=capture_request):
-            await provider.discover_repositories(page=1, page_size=50)
+            provider.discover_repositories(page=1, page_size=50)
 
         # Verify sorting parameters are correct for last push descending
         assert (
@@ -536,7 +536,7 @@ class TestGitHubProviderErrorHandling:
         )
 
         with pytest.raises(GitHubProviderError) as exc_info:
-            await provider.discover_repositories(page=1, page_size=50)
+            provider.discover_repositories(page=1, page_size=50)
 
         assert "not configured" in str(exc_info.value).lower()
 
@@ -571,7 +571,7 @@ class TestGitHubProviderErrorHandling:
 
         with patch.object(provider, "_make_api_request", return_value=mock_response):
             with pytest.raises(GitHubProviderError) as exc_info:
-                await provider.discover_repositories(page=1, page_size=50)
+                provider.discover_repositories(page=1, page_size=50)
 
         assert (
             "api" in str(exc_info.value).lower()
@@ -606,7 +606,7 @@ class TestGitHubProviderErrorHandling:
             side_effect=httpx.TimeoutException("Connection timed out"),
         ):
             with pytest.raises(GitHubProviderError) as exc_info:
-                await provider.discover_repositories(page=1, page_size=50)
+                provider.discover_repositories(page=1, page_size=50)
 
         assert "timed out" in str(exc_info.value).lower()
 
@@ -645,7 +645,7 @@ class TestGitHubProviderErrorHandling:
 
         with patch.object(provider, "_make_api_request", return_value=mock_response):
             with pytest.raises(GitHubProviderError) as exc_info:
-                await provider.discover_repositories(page=1, page_size=50)
+                provider.discover_repositories(page=1, page_size=50)
 
         # Should include rate limit info in error
         assert (
@@ -694,7 +694,7 @@ class TestGitHubProviderServerSideSearch:
             )
 
         with patch.object(provider, "_make_api_request", side_effect=capture_request):
-            await provider.discover_repositories(
+            provider.discover_repositories(
                 page=1, page_size=50, search="myproject"
             )
 
@@ -738,7 +738,7 @@ class TestGitHubProviderServerSideSearch:
             "_make_api_request",
             return_value=self._create_mock_response(search_response),
         ):
-            result = await provider.discover_repositories(
+            result = provider.discover_repositories(
                 page=1, page_size=50, search="myproject"
             )
 
@@ -768,7 +768,7 @@ class TestGitHubProviderServerSideSearch:
             "_make_api_request",
             return_value=self._create_mock_response(search_response),
         ):
-            result = await provider.discover_repositories(
+            result = provider.discover_repositories(
                 page=1, page_size=50, search="myproject"
             )
 
@@ -799,7 +799,7 @@ class TestGitHubProviderServerSideSearch:
             return self._create_mock_response([])
 
         with patch.object(provider, "_make_api_request", side_effect=capture_request):
-            await provider.discover_repositories(page=1, page_size=50, search=None)
+            provider.discover_repositories(page=1, page_size=50, search=None)
 
         assert captured_endpoint == "user/repos"
 
@@ -846,7 +846,7 @@ class TestGitHubProviderServerSideSearch:
             "_make_api_request",
             return_value=self._create_mock_response(search_response),
         ):
-            result = await provider.discover_repositories(
+            result = provider.discover_repositories(
                 page=1, page_size=50, search="data"
             )
 
@@ -877,6 +877,6 @@ class TestGitHubProviderServerSideSearch:
             return self._create_mock_response([])
 
         with patch.object(provider, "_make_api_request", side_effect=capture_request):
-            await provider.discover_repositories(page=1, page_size=50, search="")
+            provider.discover_repositories(page=1, page_size=50, search="")
 
         assert captured_endpoint == "user/repos"

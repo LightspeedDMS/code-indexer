@@ -1,6 +1,7 @@
 """Unit tests for Temporal evolution entry truncation logic (AC2, AC3, AC4).
 
 Story #681: S3 - Temporal Search with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 
 AC2: Evolution Entry Content Truncation
 AC3: Evolution Entry Diff Truncation
@@ -17,10 +18,12 @@ PREVIEW_SIZE = 2000
 
 
 class TestAC2EvolutionContentTruncation:
-    """AC2: Evolution Entry Content Truncation tests."""
+    """AC2: Evolution Entry Content Truncation tests.
 
-    @pytest.mark.asyncio
-    async def test_large_evolution_content_is_truncated(self, cache):
+    Story #50: _apply_temporal_payload_truncation is now sync.
+    """
+
+    def test_large_evolution_content_is_truncated(self, cache):
         """Test that evolution entry content > 2000 chars is truncated."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -47,7 +50,7 @@ class TestAC2EvolutionContentTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         result = truncated[0]
         evo_entry = result["temporal_context"]["evolution"][0]
@@ -72,8 +75,7 @@ class TestAC2EvolutionContentTruncation:
         assert evo_entry["diff_cache_handle"] is None
         assert evo_entry["diff_has_more"] is False
 
-    @pytest.mark.asyncio
-    async def test_small_evolution_content_not_truncated(self, cache):
+    def test_small_evolution_content_not_truncated(self, cache):
         """Test that evolution entry content <= 2000 chars is NOT truncated."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -98,7 +100,7 @@ class TestAC2EvolutionContentTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         evo_entry = truncated[0]["temporal_context"]["evolution"][0]
 
@@ -113,10 +115,12 @@ class TestAC2EvolutionContentTruncation:
 
 
 class TestAC3EvolutionDiffTruncation:
-    """AC3: Evolution Diff Truncation tests."""
+    """AC3: Evolution Diff Truncation tests.
 
-    @pytest.mark.asyncio
-    async def test_large_evolution_diff_is_truncated(self, cache):
+    Story #50: _apply_temporal_payload_truncation is now sync.
+    """
+
+    def test_large_evolution_diff_is_truncated(self, cache):
         """Test that evolution entry diff > 2000 chars is truncated."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -143,7 +147,7 @@ class TestAC3EvolutionDiffTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         evo_entry = truncated[0]["temporal_context"]["evolution"][0]
 
@@ -163,8 +167,7 @@ class TestAC3EvolutionDiffTruncation:
         assert evo_entry["content_cache_handle"] is None
         assert evo_entry["content_has_more"] is False
 
-    @pytest.mark.asyncio
-    async def test_small_evolution_diff_not_truncated(self, cache):
+    def test_small_evolution_diff_not_truncated(self, cache):
         """Test that evolution entry diff <= 2000 chars is NOT truncated."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -189,7 +192,7 @@ class TestAC3EvolutionDiffTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         evo_entry = truncated[0]["temporal_context"]["evolution"][0]
 
@@ -202,8 +205,7 @@ class TestAC3EvolutionDiffTruncation:
         assert "diff_preview" not in evo_entry
         assert "diff_total_size" not in evo_entry
 
-    @pytest.mark.asyncio
-    async def test_both_evolution_content_and_diff_truncated(self, cache):
+    def test_both_evolution_content_and_diff_truncated(self, cache):
         """Test that both content and diff are truncated when both large."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -229,7 +231,7 @@ class TestAC3EvolutionDiffTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         evo_entry = truncated[0]["temporal_context"]["evolution"][0]
 
@@ -249,10 +251,12 @@ class TestAC3EvolutionDiffTruncation:
 
 
 class TestAC4MultipleEvolutionEntries:
-    """AC4: Multiple Evolution Entries tests (independent handles)."""
+    """AC4: Multiple Evolution Entries tests (independent handles).
 
-    @pytest.mark.asyncio
-    async def test_multiple_entries_get_independent_handles(self, cache):
+    Story #50: _apply_temporal_payload_truncation is now sync.
+    """
+
+    def test_multiple_entries_get_independent_handles(self, cache):
         """Test that each evolution entry gets independent cache handles."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -286,7 +290,7 @@ class TestAC4MultipleEvolutionEntries:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         evolution = truncated[0]["temporal_context"]["evolution"]
 
@@ -320,8 +324,7 @@ class TestAC4MultipleEvolutionEntries:
         assert len(handles) == 4
         assert len(set(handles)) == 4  # All unique
 
-    @pytest.mark.asyncio
-    async def test_empty_evolution_array_handled(self, cache):
+    def test_empty_evolution_array_handled(self, cache):
         """Test that empty evolution array is handled correctly."""
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
@@ -332,7 +335,7 @@ class TestAC4MultipleEvolutionEntries:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_temporal_payload_truncation(results)
+            truncated = _apply_temporal_payload_truncation(results)  # Sync call
 
         # Evolution should remain empty array
         assert truncated[0]["temporal_context"]["evolution"] == []

@@ -5,7 +5,7 @@ error messages instead of generic ones that mask the real issues.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 from httpx import Response
 
 from src.code_indexer.api_clients.repository_linking_client import (
@@ -57,11 +57,11 @@ class TestRepositoryListErrorHandlingFix:
         mock_response.status_code = 401
         mock_response.json.return_value = {"detail": "Could not validate credentials"}
 
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should now raise specific AuthenticationError, not generic ActivationError
         with pytest.raises(AuthenticationError) as exc_info:
-            await repository_client.list_user_repositories()
+            repository_client.list_user_repositories()
 
         # Verify specific error message and type
         assert "Authentication failed:" in str(exc_info.value)
@@ -82,11 +82,11 @@ class TestRepositoryListErrorHandlingFix:
             "detail": "Insufficient permissions for repository access"
         }
 
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should raise ActivationError with specific access denied message
         with pytest.raises(ActivationError) as exc_info:
-            await repository_client.list_user_repositories()
+            repository_client.list_user_repositories()
 
         # Verify specific error message
         assert "Access denied:" in str(exc_info.value)
@@ -105,11 +105,11 @@ class TestRepositoryListErrorHandlingFix:
         mock_response.status_code = 404
         mock_response.json.return_value = {"detail": "Not Found"}
 
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should raise ActivationError with endpoint-specific message
         with pytest.raises(ActivationError) as exc_info:
-            await repository_client.list_user_repositories()
+            repository_client.list_user_repositories()
 
         # Verify specific error message for endpoint issues
         assert "Repository list endpoint not available:" in str(exc_info.value)
@@ -128,11 +128,11 @@ class TestRepositoryListErrorHandlingFix:
         mock_response.status_code = 401
         mock_response.json.return_value = {"detail": "Token has expired"}
 
-        query_client._authenticated_request = AsyncMock(return_value=mock_response)
+        query_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should now raise specific AuthenticationError
         with pytest.raises(AuthenticationError) as exc_info:
-            await query_client.list_repositories()
+            query_client.list_repositories()
 
         # Verify specific error message and type
         assert "Authentication failed:" in str(exc_info.value)
@@ -146,11 +146,11 @@ class TestRepositoryListErrorHandlingFix:
         mock_response.status_code = 404
         mock_response.json.return_value = {"detail": "Not Found"}
 
-        query_client._authenticated_request = AsyncMock(return_value=mock_response)
+        query_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should raise APIClientError with endpoint-specific message
         with pytest.raises(APIClientError) as exc_info:
-            await query_client.list_repositories()
+            query_client.list_repositories()
 
         # Verify specific error message for endpoint issues
         assert "Repository list endpoint not available:" in str(exc_info.value)
@@ -183,13 +183,13 @@ class TestRepositoryListErrorHandlingFix:
             mock_response.status_code = status_code
             mock_response.json.return_value = {"detail": detail}
 
-            repository_client._authenticated_request = AsyncMock(
+            repository_client._authenticated_request = MagicMock(
                 return_value=mock_response
             )
 
             # Each error type should raise specific exception with specific message
             with pytest.raises(expected_exception) as exc_info:
-                await repository_client.list_user_repositories()
+                repository_client.list_user_repositories()
 
             error_message = str(exc_info.value)
 
@@ -232,10 +232,10 @@ class TestRepositoryListErrorHandlingFix:
             ]
         }
 
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should succeed without any errors
-        result = await repository_client.list_user_repositories()
+        result = repository_client.list_user_repositories()
 
         # Verify successful operation
         assert len(result) == 1
@@ -249,10 +249,10 @@ class TestRepositoryListErrorHandlingFix:
         mock_response.status_code = 200
         mock_response.json.return_value = {"repositories": []}
 
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should succeed with empty list
-        result = await repository_client.list_user_repositories()
+        result = repository_client.list_user_repositories()
 
         # Verify empty list handling
         assert result == []
@@ -266,10 +266,10 @@ class TestRepositoryListErrorHandlingFix:
         mock_response.status_code = 200
         mock_response.json.return_value = {"data": [], "count": 0}  # Wrong key
 
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should handle missing "repositories" key gracefully
-        result = await repository_client.list_user_repositories()
+        result = repository_client.list_user_repositories()
 
         # Should default to empty list when key is missing
         assert result == []

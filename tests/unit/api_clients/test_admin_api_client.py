@@ -69,7 +69,7 @@ class TestAdminAPIClientRealServer:
 
         try:
             # Create a new user
-            result = await admin_client.create_user(
+            result = admin_client.create_user(
                 username="newuser",
                 password="NewPass123!",
                 role="normal_user",
@@ -83,7 +83,7 @@ class TestAdminAPIClientRealServer:
             assert "created_at" in user_info
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_create_user_insufficient_privileges_with_regular_user(
         self, test_server, user_credentials, temp_project_root
@@ -97,7 +97,7 @@ class TestAdminAPIClientRealServer:
 
         try:
             with pytest.raises(AuthenticationError) as exc_info:
-                await admin_client.create_user(
+                admin_client.create_user(
                     username="unauthorizeduser",
                     password="Pass123!",
                     role="normal_user",
@@ -106,7 +106,7 @@ class TestAdminAPIClientRealServer:
             assert "admin role required" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_create_user_invalid_role(
         self, test_server, admin_credentials, temp_project_root
@@ -120,7 +120,7 @@ class TestAdminAPIClientRealServer:
 
         try:
             with pytest.raises(APIClientError) as exc_info:
-                await admin_client.create_user(
+                admin_client.create_user(
                     username="invalidroleuser",
                     password="Pass123!",
                     role="invalid_role",
@@ -130,7 +130,7 @@ class TestAdminAPIClientRealServer:
             assert "invalid" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_create_user_duplicate_username(
         self, test_server, admin_credentials, temp_project_root
@@ -144,7 +144,7 @@ class TestAdminAPIClientRealServer:
 
         try:
             # Create first user
-            await admin_client.create_user(
+            admin_client.create_user(
                 username="duplicateuser",
                 password="Pass123!",
                 role="normal_user",
@@ -152,7 +152,7 @@ class TestAdminAPIClientRealServer:
 
             # Attempt to create user with same username
             with pytest.raises(APIClientError) as exc_info:
-                await admin_client.create_user(
+                admin_client.create_user(
                     username="duplicateuser",
                     password="AnotherPass123!",
                     role="normal_user",
@@ -162,7 +162,7 @@ class TestAdminAPIClientRealServer:
             assert "conflict" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_create_user_with_admin_role(
         self, test_server, admin_credentials, temp_project_root
@@ -175,7 +175,7 @@ class TestAdminAPIClientRealServer:
         )
 
         try:
-            result = await admin_client.create_user(
+            result = admin_client.create_user(
                 username="newadmin",
                 password="AdminPass123!",
                 role="admin",
@@ -186,7 +186,7 @@ class TestAdminAPIClientRealServer:
             assert result["user"]["username"] == "newadmin"
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_create_user_with_power_user_role(
         self, test_server, admin_credentials, temp_project_root
@@ -199,7 +199,7 @@ class TestAdminAPIClientRealServer:
         )
 
         try:
-            result = await admin_client.create_user(
+            result = admin_client.create_user(
                 username="poweruser",
                 password="PowerPass123!",
                 role="power_user",
@@ -210,7 +210,7 @@ class TestAdminAPIClientRealServer:
             assert result["user"]["username"] == "poweruser"
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_list_users_success_with_admin_credentials(
         self, test_server, admin_credentials, temp_project_root
@@ -224,11 +224,11 @@ class TestAdminAPIClientRealServer:
 
         try:
             # Create some test users first
-            await admin_client.create_user("listuser1", "Pass123!", "normal_user")
-            await admin_client.create_user("listuser2", "Pass123!", "power_user")
+            admin_client.create_user("listuser1", "Pass123!", "normal_user")
+            admin_client.create_user("listuser2", "Pass123!", "power_user")
 
             # List users
-            result = await admin_client.list_users(limit=10, offset=0)
+            result = admin_client.list_users(limit=10, offset=0)
 
             # Verify response structure
             assert "users" in result
@@ -247,7 +247,7 @@ class TestAdminAPIClientRealServer:
                 assert "created_at" in user
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_list_users_with_pagination(
         self, test_server, admin_credentials, temp_project_root
@@ -262,17 +262,15 @@ class TestAdminAPIClientRealServer:
         try:
             # Create multiple test users
             for i in range(5):
-                await admin_client.create_user(
-                    f"pageuser{i}", "Pass123!", "normal_user"
-                )
+                admin_client.create_user(f"pageuser{i}", "Pass123!", "normal_user")
 
             # Test pagination
-            result = await admin_client.list_users(limit=2, offset=0)
+            result = admin_client.list_users(limit=2, offset=0)
             assert "users" in result
             assert len(result["users"]) <= 2
 
             # Test offset
-            result2 = await admin_client.list_users(limit=2, offset=2)
+            result2 = admin_client.list_users(limit=2, offset=2)
             assert "users" in result2
             assert len(result2["users"]) <= 2
 
@@ -283,7 +281,7 @@ class TestAdminAPIClientRealServer:
             assert usernames1 != usernames2 or len(set(usernames1 + usernames2)) > 2
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_list_users_insufficient_privileges_with_regular_user(
         self, test_server, user_credentials, temp_project_root
@@ -297,12 +295,12 @@ class TestAdminAPIClientRealServer:
 
         try:
             with pytest.raises(AuthenticationError) as exc_info:
-                await admin_client.list_users(limit=10, offset=0)
+                admin_client.list_users(limit=10, offset=0)
 
             assert "admin role required" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_authentication_error_with_invalid_credentials(
         self, test_server, temp_project_root
@@ -321,14 +319,14 @@ class TestAdminAPIClientRealServer:
 
         try:
             with pytest.raises(AuthenticationError):
-                await admin_client.create_user(
+                admin_client.create_user(
                     username="shouldfail",
                     password="Pass123!",
                     role="normal_user",
                 )
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_network_error_with_invalid_server_url(
         self, admin_credentials, temp_project_root
@@ -342,14 +340,14 @@ class TestAdminAPIClientRealServer:
 
         try:
             with pytest.raises((NetworkError, APIClientError)):
-                await admin_client.create_user(
+                admin_client.create_user(
                     username="networkfail",
                     password="Pass123!",
                     role="normal_user",
                 )
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     def test_admin_client_initialization(self, admin_credentials, temp_project_root):
         """Test AdminAPIClient initialization."""
@@ -389,14 +387,14 @@ class TestAdminAPIClientRealServer:
 
         try:
             # First create a user to retrieve
-            await admin_client.create_user(
+            admin_client.create_user(
                 username="getuser",
                 password="GetPass123!",
                 role="power_user",
             )
 
             # Get the user details
-            result = await admin_client.get_user("getuser")
+            result = admin_client.get_user("getuser")
 
             # Verify response structure
             assert "user" in result
@@ -406,7 +404,7 @@ class TestAdminAPIClientRealServer:
             assert "created_at" in user_info
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_get_user_not_found(
         self, test_server, admin_credentials, temp_project_root
@@ -420,13 +418,13 @@ class TestAdminAPIClientRealServer:
 
         try:
             with pytest.raises(APIClientError) as exc_info:
-                await admin_client.get_user("nonexistentuser")
+                admin_client.get_user("nonexistentuser")
 
             assert exc_info.value.status_code == 404
             assert "not found" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_get_user_insufficient_privileges_with_regular_user(
         self, test_server, user_credentials, temp_project_root
@@ -440,12 +438,12 @@ class TestAdminAPIClientRealServer:
 
         try:
             with pytest.raises(AuthenticationError) as exc_info:
-                await admin_client.get_user("someuser")
+                admin_client.get_user("someuser")
 
             assert "admin role required" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_update_user_success_with_admin_credentials(
         self, test_server, admin_credentials, temp_project_root
@@ -459,14 +457,14 @@ class TestAdminAPIClientRealServer:
 
         try:
             # First create a user to update
-            await admin_client.create_user(
+            admin_client.create_user(
                 username="updateuser",
                 password="UpdatePass123!",
                 role="normal_user",
             )
 
             # Update the user role
-            result = await admin_client.update_user(
+            result = admin_client.update_user(
                 username="updateuser",
                 role="power_user",
             )
@@ -476,11 +474,11 @@ class TestAdminAPIClientRealServer:
             assert "updated" in result["message"].lower()
 
             # Verify the update worked by retrieving the user
-            user_result = await admin_client.get_user("updateuser")
+            user_result = admin_client.get_user("updateuser")
             assert user_result["user"]["role"] == "power_user"
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_update_user_not_found(
         self, test_server, admin_credentials, temp_project_root
@@ -494,7 +492,7 @@ class TestAdminAPIClientRealServer:
 
         try:
             with pytest.raises(APIClientError) as exc_info:
-                await admin_client.update_user(
+                admin_client.update_user(
                     username="nonexistentuser",
                     role="admin",
                 )
@@ -503,7 +501,7 @@ class TestAdminAPIClientRealServer:
             assert "not found" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_update_user_invalid_role(
         self, test_server, admin_credentials, temp_project_root
@@ -517,7 +515,7 @@ class TestAdminAPIClientRealServer:
 
         try:
             # First create a user to update
-            await admin_client.create_user(
+            admin_client.create_user(
                 username="invalidroleupdate",
                 password="Pass123!",
                 role="normal_user",
@@ -525,7 +523,7 @@ class TestAdminAPIClientRealServer:
 
             # Try to update with invalid role
             with pytest.raises(APIClientError) as exc_info:
-                await admin_client.update_user(
+                admin_client.update_user(
                     username="invalidroleupdate",
                     role="invalid_role",
                 )
@@ -534,7 +532,7 @@ class TestAdminAPIClientRealServer:
             assert "invalid" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_update_user_insufficient_privileges_with_regular_user(
         self, test_server, user_credentials, temp_project_root
@@ -548,7 +546,7 @@ class TestAdminAPIClientRealServer:
 
         try:
             with pytest.raises(AuthenticationError) as exc_info:
-                await admin_client.update_user(
+                admin_client.update_user(
                     username="someuser",
                     role="admin",
                 )
@@ -556,7 +554,7 @@ class TestAdminAPIClientRealServer:
             assert "admin role required" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_delete_user_success_with_admin_credentials(
         self, test_server, admin_credentials, temp_project_root
@@ -570,14 +568,14 @@ class TestAdminAPIClientRealServer:
 
         try:
             # First create a user to delete
-            await admin_client.create_user(
+            admin_client.create_user(
                 username="deleteuser",
                 password="DeletePass123!",
                 role="normal_user",
             )
 
             # Delete the user
-            result = await admin_client.delete_user("deleteuser")
+            result = admin_client.delete_user("deleteuser")
 
             # Verify deletion response
             assert "message" in result
@@ -585,11 +583,11 @@ class TestAdminAPIClientRealServer:
 
             # Verify the user is actually deleted
             with pytest.raises(APIClientError) as exc_info:
-                await admin_client.get_user("deleteuser")
+                admin_client.get_user("deleteuser")
             assert exc_info.value.status_code == 404
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_delete_user_not_found(
         self, test_server, admin_credentials, temp_project_root
@@ -603,13 +601,13 @@ class TestAdminAPIClientRealServer:
 
         try:
             with pytest.raises(APIClientError) as exc_info:
-                await admin_client.delete_user("nonexistentuser")
+                admin_client.delete_user("nonexistentuser")
 
             assert exc_info.value.status_code == 404
             assert "not found" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_delete_user_last_admin_prevention(
         self, test_server, admin_credentials, temp_project_root
@@ -624,13 +622,13 @@ class TestAdminAPIClientRealServer:
         try:
             # Attempt to delete the admin user (should be prevented by server)
             with pytest.raises(APIClientError) as exc_info:
-                await admin_client.delete_user("admin")
+                admin_client.delete_user("admin")
 
             assert exc_info.value.status_code == 400
             assert "admin" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_delete_user_insufficient_privileges_with_regular_user(
         self, test_server, user_credentials, temp_project_root
@@ -644,12 +642,12 @@ class TestAdminAPIClientRealServer:
 
         try:
             with pytest.raises(AuthenticationError) as exc_info:
-                await admin_client.delete_user("someuser")
+                admin_client.delete_user("someuser")
 
             assert "admin role required" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     # === Password Management Operations Tests ===
 
@@ -665,14 +663,14 @@ class TestAdminAPIClientRealServer:
 
         try:
             # First create a user whose password we'll change
-            await admin_client.create_user(
+            admin_client.create_user(
                 username="pwdchangeuser",
                 password="OldPass123!",
                 role="normal_user",
             )
 
             # Change the user's password
-            result = await admin_client.change_user_password(
+            result = admin_client.change_user_password(
                 username="pwdchangeuser",
                 new_password="NewPass456!",
             )
@@ -683,7 +681,7 @@ class TestAdminAPIClientRealServer:
             assert "pwdchangeuser" in result["message"]
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_change_user_password_user_not_found(
         self, test_server, admin_credentials, temp_project_root
@@ -697,7 +695,7 @@ class TestAdminAPIClientRealServer:
 
         try:
             with pytest.raises(APIClientError) as exc_info:
-                await admin_client.change_user_password(
+                admin_client.change_user_password(
                     username="nonexistentuser",
                     new_password="NewPass123!",
                 )
@@ -706,7 +704,7 @@ class TestAdminAPIClientRealServer:
             assert "not found" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_change_user_password_insufficient_privileges_with_regular_user(
         self, test_server, user_credentials, temp_project_root
@@ -720,7 +718,7 @@ class TestAdminAPIClientRealServer:
 
         try:
             with pytest.raises(AuthenticationError) as exc_info:
-                await admin_client.change_user_password(
+                admin_client.change_user_password(
                     username="someuser",
                     new_password="NewPass123!",
                 )
@@ -728,7 +726,7 @@ class TestAdminAPIClientRealServer:
             assert "admin role required" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_change_user_password_invalid_password_validation(
         self, test_server, admin_credentials, temp_project_root
@@ -742,7 +740,7 @@ class TestAdminAPIClientRealServer:
 
         try:
             # First create a user whose password we'll try to change
-            await admin_client.create_user(
+            admin_client.create_user(
                 username="pwdvalidationuser",
                 password="ValidPass123!",
                 role="normal_user",
@@ -750,7 +748,7 @@ class TestAdminAPIClientRealServer:
 
             # Try to change password to empty string
             with pytest.raises(APIClientError) as exc_info:
-                await admin_client.change_user_password(
+                admin_client.change_user_password(
                     username="pwdvalidationuser",
                     new_password="",
                 )
@@ -759,7 +757,7 @@ class TestAdminAPIClientRealServer:
             assert "password" in str(exc_info.value).lower()
 
         finally:
-            await admin_client.close()
+            admin_client.close()
 
     async def test_change_user_password_admin_user_allowed(
         self, test_server, admin_credentials, temp_project_root
@@ -773,14 +771,14 @@ class TestAdminAPIClientRealServer:
 
         try:
             # First create an admin user whose password we'll change
-            await admin_client.create_user(
+            admin_client.create_user(
                 username="pwdadminuser",
                 password="AdminPass123!",
                 role="admin",
             )
 
             # Change the admin user's password
-            result = await admin_client.change_user_password(
+            result = admin_client.change_user_password(
                 username="pwdadminuser",
                 new_password="NewAdminPass456!",
             )
@@ -791,4 +789,4 @@ class TestAdminAPIClientRealServer:
             assert "pwdadminuser" in result["message"]
 
         finally:
-            await admin_client.close()
+            admin_client.close()

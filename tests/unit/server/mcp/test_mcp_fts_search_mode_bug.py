@@ -35,8 +35,7 @@ def mock_user():
 class TestMCPFTSSearchModeBugFix:
     """Test that search_mode parameter is properly handled in MCP."""
 
-    @pytest.mark.asyncio
-    async def test_search_mode_fts_passed_to_query_user_repositories(self, mock_user):
+    def test_search_mode_fts_passed_to_query_user_repositories(self, mock_user):
         """Test that search_mode='fts' is passed to query_user_repositories."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
@@ -56,7 +55,7 @@ class TestMCPFTSSearchModeBugFix:
                 "limit": 3,
             }
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             # Verify query_user_repositories was called with search_mode parameter
             mock_app.semantic_query_manager.query_user_repositories.assert_called_once()
@@ -72,8 +71,7 @@ class TestMCPFTSSearchModeBugFix:
                 call_kwargs["search_mode"] == "fts"
             ), f"Expected search_mode='fts', got search_mode='{call_kwargs.get('search_mode')}'"
 
-    @pytest.mark.asyncio
-    async def test_search_mode_semantic_is_default(self, mock_user):
+    def test_search_mode_semantic_is_default(self, mock_user):
         """Test that search_mode defaults to 'semantic' when not specified."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
@@ -92,7 +90,7 @@ class TestMCPFTSSearchModeBugFix:
                 # No search_mode specified
             }
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             call_kwargs = (
                 mock_app.semantic_query_manager.query_user_repositories.call_args.kwargs
@@ -101,8 +99,7 @@ class TestMCPFTSSearchModeBugFix:
             # Default should be semantic
             assert call_kwargs.get("search_mode") == "semantic"
 
-    @pytest.mark.asyncio
-    async def test_search_mode_hybrid_passed_correctly(self, mock_user):
+    def test_search_mode_hybrid_passed_correctly(self, mock_user):
         """Test that search_mode='hybrid' is passed correctly."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
@@ -121,7 +118,7 @@ class TestMCPFTSSearchModeBugFix:
                 "search_mode": "hybrid",
             }
 
-            await search_code(params, mock_user)
+            search_code(params, mock_user)
 
             call_kwargs = (
                 mock_app.semantic_query_manager.query_user_repositories.call_args.kwargs

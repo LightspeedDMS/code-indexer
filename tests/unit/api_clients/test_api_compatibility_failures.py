@@ -5,7 +5,7 @@ in production to ensure they are properly fixed.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 from httpx import Response
 
 from src.code_indexer.api_clients.repository_linking_client import (
@@ -78,11 +78,11 @@ class TestRepositoryActivationParameterMismatch:
         }
 
         # Mock the request method to return the 422 response
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # This should fail with ActivationError due to parameter mismatch
         with pytest.raises(ActivationError) as exc_info:
-            await repository_client.activate_repository(
+            repository_client.activate_repository(
                 golden_alias="test-repo", branch="main", user_alias="user1"
             )
 
@@ -145,11 +145,11 @@ class TestRepositoryListEndpoint404:
         mock_response.json.return_value = {"detail": "Not Found"}
 
         # Mock the request method to simulate endpoint not found
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # This should fail if endpoint is not properly registered
         with pytest.raises(ActivationError) as exc_info:
-            await repository_client.list_user_repositories()
+            repository_client.list_user_repositories()
 
         # Verify it's calling the correct endpoint
         call_args = repository_client._authenticated_request.call_args
@@ -171,11 +171,11 @@ class TestRepositoryListEndpoint404:
         mock_response.json.return_value = {"detail": "Not Found"}
 
         # Mock the request method
-        query_client._authenticated_request = AsyncMock(return_value=mock_response)
+        query_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # This should fail with APIClientError for 404
         with pytest.raises(APIClientError) as exc_info:
-            await query_client.list_repositories()
+            query_client.list_repositories()
 
         # Verify it's calling the correct endpoint
         call_args = query_client._authenticated_request.call_args
@@ -215,7 +215,7 @@ class TestAPIVersionPrefixMismatch:
         """
         # The current implementation returns empty list without calling the endpoint
         # This test should verify this behavior, not expect an exception
-        result = await query_client.get_query_history("test-repo")
+        result = query_client.get_query_history("test-repo")
 
         # Should return empty list without errors
         assert isinstance(result, list)
@@ -241,10 +241,10 @@ class TestAPIVersionPrefixMismatch:
                 "embedding_count": 500,
             }
         }
-        query_client._authenticated_request = AsyncMock(return_value=mock_response)
+        query_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # This should succeed
-        result = await query_client.get_repository_statistics("test-repo")
+        result = query_client.get_repository_statistics("test-repo")
 
         # Should return statistics data
         assert isinstance(result, dict)
@@ -299,10 +299,10 @@ class TestEndToEndParameterValidation:
             "usage_limits": {},
         }
 
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Execute the activation
-        await repository_client.activate_repository(
+        repository_client.activate_repository(
             golden_alias="test-repo", branch="main", user_alias="user1"
         )
 

@@ -120,7 +120,7 @@ def create_jsonrpc_error(
     return {"jsonrpc": "2.0", "error": error_obj, "id": request_id}
 
 
-async def handle_tools_list(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_tools_list(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handle tools/list method.
 
@@ -202,15 +202,24 @@ async def handle_tools_call(
 
     # Call handler with arguments
     # Special handling for handlers that need session_state (CRITICAL 1, 3 fix)
+    # Story #51: Support both sync and async handlers after conversion to sync
     from typing import cast
     import inspect
 
     # Check if handler accepts session_state parameter
     sig = inspect.signature(handler)
+    is_async = asyncio.iscoroutinefunction(handler)
+
     if "session_state" in sig.parameters:
-        result = await handler(arguments, user, session_state=session_state)
+        if is_async:
+            result = await handler(arguments, user, session_state=session_state)
+        else:
+            result = handler(arguments, user, session_state=session_state)
     else:
-        result = await handler(arguments, user)
+        if is_async:
+            result = await handler(arguments, user)
+        else:
+            result = handler(arguments, user)
     return cast(Dict[str, Any], result)
 
 
@@ -264,7 +273,7 @@ async def process_jsonrpc_request(
             # Return empty result (FastAPI will use 202 if we set it in route)
             return create_jsonrpc_response(None, request_id)
         elif method == "tools/list":
-            result = await handle_tools_list(params, user)
+            result = handle_tools_list(params, user)
             return create_jsonrpc_response(result, request_id)
         elif method == "prompts/list":
             # Per losvedir line 97-106 and README line 275
@@ -385,7 +394,7 @@ async def sse_event_generator():
     yield {"data": "connected"}
 
 
-async def get_optional_user(
+def get_optional_user(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> Optional[User]:
@@ -469,7 +478,7 @@ async def authenticated_sse_generator(user):
 
 
 @mcp_router.delete("/mcp")
-async def mcp_delete_session(
+def mcp_delete_session(
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, str]:
     """MCP DELETE endpoint for session termination."""
@@ -495,7 +504,7 @@ def get_optional_user_from_cookie(request: Request) -> Optional[User]:
         return None
 
 
-async def handle_public_tools_list(user: Optional[User]) -> Dict[str, Any]:
+def handle_public_tools_list(user: Optional[User]) -> Dict[str, Any]:
     """Handle tools/list for /mcp-public endpoint."""
     if user is None:
         return {
@@ -565,7 +574,7 @@ async def process_public_jsonrpc_request(
             return create_jsonrpc_response(None, request_id)
 
         elif method == "tools/list":
-            result = await handle_public_tools_list(user)
+            result = handle_public_tools_list(user)
             return create_jsonrpc_response(result, request_id)
 
         elif method == "prompts/list":

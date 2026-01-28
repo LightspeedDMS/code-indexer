@@ -72,7 +72,7 @@ def _require_admin(user: User = Depends(get_current_user)) -> User:
 
 
 @router.get("/logs", response_model=LogsResponse)
-async def get_logs(
+def get_logs(
     request: Request,
     page: int = 1,
     page_size: int = 50,
@@ -148,7 +148,7 @@ async def get_logs(
 
 
 @router.get("/logs/export")
-async def export_logs(
+def export_logs(
     request: Request,
     format: Literal["json", "csv"] = "json",
     search: Optional[str] = None,

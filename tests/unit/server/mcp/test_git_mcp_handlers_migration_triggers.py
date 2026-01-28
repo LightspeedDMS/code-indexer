@@ -98,8 +98,7 @@ def _extract_response_data(mcp_response: dict) -> dict:
 class TestGitPushMigrationTrigger:
     """Test that git_push handler triggers migration (Bug #639)."""
 
-    @pytest.mark.asyncio
-    async def test_git_push_calls_wrapper_method(
+    def test_git_push_calls_wrapper_method(
         self, mock_user, real_git_service_with_mocked_migration, mock_repo_manager
     ):
         """
@@ -126,7 +125,7 @@ class TestGitPushMigrationTrigger:
                 "branch": "main",
             }
 
-            mcp_response = await handlers.git_push(params, mock_user)
+            mcp_response = handlers.git_push(params, mock_user)
             data = _extract_response_data(mcp_response)
 
             # Verify response is successful
@@ -144,8 +143,7 @@ class TestGitPushMigrationTrigger:
             assert call_args[0][1] == "testuser"  # username
             assert call_args[0][2] == "test-repo"  # repo_alias
 
-    @pytest.mark.asyncio
-    async def test_git_push_migration_trigger_called_before_push(
+    def test_git_push_migration_trigger_called_before_push(
         self, mock_user, real_git_service_with_mocked_migration, mock_repo_manager
     ):
         """
@@ -177,7 +175,7 @@ class TestGitPushMigrationTrigger:
                 "branch": "main",
             }
 
-            await handlers.git_push(params, mock_user)
+            handlers.git_push(params, mock_user)
 
             # Verify migration was called before git_push
             assert call_order == ["migration", "git_push"]
@@ -186,8 +184,7 @@ class TestGitPushMigrationTrigger:
 class TestGitPullMigrationTrigger:
     """Test that git_pull handler triggers migration (Bug #639)."""
 
-    @pytest.mark.asyncio
-    async def test_git_pull_calls_wrapper_method(
+    def test_git_pull_calls_wrapper_method(
         self, mock_user, real_git_service_with_mocked_migration, mock_repo_manager
     ):
         """
@@ -203,7 +200,7 @@ class TestGitPullMigrationTrigger:
                 "branch": "main",
             }
 
-            mcp_response = await handlers.git_pull(params, mock_user)
+            mcp_response = handlers.git_pull(params, mock_user)
             data = _extract_response_data(mcp_response)
 
             # Verify response is successful
@@ -220,8 +217,7 @@ class TestGitPullMigrationTrigger:
             assert call_args[0][1] == "testuser"  # username
             assert call_args[0][2] == "test-repo"  # repo_alias
 
-    @pytest.mark.asyncio
-    async def test_git_pull_migration_trigger_called_before_pull(
+    def test_git_pull_migration_trigger_called_before_pull(
         self, mock_user, real_git_service_with_mocked_migration, mock_repo_manager
     ):
         """
@@ -251,7 +247,7 @@ class TestGitPullMigrationTrigger:
                 "branch": "main",
             }
 
-            await handlers.git_pull(params, mock_user)
+            handlers.git_pull(params, mock_user)
 
             # Verify migration was called before git_pull
             assert call_order == ["migration", "git_pull"]
@@ -260,8 +256,7 @@ class TestGitPullMigrationTrigger:
 class TestGitFetchMigrationTrigger:
     """Test that git_fetch handler triggers migration (Bug #639)."""
 
-    @pytest.mark.asyncio
-    async def test_git_fetch_calls_wrapper_method(
+    def test_git_fetch_calls_wrapper_method(
         self, mock_user, real_git_service_with_mocked_migration, mock_repo_manager
     ):
         """
@@ -276,7 +271,7 @@ class TestGitFetchMigrationTrigger:
                 "remote": "origin",
             }
 
-            mcp_response = await handlers.git_fetch(params, mock_user)
+            mcp_response = handlers.git_fetch(params, mock_user)
             data = _extract_response_data(mcp_response)
 
             # Verify response is successful
@@ -293,8 +288,7 @@ class TestGitFetchMigrationTrigger:
             assert call_args[0][1] == "testuser"  # username
             assert call_args[0][2] == "test-repo"  # repo_alias
 
-    @pytest.mark.asyncio
-    async def test_git_fetch_migration_trigger_called_before_fetch(
+    def test_git_fetch_migration_trigger_called_before_fetch(
         self, mock_user, real_git_service_with_mocked_migration, mock_repo_manager
     ):
         """
@@ -323,7 +317,7 @@ class TestGitFetchMigrationTrigger:
                 "remote": "origin",
             }
 
-            await handlers.git_fetch(params, mock_user)
+            handlers.git_fetch(params, mock_user)
 
             # Verify migration was called before git_fetch
             assert call_order == ["migration", "git_fetch"]

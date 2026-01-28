@@ -46,7 +46,7 @@ class RepositoryLinkingError(Exception):
     pass
 
 
-async def execute_remote_query(
+def execute_remote_query(
     query: str,
     limit: int,
     project_root: Path,
@@ -87,11 +87,11 @@ async def execute_remote_query(
         credentials = _get_decrypted_credentials(project_root)
         server_url = remote_config["server_url"]
 
-        async with RemoteQueryClient(
+        with RemoteQueryClient(
             server_url=server_url, credentials=credentials
         ) as client:
             # Execute query using API client abstraction
-            results = await client.execute_query(
+            results = client.execute_query(
                 repository_alias=repository_alias,
                 query=query,
                 limit=limit,
@@ -112,7 +112,7 @@ async def execute_remote_query(
         raise RemoteOperationError(f"Unexpected error during remote query: {e}")
 
 
-async def discover_and_link_repository(
+def discover_and_link_repository(
     git_url: str,
     branch: str,
     server_url: str,
@@ -135,11 +135,11 @@ async def discover_and_link_repository(
         RepositoryLinkingError: If linking operation fails
     """
     try:
-        async with RepositoryLinkingClient(
+        with RepositoryLinkingClient(
             server_url=server_url, credentials=credentials
         ) as client:
             # Discover repositories using API client abstraction
-            discovery_response = await client.discover_repositories(git_url)
+            discovery_response = client.discover_repositories(git_url)
 
             if discovery_response.total_matches == 0:
                 raise RepositoryLinkingError(
@@ -166,7 +166,7 @@ async def discover_and_link_repository(
             user_alias = f"{repository_match.alias}-{credentials['username']}"
 
             # Activate repository using API client abstraction
-            activated_repo = await client.activate_repository(
+            activated_repo = client.activate_repository(
                 golden_alias=repository_match.alias,
                 branch=branch,
                 user_alias=user_alias,
@@ -193,7 +193,7 @@ async def discover_and_link_repository(
         raise RepositoryLinkingError(f"Unexpected error during repository linking: {e}")
 
 
-async def get_remote_repository_status(project_root: Path) -> RepositoryInfo:
+def get_remote_repository_status(project_root: Path) -> RepositoryInfo:
     """Get remote repository status with no HTTP code here.
 
     Args:
@@ -222,11 +222,11 @@ async def get_remote_repository_status(project_root: Path) -> RepositoryInfo:
         credentials = _get_decrypted_credentials(project_root)
         server_url = remote_config["server_url"]
 
-        async with RemoteQueryClient(
+        with RemoteQueryClient(
             server_url=server_url, credentials=credentials
         ) as client:
             # Get repository info using API client abstraction
-            repo_info = await client.get_repository_info(repository_alias)
+            repo_info = client.get_repository_info(repository_alias)
 
             return cast(RepositoryInfo, repo_info)
 
@@ -360,7 +360,7 @@ def _save_repository_link(
         raise RemoteOperationError(f"Failed to save repository link configuration: {e}")
 
 
-async def list_available_repositories(
+def list_available_repositories(
     server_url: str, credentials: Dict[str, Any]
 ) -> List[ActivatedRepository]:
     """List all repositories available to the current user.
@@ -376,10 +376,10 @@ async def list_available_repositories(
         RemoteOperationError: If listing fails
     """
     try:
-        async with RepositoryLinkingClient(
+        with RepositoryLinkingClient(
             server_url=server_url, credentials=credentials
         ) as client:
-            repositories = await client.list_user_repositories()
+            repositories = client.list_user_repositories()
             return cast(List[ActivatedRepository], repositories)
 
     except ActivationError as e:
@@ -392,7 +392,7 @@ async def list_available_repositories(
         raise RemoteOperationError(f"Unexpected error listing repositories: {e}")
 
 
-async def deactivate_repository_link(project_root: Path) -> bool:
+def deactivate_repository_link(project_root: Path) -> bool:
     """Deactivate current repository link.
 
     Args:
@@ -421,11 +421,11 @@ async def deactivate_repository_link(project_root: Path) -> bool:
         credentials = _get_decrypted_credentials(project_root)
         server_url = remote_config["server_url"]
 
-        async with RepositoryLinkingClient(
+        with RepositoryLinkingClient(
             server_url=server_url, credentials=credentials
         ) as client:
             # Deactivate repository using API client abstraction
-            success = await client.deactivate_repository(repository_alias)
+            success = client.deactivate_repository(repository_alias)
 
             if success:
                 # Remove local configuration files

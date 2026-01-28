@@ -54,7 +54,7 @@ class RepositoryNotLinkedException(RemoteSyncExecutionError):
 class SyncClient(CIDXRemoteAPIClient):
     """Client for repository synchronization operations."""
 
-    async def sync_repository(
+    def sync_repository(
         self,
         repo_alias: str,
         force_sync: bool = False,
@@ -88,7 +88,7 @@ class SyncClient(CIDXRemoteAPIClient):
         endpoint = f"/api/repositories/{repo_alias}/sync"
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST", endpoint, json=sync_request, timeout=timeout
             )
 
@@ -123,7 +123,7 @@ class SyncClient(CIDXRemoteAPIClient):
                 raise
             raise RemoteSyncExecutionError(f"Unexpected error during sync: {e}")
 
-    async def sync_all_repositories(
+    def sync_all_repositories(
         self,
         force_sync: bool = False,
         incremental: bool = True,
@@ -153,7 +153,7 @@ class SyncClient(CIDXRemoteAPIClient):
         )
 
         try:
-            repositories = await linking_client.list_user_repositories()
+            repositories = linking_client.list_user_repositories()
 
             if not repositories:
                 return []
@@ -162,7 +162,7 @@ class SyncClient(CIDXRemoteAPIClient):
             results = []
             for repo in repositories:
                 try:
-                    result = await self.sync_repository(
+                    result = self.sync_repository(
                         repo_alias=repo.user_alias,
                         force_sync=force_sync,
                         incremental=incremental,
@@ -183,10 +183,10 @@ class SyncClient(CIDXRemoteAPIClient):
             return results
 
         finally:
-            await linking_client.close()
+            linking_client.close()
 
 
-async def execute_repository_sync(
+def execute_repository_sync(
     repository_alias: Optional[str],
     project_root: Path,
     sync_all: bool = False,
@@ -246,7 +246,7 @@ async def execute_repository_sync(
                     )
 
                     try:
-                        repositories = await linking_client.list_user_repositories()
+                        repositories = linking_client.list_user_repositories()
                         results = []
                         for repo in repositories:
                             results.append(
@@ -259,7 +259,7 @@ async def execute_repository_sync(
                             )
                         return results
                     finally:
-                        await linking_client.close()
+                        linking_client.close()
                 else:
                     # Determine repository to sync
                     if repository_alias:
@@ -286,7 +286,7 @@ async def execute_repository_sync(
 
             # Execute actual sync
             if sync_all:
-                results = await sync_client.sync_all_repositories(
+                results = sync_client.sync_all_repositories(
                     force_sync=False,
                     incremental=not full_reindex,
                     pull_remote=not no_pull,
@@ -313,7 +313,7 @@ async def execute_repository_sync(
                             "Use 'cidx link' to link this repository or specify a repository alias."
                         )
 
-                result = await sync_client.sync_repository(
+                result = sync_client.sync_repository(
                     repo_alias=repo_name,
                     force_sync=False,
                     incremental=not full_reindex,
@@ -325,12 +325,12 @@ async def execute_repository_sync(
 
             # Poll for job completion if enabled
             if enable_polling and progress_callback and not dry_run:
-                await _poll_sync_jobs(sync_client, results, timeout, progress_callback)
+                _poll_sync_jobs(sync_client, results, timeout, progress_callback)
 
             return results
 
         finally:
-            await sync_client.close()
+            sync_client.close()
 
     except (
         CredentialNotFoundError,
@@ -347,7 +347,7 @@ async def execute_repository_sync(
         raise RemoteSyncExecutionError(f"Sync execution failed: {e}")
 
 
-async def _poll_sync_jobs(
+def _poll_sync_jobs(
     sync_client: "SyncClient",
     results: List[SyncJobResult],
     timeout: int,
@@ -387,9 +387,7 @@ async def _poll_sync_jobs(
                 )
 
                 # Start polling for this job with timeout
-                final_status = await polling_engine.start_polling(
-                    job_result.job_id, timeout
-                )
+                final_status = polling_engine.start_polling(job_result.job_id, timeout)
 
                 # Update result with final status
                 job_result.status = final_status.status

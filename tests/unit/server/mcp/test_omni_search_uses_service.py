@@ -5,12 +5,15 @@ Verifies that _omni_search_code delegates to MultiSearchService.search()
 instead of having its own parallel execution implementation.
 
 Written following TDD methodology - tests first, implementation second.
+
+Story #51: Converted to sync tests since _omni_search_code and
+MultiSearchService.search() are now synchronous for FastAPI thread pool execution.
 """
 
 import json
 import pytest
 from datetime import datetime
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, patch
 from code_indexer.server.auth.user_manager import User, UserRole
 
 
@@ -53,8 +56,7 @@ def mock_wildcard_expansion():
 class TestOmniSearchDelegatesToService:
     """Test that _omni_search_code delegates to MultiSearchService."""
 
-    @pytest.mark.asyncio
-    async def test_omni_search_creates_multi_search_service(
+    def test_omni_search_creates_multi_search_service(
         self, mock_user, mock_config_service, mock_wildcard_expansion
     ):
         """_omni_search_code creates MultiSearchService with correct config."""
@@ -84,10 +86,10 @@ class TestOmniSearchDelegatesToService:
                 ),
                 errors=None,
             )
-            mock_service.search = AsyncMock(return_value=mock_response)
+            mock_service.search = Mock(return_value=mock_response)
             mock_service_class.return_value = mock_service
 
-            await _omni_search_code(params, mock_user)
+            _omni_search_code(params, mock_user)
 
             # Verify MultiSearchService was created with correct config
             mock_service_class.assert_called_once()
@@ -96,8 +98,7 @@ class TestOmniSearchDelegatesToService:
             assert config.max_workers == 4
             assert config.query_timeout_seconds == 30
 
-    @pytest.mark.asyncio
-    async def test_omni_search_calls_service_search(
+    def test_omni_search_calls_service_search(
         self, mock_user, mock_config_service, mock_wildcard_expansion
     ):
         """_omni_search_code calls MultiSearchService.search() with request."""
@@ -127,16 +128,15 @@ class TestOmniSearchDelegatesToService:
                 ),
                 errors=None,
             )
-            mock_service.search = AsyncMock(return_value=mock_response)
+            mock_service.search = Mock(return_value=mock_response)
             mock_service_class.return_value = mock_service
 
-            await _omni_search_code(params, mock_user)
+            _omni_search_code(params, mock_user)
 
             # Verify search was called
             mock_service.search.assert_called_once()
 
-    @pytest.mark.asyncio
-    async def test_omni_search_no_asyncio_gather(
+    def test_omni_search_no_asyncio_gather(
         self, mock_user, mock_config_service, mock_wildcard_expansion
     ):
         """_omni_search_code should NOT use asyncio.gather (delegates to service)."""
@@ -166,12 +166,12 @@ class TestOmniSearchDelegatesToService:
                 ),
                 errors=None,
             )
-            mock_service.search = AsyncMock(return_value=mock_response)
+            mock_service.search = Mock(return_value=mock_response)
             mock_service_class.return_value = mock_service
 
             # Patch asyncio.gather to detect if it's used
             with patch("asyncio.gather") as mock_gather:
-                await _omni_search_code(params, mock_user)
+                _omni_search_code(params, mock_user)
 
                 # asyncio.gather should NOT be called (delegation eliminates it)
                 mock_gather.assert_not_called()
@@ -180,8 +180,7 @@ class TestOmniSearchDelegatesToService:
 class TestOmniSearchParameterMapping:
     """Test parameter mapping from MCP params to MultiSearchRequest."""
 
-    @pytest.mark.asyncio
-    async def test_maps_query_text_to_query(
+    def test_maps_query_text_to_query(
         self, mock_user, mock_config_service, mock_wildcard_expansion
     ):
         """query_text param maps to MultiSearchRequest.query."""
@@ -208,18 +207,17 @@ class TestOmniSearchParameterMapping:
                 ),
                 errors=None,
             )
-            mock_service.search = AsyncMock(return_value=mock_response)
+            mock_service.search = Mock(return_value=mock_response)
             mock_service_class.return_value = mock_service
 
-            await _omni_search_code(params, mock_user)
+            _omni_search_code(params, mock_user)
 
             # Check the request passed to search()
             call_args = mock_service.search.call_args
             request = call_args[0][0]
             assert request.query == "find authentication logic"
 
-    @pytest.mark.asyncio
-    async def test_maps_repository_alias_to_repositories(
+    def test_maps_repository_alias_to_repositories(
         self, mock_user, mock_config_service, mock_wildcard_expansion
     ):
         """repository_alias array maps to MultiSearchRequest.repositories."""
@@ -250,10 +248,10 @@ class TestOmniSearchParameterMapping:
                 ),
                 errors=None,
             )
-            mock_service.search = AsyncMock(return_value=mock_response)
+            mock_service.search = Mock(return_value=mock_response)
             mock_service_class.return_value = mock_service
 
-            await _omni_search_code(params, mock_user)
+            _omni_search_code(params, mock_user)
 
             call_args = mock_service.search.call_args
             request = call_args[0][0]
@@ -263,8 +261,7 @@ class TestOmniSearchParameterMapping:
                 "repo3-global",
             ]
 
-    @pytest.mark.asyncio
-    async def test_maps_search_mode_to_search_type(
+    def test_maps_search_mode_to_search_type(
         self, mock_user, mock_config_service, mock_wildcard_expansion
     ):
         """search_mode param maps to MultiSearchRequest.search_type."""
@@ -292,17 +289,16 @@ class TestOmniSearchParameterMapping:
                 ),
                 errors=None,
             )
-            mock_service.search = AsyncMock(return_value=mock_response)
+            mock_service.search = Mock(return_value=mock_response)
             mock_service_class.return_value = mock_service
 
-            await _omni_search_code(params, mock_user)
+            _omni_search_code(params, mock_user)
 
             call_args = mock_service.search.call_args
             request = call_args[0][0]
             assert request.search_type == "fts"
 
-    @pytest.mark.asyncio
-    async def test_default_search_mode_is_semantic(
+    def test_default_search_mode_is_semantic(
         self, mock_user, mock_config_service, mock_wildcard_expansion
     ):
         """Default search_mode (semantic) maps correctly."""
@@ -330,10 +326,10 @@ class TestOmniSearchParameterMapping:
                 ),
                 errors=None,
             )
-            mock_service.search = AsyncMock(return_value=mock_response)
+            mock_service.search = Mock(return_value=mock_response)
             mock_service_class.return_value = mock_service
 
-            await _omni_search_code(params, mock_user)
+            _omni_search_code(params, mock_user)
 
             call_args = mock_service.search.call_args
             request = call_args[0][0]
@@ -343,8 +339,7 @@ class TestOmniSearchParameterMapping:
 class TestOmniSearchResponseConversion:
     """Test conversion from MultiSearchResponse to MCP format."""
 
-    @pytest.mark.asyncio
-    async def test_converts_grouped_results_to_flat_list(
+    def test_converts_grouped_results_to_flat_list(
         self, mock_user, mock_config_service, mock_wildcard_expansion
     ):
         """Service results grouped by repo are converted to flat list with source_repo."""
@@ -383,17 +378,15 @@ class TestOmniSearchResponseConversion:
                 ),
                 errors=None,
             )
-            mock_service.search = AsyncMock(return_value=mock_response)
+            mock_service.search = Mock(return_value=mock_response)
             mock_service_class.return_value = mock_service
 
             # Mock truncation to pass through
             with patch(
                 "code_indexer.server.mcp.handlers._apply_payload_truncation",
-                new_callable=AsyncMock,
-            ) as mock_truncation:
-                mock_truncation.side_effect = lambda results: results
-
-                result = await _omni_search_code(params, mock_user)
+                side_effect=lambda results: results,
+            ):
+                result = _omni_search_code(params, mock_user)
 
             # Parse response
             response_data = json.loads(result["content"][0]["text"])
@@ -410,8 +403,7 @@ class TestOmniSearchResponseConversion:
             assert len(repo1_results) == 2
             assert len(repo2_results) == 1
 
-    @pytest.mark.asyncio
-    async def test_errors_passed_through_from_service(
+    def test_errors_passed_through_from_service(
         self, mock_user, mock_config_service, mock_wildcard_expansion
     ):
         """Errors from service are passed through to MCP response."""
@@ -438,17 +430,16 @@ class TestOmniSearchResponseConversion:
                 ),
                 errors={"bad-repo": "Repository not found"},
             )
-            mock_service.search = AsyncMock(return_value=mock_response)
+            mock_service.search = Mock(return_value=mock_response)
             mock_service_class.return_value = mock_service
 
-            result = await _omni_search_code(params, mock_user)
+            result = _omni_search_code(params, mock_user)
 
             response_data = json.loads(result["content"][0]["text"])
             assert "bad-repo" in response_data["results"]["errors"]
             assert "not found" in response_data["results"]["errors"]["bad-repo"].lower()
 
-    @pytest.mark.asyncio
-    async def test_total_repos_searched_from_metadata(
+    def test_total_repos_searched_from_metadata(
         self, mock_user, mock_config_service, mock_wildcard_expansion
     ):
         """total_repos_searched comes from service metadata."""
@@ -477,10 +468,10 @@ class TestOmniSearchResponseConversion:
                 ),
                 errors={"repo3-global": "Not found"},
             )
-            mock_service.search = AsyncMock(return_value=mock_response)
+            mock_service.search = Mock(return_value=mock_response)
             mock_service_class.return_value = mock_service
 
-            result = await _omni_search_code(params, mock_user)
+            result = _omni_search_code(params, mock_user)
 
             response_data = json.loads(result["content"][0]["text"])
             assert response_data["results"]["total_repos_searched"] == 2

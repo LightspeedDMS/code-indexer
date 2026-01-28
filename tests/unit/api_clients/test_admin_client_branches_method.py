@@ -2,7 +2,7 @@
 Unit tests for AdminAPIClient.get_golden_repository_branches method.
 """
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -32,10 +32,9 @@ class TestAdminClientBranchesMethod:
         self, admin_client
     ):
         """Test that the method calls the correct API endpoint."""
-        from unittest.mock import MagicMock
 
         with patch.object(
-            admin_client, "_authenticated_request", new_callable=AsyncMock
+            admin_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -45,7 +44,7 @@ class TestAdminClientBranchesMethod:
             }
             mock_request.return_value = mock_response
 
-            result = await admin_client.get_golden_repository_branches("test-repo")
+            result = admin_client.get_golden_repository_branches("test-repo")
 
             mock_request.assert_called_once_with(
                 "GET", "/api/repos/golden/test-repo/branches"

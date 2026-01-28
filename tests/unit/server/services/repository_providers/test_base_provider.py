@@ -125,6 +125,6 @@ class TestRepositoryProviderBase:
                 )
 
         provider = ConcreteProvider()
-        assert await provider.is_configured() is True
-        result = await provider.discover_repositories(page=1, page_size=50)
+        assert provider.is_configured() is True
+        result = provider.discover_repositories(page=1, page_size=50)
         assert isinstance(result, RepositoryDiscoveryResult)

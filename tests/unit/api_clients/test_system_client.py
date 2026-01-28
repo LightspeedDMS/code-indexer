@@ -5,7 +5,6 @@ and validate actual health endpoint integration.
 """
 
 import pytest
-import asyncio
 import time
 from pathlib import Path
 from typing import Dict, Any
@@ -50,7 +49,7 @@ class TestSystemAPIClientHealthMonitoring:
             mock_request.return_value = mock_response
 
             start_time = time.time()
-            result = await system_client.check_basic_health()
+            result = system_client.check_basic_health()
             end_time = time.time()
 
             # Verify response structure
@@ -100,7 +99,7 @@ class TestSystemAPIClientHealthMonitoring:
             }
             mock_request.return_value = mock_response
 
-            result = await system_client.check_detailed_health()
+            result = system_client.check_detailed_health()
 
             # Verify response structure
             assert result["status"] == "healthy"
@@ -141,7 +140,7 @@ class TestSystemAPIClientHealthMonitoring:
             )
 
             with pytest.raises(AuthenticationError) as exc_info:
-                await system_client.check_basic_health()
+                system_client.check_basic_health()
 
             assert "Invalid token" in str(exc_info.value)
             assert exc_info.value.status_code == 401
@@ -157,7 +156,7 @@ class TestSystemAPIClientHealthMonitoring:
             )
 
             with pytest.raises(AuthenticationError) as exc_info:
-                await system_client.check_detailed_health()
+                system_client.check_detailed_health()
 
             assert "Token expired" in str(exc_info.value)
             assert exc_info.value.status_code == 401
@@ -173,7 +172,7 @@ class TestSystemAPIClientHealthMonitoring:
             )
 
             with pytest.raises(APIClientError) as exc_info:
-                await system_client.check_basic_health()
+                system_client.check_basic_health()
 
             assert "Internal server error" in str(exc_info.value)
             assert exc_info.value.status_code == 500
@@ -189,20 +188,17 @@ class TestSystemAPIClientHealthMonitoring:
             )
 
             with pytest.raises(APIClientError) as exc_info:
-                await system_client.check_detailed_health()
+                system_client.check_detailed_health()
 
             assert "Service unavailable" in str(exc_info.value)
             assert exc_info.value.status_code == 503
 
-    @pytest.mark.asyncio
-    async def test_response_time_measurement_accuracy(
-        self, system_client: SystemAPIClient
-    ):
+    def test_response_time_measurement_accuracy(self, system_client: SystemAPIClient):
         """Test that response time measurement is accurate."""
         with patch.object(system_client, "_authenticated_request") as mock_request:
-            # Simulate a delay in the API response
-            async def delayed_response(*args, **kwargs):
-                await asyncio.sleep(0.1)  # 100ms delay
+            # Simulate a delay in the API response (sync version)
+            def delayed_response(*args, **kwargs):
+                time.sleep(0.1)  # 100ms delay
                 mock_response = MagicMock()
                 mock_response.json.return_value = {
                     "status": "ok",
@@ -213,17 +209,18 @@ class TestSystemAPIClientHealthMonitoring:
 
             mock_request.side_effect = delayed_response
 
-            result = await system_client.check_basic_health()
+            result = system_client.check_basic_health()
 
             # Response time should be approximately 100ms (with some tolerance)
             response_time_ms = result["response_time_ms"]
             assert 90 <= response_time_ms <= 150  # 100ms ± 50ms tolerance
 
-    @pytest.mark.asyncio
-    async def test_health_check_concurrent_requests(
-        self, system_client: SystemAPIClient
-    ):
-        """Test that multiple concurrent health checks work correctly."""
+    def test_health_check_concurrent_requests(self, system_client: SystemAPIClient):
+        """Test that multiple health checks work correctly.
+
+        Note: check_basic_health() is a sync method, so we run multiple calls
+        sequentially rather than using asyncio.gather.
+        """
         with patch.object(system_client, "_authenticated_request") as mock_request:
             mock_response = MagicMock()
             mock_response.json.return_value = {
@@ -233,9 +230,8 @@ class TestSystemAPIClientHealthMonitoring:
             }
             mock_request.return_value = mock_response
 
-            # Run 5 concurrent health checks
-            tasks = [system_client.check_basic_health() for _ in range(5)]
-            results = await asyncio.gather(*tasks)
+            # Run 5 health checks (sync method, run sequentially)
+            results = [system_client.check_basic_health() for _ in range(5)]
 
             # Verify all requests succeeded
             assert len(results) == 5

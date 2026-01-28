@@ -125,7 +125,7 @@ class TestRegexSearchServiceMetrics:
             stack.enter_context(patch.object(Path, "exists", return_value=True))
 
             # Execute search - should complete successfully
-            result = await service.search(pattern="test", max_results=10)
+            result = service.search(pattern="test", max_results=10)
 
             # Verify search completed
             assert result is not None

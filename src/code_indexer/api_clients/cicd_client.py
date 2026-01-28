@@ -49,7 +49,7 @@ class CICDAPIClient(CIDXRemoteAPIClient):
             project_root=project_root,
         )
 
-    async def _make_cicd_request(
+    def _make_cicd_request(
         self,
         method: str,
         endpoint: str,
@@ -75,7 +75,7 @@ class CICDAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 method, endpoint, params=params if params else None
             )
 
@@ -112,7 +112,7 @@ class CICDAPIClient(CIDXRemoteAPIClient):
 
     # GitHub Actions Methods
 
-    async def github_list_runs(
+    def github_list_runs(
         self,
         owner: str,
         repo: str,
@@ -129,7 +129,7 @@ class CICDAPIClient(CIDXRemoteAPIClient):
         if limit:
             params["limit"] = limit
 
-        return await self._make_cicd_request(
+        return self._make_cicd_request(
             "GET",
             f"/api/cicd/github/{owner}/{repo}/runs",
             f"Repository '{owner}/{repo}' not found",
@@ -137,18 +137,16 @@ class CICDAPIClient(CIDXRemoteAPIClient):
             params,
         )
 
-    async def github_get_run(
-        self, owner: str, repo: str, run_id: int
-    ) -> Dict[str, Any]:
+    def github_get_run(self, owner: str, repo: str, run_id: int) -> Dict[str, Any]:
         """Get details of a specific GitHub Actions workflow run."""
-        return await self._make_cicd_request(
+        return self._make_cicd_request(
             "GET",
             f"/api/cicd/github/{owner}/{repo}/runs/{run_id}",
             f"Run '{run_id}' not found in repository '{owner}/{repo}'",
             "get GitHub run",
         )
 
-    async def github_search_logs(
+    def github_search_logs(
         self,
         owner: str,
         repo: str,
@@ -157,7 +155,7 @@ class CICDAPIClient(CIDXRemoteAPIClient):
     ) -> Dict[str, Any]:
         """Search logs for a GitHub Actions workflow run."""
         params = {"query": query} if query else None
-        return await self._make_cicd_request(
+        return self._make_cicd_request(
             "GET",
             f"/api/cicd/github/{owner}/{repo}/runs/{run_id}/logs",
             f"Run '{run_id}' not found in repository '{owner}/{repo}'",
@@ -165,33 +163,27 @@ class CICDAPIClient(CIDXRemoteAPIClient):
             params,
         )
 
-    async def github_get_job_logs(
-        self, owner: str, repo: str, job_id: int
-    ) -> Dict[str, Any]:
+    def github_get_job_logs(self, owner: str, repo: str, job_id: int) -> Dict[str, Any]:
         """Get complete logs for a specific GitHub Actions job."""
-        return await self._make_cicd_request(
+        return self._make_cicd_request(
             "GET",
             f"/api/cicd/github/{owner}/{repo}/jobs/{job_id}/logs",
             f"Job '{job_id}' not found in repository '{owner}/{repo}'",
             "get GitHub job logs",
         )
 
-    async def github_retry_run(
-        self, owner: str, repo: str, run_id: int
-    ) -> Dict[str, Any]:
+    def github_retry_run(self, owner: str, repo: str, run_id: int) -> Dict[str, Any]:
         """Retry a failed GitHub Actions workflow run."""
-        return await self._make_cicd_request(
+        return self._make_cicd_request(
             "POST",
             f"/api/cicd/github/{owner}/{repo}/runs/{run_id}/retry",
             f"Run '{run_id}' not found in repository '{owner}/{repo}'",
             "retry GitHub run",
         )
 
-    async def github_cancel_run(
-        self, owner: str, repo: str, run_id: int
-    ) -> Dict[str, Any]:
+    def github_cancel_run(self, owner: str, repo: str, run_id: int) -> Dict[str, Any]:
         """Cancel a running or queued GitHub Actions workflow run."""
-        return await self._make_cicd_request(
+        return self._make_cicd_request(
             "POST",
             f"/api/cicd/github/{owner}/{repo}/runs/{run_id}/cancel",
             f"Run '{run_id}' not found in repository '{owner}/{repo}'",
@@ -200,7 +192,7 @@ class CICDAPIClient(CIDXRemoteAPIClient):
 
     # GitLab CI Methods
 
-    async def gitlab_list_pipelines(
+    def gitlab_list_pipelines(
         self,
         project_id: str,
         status: Optional[str] = None,
@@ -216,7 +208,7 @@ class CICDAPIClient(CIDXRemoteAPIClient):
         if limit:
             params["limit"] = limit
 
-        return await self._make_cicd_request(
+        return self._make_cicd_request(
             "GET",
             f"/api/cicd/gitlab/{project_id}/pipelines",
             f"Project '{project_id}' not found",
@@ -224,18 +216,16 @@ class CICDAPIClient(CIDXRemoteAPIClient):
             params,
         )
 
-    async def gitlab_get_pipeline(
-        self, project_id: str, pipeline_id: int
-    ) -> Dict[str, Any]:
+    def gitlab_get_pipeline(self, project_id: str, pipeline_id: int) -> Dict[str, Any]:
         """Get details of a specific GitLab CI pipeline."""
-        return await self._make_cicd_request(
+        return self._make_cicd_request(
             "GET",
             f"/api/cicd/gitlab/{project_id}/pipelines/{pipeline_id}",
             f"Pipeline '{pipeline_id}' not found in project '{project_id}'",
             "get GitLab pipeline",
         )
 
-    async def gitlab_search_logs(
+    def gitlab_search_logs(
         self,
         project_id: str,
         pipeline_id: int,
@@ -243,7 +233,7 @@ class CICDAPIClient(CIDXRemoteAPIClient):
     ) -> Dict[str, Any]:
         """Search logs for a GitLab CI pipeline."""
         params = {"query": query} if query else None
-        return await self._make_cicd_request(
+        return self._make_cicd_request(
             "GET",
             f"/api/cicd/gitlab/{project_id}/pipelines/{pipeline_id}/logs",
             f"Pipeline '{pipeline_id}' not found in project '{project_id}'",
@@ -251,31 +241,31 @@ class CICDAPIClient(CIDXRemoteAPIClient):
             params,
         )
 
-    async def gitlab_get_job_logs(self, project_id: str, job_id: int) -> Dict[str, Any]:
+    def gitlab_get_job_logs(self, project_id: str, job_id: int) -> Dict[str, Any]:
         """Get complete logs for a specific GitLab CI job."""
-        return await self._make_cicd_request(
+        return self._make_cicd_request(
             "GET",
             f"/api/cicd/gitlab/{project_id}/jobs/{job_id}/logs",
             f"Job '{job_id}' not found in project '{project_id}'",
             "get GitLab job logs",
         )
 
-    async def gitlab_retry_pipeline(
+    def gitlab_retry_pipeline(
         self, project_id: str, pipeline_id: int
     ) -> Dict[str, Any]:
         """Retry a failed GitLab CI pipeline."""
-        return await self._make_cicd_request(
+        return self._make_cicd_request(
             "POST",
             f"/api/cicd/gitlab/{project_id}/pipelines/{pipeline_id}/retry",
             f"Pipeline '{pipeline_id}' not found in project '{project_id}'",
             "retry GitLab pipeline",
         )
 
-    async def gitlab_cancel_pipeline(
+    def gitlab_cancel_pipeline(
         self, project_id: str, pipeline_id: int
     ) -> Dict[str, Any]:
         """Cancel a running or pending GitLab CI pipeline."""
-        return await self._make_cicd_request(
+        return self._make_cicd_request(
             "POST",
             f"/api/cicd/gitlab/{project_id}/pipelines/{pipeline_id}/cancel",
             f"Pipeline '{pipeline_id}' not found in project '{project_id}'",

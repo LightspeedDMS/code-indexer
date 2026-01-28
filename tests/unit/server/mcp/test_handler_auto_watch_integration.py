@@ -74,8 +74,7 @@ def mock_activated_repo_manager():
 class TestHandleCreateFileAutoWatch:
     """Tests for auto-watch integration in handle_create_file."""
 
-    @pytest.mark.asyncio
-    async def test_create_file_starts_auto_watch(
+    def test_create_file_starts_auto_watch(
         self,
         mock_user,
         mock_auto_watch_manager,
@@ -106,7 +105,7 @@ class TestHandleCreateFileAutoWatch:
             ) as MockActivatedRepoManager,
         ):
             MockActivatedRepoManager.return_value = mock_activated_repo_manager
-            result = await handle_create_file(params, mock_user)
+            result = handle_create_file(params, mock_user)
 
         # Verify auto-watch was started with repository path
         mock_auto_watch_manager.start_watch.assert_called_once()
@@ -120,8 +119,7 @@ class TestHandleCreateFileAutoWatch:
         response_data = json.loads(result["content"][0]["text"])
         assert response_data["success"] is True
 
-    @pytest.mark.asyncio
-    async def test_create_file_auto_watch_called_before_creation(
+    def test_create_file_auto_watch_called_before_creation(
         self,
         mock_user,
         mock_auto_watch_manager,
@@ -169,7 +167,7 @@ class TestHandleCreateFileAutoWatch:
             ) as MockActivatedRepoManager,
         ):
             MockActivatedRepoManager.return_value = mock_activated_repo_manager
-            await handle_create_file(params, mock_user)
+            handle_create_file(params, mock_user)
 
         # Verify auto-watch was called BEFORE create_file
         assert call_order == ["auto_watch", "create_file"]
@@ -178,8 +176,7 @@ class TestHandleCreateFileAutoWatch:
 class TestHandleEditFileAutoWatch:
     """Tests for auto-watch integration in handle_edit_file."""
 
-    @pytest.mark.asyncio
-    async def test_edit_file_starts_auto_watch(
+    def test_edit_file_starts_auto_watch(
         self,
         mock_user,
         mock_auto_watch_manager,
@@ -211,7 +208,7 @@ class TestHandleEditFileAutoWatch:
             ) as MockActivatedRepoManager,
         ):
             MockActivatedRepoManager.return_value = mock_activated_repo_manager
-            result = await handle_edit_file(params, mock_user)
+            result = handle_edit_file(params, mock_user)
 
         # Verify auto-watch was started
         mock_auto_watch_manager.start_watch.assert_called_once()
@@ -229,8 +226,7 @@ class TestHandleEditFileAutoWatch:
 class TestHandleDeleteFileAutoWatch:
     """Tests for auto-watch integration in handle_delete_file."""
 
-    @pytest.mark.asyncio
-    async def test_delete_file_starts_auto_watch(
+    def test_delete_file_starts_auto_watch(
         self,
         mock_user,
         mock_auto_watch_manager,
@@ -259,7 +255,7 @@ class TestHandleDeleteFileAutoWatch:
             ) as MockActivatedRepoManager,
         ):
             MockActivatedRepoManager.return_value = mock_activated_repo_manager
-            result = await handle_delete_file(params, mock_user)
+            result = handle_delete_file(params, mock_user)
 
         # Verify auto-watch was started
         mock_auto_watch_manager.start_watch.assert_called_once()
@@ -277,8 +273,7 @@ class TestHandleDeleteFileAutoWatch:
 class TestAutoWatchMultipleOperations:
     """Tests for auto-watch timeout reset on multiple operations."""
 
-    @pytest.mark.asyncio
-    async def test_multiple_file_operations_reset_timeout(
+    def test_multiple_file_operations_reset_timeout(
         self,
         mock_user,
         mock_auto_watch_manager,
@@ -315,7 +310,7 @@ class TestAutoWatchMultipleOperations:
             ) as MockActivatedRepoManager,
         ):
             MockActivatedRepoManager.return_value = mock_activated_repo_manager
-            await handle_create_file(create_params, mock_user)
+            handle_create_file(create_params, mock_user)
 
             # Second operation: edit file
             edit_params = {
@@ -325,7 +320,7 @@ class TestAutoWatchMultipleOperations:
                 "new_string": "goodbye",
                 "content_hash": "abc123",
             }
-            await handle_edit_file(edit_params, mock_user)
+            handle_edit_file(edit_params, mock_user)
 
         # Verify start_watch was called for both operations
         assert mock_auto_watch_manager.start_watch.call_count == 2

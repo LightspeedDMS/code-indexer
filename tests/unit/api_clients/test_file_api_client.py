@@ -6,7 +6,7 @@ Following TDD methodology - tests written before implementation.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 
 class TestFileAPIClientImport:
@@ -80,7 +80,7 @@ class TestFileAPIClientCreateMethod:
     async def test_create_file_calls_correct_endpoint(self, file_client):
         """Test create_file calls the correct REST endpoint."""
         with patch.object(
-            file_client, "_authenticated_request", new_callable=AsyncMock
+            file_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 201
@@ -93,9 +93,7 @@ class TestFileAPIClientCreateMethod:
             }
             mock_request.return_value = mock_response
 
-            await file_client.create_file(
-                "test-repo", "src/new_file.py", "print('hello')"
-            )
+            file_client.create_file("test-repo", "src/new_file.py", "print('hello')")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -108,7 +106,7 @@ class TestFileAPIClientCreateMethod:
     async def test_create_file_returns_response_dict(self, file_client):
         """Test create_file returns response as dictionary."""
         with patch.object(
-            file_client, "_authenticated_request", new_callable=AsyncMock
+            file_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 201
@@ -121,9 +119,7 @@ class TestFileAPIClientCreateMethod:
             }
             mock_request.return_value = mock_response
 
-            result = await file_client.create_file(
-                "test-repo", "src/new_file.py", "content"
-            )
+            result = file_client.create_file("test-repo", "src/new_file.py", "content")
 
             assert isinstance(result, dict)
             assert result["success"] is True
@@ -155,7 +151,7 @@ class TestFileAPIClientEditMethod:
     async def test_edit_file_calls_correct_endpoint(self, file_client):
         """Test edit_file calls the correct REST endpoint with URL encoding."""
         with patch.object(
-            file_client, "_authenticated_request", new_callable=AsyncMock
+            file_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -168,7 +164,7 @@ class TestFileAPIClientEditMethod:
             }
             mock_request.return_value = mock_response
 
-            await file_client.edit_file(
+            file_client.edit_file(
                 "test-repo",
                 "src/app.py",
                 old_string="old_value",
@@ -189,7 +185,7 @@ class TestFileAPIClientEditMethod:
     async def test_edit_file_with_replace_all(self, file_client):
         """Test edit_file with replace_all flag."""
         with patch.object(
-            file_client, "_authenticated_request", new_callable=AsyncMock
+            file_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -202,7 +198,7 @@ class TestFileAPIClientEditMethod:
             }
             mock_request.return_value = mock_response
 
-            await file_client.edit_file(
+            file_client.edit_file(
                 "test-repo",
                 "src/app.py",
                 old_string="foo",
@@ -219,7 +215,7 @@ class TestFileAPIClientEditMethod:
     async def test_edit_file_without_content_hash(self, file_client):
         """Test edit_file without content_hash (optional parameter)."""
         with patch.object(
-            file_client, "_authenticated_request", new_callable=AsyncMock
+            file_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -232,7 +228,7 @@ class TestFileAPIClientEditMethod:
             }
             mock_request.return_value = mock_response
 
-            await file_client.edit_file(
+            file_client.edit_file(
                 "test-repo",
                 "src/app.py",
                 old_string="foo",
@@ -251,7 +247,7 @@ class TestFileAPIClientEditMethod:
     async def test_edit_file_url_encodes_path(self, file_client):
         """Test edit_file URL-encodes file paths with special characters."""
         with patch.object(
-            file_client, "_authenticated_request", new_callable=AsyncMock
+            file_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -264,7 +260,7 @@ class TestFileAPIClientEditMethod:
             }
             mock_request.return_value = mock_response
 
-            await file_client.edit_file(
+            file_client.edit_file(
                 "test-repo",
                 "src/my file.py",
                 old_string="old",
@@ -302,7 +298,7 @@ class TestFileAPIClientDeleteMethod:
     async def test_delete_file_calls_correct_endpoint(self, file_client):
         """Test delete_file calls the correct REST endpoint."""
         with patch.object(
-            file_client, "_authenticated_request", new_callable=AsyncMock
+            file_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -313,7 +309,7 @@ class TestFileAPIClientDeleteMethod:
             }
             mock_request.return_value = mock_response
 
-            await file_client.delete_file("test-repo", "src/obsolete.py")
+            file_client.delete_file("test-repo", "src/obsolete.py")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -324,7 +320,7 @@ class TestFileAPIClientDeleteMethod:
     async def test_delete_file_with_content_hash(self, file_client):
         """Test delete_file with content_hash for optimistic locking."""
         with patch.object(
-            file_client, "_authenticated_request", new_callable=AsyncMock
+            file_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -335,7 +331,7 @@ class TestFileAPIClientDeleteMethod:
             }
             mock_request.return_value = mock_response
 
-            await file_client.delete_file(
+            file_client.delete_file(
                 "test-repo", "src/obsolete.py", content_hash="hash123"
             )
 
@@ -348,7 +344,7 @@ class TestFileAPIClientDeleteMethod:
     async def test_delete_file_without_content_hash(self, file_client):
         """Test delete_file without content_hash."""
         with patch.object(
-            file_client, "_authenticated_request", new_callable=AsyncMock
+            file_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -359,7 +355,7 @@ class TestFileAPIClientDeleteMethod:
             }
             mock_request.return_value = mock_response
 
-            await file_client.delete_file("test-repo", "src/obsolete.py")
+            file_client.delete_file("test-repo", "src/obsolete.py")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -388,7 +384,7 @@ class TestFileAPIClientErrorHandling:
         from code_indexer.api_clients.base_client import APIClientError
 
         with patch.object(
-            file_client, "_authenticated_request", new_callable=AsyncMock
+            file_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 404
@@ -396,7 +392,7 @@ class TestFileAPIClientErrorHandling:
             mock_request.return_value = mock_response
 
             with pytest.raises(APIClientError) as exc_info:
-                await file_client.create_file("nonexistent", "file.py", "content")
+                file_client.create_file("nonexistent", "file.py", "content")
 
             assert "not found" in str(exc_info.value).lower()
 
@@ -406,7 +402,7 @@ class TestFileAPIClientErrorHandling:
         from code_indexer.api_clients.base_client import APIClientError
 
         with patch.object(
-            file_client, "_authenticated_request", new_callable=AsyncMock
+            file_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 409
@@ -414,7 +410,7 @@ class TestFileAPIClientErrorHandling:
             mock_request.return_value = mock_response
 
             with pytest.raises(APIClientError) as exc_info:
-                await file_client.create_file("repo", "existing.py", "content")
+                file_client.create_file("repo", "existing.py", "content")
 
             assert exc_info.value.status_code == 409
 
@@ -424,7 +420,7 @@ class TestFileAPIClientErrorHandling:
         from code_indexer.api_clients.base_client import APIClientError
 
         with patch.object(
-            file_client, "_authenticated_request", new_callable=AsyncMock
+            file_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 409
@@ -434,7 +430,7 @@ class TestFileAPIClientErrorHandling:
             mock_request.return_value = mock_response
 
             with pytest.raises(APIClientError) as exc_info:
-                await file_client.edit_file(
+                file_client.edit_file(
                     "repo", "file.py", "old", "new", content_hash="stale_hash"
                 )
 

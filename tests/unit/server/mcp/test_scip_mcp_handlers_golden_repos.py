@@ -176,8 +176,7 @@ class TestScipHandlersErrorHandling:
         }
         return mock_service
 
-    @pytest.mark.asyncio
-    async def test_scip_definition_returns_empty_when_no_indexes(self) -> None:
+    def test_scip_definition_returns_empty_when_no_indexes(self) -> None:
         """Verify scip_definition returns empty results when service finds no indexes."""
         from code_indexer.server.mcp.handlers import scip_definition
 
@@ -190,7 +189,7 @@ class TestScipHandlersErrorHandling:
             return_value=mock_service,
         ):
             params = {"symbol": "some_function"}
-            result = await scip_definition(params, mock_user)
+            result = scip_definition(params, mock_user)
 
             # Verify: Should return success with empty results
             content = result.get("content", [])
@@ -200,8 +199,7 @@ class TestScipHandlersErrorHandling:
             assert data["total_results"] == 0
             assert data["results"] == []
 
-    @pytest.mark.asyncio
-    async def test_scip_definition_passes_repository_alias_to_service(self) -> None:
+    def test_scip_definition_passes_repository_alias_to_service(self) -> None:
         """Verify scip_definition passes repository_alias parameter to service."""
         from code_indexer.server.mcp.handlers import scip_definition
 
@@ -214,7 +212,7 @@ class TestScipHandlersErrorHandling:
             return_value=mock_service,
         ):
             params = {"symbol": "some_function", "repository_alias": "test-repo"}
-            await scip_definition(params, mock_user)
+            scip_definition(params, mock_user)
 
             # Verify service.find_definition was called with repository_alias
             mock_service.find_definition.assert_called_once_with(
@@ -224,8 +222,7 @@ class TestScipHandlersErrorHandling:
                 username="testuser",
             )
 
-    @pytest.mark.asyncio
-    async def test_scip_references_returns_empty_when_no_indexes(self) -> None:
+    def test_scip_references_returns_empty_when_no_indexes(self) -> None:
         """Verify scip_references returns empty results when service finds no indexes."""
         from code_indexer.server.mcp.handlers import scip_references
 
@@ -238,7 +235,7 @@ class TestScipHandlersErrorHandling:
             return_value=mock_service,
         ):
             params = {"symbol": "some_function"}
-            result = await scip_references(params, mock_user)
+            result = scip_references(params, mock_user)
 
             content = result.get("content", [])
             assert len(content) > 0
@@ -246,8 +243,7 @@ class TestScipHandlersErrorHandling:
             assert data["success"] is True
             assert data["total_results"] == 0
 
-    @pytest.mark.asyncio
-    async def test_scip_references_passes_repository_alias_to_service(self) -> None:
+    def test_scip_references_passes_repository_alias_to_service(self) -> None:
         """Verify scip_references passes repository_alias parameter to service."""
         from code_indexer.server.mcp.handlers import scip_references
 
@@ -260,7 +256,7 @@ class TestScipHandlersErrorHandling:
             return_value=mock_service,
         ):
             params = {"symbol": "some_function", "repository_alias": "test-repo"}
-            await scip_references(params, mock_user)
+            scip_references(params, mock_user)
 
             # Verify service.find_references was called with repository_alias
             mock_service.find_references.assert_called_once()
@@ -268,8 +264,7 @@ class TestScipHandlersErrorHandling:
             assert call_kwargs["repository_alias"] == "test-repo"
             assert call_kwargs["username"] == "testuser"
 
-    @pytest.mark.asyncio
-    async def test_scip_dependencies_returns_empty_when_no_indexes(self) -> None:
+    def test_scip_dependencies_returns_empty_when_no_indexes(self) -> None:
         """Verify scip_dependencies returns empty results when service finds no indexes."""
         from code_indexer.server.mcp.handlers import scip_dependencies
 
@@ -282,7 +277,7 @@ class TestScipHandlersErrorHandling:
             return_value=mock_service,
         ):
             params = {"symbol": "some_function"}
-            result = await scip_dependencies(params, mock_user)
+            result = scip_dependencies(params, mock_user)
 
             content = result.get("content", [])
             assert len(content) > 0
@@ -290,8 +285,7 @@ class TestScipHandlersErrorHandling:
             assert data["success"] is True
             assert data["total_results"] == 0
 
-    @pytest.mark.asyncio
-    async def test_scip_dependencies_passes_repository_alias_to_service(self) -> None:
+    def test_scip_dependencies_passes_repository_alias_to_service(self) -> None:
         """Verify scip_dependencies passes repository_alias parameter to service."""
         from code_indexer.server.mcp.handlers import scip_dependencies
 
@@ -304,7 +298,7 @@ class TestScipHandlersErrorHandling:
             return_value=mock_service,
         ):
             params = {"symbol": "some_function", "repository_alias": "test-repo"}
-            await scip_dependencies(params, mock_user)
+            scip_dependencies(params, mock_user)
 
             # Verify service.get_dependencies was called with repository_alias
             mock_service.get_dependencies.assert_called_once()
@@ -312,8 +306,7 @@ class TestScipHandlersErrorHandling:
             assert call_kwargs["repository_alias"] == "test-repo"
             assert call_kwargs["username"] == "testuser"
 
-    @pytest.mark.asyncio
-    async def test_scip_dependents_returns_empty_when_no_indexes(self) -> None:
+    def test_scip_dependents_returns_empty_when_no_indexes(self) -> None:
         """Verify scip_dependents returns empty results when service finds no indexes."""
         from code_indexer.server.mcp.handlers import scip_dependents
 
@@ -326,7 +319,7 @@ class TestScipHandlersErrorHandling:
             return_value=mock_service,
         ):
             params = {"symbol": "some_function"}
-            result = await scip_dependents(params, mock_user)
+            result = scip_dependents(params, mock_user)
 
             content = result.get("content", [])
             assert len(content) > 0
@@ -334,8 +327,7 @@ class TestScipHandlersErrorHandling:
             assert data["success"] is True
             assert data["total_results"] == 0
 
-    @pytest.mark.asyncio
-    async def test_scip_dependents_passes_repository_alias_to_service(self) -> None:
+    def test_scip_dependents_passes_repository_alias_to_service(self) -> None:
         """Verify scip_dependents passes repository_alias parameter to service."""
         from code_indexer.server.mcp.handlers import scip_dependents
 
@@ -348,7 +340,7 @@ class TestScipHandlersErrorHandling:
             return_value=mock_service,
         ):
             params = {"symbol": "some_function", "repository_alias": "test-repo"}
-            await scip_dependents(params, mock_user)
+            scip_dependents(params, mock_user)
 
             # Verify service.get_dependents was called with repository_alias
             mock_service.get_dependents.assert_called_once()
@@ -356,8 +348,7 @@ class TestScipHandlersErrorHandling:
             assert call_kwargs["repository_alias"] == "test-repo"
             assert call_kwargs["username"] == "testuser"
 
-    @pytest.mark.asyncio
-    async def test_scip_impact_returns_empty_when_no_indexes(self) -> None:
+    def test_scip_impact_returns_empty_when_no_indexes(self) -> None:
         """Verify scip_impact returns empty results when service finds no indexes."""
         from code_indexer.server.mcp.handlers import scip_impact
 
@@ -370,7 +361,7 @@ class TestScipHandlersErrorHandling:
             return_value=mock_service,
         ):
             params = {"symbol": "some_function"}
-            result = await scip_impact(params, mock_user)
+            result = scip_impact(params, mock_user)
 
             content = result.get("content", [])
             assert len(content) > 0
@@ -378,8 +369,7 @@ class TestScipHandlersErrorHandling:
             assert data["success"] is True
             assert data["total_affected"] == 0
 
-    @pytest.mark.asyncio
-    async def test_scip_callchain_returns_empty_when_no_indexes(self) -> None:
+    def test_scip_callchain_returns_empty_when_no_indexes(self) -> None:
         """Verify scip_callchain returns empty results when service finds no indexes."""
         from code_indexer.server.mcp.handlers import scip_callchain
 
@@ -392,7 +382,7 @@ class TestScipHandlersErrorHandling:
             return_value=mock_service,
         ):
             params = {"from_symbol": "func1", "to_symbol": "func2"}
-            result = await scip_callchain(params, mock_user)
+            result = scip_callchain(params, mock_user)
 
             content = result.get("content", [])
             assert len(content) > 0
@@ -400,8 +390,7 @@ class TestScipHandlersErrorHandling:
             assert data["success"] is True
             assert data["total_chains_found"] == 0
 
-    @pytest.mark.asyncio
-    async def test_scip_callchain_passes_repository_alias_to_service(self) -> None:
+    def test_scip_callchain_passes_repository_alias_to_service(self) -> None:
         """Verify scip_callchain passes repository_alias parameter to service."""
         from code_indexer.server.mcp.handlers import scip_callchain
 
@@ -418,7 +407,7 @@ class TestScipHandlersErrorHandling:
                 "to_symbol": "func2",
                 "repository_alias": "test-repo",
             }
-            await scip_callchain(params, mock_user)
+            scip_callchain(params, mock_user)
 
             # Verify service.trace_callchain was called with repository_alias
             mock_service.trace_callchain.assert_called_once()
@@ -426,8 +415,7 @@ class TestScipHandlersErrorHandling:
             assert call_kwargs["repository_alias"] == "test-repo"
             assert call_kwargs["username"] == "testuser"
 
-    @pytest.mark.asyncio
-    async def test_scip_context_returns_empty_when_no_indexes(self) -> None:
+    def test_scip_context_returns_empty_when_no_indexes(self) -> None:
         """Verify scip_context returns empty results when service finds no indexes."""
         from code_indexer.server.mcp.handlers import scip_context
 
@@ -440,7 +428,7 @@ class TestScipHandlersErrorHandling:
             return_value=mock_service,
         ):
             params = {"symbol": "some_function"}
-            result = await scip_context(params, mock_user)
+            result = scip_context(params, mock_user)
 
             content = result.get("content", [])
             assert len(content) > 0
@@ -456,8 +444,7 @@ class TestScipCompositeHandlersGoldenReposDirectory:
     delegate to service methods with correct parameters.
     """
 
-    @pytest.mark.asyncio
-    async def test_scip_impact_delegates_to_service(self) -> None:
+    def test_scip_impact_delegates_to_service(self) -> None:
         """Verify scip_impact delegates to SCIPQueryService.analyze_impact()."""
         from code_indexer.server.mcp.handlers import scip_impact
 
@@ -479,7 +466,7 @@ class TestScipCompositeHandlersGoldenReposDirectory:
             "code_indexer.server.mcp.handlers._get_scip_query_service",
             return_value=mock_service,
         ):
-            result = await scip_impact({"symbol": "test", "depth": 2}, mock_user)
+            result = scip_impact({"symbol": "test", "depth": 2}, mock_user)
 
             # Verify service.analyze_impact was called with correct params
             mock_service.analyze_impact.assert_called_once_with(
@@ -497,8 +484,7 @@ class TestScipCompositeHandlersGoldenReposDirectory:
             assert data["target_symbol"] == "test"
             assert data["depth_analyzed"] == 2
 
-    @pytest.mark.asyncio
-    async def test_scip_callchain_delegates_to_service(self) -> None:
+    def test_scip_callchain_delegates_to_service(self) -> None:
         """Verify scip_callchain delegates to SCIPQueryService.trace_callchain()."""
         from code_indexer.server.mcp.handlers import scip_callchain
 
@@ -515,7 +501,7 @@ class TestScipCompositeHandlersGoldenReposDirectory:
             "code_indexer.server.mcp.handlers._get_scip_query_service",
             return_value=mock_service,
         ):
-            result = await scip_callchain(
+            result = scip_callchain(
                 {"from_symbol": "func1", "to_symbol": "func2"}, mock_user
             )
 
@@ -533,8 +519,7 @@ class TestScipCompositeHandlersGoldenReposDirectory:
             assert data["success"] is True
             assert data["total_chains_found"] == 1
 
-    @pytest.mark.asyncio
-    async def test_scip_callchain_clamps_max_depth_to_10(self) -> None:
+    def test_scip_callchain_clamps_max_depth_to_10(self) -> None:
         """Verify scip_callchain clamps max_depth to 10 when user passes value > 10.
 
         Bug: User passes max_depth=15 via MCP, handler passes it unclamped to
@@ -556,7 +541,7 @@ class TestScipCompositeHandlersGoldenReposDirectory:
             return_value=mock_service,
         ):
             # Execute with max_depth=15 (exceeds limit)
-            result = await scip_callchain(
+            result = scip_callchain(
                 {"from_symbol": "func1", "to_symbol": "func2", "max_depth": 15},
                 mock_user,
             )
@@ -575,8 +560,7 @@ class TestScipCompositeHandlersGoldenReposDirectory:
                 max_depth_arg <= 10
             ), f"Expected max_depth <= 10, got {max_depth_arg}"
 
-    @pytest.mark.asyncio
-    async def test_scip_context_delegates_to_service(self) -> None:
+    def test_scip_context_delegates_to_service(self) -> None:
         """Verify scip_context delegates to SCIPQueryService.get_context()."""
         from code_indexer.server.mcp.handlers import scip_context
 
@@ -598,7 +582,7 @@ class TestScipCompositeHandlersGoldenReposDirectory:
             "code_indexer.server.mcp.handlers._get_scip_query_service",
             return_value=mock_service,
         ):
-            result = await scip_context({"symbol": "test"}, mock_user)
+            result = scip_context({"symbol": "test"}, mock_user)
 
             # Verify service.get_context was called with correct params
             mock_service.get_context.assert_called_once()
@@ -618,14 +602,13 @@ class TestScipCompositeHandlersGoldenReposDirectory:
 class TestScipCallchainSymbolValidation:
     """Tests for scip_callchain symbol format validation."""
 
-    @pytest.mark.asyncio
-    async def test_scip_callchain_validates_empty_from_symbol(self) -> None:
+    def test_scip_callchain_validates_empty_from_symbol(self) -> None:
         """Verify scip_callchain returns error when from_symbol is empty."""
         from code_indexer.server.mcp.handlers import scip_callchain
 
         mock_user = MagicMock()
         params = {"from_symbol": "", "to_symbol": "valid_symbol"}
-        result = await scip_callchain(params, mock_user)
+        result = scip_callchain(params, mock_user)
 
         content = result.get("content", [])
         assert len(content) > 0
@@ -637,14 +620,13 @@ class TestScipCallchainSymbolValidation:
             or "cannot be empty" in data["error"].lower()
         )
 
-    @pytest.mark.asyncio
-    async def test_scip_callchain_validates_empty_to_symbol(self) -> None:
+    def test_scip_callchain_validates_empty_to_symbol(self) -> None:
         """Verify scip_callchain returns error when to_symbol is empty."""
         from code_indexer.server.mcp.handlers import scip_callchain
 
         mock_user = MagicMock()
         params = {"from_symbol": "valid_symbol", "to_symbol": ""}
-        result = await scip_callchain(params, mock_user)
+        result = scip_callchain(params, mock_user)
 
         content = result.get("content", [])
         assert len(content) > 0
@@ -656,14 +638,13 @@ class TestScipCallchainSymbolValidation:
             or "cannot be empty" in data["error"].lower()
         )
 
-    @pytest.mark.asyncio
-    async def test_scip_callchain_validates_whitespace_from_symbol(self) -> None:
+    def test_scip_callchain_validates_whitespace_from_symbol(self) -> None:
         """Verify scip_callchain returns error when from_symbol is only whitespace."""
         from code_indexer.server.mcp.handlers import scip_callchain
 
         mock_user = MagicMock()
         params = {"from_symbol": "   ", "to_symbol": "valid_symbol"}
-        result = await scip_callchain(params, mock_user)
+        result = scip_callchain(params, mock_user)
 
         content = result.get("content", [])
         assert len(content) > 0
@@ -675,14 +656,13 @@ class TestScipCallchainSymbolValidation:
             or "cannot be empty" in data["error"].lower()
         )
 
-    @pytest.mark.asyncio
-    async def test_scip_callchain_validates_whitespace_to_symbol(self) -> None:
+    def test_scip_callchain_validates_whitespace_to_symbol(self) -> None:
         """Verify scip_callchain returns error when to_symbol is only whitespace."""
         from code_indexer.server.mcp.handlers import scip_callchain
 
         mock_user = MagicMock()
         params = {"from_symbol": "valid_symbol", "to_symbol": "   "}
-        result = await scip_callchain(params, mock_user)
+        result = scip_callchain(params, mock_user)
 
         content = result.get("content", [])
         assert len(content) > 0
@@ -701,8 +681,7 @@ class TestScipCallchainEnhancedResponse:
     Story #40: Updated to mock _get_scip_query_service instead of _find_scip_files.
     """
 
-    @pytest.mark.asyncio
-    async def test_scip_callchain_includes_diagnostic_when_no_chains_found(self) -> None:
+    def test_scip_callchain_includes_diagnostic_when_no_chains_found(self) -> None:
         """Verify scip_callchain includes diagnostic message when 0 chains found."""
         from code_indexer.server.mcp.handlers import scip_callchain
 
@@ -717,7 +696,7 @@ class TestScipCallchainEnhancedResponse:
             "code_indexer.server.mcp.handlers._get_scip_query_service",
             return_value=mock_service,
         ):
-            result = await scip_callchain(
+            result = scip_callchain(
                 {"from_symbol": "func1", "to_symbol": "func2"}, mock_user
             )
 

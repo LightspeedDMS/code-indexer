@@ -60,8 +60,7 @@ def _extract_response_data(mcp_response: dict) -> dict:
 class TestGitResetHandler:
     """Test git_reset MCP handler (F5: Recovery Operations)."""
 
-    @pytest.mark.asyncio
-    async def test_git_reset_soft_success(
+    def test_git_reset_soft_success(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test successful git reset --soft operation."""
@@ -77,7 +76,7 @@ class TestGitResetHandler:
             "target": "HEAD~1",
         }
 
-        mcp_response = await handlers.git_reset(params, mock_user)
+        mcp_response = handlers.git_reset(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
@@ -89,8 +88,7 @@ class TestGitResetHandler:
             confirmation_token=None,
         )
 
-    @pytest.mark.asyncio
-    async def test_git_reset_hard_requires_confirmation(
+    def test_git_reset_hard_requires_confirmation(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git reset --hard requires confirmation token."""
@@ -107,15 +105,14 @@ class TestGitResetHandler:
             "target": "HEAD",
         }
 
-        mcp_response = await handlers.git_reset(params, mock_user)
+        mcp_response = handlers.git_reset(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert "confirmation_token_required" in data
         assert data["confirmation_token_required"]["token"] == "TEST123"
 
-    @pytest.mark.asyncio
-    async def test_git_reset_hard_with_valid_token(
+    def test_git_reset_hard_with_valid_token(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git reset --hard with valid confirmation token."""
@@ -132,7 +129,7 @@ class TestGitResetHandler:
             "confirmation_token": "ABC123",
         }
 
-        mcp_response = await handlers.git_reset(params, mock_user)
+        mcp_response = handlers.git_reset(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
@@ -144,12 +141,11 @@ class TestGitResetHandler:
             confirmation_token="ABC123",
         )
 
-    @pytest.mark.asyncio
-    async def test_git_reset_missing_repository(self, mock_user):
+    def test_git_reset_missing_repository(self, mock_user):
         """Test git reset with missing repository_alias parameter."""
         params = {"mode": "soft"}  # Missing repository_alias
 
-        mcp_response = await handlers.git_reset(params, mock_user)
+        mcp_response = handlers.git_reset(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
@@ -159,8 +155,7 @@ class TestGitResetHandler:
 class TestGitCleanHandler:
     """Test git_clean MCP handler (F5: Recovery Operations)."""
 
-    @pytest.mark.asyncio
-    async def test_git_clean_requires_confirmation(
+    def test_git_clean_requires_confirmation(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git clean requires confirmation token."""
@@ -172,15 +167,14 @@ class TestGitCleanHandler:
 
         params = {"repository_alias": "test-repo"}
 
-        mcp_response = await handlers.git_clean(params, mock_user)
+        mcp_response = handlers.git_clean(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert "confirmation_token_required" in data
         assert data["confirmation_token_required"]["token"] == "CLEAN456"
 
-    @pytest.mark.asyncio
-    async def test_git_clean_with_valid_token(
+    def test_git_clean_with_valid_token(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git clean with valid confirmation token."""
@@ -194,7 +188,7 @@ class TestGitCleanHandler:
             "confirmation_token": "XYZ789",
         }
 
-        mcp_response = await handlers.git_clean(params, mock_user)
+        mcp_response = handlers.git_clean(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
@@ -203,12 +197,11 @@ class TestGitCleanHandler:
             Path("/tmp/test-repo"), confirmation_token="XYZ789"
         )
 
-    @pytest.mark.asyncio
-    async def test_git_clean_missing_repository(self, mock_user):
+    def test_git_clean_missing_repository(self, mock_user):
         """Test git clean with missing repository_alias parameter."""
         params = {}  # Missing repository_alias
 
-        mcp_response = await handlers.git_clean(params, mock_user)
+        mcp_response = handlers.git_clean(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
@@ -218,8 +211,7 @@ class TestGitCleanHandler:
 class TestGitMergeAbortHandler:
     """Test git_merge_abort MCP handler (F5: Recovery Operations)."""
 
-    @pytest.mark.asyncio
-    async def test_git_merge_abort_success(
+    def test_git_merge_abort_success(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test successful git merge --abort operation."""
@@ -230,15 +222,14 @@ class TestGitMergeAbortHandler:
 
         params = {"repository_alias": "test-repo"}
 
-        mcp_response = await handlers.git_merge_abort(params, mock_user)
+        mcp_response = handlers.git_merge_abort(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
         assert "aborted" in data["message"].lower()
         mock_git_service.git_merge_abort.assert_called_once_with(Path("/tmp/test-repo"))
 
-    @pytest.mark.asyncio
-    async def test_git_merge_abort_no_merge_in_progress(
+    def test_git_merge_abort_no_merge_in_progress(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git merge abort when no merge is in progress."""
@@ -252,19 +243,18 @@ class TestGitMergeAbortHandler:
 
         params = {"repository_alias": "test-repo"}
 
-        mcp_response = await handlers.git_merge_abort(params, mock_user)
+        mcp_response = handlers.git_merge_abort(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert data["error_type"] == "GitCommandError"
         assert "no merge in progress" in data["stderr"].lower()
 
-    @pytest.mark.asyncio
-    async def test_git_merge_abort_missing_repository(self, mock_user):
+    def test_git_merge_abort_missing_repository(self, mock_user):
         """Test git merge abort with missing repository_alias parameter."""
         params = {}  # Missing repository_alias
 
-        mcp_response = await handlers.git_merge_abort(params, mock_user)
+        mcp_response = handlers.git_merge_abort(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
@@ -274,8 +264,7 @@ class TestGitMergeAbortHandler:
 class TestGitCheckoutFileHandler:
     """Test git_checkout_file MCP handler (F5: Recovery Operations)."""
 
-    @pytest.mark.asyncio
-    async def test_git_checkout_file_success(
+    def test_git_checkout_file_success(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test successful git checkout file operation."""
@@ -289,7 +278,7 @@ class TestGitCheckoutFileHandler:
             "file_path": "src/main.py",
         }
 
-        mcp_response = await handlers.git_checkout_file(params, mock_user)
+        mcp_response = handlers.git_checkout_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
@@ -298,8 +287,7 @@ class TestGitCheckoutFileHandler:
             Path("/tmp/test-repo"), "src/main.py"
         )
 
-    @pytest.mark.asyncio
-    async def test_git_checkout_file_nonexistent(
+    def test_git_checkout_file_nonexistent(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git checkout file for nonexistent file."""
@@ -316,26 +304,25 @@ class TestGitCheckoutFileHandler:
             "file_path": "nonexistent.py",
         }
 
-        mcp_response = await handlers.git_checkout_file(params, mock_user)
+        mcp_response = handlers.git_checkout_file(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert data["error_type"] == "GitCommandError"
         assert "did not match" in data["stderr"]
 
-    @pytest.mark.asyncio
-    async def test_git_checkout_file_missing_parameters(self, mock_user):
+    def test_git_checkout_file_missing_parameters(self, mock_user):
         """Test git checkout file with missing required parameters."""
         # Missing repository_alias
         params = {"file_path": "test.py"}
-        mcp_response = await handlers.git_checkout_file(params, mock_user)
+        mcp_response = handlers.git_checkout_file(params, mock_user)
         data = _extract_response_data(mcp_response)
         assert data["success"] is False
         assert "Missing required parameter: repository_alias" in data["error"]
 
         # Missing file_path
         params = {"repository_alias": "test-repo"}
-        mcp_response = await handlers.git_checkout_file(params, mock_user)
+        mcp_response = handlers.git_checkout_file(params, mock_user)
         data = _extract_response_data(mcp_response)
         assert data["success"] is False
         assert "Missing required parameter: file_path" in data["error"]

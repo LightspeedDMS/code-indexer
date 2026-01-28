@@ -45,20 +45,20 @@ class ServerCompatibilityValidator:
             server_url: Base URL of the CIDX server
         """
         self.server_url = server_url.rstrip("/")
-        self._session: Optional[httpx.AsyncClient] = None
+        self._session: Optional[httpx.Client] = None
 
     @property
-    def session(self) -> httpx.AsyncClient:
+    def session(self) -> httpx.Client:
         """Get or create HTTP session."""
         if self._session is None or self._session.is_closed:
-            self._session = httpx.AsyncClient(
+            self._session = httpx.Client(
                 timeout=30.0,
                 headers={"Content-Type": "application/json"},
                 follow_redirects=True,
             )
         return self._session
 
-    async def validate_compatibility(
+    def validate_compatibility(
         self, username: str, password: str
     ) -> CompatibilityResult:
         """Perform comprehensive server compatibility validation.
@@ -77,7 +77,7 @@ class ServerCompatibilityValidator:
             recommendations: List[str] = []
 
             # Step 1: Basic connectivity test
-            connectivity_result = await self._test_connectivity()
+            connectivity_result = self._test_connectivity()
             if not connectivity_result["success"]:
                 issues.append(
                     f"Network connectivity failed: {connectivity_result['error']}"
@@ -93,7 +93,7 @@ class ServerCompatibilityValidator:
                 )
 
             # Step 2: Server health check
-            health_result = await self._check_server_health()
+            health_result = self._check_server_health()
             if health_result["success"]:
                 server_info.update(
                     {
@@ -109,7 +109,7 @@ class ServerCompatibilityValidator:
                     recommendations.extend(health_result["recommendations"])
 
             # Step 3: API version compatibility
-            version_result = await self._check_api_version()
+            version_result = self._check_api_version()
             if version_result["compatible"]:
                 if "warning" in version_result and version_result["warning"]:
                     warnings.append(version_result["warning"])
@@ -128,7 +128,7 @@ class ServerCompatibilityValidator:
                 )
 
             # Step 4: Authentication system validation
-            auth_result = await self._validate_authentication(username, password)
+            auth_result = self._validate_authentication(username, password)
             if auth_result["success"]:
                 server_info["auth_working"] = True
                 if "username" in auth_result:
@@ -150,7 +150,7 @@ class ServerCompatibilityValidator:
                 )
 
             # Step 5: Essential endpoint availability
-            endpoints_result = await self._check_required_endpoints()
+            endpoints_result = self._check_required_endpoints()
             if endpoints_result["success"]:
                 server_info["endpoints_available"] = endpoints_result[
                     "available_endpoints"
@@ -192,9 +192,9 @@ class ServerCompatibilityValidator:
                 recommendations=["Contact support with error details"],
             )
         finally:
-            await self.close()
+            self.close()
 
-    async def _test_connectivity(self) -> Dict[str, Any]:
+    def _test_connectivity(self) -> Dict[str, Any]:
         """Test basic network connectivity to server.
 
         Returns:
@@ -202,7 +202,7 @@ class ServerCompatibilityValidator:
         """
         try:
             # Try to reach the server with a simple GET request
-            await self.session.get(f"{self.server_url}/api/health")
+            self.session.get(f"{self.server_url}/api/health")
             return {"success": True, "error": None}
 
         except httpx.NetworkError as e:
@@ -261,14 +261,14 @@ class ServerCompatibilityValidator:
                 "recommendations": ["Check server configuration and status"],
             }
 
-    async def _check_server_health(self) -> Dict[str, Any]:
+    def _check_server_health(self) -> Dict[str, Any]:
         """Check server health and basic operational status.
 
         Returns:
             Dictionary with health status, version info, and recommendations
         """
         try:
-            response = await self.session.get(f"{self.server_url}/api/health")
+            response = self.session.get(f"{self.server_url}/api/health")
 
             if response.status_code == 200:
                 try:
@@ -335,14 +335,14 @@ class ServerCompatibilityValidator:
                 "recommendations": ["Verify server is running and accessible"],
             }
 
-    async def _check_api_version(self) -> Dict[str, Any]:
+    def _check_api_version(self) -> Dict[str, Any]:
         """Validate API version compatibility.
 
         Returns:
             Dictionary with compatibility status and version details
         """
         try:
-            response = await self.session.get(f"{self.server_url}/api/version")
+            response = self.session.get(f"{self.server_url}/api/version")
 
             if response.status_code == 200:
                 try:
@@ -415,9 +415,7 @@ class ServerCompatibilityValidator:
                 "recommendations": ["Verify server supports API version detection"],
             }
 
-    async def _validate_authentication(
-        self, username: str, password: str
-    ) -> Dict[str, Any]:
+    def _validate_authentication(self, username: str, password: str) -> Dict[str, Any]:
         """Validate authentication system functionality.
 
         Args:
@@ -435,7 +433,7 @@ class ServerCompatibilityValidator:
             }
 
             # Attempt authentication with direct endpoint call
-            auth_response = await self.session.post(
+            auth_response = self.session.post(
                 f"{self.server_url}/auth/login", json=auth_payload
             )
 
@@ -449,7 +447,7 @@ class ServerCompatibilityValidator:
                     if token:
                         headers = {"Authorization": f"Bearer {token}"}
                         try:
-                            user_response = await self.session.get(
+                            user_response = self.session.get(
                                 f"{self.server_url}/api/user/info", headers=headers
                             )
 
@@ -552,7 +550,7 @@ class ServerCompatibilityValidator:
                 "recommendations": ["Contact support with error details"],
             }
 
-    async def _check_required_endpoints(self) -> Dict[str, Any]:
+    def _check_required_endpoints(self) -> Dict[str, Any]:
         """Check availability of essential API endpoints.
 
         Returns:
@@ -565,7 +563,7 @@ class ServerCompatibilityValidator:
 
             for endpoint in self.REQUIRED_ENDPOINTS:
                 try:
-                    response = await self.session.get(f"{self.server_url}{endpoint}")
+                    response = self.session.get(f"{self.server_url}{endpoint}")
 
                     if response.status_code == 200:
                         available_endpoints.append(endpoint)
@@ -612,10 +610,10 @@ class ServerCompatibilityValidator:
                 "recommendations": ["Verify server is accessible and configured"],
             }
 
-    async def close(self) -> None:
+    def close(self) -> None:
         """Close HTTP session and clean up resources."""
         if self._session and not self._session.is_closed:
-            await self._session.aclose()
+            self._session.close()
 
 
 def validate_remote_credentials(server_url: str, username: str, password: str) -> bool:
@@ -629,21 +627,11 @@ def validate_remote_credentials(server_url: str, username: str, password: str) -
     Returns:
         True if credentials are valid, False otherwise
     """
-    import asyncio
-
-    async def _async_validate():
-        validator = ServerCompatibilityValidator(server_url)
-        try:
-            auth_result = await validator._validate_authentication(username, password)
-            return auth_result.get("success", False)
-        except Exception:
-            return False
-        finally:
-            await validator.close()
-
+    validator = ServerCompatibilityValidator(server_url)
     try:
-        # Use asyncio.run() directly - simpler and more reliable
-        result = asyncio.run(_async_validate())
-        return bool(result)
+        auth_result = validator._validate_authentication(username, password)
+        return bool(auth_result.get("success", False))
     except Exception:
         return False
+    finally:
+        validator.close()

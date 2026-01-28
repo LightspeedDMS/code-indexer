@@ -2,6 +2,7 @@
 
 Bug Fix for Story #683: MCP _omni_search_code Missing Payload Truncation
 Story #36: Updated to work with MultiSearchService delegation pattern.
+Story #50: Updated truncation function mocks to sync (truncation helpers are now sync).
 
 TDD methodology: Tests written BEFORE the fix is implemented.
 """
@@ -49,8 +50,9 @@ def mock_config_service():
         mock_service = Mock()
         mock_config = Mock()
         mock_limits = Mock()
-        mock_limits.omni_max_workers = 4
-        mock_limits.omni_per_repo_timeout_seconds = 30
+        # Use correct attribute names matching MultiSearchLimitsConfig
+        mock_limits.multi_search_max_workers = 4
+        mock_limits.multi_search_timeout_seconds = 30
         mock_config.multi_search_limits_config = mock_limits
         mock_service.get_config.return_value = mock_config
         mock.return_value = mock_service
@@ -61,6 +63,7 @@ class TestOmniSearchAppliesTruncation:
     """Tests verifying _omni_search_code applies truncation after aggregation.
 
     Story #36: Updated to mock MultiSearchService instead of search_code.
+    Story #50: Truncation functions are now sync, mocks updated accordingly.
     """
 
     @pytest.mark.asyncio
@@ -77,9 +80,10 @@ class TestOmniSearchAppliesTruncation:
         truncation_calls = []
         original_fn = handlers._apply_payload_truncation
 
-        async def tracking_fn(results):
+        # Story #50: Tracking function is now sync (truncation helpers are sync)
+        def tracking_fn(results):
             truncation_calls.append(len(results))
-            return await original_fn(results)
+            return original_fn(results)
 
         # Mock MultiSearchService to return results
         service_results = {
@@ -138,9 +142,10 @@ class TestOmniSearchAppliesTruncation:
         truncation_calls = []
         original_fn = handlers._apply_fts_payload_truncation
 
-        async def tracking_fn(results):
+        # Story #50: Tracking function is now sync (truncation helpers are sync)
+        def tracking_fn(results):
             truncation_calls.append(len(results))
-            return await original_fn(results)
+            return original_fn(results)
 
         # Mock MultiSearchService to return results
         service_results = {

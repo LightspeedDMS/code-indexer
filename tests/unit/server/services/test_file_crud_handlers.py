@@ -63,7 +63,7 @@ class TestCreateFileHandler:
             "file_path": "test/file.txt",
             "content": "Test content",
         }
-        result = await create_file(params, test_user)
+        result = create_file(params, test_user)
 
         # Validate MCP response format
         assert "content" in result
@@ -93,7 +93,7 @@ class TestCreateFileHandler:
 
         # Missing file_path
         params = {"repository_alias": "test-repo", "content": "Test"}
-        result = await create_file(params, test_user)
+        result = create_file(params, test_user)
 
         response_data = json.loads(result["content"][0]["text"])
         assert response_data["success"] is False
@@ -116,7 +116,7 @@ class TestCreateFileHandler:
             "file_path": "test/file.txt",
             "content": "Test",
         }
-        result = await create_file(params, test_user)
+        result = create_file(params, test_user)
 
         response_data = json.loads(result["content"][0]["text"])
         assert response_data["success"] is False
@@ -140,7 +140,7 @@ class TestCreateFileHandler:
             "file_path": ".git/config",
             "content": "Test",
         }
-        result = await create_file(params, test_user)
+        result = create_file(params, test_user)
 
         response_data = json.loads(result["content"][0]["text"])
         assert response_data["success"] is False
@@ -174,7 +174,7 @@ class TestEditFileHandler:
             "content_hash": "abc123def456",
             "replace_all": False,
         }
-        result = await edit_file(params, test_user)
+        result = edit_file(params, test_user)
 
         # Validate MCP response format
         response_data = json.loads(result["content"][0]["text"])
@@ -216,7 +216,7 @@ class TestEditFileHandler:
             "content_hash": "abc123",
             "replace_all": False,
         }
-        result = await edit_file(params, test_user)
+        result = edit_file(params, test_user)
 
         response_data = json.loads(result["content"][0]["text"])
         assert response_data["success"] is False
@@ -243,7 +243,7 @@ class TestEditFileHandler:
             "content_hash": "abc123",
             "replace_all": False,
         }
-        result = await edit_file(params, test_user)
+        result = edit_file(params, test_user)
 
         response_data = json.loads(result["content"][0]["text"])
         assert response_data["success"] is False
@@ -271,7 +271,7 @@ class TestEditFileHandler:
             "content_hash": "abc123",
             "replace_all": False,
         }
-        result = await edit_file(params, test_user)
+        result = edit_file(params, test_user)
 
         response_data = json.loads(result["content"][0]["text"])
         assert response_data["success"] is False
@@ -300,7 +300,7 @@ class TestDeleteFileHandler:
             "file_path": "test/file.txt",
             "content_hash": "abc123def456",
         }
-        result = await delete_file(params, test_user)
+        result = delete_file(params, test_user)
 
         # Validate MCP response format
         response_data = json.loads(result["content"][0]["text"])
@@ -334,7 +334,7 @@ class TestDeleteFileHandler:
             "repository_alias": "test-repo",
             "file_path": "test/file.txt",
         }
-        result = await delete_file(params, test_user)
+        result = delete_file(params, test_user)
 
         response_data = json.loads(result["content"][0]["text"])
         assert response_data["success"] is True
@@ -362,7 +362,7 @@ class TestDeleteFileHandler:
             "repository_alias": "test-repo",
             "file_path": "test/missing.txt",
         }
-        result = await delete_file(params, test_user)
+        result = delete_file(params, test_user)
 
         response_data = json.loads(result["content"][0]["text"])
         assert response_data["success"] is False
@@ -387,7 +387,7 @@ class TestDeleteFileHandler:
             "file_path": "test/file.txt",
             "content_hash": "abc123",
         }
-        result = await delete_file(params, test_user)
+        result = delete_file(params, test_user)
 
         response_data = json.loads(result["content"][0]["text"])
         assert response_data["success"] is False

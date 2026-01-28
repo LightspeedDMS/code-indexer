@@ -6,12 +6,15 @@ When repository_alias is an array with multiple repos (2+):
 - response_format defaults to 'grouped' (not 'flat')
 
 Written following TDD methodology - tests first, implementation second.
+
+Story #51: Converted to sync tests since _omni_search_code and
+MultiSearchService.search() are now synchronous for FastAPI thread pool execution.
 """
 
 import json
 import pytest
 from datetime import datetime
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, patch
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.multi.models import MultiSearchResponse, MultiSearchMetadata
 
@@ -81,8 +84,7 @@ def create_repo_results(count: int, base_score: float) -> list:
 class TestMultiRepoSmartDefaultsAggregation:
     """Test smart defaults for aggregation_mode based on repo count."""
 
-    @pytest.mark.asyncio
-    async def test_multi_repo_defaults_to_per_repo_aggregation(
+    def test_multi_repo_defaults_to_per_repo_aggregation(
         self, mock_user, mock_config_service, mock_wildcard_expansion
     ):
         """When repository_alias has 2+ repos, aggregation_mode defaults to 'per_repo'.
@@ -112,17 +114,16 @@ class TestMultiRepoSmartDefaultsAggregation:
             "code_indexer.server.multi.multi_search_service.MultiSearchService"
         ) as mock_class:
             mock_service = Mock()
-            mock_service.search = AsyncMock(
+            mock_service.search = Mock(
                 return_value=create_mock_response(service_results, num_repos)
             )
             mock_class.return_value = mock_service
 
             with patch(
                 "code_indexer.server.mcp.handlers._apply_payload_truncation",
-                new_callable=AsyncMock,
                 side_effect=lambda r: r,
             ):
-                result = await _omni_search_code(params, mock_user)
+                result = _omni_search_code(params, mock_user)
 
         response = json.loads(result["content"][0]["text"])
         results = response["results"]
@@ -148,8 +149,7 @@ class TestMultiRepoSmartDefaultsAggregation:
             repo2_count == expected_per_repo
         ), f"Expected {expected_per_repo} from repo2, got {repo2_count}"
 
-    @pytest.mark.asyncio
-    async def test_explicit_global_aggregation_overrides_smart_default(
+    def test_explicit_global_aggregation_overrides_smart_default(
         self, mock_user, mock_config_service, mock_wildcard_expansion
     ):
         """Explicit aggregation_mode='global' overrides per_repo smart default.
@@ -178,17 +178,16 @@ class TestMultiRepoSmartDefaultsAggregation:
             "code_indexer.server.multi.multi_search_service.MultiSearchService"
         ) as mock_class:
             mock_service = Mock()
-            mock_service.search = AsyncMock(
+            mock_service.search = Mock(
                 return_value=create_mock_response(service_results, 2)
             )
             mock_class.return_value = mock_service
 
             with patch(
                 "code_indexer.server.mcp.handlers._apply_payload_truncation",
-                new_callable=AsyncMock,
                 side_effect=lambda r: r,
             ):
-                result = await _omni_search_code(params, mock_user)
+                result = _omni_search_code(params, mock_user)
 
         response = json.loads(result["content"][0]["text"])
         all_results = response["results"].get("results", [])
@@ -202,8 +201,7 @@ class TestMultiRepoSmartDefaultsAggregation:
             repo1_count == limit
         ), f"Expected all {limit} from repo1 with global, got {repo1_count}"
 
-    @pytest.mark.asyncio
-    async def test_three_repos_uses_per_repo_aggregation(
+    def test_three_repos_uses_per_repo_aggregation(
         self, mock_user, mock_config_service, mock_wildcard_expansion
     ):
         """Verify per_repo smart default works with 3+ repos."""
@@ -230,17 +228,16 @@ class TestMultiRepoSmartDefaultsAggregation:
             "code_indexer.server.multi.multi_search_service.MultiSearchService"
         ) as mock_class:
             mock_service = Mock()
-            mock_service.search = AsyncMock(
+            mock_service.search = Mock(
                 return_value=create_mock_response(service_results, num_repos)
             )
             mock_class.return_value = mock_service
 
             with patch(
                 "code_indexer.server.mcp.handlers._apply_payload_truncation",
-                new_callable=AsyncMock,
                 side_effect=lambda r: r,
             ):
-                result = await _omni_search_code(params, mock_user)
+                result = _omni_search_code(params, mock_user)
 
         response = json.loads(result["content"][0]["text"])
         results = response["results"]
@@ -276,8 +273,7 @@ class TestMultiRepoSmartDefaultsAggregation:
 class TestMultiRepoSmartDefaultsResponseFormat:
     """Test smart defaults for response_format based on repo count."""
 
-    @pytest.mark.asyncio
-    async def test_multi_repo_defaults_to_grouped_format(
+    def test_multi_repo_defaults_to_grouped_format(
         self, mock_user, mock_config_service, mock_wildcard_expansion
     ):
         """When repository_alias has 2+ repos, response_format defaults to 'grouped'.
@@ -306,17 +302,16 @@ class TestMultiRepoSmartDefaultsResponseFormat:
             "code_indexer.server.multi.multi_search_service.MultiSearchService"
         ) as mock_class:
             mock_service = Mock()
-            mock_service.search = AsyncMock(
+            mock_service.search = Mock(
                 return_value=create_mock_response(service_results, 2)
             )
             mock_class.return_value = mock_service
 
             with patch(
                 "code_indexer.server.mcp.handlers._apply_payload_truncation",
-                new_callable=AsyncMock,
                 side_effect=lambda r: r,
             ):
-                result = await _omni_search_code(params, mock_user)
+                result = _omni_search_code(params, mock_user)
 
         response = json.loads(result["content"][0]["text"])
         results = response["results"]
@@ -331,8 +326,7 @@ class TestMultiRepoSmartDefaultsResponseFormat:
         assert "repo1-global" in results["results_by_repo"]
         assert "repo2-global" in results["results_by_repo"]
 
-    @pytest.mark.asyncio
-    async def test_single_repo_defaults_to_flat_format(
+    def test_single_repo_defaults_to_flat_format(
         self, mock_user, mock_config_service, mock_wildcard_expansion
     ):
         """When repository_alias is single repo, response_format defaults to 'flat'.
@@ -359,17 +353,16 @@ class TestMultiRepoSmartDefaultsResponseFormat:
             "code_indexer.server.multi.multi_search_service.MultiSearchService"
         ) as mock_class:
             mock_service = Mock()
-            mock_service.search = AsyncMock(
+            mock_service.search = Mock(
                 return_value=create_mock_response(service_results, 1)
             )
             mock_class.return_value = mock_service
 
             with patch(
                 "code_indexer.server.mcp.handlers._apply_payload_truncation",
-                new_callable=AsyncMock,
                 side_effect=lambda r: r,
             ):
-                result = await _omni_search_code(params, mock_user)
+                result = _omni_search_code(params, mock_user)
 
         response = json.loads(result["content"][0]["text"])
         results = response["results"]
@@ -381,8 +374,7 @@ class TestMultiRepoSmartDefaultsResponseFormat:
         ), "Flat format should not have results_by_repo"
         assert len(results["results"]) == 2
 
-    @pytest.mark.asyncio
-    async def test_explicit_flat_format_overrides_smart_default(
+    def test_explicit_flat_format_overrides_smart_default(
         self, mock_user, mock_config_service, mock_wildcard_expansion
     ):
         """Explicit response_format='flat' overrides grouped smart default."""
@@ -408,17 +400,16 @@ class TestMultiRepoSmartDefaultsResponseFormat:
             "code_indexer.server.multi.multi_search_service.MultiSearchService"
         ) as mock_class:
             mock_service = Mock()
-            mock_service.search = AsyncMock(
+            mock_service.search = Mock(
                 return_value=create_mock_response(service_results, 2)
             )
             mock_class.return_value = mock_service
 
             with patch(
                 "code_indexer.server.mcp.handlers._apply_payload_truncation",
-                new_callable=AsyncMock,
                 side_effect=lambda r: r,
             ):
-                result = await _omni_search_code(params, mock_user)
+                result = _omni_search_code(params, mock_user)
 
         response = json.loads(result["content"][0]["text"])
         results = response["results"]

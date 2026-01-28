@@ -82,7 +82,7 @@ class SCIPMultiService:
         self.query_timeout_seconds = query_timeout_seconds
         self.thread_executor = ThreadPoolExecutor(max_workers=max_workers)
 
-    async def definition(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
+    def definition(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
         """
         Find definitions across multiple repositories (AC1).
 
@@ -92,7 +92,7 @@ class SCIPMultiService:
         Returns:
             SCIPMultiResponse with definitions grouped by repository
         """
-        return await self._execute_parallel_operation(
+        return self._execute_parallel_operation(
             request, self._find_definition_in_repo, "definition"
         )
 
@@ -120,7 +120,7 @@ class SCIPMultiService:
             logger.error(f"Definition query failed for repo {repo_id}: {e}")
             raise
 
-    async def references(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
+    def references(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
         """
         Find references across multiple repositories (AC2).
 
@@ -130,7 +130,7 @@ class SCIPMultiService:
         Returns:
             SCIPMultiResponse with references grouped by repository
         """
-        return await self._execute_parallel_operation(
+        return self._execute_parallel_operation(
             request, self._find_references_in_repo, "references"
         )
 
@@ -161,7 +161,7 @@ class SCIPMultiService:
             logger.error(f"References query failed for repo {repo_id}: {e}")
             raise
 
-    async def dependencies(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
+    def dependencies(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
         """
         Find dependencies across multiple repositories (AC3).
 
@@ -171,7 +171,7 @@ class SCIPMultiService:
         Returns:
             SCIPMultiResponse with dependencies grouped by repository
         """
-        return await self._execute_parallel_operation(
+        return self._execute_parallel_operation(
             request, self._get_dependencies_in_repo, "dependencies"
         )
 
@@ -204,7 +204,7 @@ class SCIPMultiService:
             logger.error(f"Dependencies query failed for repo {repo_id}: {e}")
             raise
 
-    async def dependents(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
+    def dependents(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
         """
         Find dependents across multiple repositories (AC4).
 
@@ -214,7 +214,7 @@ class SCIPMultiService:
         Returns:
             SCIPMultiResponse with dependents grouped by repository
         """
-        return await self._execute_parallel_operation(
+        return self._execute_parallel_operation(
             request, self._get_dependents_in_repo, "dependents"
         )
 
@@ -247,7 +247,7 @@ class SCIPMultiService:
             logger.error(f"Dependents query failed for repo {repo_id}: {e}")
             raise
 
-    async def callchain(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
+    def callchain(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
         """
         Trace call chains per repository (AC5).
 
@@ -259,7 +259,7 @@ class SCIPMultiService:
         Returns:
             SCIPMultiResponse with call chains grouped by repository
         """
-        return await self._execute_parallel_operation(
+        return self._execute_parallel_operation(
             request, self._trace_callchain_in_repo, "callchain"
         )
 
@@ -321,7 +321,7 @@ class SCIPMultiService:
             logger.error(f"Callchain tracing failed for repo {repo_id}: {e}")
             raise
 
-    async def _execute_parallel_operation(
+    def _execute_parallel_operation(
         self, request: SCIPMultiRequest, operation_func, operation_name: str
     ) -> SCIPMultiResponse:
         """

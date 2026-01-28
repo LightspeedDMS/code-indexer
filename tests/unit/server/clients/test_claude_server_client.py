@@ -828,7 +828,7 @@ class TestClaudeServerClientJobPolling:
             password=TEST_PASSWORD,
         )
 
-        result = await client.get_job_status("job-12345")
+        result = client.get_job_status("job-12345")
 
         assert result["job_id"] == "job-12345"
         assert result["status"] == "in_progress"
@@ -873,7 +873,7 @@ class TestClaudeServerClientJobPolling:
             password=TEST_PASSWORD,
         )
 
-        result = await client.get_job_status("job-12345")
+        result = client.get_job_status("job-12345")
 
         assert result["status"] == "completed"
         assert "JWT tokens" in result["result"]
@@ -917,7 +917,7 @@ class TestClaudeServerClientJobPolling:
 
         # Should raise specific ClaudeServerNotFoundError
         with pytest.raises(ClaudeServerNotFoundError) as exc_info:
-            await client.get_job_status("nonexistent-job")
+            client.get_job_status("nonexistent-job")
 
         assert "not found" in str(exc_info.value).lower()
         # Also verify it's a subclass of ClaudeServerError for catch-all handling

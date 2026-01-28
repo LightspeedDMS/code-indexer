@@ -6,7 +6,7 @@ of API integration, error handling, and security requirements.
 
 import json
 import pytest
-from unittest.mock import Mock, AsyncMock, patch
+from unittest.mock import Mock, MagicMock, patch
 import httpx
 from pathlib import Path
 
@@ -49,18 +49,16 @@ class TestChangePasswordAPI:
 
         # Mock _authenticated_request method
         with patch.object(
-            self.client, "_authenticated_request", new_callable=AsyncMock
+            self.client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_request.return_value = mock_response
 
             # Mock credential storage
             with patch.object(
-                self.client, "_store_credentials_securely", new_callable=AsyncMock
+                self.client, "_store_credentials_securely", new_callable=MagicMock
             ):
                 # Call the actual method
-                result = await self.client.change_password(
-                    "current_pass", "new_pass123!"
-                )
+                result = self.client.change_password("current_pass", "new_pass123!")
 
                 # Verify the result
                 assert result == {
@@ -88,13 +86,13 @@ class TestChangePasswordAPI:
 
         # Mock _authenticated_request method
         with patch.object(
-            self.client, "_authenticated_request", new_callable=AsyncMock
+            self.client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_request.return_value = mock_response
 
             # Call should raise APIClientError
             with pytest.raises(APIClientError) as exc_info:
-                await self.client.change_password("wrong_pass", "new_pass123!")
+                self.client.change_password("wrong_pass", "new_pass123!")
 
             assert "Current password is incorrect" in str(exc_info.value)
 
@@ -110,13 +108,13 @@ class TestChangePasswordAPI:
 
         # Mock _authenticated_request method
         with patch.object(
-            self.client, "_authenticated_request", new_callable=AsyncMock
+            self.client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_request.return_value = mock_response
 
             # Call should raise APIClientError
             with pytest.raises(APIClientError) as exc_info:
-                await self.client.change_password("current_pass", "weak")
+                self.client.change_password("current_pass", "weak")
 
             assert "Password does not meet security requirements" in str(exc_info.value)
 
@@ -130,13 +128,13 @@ class TestChangePasswordAPI:
 
         # Mock _authenticated_request method
         with patch.object(
-            self.client, "_authenticated_request", new_callable=AsyncMock
+            self.client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_request.return_value = mock_response
 
             # Call should raise AuthenticationError
             with pytest.raises(AuthenticationError) as exc_info:
-                await self.client.change_password("current_pass", "new_pass123!")
+                self.client.change_password("current_pass", "new_pass123!")
 
             assert "Authentication required" in str(exc_info.value)
 
@@ -145,13 +143,13 @@ class TestChangePasswordAPI:
         """Test password change with network error."""
         # Mock _authenticated_request to raise network error
         with patch.object(
-            self.client, "_authenticated_request", new_callable=AsyncMock
+            self.client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_request.side_effect = httpx.NetworkError("Connection failed")
 
             # Call should raise APIClientError with network error details
             with pytest.raises(APIClientError) as exc_info:
-                await self.client.change_password("current_pass", "new_pass123!")
+                self.client.change_password("current_pass", "new_pass123!")
 
             assert "Connection failed" in str(exc_info.value)
 
@@ -167,15 +165,15 @@ class TestChangePasswordAPI:
         }
 
         with patch.object(
-            self.client, "_authenticated_request", new_callable=AsyncMock
+            self.client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_request.return_value = mock_response
 
             with patch.object(
-                self.client, "_store_credentials_securely", new_callable=AsyncMock
+                self.client, "_store_credentials_securely", new_callable=MagicMock
             ) as mock_store:
                 # Call the method
-                await self.client.change_password("old_pass", "new_pass")
+                self.client.change_password("old_pass", "new_pass")
 
                 # Verify credentials were updated
                 assert self.client.credentials["password"] == "new_pass"
@@ -215,12 +213,12 @@ class TestResetPasswordAPI:
         }
 
         with patch.object(
-            self.client.session, "post", new_callable=AsyncMock
+            self.client.session, "post", new_callable=MagicMock
         ) as mock_post:
             mock_post.return_value = mock_response
 
             # Call the method
-            result = await self.client.reset_password("testuser")
+            result = self.client.reset_password("testuser")
 
             # Verify result
             assert result == {"status": "success", "message": "Reset email sent"}
@@ -239,13 +237,13 @@ class TestResetPasswordAPI:
         mock_response.json.return_value = {"detail": "User not found"}
 
         with patch.object(
-            self.client.session, "post", new_callable=AsyncMock
+            self.client.session, "post", new_callable=MagicMock
         ) as mock_post:
             mock_post.return_value = mock_response
 
             # Call should raise APIClientError
             with pytest.raises(APIClientError) as exc_info:
-                await self.client.reset_password("nonexistent")
+                self.client.reset_password("nonexistent")
 
             assert "User not found" in str(exc_info.value)
 
@@ -258,13 +256,13 @@ class TestResetPasswordAPI:
         mock_response.json.return_value = {"detail": "Too many reset attempts"}
 
         with patch.object(
-            self.client.session, "post", new_callable=AsyncMock
+            self.client.session, "post", new_callable=MagicMock
         ) as mock_post:
             mock_post.return_value = mock_response
 
             # Call should raise APIClientError
             with pytest.raises(APIClientError) as exc_info:
-                await self.client.reset_password("testuser")
+                self.client.reset_password("testuser")
 
             assert "Too many reset attempts" in str(exc_info.value)
 
@@ -277,13 +275,13 @@ class TestResetPasswordAPI:
         mock_response.json.return_value = {"detail": "Internal server error"}
 
         with patch.object(
-            self.client.session, "post", new_callable=AsyncMock
+            self.client.session, "post", new_callable=MagicMock
         ) as mock_post:
             mock_post.return_value = mock_response
 
             # Call should raise APIClientError
             with pytest.raises(APIClientError) as exc_info:
-                await self.client.reset_password("testuser")
+                self.client.reset_password("testuser")
 
             assert "Internal server error" in str(exc_info.value)
 
@@ -291,13 +289,13 @@ class TestResetPasswordAPI:
     async def test_reset_password_network_error(self):
         """Test password reset with network error."""
         with patch.object(
-            self.client.session, "post", new_callable=AsyncMock
+            self.client.session, "post", new_callable=MagicMock
         ) as mock_post:
             mock_post.side_effect = httpx.NetworkError("Connection failed")
 
             # Call should raise APIClientError
             with pytest.raises(APIClientError) as exc_info:
-                await self.client.reset_password("testuser")
+                self.client.reset_password("testuser")
 
             assert "Connection failed" in str(exc_info.value)
 
@@ -310,13 +308,13 @@ class TestResetPasswordAPI:
         mock_response.json.side_effect = json.JSONDecodeError("Invalid", "", 0)
 
         with patch.object(
-            self.client.session, "post", new_callable=AsyncMock
+            self.client.session, "post", new_callable=MagicMock
         ) as mock_post:
             mock_post.return_value = mock_response
 
             # Should handle JSON error gracefully
             with pytest.raises(APIClientError) as exc_info:
-                await self.client.reset_password("testuser")
+                self.client.reset_password("testuser")
 
             # Should use default error message
             assert "User not found" in str(exc_info.value)
@@ -346,13 +344,13 @@ class TestPasswordSecurityHandling:
 
         with patch("code_indexer.api_clients.auth_client.logger") as mock_logger:
             with patch.object(
-                self.client, "_authenticated_request", new_callable=AsyncMock
+                self.client, "_authenticated_request", new_callable=MagicMock
             ) as mock_request:
                 mock_request.return_value = mock_response
                 with patch.object(
-                    self.client, "_store_credentials_securely", new_callable=AsyncMock
+                    self.client, "_store_credentials_securely", new_callable=MagicMock
                 ):
-                    await self.client.change_password("current_pass", "new_pass123!")
+                    self.client.change_password("current_pass", "new_pass123!")
 
                     # Verify passwords never appear in logs
                     for call in mock_logger.debug.call_args_list:
@@ -392,13 +390,13 @@ class TestPasswordSecurityHandling:
         mock_response.json.return_value = {"status": "success"}
 
         with patch.object(
-            self.client, "_authenticated_request", new_callable=AsyncMock
+            self.client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_request.return_value = mock_response
             with patch.object(
-                self.client, "_store_credentials_securely", new_callable=AsyncMock
+                self.client, "_store_credentials_securely", new_callable=MagicMock
             ):
-                await self.client.change_password("old_pass", "new_pass")
+                self.client.change_password("old_pass", "new_pass")
 
                 # Verify correct payload structure
                 mock_request.assert_called_once()
@@ -414,7 +412,7 @@ class TestPasswordSecurityHandling:
     async def test_password_cleared_on_exception(self):
         """Test that passwords are not retained after exceptions."""
         with patch.object(
-            self.client, "_authenticated_request", new_callable=AsyncMock
+            self.client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_request.side_effect = Exception("Test error")
 
@@ -423,7 +421,7 @@ class TestPasswordSecurityHandling:
 
             # Call should raise exception
             with pytest.raises(APIClientError):
-                await self.client.change_password("old", "new")
+                self.client.change_password("old", "new")
 
             # Password should not have changed
             assert self.client.credentials.get("password", "") == original_password

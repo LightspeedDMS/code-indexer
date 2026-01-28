@@ -12,7 +12,7 @@ semantic_query_manager._perform_search() which has the tracking logic.
 """
 
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock
 
 from code_indexer.server.multi.multi_search_config import MultiSearchConfig
 
@@ -49,8 +49,7 @@ class TestOmniSearchMetricsTracking:
             max_results_per_repo=100,
         )
 
-    @pytest.mark.asyncio
-    async def test_semantic_search_increments_semantic_metric(
+    def test_semantic_search_increments_semantic_metric(
         self, mock_user, mock_multi_search_response, valid_multi_search_config
     ):
         """Semantic multi-repo search should increment semantic_searches counter."""
@@ -63,9 +62,9 @@ class TestOmniSearchMetricsTracking:
         ) as mock_metrics, patch(
             "code_indexer.server.mcp.handlers._expand_wildcard_patterns"
         ) as mock_expand:
-            # Setup mocks
+            # Setup mocks - Story #51: handlers are now sync
             mock_service = MagicMock()
-            mock_service.search = AsyncMock(return_value=mock_multi_search_response)
+            mock_service.search = MagicMock(return_value=mock_multi_search_response)
             mock_service_class.return_value = mock_service
 
             # Return valid config directly
@@ -84,15 +83,14 @@ class TestOmniSearchMetricsTracking:
                 "limit": 10,
             }
 
-            await _omni_search_code(params, mock_user)
+            _omni_search_code(params, mock_user)
 
             # Verify semantic search metric was incremented
             mock_metrics.increment_semantic_search.assert_called_once()
             mock_metrics.increment_other_index_search.assert_not_called()
             mock_metrics.increment_regex_search.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_fts_search_increments_other_index_metric(
+    def test_fts_search_increments_other_index_metric(
         self, mock_user, mock_multi_search_response, valid_multi_search_config
     ):
         """FTS multi-repo search should increment other_index_searches counter."""
@@ -105,9 +103,9 @@ class TestOmniSearchMetricsTracking:
         ) as mock_metrics, patch(
             "code_indexer.server.mcp.handlers._expand_wildcard_patterns"
         ) as mock_expand:
-            # Setup mocks
+            # Setup mocks - Story #51: handlers are now sync
             mock_service = MagicMock()
-            mock_service.search = AsyncMock(return_value=mock_multi_search_response)
+            mock_service.search = MagicMock(return_value=mock_multi_search_response)
             mock_service_class.return_value = mock_service
 
             mock_config_from_config.return_value = valid_multi_search_config
@@ -122,15 +120,14 @@ class TestOmniSearchMetricsTracking:
                 "limit": 10,
             }
 
-            await _omni_search_code(params, mock_user)
+            _omni_search_code(params, mock_user)
 
             # Verify other_index_search metric was incremented
             mock_metrics.increment_other_index_search.assert_called_once()
             mock_metrics.increment_semantic_search.assert_not_called()
             mock_metrics.increment_regex_search.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_regex_search_increments_regex_metric(
+    def test_regex_search_increments_regex_metric(
         self, mock_user, mock_multi_search_response, valid_multi_search_config
     ):
         """Regex multi-repo search should increment regex_searches counter."""
@@ -143,9 +140,9 @@ class TestOmniSearchMetricsTracking:
         ) as mock_metrics, patch(
             "code_indexer.server.mcp.handlers._expand_wildcard_patterns"
         ) as mock_expand:
-            # Setup mocks
+            # Setup mocks - Story #51: handlers are now sync
             mock_service = MagicMock()
-            mock_service.search = AsyncMock(return_value=mock_multi_search_response)
+            mock_service.search = MagicMock(return_value=mock_multi_search_response)
             mock_service_class.return_value = mock_service
 
             mock_config_from_config.return_value = valid_multi_search_config
@@ -160,15 +157,14 @@ class TestOmniSearchMetricsTracking:
                 "limit": 10,
             }
 
-            await _omni_search_code(params, mock_user)
+            _omni_search_code(params, mock_user)
 
             # Verify regex search metric was incremented
             mock_metrics.increment_regex_search.assert_called_once()
             mock_metrics.increment_semantic_search.assert_not_called()
             mock_metrics.increment_other_index_search.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_temporal_search_increments_other_index_metric(
+    def test_temporal_search_increments_other_index_metric(
         self, mock_user, mock_multi_search_response, valid_multi_search_config
     ):
         """Temporal multi-repo search should increment other_index_searches counter."""
@@ -183,9 +179,9 @@ class TestOmniSearchMetricsTracking:
         ) as mock_expand, patch(
             "code_indexer.server.mcp.handlers._is_temporal_query"
         ) as mock_is_temporal:
-            # Setup mocks
+            # Setup mocks - Story #51: handlers are now sync
             mock_service = MagicMock()
-            mock_service.search = AsyncMock(return_value=mock_multi_search_response)
+            mock_service.search = MagicMock(return_value=mock_multi_search_response)
             mock_service_class.return_value = mock_service
 
             mock_config_from_config.return_value = valid_multi_search_config
@@ -203,15 +199,14 @@ class TestOmniSearchMetricsTracking:
                 "limit": 10,
             }
 
-            await _omni_search_code(params, mock_user)
+            _omni_search_code(params, mock_user)
 
             # Verify other_index_search metric was incremented (temporal is in this bucket)
             mock_metrics.increment_other_index_search.assert_called_once()
             mock_metrics.increment_semantic_search.assert_not_called()
             mock_metrics.increment_regex_search.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_empty_repos_does_not_track_metrics(self, mock_user):
+    def test_empty_repos_does_not_track_metrics(self, mock_user):
         """Empty repository list should return early without tracking metrics."""
         with patch(
             "code_indexer.server.mcp.handlers.api_metrics_service"
@@ -230,7 +225,7 @@ class TestOmniSearchMetricsTracking:
                 "limit": 10,
             }
 
-            result = await _omni_search_code(params, mock_user)
+            result = _omni_search_code(params, mock_user)
 
             # Verify no metrics were incremented for empty repos
             mock_metrics.increment_semantic_search.assert_not_called()

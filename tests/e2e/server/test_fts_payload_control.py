@@ -27,7 +27,7 @@ class TestFtsPayloadCacheE2E:
     """E2E tests for FTS PayloadCache truncation functionality."""
 
     @pytest.fixture
-    async def cache_with_standard_config(self, tmp_path):
+    def cache_with_standard_config(self, tmp_path):
         """Create PayloadCache with standard settings."""
         config = PayloadCacheConfig(
             preview_size_chars=2000,
@@ -35,9 +35,9 @@ class TestFtsPayloadCacheE2E:
             cache_ttl_seconds=900,
         )
         cache = PayloadCache(db_path=tmp_path / "test_cache.db", config=config)
-        await cache.initialize()
+        cache.initialize()
         yield cache
-        await cache.close()
+        cache.close()
 
     @pytest.mark.asyncio
     async def test_fts_large_snippet_truncation_workflow(self, cache_with_standard_config):
@@ -59,7 +59,7 @@ class TestFtsPayloadCacheE2E:
         ) as mock_state:
             mock_state.payload_cache = cache_with_standard_config
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)
 
         result = truncated[0]
 
@@ -69,7 +69,7 @@ class TestFtsPayloadCacheE2E:
         assert result["snippet_cache_handle"] is not None
 
         # Verify full content can be retrieved
-        retrieved = await cache_with_standard_config.retrieve(
+        retrieved = cache_with_standard_config.retrieve(
             result["snippet_cache_handle"], page=0
         )
         assert retrieved.content == large_snippet
@@ -97,7 +97,7 @@ class TestFtsPayloadCacheE2E:
         ) as mock_state:
             mock_state.payload_cache = cache_with_standard_config
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)
 
         result = truncated[0]
 
@@ -107,7 +107,7 @@ class TestFtsPayloadCacheE2E:
         assert result["match_text_cache_handle"] is not None
 
         # Verify full content can be retrieved
-        retrieved = await cache_with_standard_config.retrieve(
+        retrieved = cache_with_standard_config.retrieve(
             result["match_text_cache_handle"], page=0
         )
         assert retrieved.content == large_match_text
@@ -133,7 +133,7 @@ class TestFtsPayloadCacheE2E:
         ) as mock_state:
             mock_state.payload_cache = cache_with_standard_config
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)
 
         result = truncated[0]
 
@@ -143,10 +143,10 @@ class TestFtsPayloadCacheE2E:
         assert result["snippet_cache_handle"] != result["match_text_cache_handle"]
 
         # Retrieve each independently and verify correct content
-        snippet_retrieved = await cache_with_standard_config.retrieve(
+        snippet_retrieved = cache_with_standard_config.retrieve(
             result["snippet_cache_handle"], page=0
         )
-        match_text_retrieved = await cache_with_standard_config.retrieve(
+        match_text_retrieved = cache_with_standard_config.retrieve(
             result["match_text_cache_handle"], page=0
         )
 
@@ -174,7 +174,7 @@ class TestFtsPayloadCacheE2E:
         ) as mock_state:
             mock_state.payload_cache = cache_with_standard_config
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)
 
         result = truncated[0]
 
@@ -192,7 +192,7 @@ class TestFtsMcpCacheRetrievalE2E:
     """E2E tests for MCP get_cached_content tool with FTS handles (AC5)."""
 
     @pytest.fixture
-    async def cache(self, tmp_path):
+    def cache(self, tmp_path):
         """Create PayloadCache for testing."""
         config = PayloadCacheConfig(
             preview_size_chars=2000,
@@ -200,9 +200,9 @@ class TestFtsMcpCacheRetrievalE2E:
             cache_ttl_seconds=900,
         )
         cache = PayloadCache(db_path=tmp_path / "test_cache.db", config=config)
-        await cache.initialize()
+        cache.initialize()
         yield cache
-        await cache.close()
+        cache.close()
 
     @pytest.fixture
     def mock_user(self):
@@ -230,7 +230,7 @@ class TestFtsMcpCacheRetrievalE2E:
             "code_indexer.server.mcp.handlers.app_module.app.state"
         ) as mock_state:
             mock_state.payload_cache = cache
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)
 
         snippet_handle = truncated[0]["snippet_cache_handle"]
 
@@ -269,7 +269,7 @@ class TestFtsMcpCacheRetrievalE2E:
             "code_indexer.server.mcp.handlers.app_module.app.state"
         ) as mock_state:
             mock_state.payload_cache = cache
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)
 
         match_text_handle = truncated[0]["match_text_cache_handle"]
 
@@ -310,7 +310,7 @@ class TestFtsMcpCacheRetrievalE2E:
             "code_indexer.server.mcp.handlers.app_module.app.state"
         ) as mock_state:
             mock_state.payload_cache = cache
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)
 
         snippet_handle = truncated[0]["snippet_cache_handle"]
 

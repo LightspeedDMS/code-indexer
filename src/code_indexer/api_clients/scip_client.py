@@ -64,12 +64,12 @@ class SCIPAPIClient(CIDXRemoteAPIClient):
             payload["project"] = project
         return payload
 
-    async def _execute_scip_request(
+    def _execute_scip_request(
         self, endpoint: str, payload: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Execute SCIP request and handle responses."""
         try:
-            response = await self._authenticated_request("POST", endpoint, json=payload)
+            response = self._authenticated_request("POST", endpoint, json=payload)
 
             if response.status_code == 200:
                 return dict(response.json())
@@ -104,7 +104,7 @@ class SCIPAPIClient(CIDXRemoteAPIClient):
         except Exception:
             return default
 
-    async def definition(
+    def definition(
         self,
         symbol: str,
         repository_alias: Optional[str] = None,
@@ -128,9 +128,9 @@ class SCIPAPIClient(CIDXRemoteAPIClient):
         payload = self._build_request_payload(
             symbol=symbol, repositories=[repository_alias], project=project
         )
-        return await self._execute_scip_request("/api/scip/multi/definition", payload)
+        return self._execute_scip_request("/api/scip/multi/definition", payload)
 
-    async def references(
+    def references(
         self,
         symbol: str,
         repository_alias: Optional[str] = None,
@@ -156,9 +156,9 @@ class SCIPAPIClient(CIDXRemoteAPIClient):
         payload = self._build_request_payload(
             symbol=symbol, repositories=[repository_alias], limit=limit, project=project
         )
-        return await self._execute_scip_request("/api/scip/multi/references", payload)
+        return self._execute_scip_request("/api/scip/multi/references", payload)
 
-    async def dependencies(
+    def dependencies(
         self,
         symbol: str,
         repository_alias: Optional[str] = None,
@@ -187,9 +187,9 @@ class SCIPAPIClient(CIDXRemoteAPIClient):
             max_depth=depth,
             project=project,
         )
-        return await self._execute_scip_request("/api/scip/multi/dependencies", payload)
+        return self._execute_scip_request("/api/scip/multi/dependencies", payload)
 
-    async def dependents(
+    def dependents(
         self,
         symbol: str,
         repository_alias: Optional[str] = None,
@@ -218,9 +218,9 @@ class SCIPAPIClient(CIDXRemoteAPIClient):
             max_depth=depth,
             project=project,
         )
-        return await self._execute_scip_request("/api/scip/multi/dependents", payload)
+        return self._execute_scip_request("/api/scip/multi/dependents", payload)
 
-    async def impact(
+    def impact(
         self,
         symbol: str,
         repository_alias: Optional[str] = None,
@@ -249,9 +249,9 @@ class SCIPAPIClient(CIDXRemoteAPIClient):
             max_depth=min(depth, 10),
             project=project,
         )
-        return await self._execute_scip_request("/api/scip/multi/dependents", payload)
+        return self._execute_scip_request("/api/scip/multi/dependents", payload)
 
-    async def callchain(
+    def callchain(
         self,
         from_symbol: str,
         to_symbol: str,
@@ -288,7 +288,7 @@ class SCIPAPIClient(CIDXRemoteAPIClient):
         if project:
             payload["project"] = project
 
-        return await self._execute_scip_request("/api/scip/multi/callchain", payload)
+        return self._execute_scip_request("/api/scip/multi/callchain", payload)
 
     def _combine_context_results(
         self, def_result: Dict[str, Any], ref_result: Dict[str, Any]
@@ -324,7 +324,7 @@ class SCIPAPIClient(CIDXRemoteAPIClient):
                     combined["errors"][repo_id] = error
         return combined
 
-    async def context(
+    def context(
         self,
         symbol: str,
         repository_alias: Optional[str] = None,
@@ -352,13 +352,13 @@ class SCIPAPIClient(CIDXRemoteAPIClient):
         def_payload = self._build_request_payload(
             symbol=symbol, repositories=[repository_alias], project=project
         )
-        def_result = await self._execute_scip_request(
+        def_result = self._execute_scip_request(
             "/api/scip/multi/definition", def_payload
         )
         ref_payload = self._build_request_payload(
             symbol=symbol, repositories=[repository_alias], limit=limit, project=project
         )
-        ref_result = await self._execute_scip_request(
+        ref_result = self._execute_scip_request(
             "/api/scip/multi/references", ref_payload
         )
         return self._combine_context_results(def_result, ref_result)

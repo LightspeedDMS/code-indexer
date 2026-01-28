@@ -65,7 +65,7 @@ router = APIRouter(prefix="/api/v1/repos/{alias}/git", tags=["git"])
     summary="Get git status",
     description="Get the git status of the activated repository",
 )
-async def git_status(
+def git_status(
     alias: str, user: User = Depends(get_current_user)
 ) -> GitStatusResponse:
     """Get git status of the repository."""
@@ -103,7 +103,7 @@ async def git_status(
     summary="Get git diff",
     description="Get the git diff for the activated repository",
 )
-async def git_diff(
+def git_diff(
     alias: str,
     context_lines: Optional[int] = Query(
         None, description="Number of context lines to show"
@@ -174,7 +174,7 @@ async def git_diff(
     summary="Get git log",
     description="Get the git commit log for the activated repository",
 )
-async def git_log(
+def git_log(
     alias: str,
     limit: Optional[int] = Query(
         None, description="Maximum number of commits to return"
@@ -259,7 +259,7 @@ async def git_log(
     summary="Stage files",
     description="Stage files for commit in the activated repository",
 )
-async def git_stage(
+def git_stage(
     alias: str, request: GitStageRequest, user: User = Depends(get_current_user)
 ) -> GitStageResponse:
     """Stage files for commit."""
@@ -305,7 +305,7 @@ async def git_stage(
     summary="Unstage files",
     description="Unstage files in the activated repository",
 )
-async def git_unstage(
+def git_unstage(
     alias: str, request: GitUnstageRequest, user: User = Depends(get_current_user)
 ) -> GitUnstageResponse:
     """Unstage files."""
@@ -346,7 +346,7 @@ async def git_unstage(
     summary="Create commit",
     description="Create a git commit in the activated repository",
 )
-async def git_commit(
+def git_commit(
     alias: str, request: GitCommitRequest, user: User = Depends(get_current_user)
 ) -> GitCommitResponse:
     """Create a git commit."""
@@ -400,7 +400,7 @@ async def git_commit(
     summary="Push commits",
     description="Push commits to remote repository",
 )
-async def git_push(
+def git_push(
     alias: str, request: GitPushRequest, user: User = Depends(get_current_user)
 ) -> GitPushResponse:
     """Push commits to remote."""
@@ -445,7 +445,7 @@ async def git_push(
     summary="Pull commits",
     description="Pull commits from remote repository",
 )
-async def git_pull(
+def git_pull(
     alias: str, request: GitPullRequest, user: User = Depends(get_current_user)
 ) -> GitPullResponse:
     """Pull commits from remote."""
@@ -489,7 +489,7 @@ async def git_pull(
     summary="Fetch from remote",
     description="Fetch refs and objects from remote repository",
 )
-async def git_fetch(
+def git_fetch(
     alias: str, request: GitFetchRequest, user: User = Depends(get_current_user)
 ) -> GitFetchResponse:
     """Fetch from remote."""
@@ -534,7 +534,7 @@ async def git_fetch(
     summary="Reset repository",
     description="Reset repository to a specific commit (requires confirmation for hard reset)",
 )
-async def git_reset(
+def git_reset(
     alias: str, request: GitResetRequest, user: User = Depends(get_current_user)
 ) -> GitResetResponse:
     """Reset repository to a specific state."""
@@ -591,7 +591,7 @@ async def git_reset(
     summary="Clean untracked files",
     description="Remove untracked files from repository (requires confirmation)",
 )
-async def git_clean(
+def git_clean(
     alias: str,
     request: GitCleanRequest = GitCleanRequest(),
     user: User = Depends(get_current_user),
@@ -641,7 +641,7 @@ async def git_clean(
     summary="Abort merge",
     description="Abort an in-progress merge operation",
 )
-async def git_merge_abort(
+def git_merge_abort(
     alias: str, user: User = Depends(get_current_user)
 ) -> GitMergeAbortResponse:
     """Abort an in-progress merge."""
@@ -679,7 +679,7 @@ async def git_merge_abort(
     summary="Restore file",
     description="Restore a file to its last committed state",
 )
-async def git_checkout_file(
+def git_checkout_file(
     alias: str, request: GitCheckoutFileRequest, user: User = Depends(get_current_user)
 ) -> GitCheckoutFileResponse:
     """Restore a file to its last committed state."""
@@ -722,7 +722,7 @@ async def git_checkout_file(
     summary="List branches",
     description="List all local and remote branches in the repository",
 )
-async def git_branch_list(
+def git_branch_list(
     alias: str, user: User = Depends(get_current_user)
 ) -> GitBranchListResponse:
     """List all branches."""
@@ -762,7 +762,7 @@ async def git_branch_list(
     summary="Create branch",
     description="Create a new branch in the repository",
 )
-async def git_branch_create(
+def git_branch_create(
     alias: str, request: GitBranchCreateRequest, user: User = Depends(get_current_user)
 ) -> GitBranchCreateResponse:
     """Create a new branch."""
@@ -814,7 +814,7 @@ async def git_branch_create(
     summary="Switch branch",
     description="Switch to a different branch",
 )
-async def git_branch_switch(
+def git_branch_switch(
     alias: str, name: str, user: User = Depends(get_current_user)
 ) -> GitBranchSwitchResponse:
     """Switch to a different branch."""
@@ -855,7 +855,7 @@ async def git_branch_switch(
     summary="Delete branch",
     description="Delete a branch (requires confirmation)",
 )
-async def git_branch_delete(
+def git_branch_delete(
     alias: str,
     name: str,
     confirmation_token: Optional[str] = Query(None, description="Confirmation token"),

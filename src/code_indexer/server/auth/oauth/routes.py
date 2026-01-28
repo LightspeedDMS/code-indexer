@@ -136,7 +136,7 @@ class RevokeRequest(BaseModel):
 
 
 @router.get("/.well-known/oauth-authorization-server")
-async def discovery_endpoint(manager: OAuthManager = Depends(get_oauth_manager)):
+def discovery_endpoint(manager: OAuthManager = Depends(get_oauth_manager)):
     """OAuth 2.1 discovery endpoint."""
     return manager.get_discovery_metadata()
 
@@ -146,7 +146,7 @@ async def discovery_endpoint(manager: OAuthManager = Depends(get_oauth_manager))
     response_model=ClientRegistrationResponse,
     status_code=status.HTTP_201_CREATED,
 )
-async def register_client(
+def register_client(
     request_model: ClientRegistrationRequest,
     http_request: Request,
     manager: OAuthManager = Depends(get_oauth_manager),
@@ -191,7 +191,7 @@ async def register_client(
 
 
 @router.get("/authorize", response_class=HTMLResponse)
-async def get_authorize_form(
+def get_authorize_form(
     request: Request,
     client_id: str,
     redirect_uri: str,
@@ -266,7 +266,7 @@ async def get_authorize_form(
 
 
 @router.post("/authorize/consent")
-async def authorize_consent(
+def authorize_consent(
     request: Request,
     client_id: str = Form(...),
     redirect_uri: str = Form(...),
@@ -473,7 +473,7 @@ async def authorize_endpoint(
 
 
 @router.post("/token", response_model=TokenResponse)
-async def token_endpoint(
+def token_endpoint(
     http_request: Request,
     grant_type: str = Form(...),
     code: Optional[str] = Form(None),
@@ -637,7 +637,7 @@ async def token_endpoint(
 
 
 @router.post("/revoke")
-async def revoke_endpoint(
+def revoke_endpoint(
     request_model: RevokeRequest,
     http_request: Request,
     manager: OAuthManager = Depends(get_oauth_manager),

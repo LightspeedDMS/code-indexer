@@ -49,7 +49,7 @@ class JobsAPIClient(CIDXRemoteAPIClient):
             project_root=project_root,
         )
 
-    async def list_jobs(
+    def list_jobs(
         self,
         status: Optional[str] = None,
         limit: int = 10,
@@ -79,7 +79,7 @@ class JobsAPIClient(CIDXRemoteAPIClient):
             params["status"] = status
 
         try:
-            response = await self.get("/api/jobs", params=params)
+            response = self.get("/api/jobs", params=params)
 
             if response.status_code == 200:
                 return dict(response.json())
@@ -112,7 +112,7 @@ class JobsAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error listing jobs: {e}")
 
-    async def get_job_status(self, job_id: str) -> Dict[str, Any]:
+    def get_job_status(self, job_id: str) -> Dict[str, Any]:
         """Get status of a specific job.
 
         Args:
@@ -127,4 +127,4 @@ class JobsAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         # Use the existing method from base class
-        return await super().get_job_status(job_id)
+        return super().get_job_status(job_id)

@@ -199,7 +199,7 @@ class SCIPResolutionQueue:
             "is_running": self.is_running,
         }
 
-    async def start_worker(self) -> None:
+    def start_worker(self) -> None:
         """
         Start the queue worker task.
 

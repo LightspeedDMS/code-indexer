@@ -85,7 +85,7 @@ class GetIndexStatusResponse(BaseModel):
     summary="Trigger re-indexing",
     description="Trigger a background re-indexing job for specified index types",
 )
-async def trigger_reindex(
+def trigger_reindex(
     alias: str, request: TriggerReindexRequest, user: User = Depends(get_current_user)
 ) -> TriggerReindexResponse:
     """Trigger re-indexing for specified index types."""
@@ -139,7 +139,7 @@ async def trigger_reindex(
     summary="Get index status",
     description="Get the status of all index types for the repository",
 )
-async def get_index_status(
+def get_index_status(
     alias: str, user: User = Depends(get_current_user)
 ) -> GetIndexStatusResponse:
     """Get index status for all index types."""
@@ -232,7 +232,7 @@ async def get_index_status(
     summary="Get temporal indexing status",
     description="Get the temporal indexing status (format version, file count, reindex requirement)",
 )
-async def get_temporal_status(
+def get_temporal_status(
     alias: str, user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Get temporal indexing status for repository.

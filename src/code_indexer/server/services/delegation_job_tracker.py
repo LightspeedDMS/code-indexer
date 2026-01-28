@@ -144,7 +144,7 @@ class DelegationJobTracker:
             try:
                 cache_key = f"delegation:{result.job_id}"
                 serialized = json.dumps(asdict(result))
-                await self._payload_cache.store_with_key(cache_key, serialized)
+                self._payload_cache.store_with_key(cache_key, serialized)
                 logger.debug(f"Cached result for job: {result.job_id}")
             except Exception as e:
                 # Log but don't fail - caching is optional optimization
@@ -178,8 +178,8 @@ class DelegationJobTracker:
         if self._payload_cache is not None:
             try:
                 cache_key = f"delegation:{job_id}"
-                if await self._payload_cache.has_key(cache_key):
-                    cached = await self._payload_cache.retrieve(cache_key, page=0)
+                if self._payload_cache.has_key(cache_key):
+                    cached = self._payload_cache.retrieve(cache_key, page=0)
                     cached_dict = json.loads(cached.content)
                     result = JobResult(**cached_dict)
                     logger.debug(f"Returning cached result for job: {job_id}")

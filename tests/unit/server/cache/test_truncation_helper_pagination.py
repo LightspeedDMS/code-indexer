@@ -2,6 +2,7 @@
 Unit tests for TruncationHelper pagination info (total_pages, has_more).
 
 Story #34: Add missing pagination information in TruncationHelper and get_file_content response.
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 
 Tests:
 - TruncationResult has total_pages and has_more fields
@@ -69,7 +70,10 @@ class TestTruncationResultPaginationFields:
 
 
 class TestTruncationHelperPaginationCalculation:
-    """Test TruncationHelper correctly calculates pagination info."""
+    """Test TruncationHelper correctly calculates pagination info.
+
+    Story #50: PayloadCache and TruncationHelper are now sync.
+    """
 
     @pytest.fixture
     def content_limits(self) -> ContentLimitsConfig:
@@ -86,8 +90,10 @@ class TestTruncationHelperPaginationCalculation:
         )
 
     @pytest.fixture
-    async def payload_cache(self, tmp_path: Path):
+    def payload_cache(self, tmp_path: Path):
         """Create a real PayloadCache with specific max_fetch_size_chars.
+
+        Story #50: PayloadCache is now sync.
 
         max_fetch_size_chars=500 means:
         - 1000 chars content = 2 pages
@@ -105,25 +111,24 @@ class TestTruncationHelperPaginationCalculation:
             cache_ttl_seconds=3600,
         )
         cache = PayloadCache(db_path, config)
-        await cache.initialize()
+        cache.initialize()  # Sync call
         return cache
 
     @pytest.fixture
-    async def truncation_helper(self, payload_cache, content_limits):
+    def truncation_helper(self, payload_cache, content_limits):
         """Create TruncationHelper instance for testing."""
         from code_indexer.server.cache.truncation_helper import TruncationHelper
 
         return TruncationHelper(payload_cache, content_limits)
 
-    @pytest.mark.asyncio
-    async def test_truncated_content_returns_correct_total_pages(
+    def test_truncated_content_returns_correct_total_pages(
         self, truncation_helper
     ):
         """Truncated content should return correct total_pages based on content size."""
         # 1000 chars content with max_fetch_size_chars=500 = 2 pages
         large_content = "x" * 1000
 
-        result = await truncation_helper.truncate_and_cache(
+        result = truncation_helper.truncate_and_cache(  # Sync call
             content=large_content,
             content_type="file",
         )
@@ -131,12 +136,11 @@ class TestTruncationHelperPaginationCalculation:
         assert result.truncated is True
         assert result.total_pages == 2
 
-    @pytest.mark.asyncio
-    async def test_truncated_content_has_more_is_true(self, truncation_helper):
+    def test_truncated_content_has_more_is_true(self, truncation_helper):
         """Truncated content should have has_more=True since there's cached content."""
         large_content = "x" * 1000
 
-        result = await truncation_helper.truncate_and_cache(
+        result = truncation_helper.truncate_and_cache(  # Sync call
             content=large_content,
             content_type="file",
         )
@@ -144,12 +148,11 @@ class TestTruncationHelperPaginationCalculation:
         assert result.truncated is True
         assert result.has_more is True
 
-    @pytest.mark.asyncio
-    async def test_small_content_total_pages_zero(self, truncation_helper):
+    def test_small_content_total_pages_zero(self, truncation_helper):
         """Non-truncated content should have total_pages=0 (no cache)."""
         small_content = "Small content"  # 13 chars = ~3 tokens, under 100 token limit
 
-        result = await truncation_helper.truncate_and_cache(
+        result = truncation_helper.truncate_and_cache(  # Sync call
             content=small_content,
             content_type="file",
         )
@@ -157,12 +160,11 @@ class TestTruncationHelperPaginationCalculation:
         assert result.truncated is False
         assert result.total_pages == 0
 
-    @pytest.mark.asyncio
-    async def test_small_content_has_more_is_false(self, truncation_helper):
+    def test_small_content_has_more_is_false(self, truncation_helper):
         """Non-truncated content should have has_more=False."""
         small_content = "Small content"
 
-        result = await truncation_helper.truncate_and_cache(
+        result = truncation_helper.truncate_and_cache(  # Sync call
             content=small_content,
             content_type="file",
         )
@@ -170,8 +172,7 @@ class TestTruncationHelperPaginationCalculation:
         assert result.truncated is False
         assert result.has_more is False
 
-    @pytest.mark.asyncio
-    async def test_total_pages_calculation_various_sizes(self, truncation_helper):
+    def test_total_pages_calculation_various_sizes(self, truncation_helper):
         """Verify total_pages calculation for various content sizes.
 
         With max_fetch_size_chars=500:
@@ -192,7 +193,7 @@ class TestTruncationHelperPaginationCalculation:
         for content_size, expected_pages in test_cases:
             content = "x" * content_size
 
-            result = await truncation_helper.truncate_and_cache(
+            result = truncation_helper.truncate_and_cache(  # Sync call
                 content=content,
                 content_type="file",
             )
@@ -203,20 +204,19 @@ class TestTruncationHelperPaginationCalculation:
                 f"got {result.total_pages}"
             )
 
-    @pytest.mark.asyncio
-    async def test_total_pages_matches_cache_retrieve_pagination(
+    def test_total_pages_matches_cache_retrieve_pagination(
         self, truncation_helper, payload_cache
     ):
         """Verify total_pages in TruncationResult matches what PayloadCache.retrieve returns."""
         content = "x" * 1500  # 1500 chars = 3 pages with max_fetch_size_chars=500
 
-        result = await truncation_helper.truncate_and_cache(
+        result = truncation_helper.truncate_and_cache(  # Sync call
             content=content,
             content_type="file",
         )
 
-        # Retrieve from cache and verify pagination matches
-        cache_result = await payload_cache.retrieve(result.cache_handle, page=0)
+        # Retrieve from cache and verify pagination matches (sync call)
+        cache_result = payload_cache.retrieve(result.cache_handle, page=0)
 
         assert result.total_pages == cache_result.total_pages, (
             f"TruncationResult.total_pages ({result.total_pages}) should match "

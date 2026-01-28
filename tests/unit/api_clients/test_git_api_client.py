@@ -6,7 +6,7 @@ Following TDD methodology - tests written before implementation.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 
 class TestGitAPIClientImport:
@@ -86,7 +86,7 @@ class TestGitAPIClientStatusMethods:
     async def test_status_calls_correct_endpoint(self, git_client):
         """Test status calls the correct REST endpoint."""
         with patch.object(
-            git_client, "_authenticated_request", new_callable=AsyncMock
+            git_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -98,7 +98,7 @@ class TestGitAPIClientStatusMethods:
             }
             mock_request.return_value = mock_response
 
-            _ = await git_client.status("test-repo")
+            _ = git_client.status("test-repo")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -115,7 +115,7 @@ class TestGitAPIClientStatusMethods:
     async def test_diff_calls_correct_endpoint(self, git_client):
         """Test diff calls the correct REST endpoint."""
         with patch.object(
-            git_client, "_authenticated_request", new_callable=AsyncMock
+            git_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -126,7 +126,7 @@ class TestGitAPIClientStatusMethods:
             }
             mock_request.return_value = mock_response
 
-            _ = await git_client.diff("test-repo")
+            _ = git_client.diff("test-repo")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -143,14 +143,14 @@ class TestGitAPIClientStatusMethods:
     async def test_log_calls_correct_endpoint(self, git_client):
         """Test log calls the correct REST endpoint."""
         with patch.object(
-            git_client, "_authenticated_request", new_callable=AsyncMock
+            git_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"success": True, "commits": []}
             mock_request.return_value = mock_response
 
-            await git_client.log("test-repo")
+            git_client.log("test-repo")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -188,7 +188,7 @@ class TestGitAPIClientStagingMethods:
     async def test_stage_calls_correct_endpoint(self, git_client):
         """Test stage calls the correct REST endpoint."""
         with patch.object(
-            git_client, "_authenticated_request", new_callable=AsyncMock
+            git_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -198,7 +198,7 @@ class TestGitAPIClientStagingMethods:
             }
             mock_request.return_value = mock_response
 
-            await git_client.stage("test-repo", files=["file1.py"])
+            git_client.stage("test-repo", files=["file1.py"])
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -216,7 +216,7 @@ class TestGitAPIClientStagingMethods:
     async def test_unstage_calls_correct_endpoint(self, git_client):
         """Test unstage calls the correct REST endpoint."""
         with patch.object(
-            git_client, "_authenticated_request", new_callable=AsyncMock
+            git_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -226,7 +226,7 @@ class TestGitAPIClientStagingMethods:
             }
             mock_request.return_value = mock_response
 
-            await git_client.unstage("test-repo", files=["file1.py"])
+            git_client.unstage("test-repo", files=["file1.py"])
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -244,7 +244,7 @@ class TestGitAPIClientStagingMethods:
     async def test_commit_calls_correct_endpoint(self, git_client):
         """Test commit calls the correct REST endpoint."""
         with patch.object(
-            git_client, "_authenticated_request", new_callable=AsyncMock
+            git_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 201
@@ -258,7 +258,7 @@ class TestGitAPIClientStagingMethods:
             }
             mock_request.return_value = mock_response
 
-            await git_client.commit("test-repo", message="Test commit")
+            git_client.commit("test-repo", message="Test commit")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -291,7 +291,7 @@ class TestGitAPIClientRemoteMethods:
     async def test_push_calls_correct_endpoint(self, git_client):
         """Test push calls the correct REST endpoint."""
         with patch.object(
-            git_client, "_authenticated_request", new_callable=AsyncMock
+            git_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -303,7 +303,7 @@ class TestGitAPIClientRemoteMethods:
             }
             mock_request.return_value = mock_response
 
-            await git_client.push("test-repo")
+            git_client.push("test-repo")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -320,7 +320,7 @@ class TestGitAPIClientRemoteMethods:
     async def test_pull_calls_correct_endpoint(self, git_client):
         """Test pull calls the correct REST endpoint."""
         with patch.object(
-            git_client, "_authenticated_request", new_callable=AsyncMock
+            git_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -331,7 +331,7 @@ class TestGitAPIClientRemoteMethods:
             }
             mock_request.return_value = mock_response
 
-            await git_client.pull("test-repo")
+            git_client.pull("test-repo")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -348,7 +348,7 @@ class TestGitAPIClientRemoteMethods:
     async def test_fetch_calls_correct_endpoint(self, git_client):
         """Test fetch calls the correct REST endpoint."""
         with patch.object(
-            git_client, "_authenticated_request", new_callable=AsyncMock
+            git_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -358,7 +358,7 @@ class TestGitAPIClientRemoteMethods:
             }
             mock_request.return_value = mock_response
 
-            await git_client.fetch("test-repo")
+            git_client.fetch("test-repo")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args

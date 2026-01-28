@@ -92,7 +92,7 @@ class TestGitLabProviderSearchFilter:
         with patch.object(
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await gitlab_provider.discover_repositories(
+            result = gitlab_provider.discover_repositories(
                 page=1, page_size=50, search="auth"
             )
 
@@ -113,7 +113,7 @@ class TestGitLabProviderSearchFilter:
         with patch.object(
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await gitlab_provider.discover_repositories(
+            result = gitlab_provider.discover_repositories(
                 page=1, page_size=50, search="authentication"
             )
 
@@ -132,7 +132,7 @@ class TestGitLabProviderSearchFilter:
         with patch.object(
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await gitlab_provider.discover_repositories(
+            result = gitlab_provider.discover_repositories(
                 page=1, page_size=50, search="myproject"
             )
         assert len(result.repositories) == 1
@@ -140,7 +140,7 @@ class TestGitLabProviderSearchFilter:
         with patch.object(
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await gitlab_provider.discover_repositories(
+            result = gitlab_provider.discover_repositories(
                 page=1, page_size=50, search="important"
             )
         assert len(result.repositories) == 1
@@ -155,7 +155,7 @@ class TestGitLabProviderSearchFilter:
         with patch.object(
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await gitlab_provider.discover_repositories(
+            result = gitlab_provider.discover_repositories(
                 page=1, page_size=50, search="nonexistent"
             )
 
@@ -173,7 +173,7 @@ class TestGitLabProviderSearchFilter:
         with patch.object(
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await gitlab_provider.discover_repositories(
+            result = gitlab_provider.discover_repositories(
                 page=1, page_size=50, search=""
             )
         assert len(result.repositories) == 2
@@ -181,7 +181,7 @@ class TestGitLabProviderSearchFilter:
         with patch.object(
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await gitlab_provider.discover_repositories(
+            result = gitlab_provider.discover_repositories(
                 page=1, page_size=50, search=None
             )
         assert len(result.repositories) == 2
@@ -201,7 +201,7 @@ class TestGitLabProviderSearchFilter:
             with patch.object(
                 gitlab_provider, "_make_api_request", return_value=mock_response
             ):
-                result = await gitlab_provider.discover_repositories(
+                result = gitlab_provider.discover_repositories(
                     page=1, page_size=50, search=search_term
                 )
                 assert isinstance(result.repositories, list)
@@ -219,7 +219,7 @@ class TestGitLabProviderSearchFilter:
         with patch.object(
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await gitlab_provider.discover_repositories(
+            result = gitlab_provider.discover_repositories(
                 page=1, page_size=50, search="team"
             )
 
@@ -247,7 +247,7 @@ class TestGitLabProviderSearchFilter:
         with patch.object(
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await gitlab_provider.discover_repositories(
+            result = gitlab_provider.discover_repositories(
                 page=1, page_size=50, search="auth"
             )
 
@@ -280,7 +280,7 @@ class TestGitLabProviderSearchFilter:
         with patch.object(
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await gitlab_provider.discover_repositories(
+            result = gitlab_provider.discover_repositories(
                 page=1, page_size=50, search="project"
             )
 
@@ -304,7 +304,7 @@ class TestGitLabProviderSearchFilter:
         with patch.object(
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await gitlab_provider.discover_repositories(
+            result = gitlab_provider.discover_repositories(
                 page=1, page_size=50, search="project"
             )
 
@@ -335,7 +335,7 @@ class TestGitLabProviderSearchFilter:
         with patch.object(
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await gitlab_provider.discover_repositories(
+            result = gitlab_provider.discover_repositories(
                 page=1, page_size=50, search="commit"
             )
 
@@ -435,7 +435,7 @@ class TestGitHubProviderSearchFilter:
         with patch.object(
             github_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await github_provider.discover_repositories(
+            result = github_provider.discover_repositories(
                 page=1, page_size=50, search="auth"
             )
 
@@ -456,7 +456,7 @@ class TestGitHubProviderSearchFilter:
         with patch.object(
             github_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await github_provider.discover_repositories(
+            result = github_provider.discover_repositories(
                 page=1, page_size=50, search="authentication"
             )
 
@@ -475,7 +475,7 @@ class TestGitHubProviderSearchFilter:
         with patch.object(
             github_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await github_provider.discover_repositories(
+            result = github_provider.discover_repositories(
                 page=1, page_size=50, search="awesome"
             )
         assert len(result.repositories) == 1
@@ -490,7 +490,7 @@ class TestGitHubProviderSearchFilter:
         with patch.object(
             github_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await github_provider.discover_repositories(
+            result = github_provider.discover_repositories(
                 page=1, page_size=50, search="nonexistent"
             )
 
@@ -509,7 +509,7 @@ class TestGitHubProviderSearchFilter:
         with patch.object(
             github_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await github_provider.discover_repositories(
+            result = github_provider.discover_repositories(
                 page=1, page_size=50, search=""
             )
         assert len(result.repositories) == 2
@@ -517,7 +517,7 @@ class TestGitHubProviderSearchFilter:
         with patch.object(
             github_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await github_provider.discover_repositories(
+            result = github_provider.discover_repositories(
                 page=1, page_size=50, search=None
             )
         assert len(result.repositories) == 2
@@ -536,7 +536,7 @@ class TestGitHubProviderSearchFilter:
             with patch.object(
                 github_provider, "_make_api_request", return_value=mock_response
             ):
-                result = await github_provider.discover_repositories(
+                result = github_provider.discover_repositories(
                     page=1, page_size=50, search=search_term
                 )
                 assert isinstance(result.repositories, list)
@@ -567,7 +567,7 @@ class TestGitHubProviderSearchFilter:
         with patch.object(
             github_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await github_provider.discover_repositories(
+            result = github_provider.discover_repositories(
                 page=1, page_size=50, search="repo"
             )
 
@@ -591,7 +591,7 @@ class TestGitHubProviderSearchFilter:
         with patch.object(
             github_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await github_provider.discover_repositories(
+            result = github_provider.discover_repositories(
                 page=1, page_size=50, search="repo"
             )
 
@@ -622,7 +622,7 @@ class TestGitHubProviderSearchFilter:
         with patch.object(
             github_provider, "_make_api_request", return_value=mock_response
         ):
-            result = await github_provider.discover_repositories(
+            result = github_provider.discover_repositories(
                 page=1, page_size=50, search="commit"
             )
 

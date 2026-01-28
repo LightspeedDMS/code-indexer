@@ -1,6 +1,7 @@
 """Unit tests for Hybrid Search truncation - edge cases.
 
 Story #682: S4 - Hybrid Search with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 Tests: Edge cases for hybrid truncation
 
 Note: The `cache` fixture is provided by conftest.py in this directory.
@@ -13,10 +14,12 @@ from unittest.mock import patch
 
 
 class TestHybridEdgeCases:
-    """Edge cases for hybrid truncation."""
+    """Edge cases for hybrid truncation.
 
-    @pytest.mark.asyncio
-    async def test_empty_fields_handled_correctly(self, cache):
+    Story #50: _apply_payload_truncation, _apply_fts_payload_truncation, and PayloadCache are now sync.
+    """
+
+    def test_empty_fields_handled_correctly(self, cache):
         """Test that empty fields don't cause errors."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -37,8 +40,8 @@ class TestHybridEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
+            truncated = _apply_payload_truncation(truncated)  # Sync call
 
         result = truncated[0]
 
@@ -55,8 +58,7 @@ class TestHybridEdgeCases:
         assert result["match_text_has_more"] is False
         assert result["match_text_cache_handle"] is None
 
-    @pytest.mark.asyncio
-    async def test_exact_boundary_fields(self, cache):
+    def test_exact_boundary_fields(self, cache):
         """Test fields at exactly 2000 chars are NOT truncated."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -80,8 +82,8 @@ class TestHybridEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
+            truncated = _apply_payload_truncation(truncated)  # Sync call
 
         result = truncated[0]
 
@@ -98,8 +100,7 @@ class TestHybridEdgeCases:
         assert result["match_text_has_more"] is False
         assert result["match_text_cache_handle"] is None
 
-    @pytest.mark.asyncio
-    async def test_unicode_content_preserved(self, cache):
+    def test_unicode_content_preserved(self, cache):
         """Test that unicode content is preserved correctly in all fields."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -127,8 +128,8 @@ class TestHybridEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
+            truncated = _apply_payload_truncation(truncated)  # Sync call
 
         result = truncated[0]
 
@@ -137,10 +138,10 @@ class TestHybridEdgeCases:
         assert result["snippet_has_more"] is True
         assert result["match_text_has_more"] is True
 
-        # Retrieve and verify unicode preserved
-        content_retrieved = await cache.retrieve(result["cache_handle"], page=0)
-        snippet_retrieved = await cache.retrieve(result["snippet_cache_handle"], page=0)
-        match_text_retrieved = await cache.retrieve(
+        # Retrieve and verify unicode preserved (sync calls)
+        content_retrieved = cache.retrieve(result["cache_handle"], page=0)
+        snippet_retrieved = cache.retrieve(result["snippet_cache_handle"], page=0)
+        match_text_retrieved = cache.retrieve(
             result["match_text_cache_handle"], page=0
         )
 
@@ -149,8 +150,7 @@ class TestHybridEdgeCases:
         assert "cafe" in snippet_retrieved.content
         assert "alpha" in match_text_retrieved.content
 
-    @pytest.mark.asyncio
-    async def test_null_fields_skipped(self, cache):
+    def test_null_fields_skipped(self, cache):
         """Test that None/missing fields are handled gracefully."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -169,8 +169,8 @@ class TestHybridEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
+            truncated = _apply_payload_truncation(truncated)  # Sync call
 
         result = truncated[0]
 
@@ -185,8 +185,7 @@ class TestHybridEdgeCases:
         assert "snippet_has_more" not in result
         assert "snippet_cache_handle" not in result
 
-    @pytest.mark.asyncio
-    async def test_one_char_over_boundary(self, cache):
+    def test_one_char_over_boundary(self, cache):
         """Test fields at 2001 chars are truncated."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -202,8 +201,8 @@ class TestHybridEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
+            truncated = _apply_payload_truncation(truncated)  # Sync call
 
         result = truncated[0]
 

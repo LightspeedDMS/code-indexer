@@ -68,7 +68,7 @@ class ActivatedRepository(BaseModel):
 class RepositoryLinkingClient(CIDXRemoteAPIClient):
     """Client for repository discovery and linking operations."""
 
-    async def discover_repositories(self, repo_url: str) -> RepositoryDiscoveryResponse:
+    def discover_repositories(self, repo_url: str) -> RepositoryDiscoveryResponse:
         """Find matching repositories by git origin URL.
 
         Args:
@@ -97,7 +97,7 @@ class RepositoryLinkingClient(CIDXRemoteAPIClient):
         discovery_endpoint = f"/api/repos/discover?repo_url={repo_url}"
 
         try:
-            response = await self._authenticated_request("GET", discovery_endpoint)
+            response = self._authenticated_request("GET", discovery_endpoint)
 
             if response.status_code == 200:
                 discovery_data = response.json()
@@ -143,7 +143,7 @@ class RepositoryLinkingClient(CIDXRemoteAPIClient):
                 )
             raise RepositoryNotFoundError(f"Unexpected discovery error: {e}")
 
-    async def get_golden_repository_branches(self, alias: str) -> List[BranchInfo]:
+    def get_golden_repository_branches(self, alias: str) -> List[BranchInfo]:
         """Get available branches for golden repository.
 
         Args:
@@ -172,7 +172,7 @@ class RepositoryLinkingClient(CIDXRemoteAPIClient):
         branches_endpoint = f"/api/repos/golden/{alias}/branches"
 
         try:
-            response = await self._authenticated_request("GET", branches_endpoint)
+            response = self._authenticated_request("GET", branches_endpoint)
 
             if response.status_code == 200:
                 branches_data = response.json()
@@ -198,7 +198,7 @@ class RepositoryLinkingClient(CIDXRemoteAPIClient):
                 raise RepositoryNotFoundError(f"Failed to get branches: {e}")
             raise RepositoryNotFoundError(f"Unexpected error getting branches: {e}")
 
-    async def activate_repository(
+    def activate_repository(
         self, golden_alias: str, branch: str, user_alias: str
     ) -> ActivatedRepository:
         """Activate a golden repository for user access.
@@ -245,7 +245,7 @@ class RepositoryLinkingClient(CIDXRemoteAPIClient):
         }
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST", activation_endpoint, json=activation_payload
             )
 
@@ -288,7 +288,7 @@ class RepositoryLinkingClient(CIDXRemoteAPIClient):
                 raise ActivationError(f"Activation failed: {e}")
             raise ActivationError(f"Unexpected activation error: {e}")
 
-    async def deactivate_repository(self, user_alias: str) -> bool:
+    def deactivate_repository(self, user_alias: str) -> bool:
         """Deactivate a user's repository access.
 
         Args:
@@ -313,9 +313,7 @@ class RepositoryLinkingClient(CIDXRemoteAPIClient):
         deactivation_endpoint = f"/api/repos/{user_alias}"
 
         try:
-            response = await self._authenticated_request(
-                "DELETE", deactivation_endpoint
-            )
+            response = self._authenticated_request("DELETE", deactivation_endpoint)
 
             if response.status_code == 200:
                 return True
@@ -339,7 +337,7 @@ class RepositoryLinkingClient(CIDXRemoteAPIClient):
                 raise ActivationError(f"Deactivation failed: {e}")
             raise ActivationError(f"Unexpected deactivation error: {e}")
 
-    async def list_user_repositories(self) -> List[ActivatedRepository]:
+    def list_user_repositories(self) -> List[ActivatedRepository]:
         """List all repositories activated for the current user.
 
         Returns:
@@ -352,7 +350,7 @@ class RepositoryLinkingClient(CIDXRemoteAPIClient):
         list_endpoint = "/api/repos"
 
         try:
-            response = await self._authenticated_request("GET", list_endpoint)
+            response = self._authenticated_request("GET", list_endpoint)
 
             if response.status_code == 200:
                 repositories_data = response.json()

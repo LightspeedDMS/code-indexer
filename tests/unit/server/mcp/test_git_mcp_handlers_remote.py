@@ -59,8 +59,7 @@ def _extract_response_data(mcp_response: dict) -> dict:
 class TestGitPushHandler:
     """Test git_push MCP handler (F4: Remote Operations)."""
 
-    @pytest.mark.asyncio
-    async def test_git_push_success(
+    def test_git_push_success(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test successful git push operation."""
@@ -78,7 +77,7 @@ class TestGitPushHandler:
             "branch": "main",
         }
 
-        mcp_response = await handlers.git_push(params, mock_user)
+        mcp_response = handlers.git_push(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
@@ -88,8 +87,7 @@ class TestGitPushHandler:
             repo_alias="test-repo", username="testuser", remote="origin", branch="main"
         )
 
-    @pytest.mark.asyncio
-    async def test_git_push_authentication_error(
+    def test_git_push_authentication_error(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git push with authentication error."""
@@ -108,15 +106,14 @@ class TestGitPushHandler:
             "branch": "main",
         }
 
-        mcp_response = await handlers.git_push(params, mock_user)
+        mcp_response = handlers.git_push(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert data["error_type"] == "GitCommandError"
         assert "Authentication failed" in data["stderr"]
 
-    @pytest.mark.asyncio
-    async def test_git_push_network_error(
+    def test_git_push_network_error(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git push with network connectivity error."""
@@ -135,7 +132,7 @@ class TestGitPushHandler:
             "branch": "main",
         }
 
-        mcp_response = await handlers.git_push(params, mock_user)
+        mcp_response = handlers.git_push(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
@@ -146,8 +143,7 @@ class TestGitPushHandler:
 class TestGitPullHandler:
     """Test git_pull MCP handler (F4: Remote Operations)."""
 
-    @pytest.mark.asyncio
-    async def test_git_pull_success(
+    def test_git_pull_success(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test successful git pull operation."""
@@ -165,7 +161,7 @@ class TestGitPullHandler:
             "branch": "main",
         }
 
-        mcp_response = await handlers.git_pull(params, mock_user)
+        mcp_response = handlers.git_pull(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
@@ -174,8 +170,7 @@ class TestGitPullHandler:
             repo_alias="test-repo", username="testuser", remote="origin", branch="main"
         )
 
-    @pytest.mark.asyncio
-    async def test_git_pull_merge_conflicts(
+    def test_git_pull_merge_conflicts(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git pull with merge conflicts detected."""
@@ -192,15 +187,14 @@ class TestGitPullHandler:
             "branch": "main",
         }
 
-        mcp_response = await handlers.git_pull(params, mock_user)
+        mcp_response = handlers.git_pull(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
         assert "conflicts" in data
         assert data["conflicts"] == ["file1.py", "file2.py"]
 
-    @pytest.mark.asyncio
-    async def test_git_pull_network_error(
+    def test_git_pull_network_error(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git pull with network error."""
@@ -219,7 +213,7 @@ class TestGitPullHandler:
             "branch": "main",
         }
 
-        mcp_response = await handlers.git_pull(params, mock_user)
+        mcp_response = handlers.git_pull(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
@@ -230,8 +224,7 @@ class TestGitPullHandler:
 class TestGitFetchHandler:
     """Test git_fetch MCP handler (F4: Remote Operations)."""
 
-    @pytest.mark.asyncio
-    async def test_git_fetch_success(
+    def test_git_fetch_success(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test successful git fetch operation."""
@@ -247,7 +240,7 @@ class TestGitFetchHandler:
             "remote": "origin",
         }
 
-        mcp_response = await handlers.git_fetch(params, mock_user)
+        mcp_response = handlers.git_fetch(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
@@ -256,8 +249,7 @@ class TestGitFetchHandler:
             repo_alias="test-repo", username="testuser", remote="origin"
         )
 
-    @pytest.mark.asyncio
-    async def test_git_fetch_network_error(
+    def test_git_fetch_network_error(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git fetch with network error."""
@@ -275,7 +267,7 @@ class TestGitFetchHandler:
             "remote": "origin",
         }
 
-        mcp_response = await handlers.git_fetch(params, mock_user)
+        mcp_response = handlers.git_fetch(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False

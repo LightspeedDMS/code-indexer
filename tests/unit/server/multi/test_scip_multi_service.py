@@ -52,7 +52,7 @@ class TestSCIPMultiServiceDefinition:
                 [],  # repo2 has no definition
             ]
 
-            response = await service.definition(request)
+            response = service.definition(request)
 
             assert response.metadata.repos_searched == 2
             assert response.metadata.repos_with_results == 1
@@ -86,7 +86,7 @@ class TestSCIPMultiServiceDefinition:
                 None,  # Indicates no SCIP index
             ]
 
-            response = await service.definition(request)
+            response = service.definition(request)
 
             assert response.metadata.repos_searched == 1
             assert "repo_no_scip" in response.skipped
@@ -131,7 +131,7 @@ class TestSCIPMultiServiceReferences:
                 ],
             ]
 
-            response = await service.references(request)
+            response = service.references(request)
 
             assert response.metadata.repos_searched == 2
             assert response.metadata.repos_with_results == 2
@@ -179,7 +179,7 @@ class TestSCIPMultiServiceDependencies:
                 ],
             ]
 
-            response = await service.dependencies(request)
+            response = service.dependencies(request)
 
             assert response.metadata.repos_searched == 2
             assert response.metadata.repos_with_results == 2
@@ -225,7 +225,7 @@ class TestSCIPMultiServiceDependents:
                 ],
             ]
 
-            response = await service.dependents(request)
+            response = service.dependents(request)
 
             assert response.metadata.repos_searched == 2
             assert response.metadata.repos_with_results == 2
@@ -276,7 +276,7 @@ class TestSCIPMultiServiceCallChain:
                 ],
             ]
 
-            response = await service.callchain(request)
+            response = service.callchain(request)
 
             # Each repo has independent call chains (no cross-repo stitching)
             assert response.metadata.repos_searched == 2
@@ -327,7 +327,7 @@ class TestSCIPMultiServiceTimeout:
                 )
             ]
 
-            response = await service.definition(request)
+            response = service.definition(request)
 
             # Verify both repos were processed
             assert response.metadata.repos_searched == 2
@@ -372,7 +372,7 @@ class TestSCIPMultiServiceResultAggregation:
                 ],
             ]
 
-            response = await service.definition(request)
+            response = service.definition(request)
 
             # Verify grouping by repository
             assert "repo1" in response.results
@@ -425,7 +425,7 @@ class TestSCIPMultiServicePartialFailure:
 
             mock_find.side_effect = find_with_error
 
-            response = await service.definition(request)
+            response = service.definition(request)
 
             # repo1 and repo3 succeed, repo_error fails
             assert len(response.results) == 2

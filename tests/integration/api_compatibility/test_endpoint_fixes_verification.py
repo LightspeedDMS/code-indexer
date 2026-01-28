@@ -56,7 +56,7 @@ class TestEndpointFixesVerification:
         mock_linking_client._authenticated_request.return_value = mock_response
 
         # Call activation method
-        result = await mock_linking_client.activate_repository(
+        result = mock_linking_client.activate_repository(
             golden_alias="test-repo", branch="main", user_alias="test-user"
         )
 
@@ -131,7 +131,7 @@ class TestEndpointFixesVerification:
         mock_linking_client._authenticated_request.return_value = mock_response
 
         # Call deactivation method
-        result = await mock_linking_client.deactivate_repository("test-user-repo")
+        result = mock_linking_client.deactivate_repository("test-user-repo")
 
         # Verify it called the CORRECT endpoint
         mock_linking_client._authenticated_request.assert_called_once_with(
@@ -213,7 +213,7 @@ class TestEndpointFixesVerification:
         mock_query_client._authenticated_request.return_value = mock_response
 
         # Call listing method
-        result = await mock_query_client.list_repositories()
+        result = mock_query_client.list_repositories()
 
         # Verify it called the CORRECT endpoint
         mock_query_client._authenticated_request.assert_called_once_with(

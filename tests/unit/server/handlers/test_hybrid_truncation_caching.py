@@ -1,6 +1,7 @@
 """Unit tests for Hybrid Search truncation - caching functionality.
 
 Story #682: S4 - Hybrid Search with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 Tests: AC5 (Independent Field Caching), AC6 (Cache Retrieval)
 
 These tests follow TDD methodology - written BEFORE verification.
@@ -12,10 +13,12 @@ from unittest.mock import patch
 
 
 class TestAC5IndependentFieldCaching:
-    """AC5: Independent Field Caching - each field gets its OWN cache handle."""
+    """AC5: Independent Field Caching - each field gets its OWN cache handle.
 
-    @pytest.mark.asyncio
-    async def test_all_three_fields_get_independent_handles(self, cache):
+    Story #50: _apply_payload_truncation, _apply_fts_payload_truncation, and PayloadCache are now sync.
+    """
+
+    def test_all_three_fields_get_independent_handles(self, cache):
         """Test that content, snippet, and match_text each get unique handles."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -40,8 +43,8 @@ class TestAC5IndependentFieldCaching:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
+            truncated = _apply_payload_truncation(truncated)  # Sync call
 
         result = truncated[0]
 
@@ -63,8 +66,7 @@ class TestAC5IndependentFieldCaching:
         uuid.UUID(snippet_handle, version=4)
         uuid.UUID(match_text_handle, version=4)
 
-    @pytest.mark.asyncio
-    async def test_handles_retrieve_correct_content(self, cache):
+    def test_handles_retrieve_correct_content(self, cache):
         """Test that each handle retrieves its correct content."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -89,15 +91,15 @@ class TestAC5IndependentFieldCaching:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
+            truncated = _apply_payload_truncation(truncated)  # Sync call
 
         result = truncated[0]
 
-        # Retrieve each independently and verify correct content
-        content_retrieved = await cache.retrieve(result["cache_handle"], page=0)
-        snippet_retrieved = await cache.retrieve(result["snippet_cache_handle"], page=0)
-        match_text_retrieved = await cache.retrieve(
+        # Retrieve each independently and verify correct content (sync calls)
+        content_retrieved = cache.retrieve(result["cache_handle"], page=0)
+        snippet_retrieved = cache.retrieve(result["snippet_cache_handle"], page=0)
+        match_text_retrieved = cache.retrieve(
             result["match_text_cache_handle"], page=0
         )
 
@@ -107,10 +109,12 @@ class TestAC5IndependentFieldCaching:
 
 
 class TestAC6CacheRetrievalForHybridFields:
-    """AC6: Cache Retrieval for Hybrid Fields - all handles work with cache API."""
+    """AC6: Cache Retrieval for Hybrid Fields - all handles work with cache API.
 
-    @pytest.mark.asyncio
-    async def test_content_handle_pagination(self, cache):
+    Story #50: _apply_payload_truncation, _apply_fts_payload_truncation, and PayloadCache are now sync.
+    """
+
+    def test_content_handle_pagination(self, cache):
         """Test that semantic content handle supports pagination."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -129,27 +133,26 @@ class TestAC6CacheRetrievalForHybridFields:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
+            truncated = _apply_payload_truncation(truncated)  # Sync call
 
         result = truncated[0]
         content_handle = result["cache_handle"]
 
-        # Retrieve page 0
-        page0_result = await cache.retrieve(content_handle, page=0)
+        # Retrieve page 0 (sync call)
+        page0_result = cache.retrieve(content_handle, page=0)
         assert page0_result.content == page1
         assert page0_result.page == 0
         assert page0_result.has_more is True
         assert page0_result.total_pages == 2
 
-        # Retrieve page 1
-        page1_result = await cache.retrieve(content_handle, page=1)
+        # Retrieve page 1 (sync call)
+        page1_result = cache.retrieve(content_handle, page=1)
         assert page1_result.content == page2
         assert page1_result.page == 1
         assert page1_result.has_more is False
 
-    @pytest.mark.asyncio
-    async def test_snippet_handle_pagination(self, cache):
+    def test_snippet_handle_pagination(self, cache):
         """Test that FTS snippet handle supports pagination."""
         from code_indexer.server.mcp.handlers import (
             _apply_fts_payload_truncation,
@@ -166,23 +169,22 @@ class TestAC6CacheRetrievalForHybridFields:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
         snippet_handle = result["snippet_cache_handle"]
 
-        # Retrieve page 0
-        page0_result = await cache.retrieve(snippet_handle, page=0)
+        # Retrieve page 0 (sync call)
+        page0_result = cache.retrieve(snippet_handle, page=0)
         assert page0_result.content == page1
         assert page0_result.has_more is True
 
-        # Retrieve page 1
-        page1_result = await cache.retrieve(snippet_handle, page=1)
+        # Retrieve page 1 (sync call)
+        page1_result = cache.retrieve(snippet_handle, page=1)
         assert page1_result.content == page2
         assert page1_result.has_more is False
 
-    @pytest.mark.asyncio
-    async def test_match_text_handle_pagination(self, cache):
+    def test_match_text_handle_pagination(self, cache):
         """Test that FTS match_text handle supports pagination."""
         from code_indexer.server.mcp.handlers import (
             _apply_fts_payload_truncation,
@@ -199,17 +201,17 @@ class TestAC6CacheRetrievalForHybridFields:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
         match_text_handle = result["match_text_cache_handle"]
 
-        # Retrieve page 0
-        page0_result = await cache.retrieve(match_text_handle, page=0)
+        # Retrieve page 0 (sync call)
+        page0_result = cache.retrieve(match_text_handle, page=0)
         assert page0_result.content == page1
         assert page0_result.has_more is True
 
-        # Retrieve page 1
-        page1_result = await cache.retrieve(match_text_handle, page=1)
+        # Retrieve page 1 (sync call)
+        page1_result = cache.retrieve(match_text_handle, page=1)
         assert page1_result.content == page2
         assert page1_result.has_more is False

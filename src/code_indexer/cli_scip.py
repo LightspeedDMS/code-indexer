@@ -849,7 +849,7 @@ def _run_remote_definition(symbol: str, repository: str, project: Optional[str])
     async def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())
         try:
-            result = await client.definition(symbol, repository, project)
+            result = client.definition(symbol, repository, project)
             return result
         finally:
             await client.close()
@@ -991,7 +991,7 @@ def _run_remote_references(symbol: str, repository: str, limit: int, project: Op
     async def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())
         try:
-            result = await client.references(symbol, repository, api_limit, project)
+            result = client.references(symbol, repository, api_limit, project)
             return result
         finally:
             await client.close()
@@ -1140,7 +1140,7 @@ def _run_remote_dependencies(symbol: str, repository: str, depth: int, project: 
     async def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())
         try:
-            result = await client.dependencies(symbol, repository, depth, project)
+            result = client.dependencies(symbol, repository, depth, project)
             return result
         finally:
             await client.close()
@@ -1288,7 +1288,7 @@ def _run_remote_dependents(symbol: str, repository: str, depth: int, project: Op
     async def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())
         try:
-            result = await client.dependents(symbol, repository, depth, project)
+            result = client.dependents(symbol, repository, depth, project)
             return result
         finally:
             await client.close()
@@ -1663,7 +1663,7 @@ def _run_remote_callchain(
     async def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())
         try:
-            result = await client.callchain(from_symbol, to_symbol, repository, max_depth, project)
+            result = client.callchain(from_symbol, to_symbol, repository, max_depth, project)
             return result
         finally:
             await client.close()

@@ -49,7 +49,7 @@ class SSHAPIClient(CIDXRemoteAPIClient):
             project_root=project_root,
         )
 
-    async def create_key(
+    def create_key(
         self,
         name: str,
         email: str,
@@ -81,7 +81,7 @@ class SSHAPIClient(CIDXRemoteAPIClient):
             data["description"] = description
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST", "/api/v1/ssh/keys", json=data
             )
 
@@ -105,7 +105,7 @@ class SSHAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error creating SSH key: {e}")
 
-    async def list_keys(self) -> Dict[str, Any]:
+    def list_keys(self) -> Dict[str, Any]:
         """List all SSH keys.
 
         Returns:
@@ -117,7 +117,7 @@ class SSHAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            response = await self._authenticated_request("GET", "/api/v1/ssh/keys")
+            response = self._authenticated_request("GET", "/api/v1/ssh/keys")
 
             if response.status_code == 200:
                 return dict(response.json())
@@ -139,7 +139,7 @@ class SSHAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error listing SSH keys: {e}")
 
-    async def delete_key(self, name: str) -> Dict[str, Any]:
+    def delete_key(self, name: str) -> Dict[str, Any]:
         """Delete an SSH key.
 
         Args:
@@ -154,9 +154,7 @@ class SSHAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            response = await self._authenticated_request(
-                "DELETE", f"/api/v1/ssh/keys/{name}"
-            )
+            response = self._authenticated_request("DELETE", f"/api/v1/ssh/keys/{name}")
 
             if response.status_code == 200:
                 return dict(response.json())
@@ -180,7 +178,7 @@ class SSHAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error deleting SSH key: {e}")
 
-    async def show_public_key(self, name: str) -> Dict[str, Any]:
+    def show_public_key(self, name: str) -> Dict[str, Any]:
         """Show the public key for an SSH key.
 
         Args:
@@ -195,9 +193,7 @@ class SSHAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            response = await self._authenticated_request(
-                "GET", f"/api/v1/ssh/keys/{name}"
-            )
+            response = self._authenticated_request("GET", f"/api/v1/ssh/keys/{name}")
 
             if response.status_code == 200:
                 return dict(response.json())
@@ -221,7 +217,7 @@ class SSHAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error showing SSH public key: {e}")
 
-    async def assign_key(
+    def assign_key(
         self,
         name: str,
         hostname: str,
@@ -248,7 +244,7 @@ class SSHAPIClient(CIDXRemoteAPIClient):
         }
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST", f"/api/v1/ssh/keys/{name}/assign", json=data
             )
 

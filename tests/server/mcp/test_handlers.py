@@ -71,7 +71,7 @@ class TestDiscoverRepositoriesHandler:
         params = {"source_type": "github"}
 
         # Act
-        result = await handlers.discover_repositories(params, mock_user)
+        result = handlers.discover_repositories(params, mock_user)
 
         # Assert
         assert result["success"] is True

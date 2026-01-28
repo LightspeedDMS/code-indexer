@@ -81,7 +81,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
 
         return dict(mcp_result)
 
-    async def _call_mcp_tool(
+    def _call_mcp_tool(
         self, tool_name: str, arguments: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Call an MCP tool via the /mcp JSON-RPC endpoint.
@@ -105,9 +105,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
         }
 
         try:
-            response = await self._authenticated_request(
-                "POST", "/mcp", json=jsonrpc_request
-            )
+            response = self._authenticated_request("POST", "/mcp", json=jsonrpc_request)
 
             if response.status_code == 200:
                 return self._parse_mcp_response(response.json())
@@ -142,7 +140,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
     # API Key Methods (3 methods)
     # =============================================================================
 
-    async def list_api_keys(self) -> Dict[str, Any]:
+    def list_api_keys(self) -> Dict[str, Any]:
         """List all API keys for the current user.
 
         Returns:
@@ -152,7 +150,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             APIClientError: If API request fails
             AuthenticationError: If authentication fails
         """
-        result = await self._call_mcp_tool("list_api_keys", {})
+        result = self._call_mcp_tool("list_api_keys", {})
 
         if not result.get("success", False):
             error = result.get("error", "Unknown error")
@@ -160,7 +158,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
 
         return {"api_keys": result.get("api_keys", [])}
 
-    async def create_api_key(self, description: str = "") -> Dict[str, Any]:
+    def create_api_key(self, description: str = "") -> Dict[str, Any]:
         """Create a new API key for the current user.
 
         Args:
@@ -177,7 +175,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
         if description:
             arguments["description"] = description
 
-        result = await self._call_mcp_tool("create_api_key", arguments)
+        result = self._call_mcp_tool("create_api_key", arguments)
 
         if not result.get("success", False):
             raise APIClientError(
@@ -190,7 +188,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             "description": result.get("description", ""),
         }
 
-    async def delete_api_key(self, key_id: str) -> Dict[str, Any]:
+    def delete_api_key(self, key_id: str) -> Dict[str, Any]:
         """Delete an API key.
 
         Args:
@@ -203,7 +201,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             APIClientError: If deletion fails or key not found
             AuthenticationError: If authentication fails
         """
-        result = await self._call_mcp_tool("delete_api_key", {"key_id": key_id})
+        result = self._call_mcp_tool("delete_api_key", {"key_id": key_id})
 
         if not result.get("success", False):
             error_msg = result.get("error", "Unknown error")
@@ -217,7 +215,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
     # MCP Credential Methods - User Self-Service (3 methods)
     # =============================================================================
 
-    async def list_mcp_credentials(self) -> Dict[str, Any]:
+    def list_mcp_credentials(self) -> Dict[str, Any]:
         """List all MCP credentials for the current user.
 
         Returns:
@@ -227,7 +225,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             APIClientError: If API request fails
             AuthenticationError: If authentication fails
         """
-        result = await self._call_mcp_tool("list_mcp_credentials", {})
+        result = self._call_mcp_tool("list_mcp_credentials", {})
 
         if not result.get("success", False):
             error = result.get("error", "Unknown error")
@@ -235,7 +233,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
 
         return {"credentials": result.get("credentials", [])}
 
-    async def create_mcp_credential(self, description: str = "") -> Dict[str, Any]:
+    def create_mcp_credential(self, description: str = "") -> Dict[str, Any]:
         """Create a new MCP credential for the current user.
 
         Args:
@@ -252,7 +250,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
         if description:
             arguments["description"] = description
 
-        result = await self._call_mcp_tool("create_mcp_credential", arguments)
+        result = self._call_mcp_tool("create_mcp_credential", arguments)
 
         if not result.get("success", False):
             raise APIClientError(
@@ -265,7 +263,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             "description": result.get("description", ""),
         }
 
-    async def delete_mcp_credential(self, credential_id: str) -> Dict[str, Any]:
+    def delete_mcp_credential(self, credential_id: str) -> Dict[str, Any]:
         """Delete an MCP credential.
 
         Args:
@@ -278,7 +276,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             APIClientError: If deletion fails or credential not found
             AuthenticationError: If authentication fails
         """
-        result = await self._call_mcp_tool(
+        result = self._call_mcp_tool(
             "delete_mcp_credential", {"credential_id": credential_id}
         )
 
@@ -294,7 +292,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
     # Admin MCP Credential Methods (4 methods)
     # =============================================================================
 
-    async def admin_list_user_mcp_credentials(self, username: str) -> Dict[str, Any]:
+    def admin_list_user_mcp_credentials(self, username: str) -> Dict[str, Any]:
         """List all MCP credentials for a specific user (Admin only).
 
         Args:
@@ -307,7 +305,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             APIClientError: If API request fails or user not found
             AuthenticationError: If authentication fails or permission denied
         """
-        result = await self._call_mcp_tool(
+        result = self._call_mcp_tool(
             "admin_list_user_mcp_credentials", {"username": username}
         )
 
@@ -319,7 +317,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
 
         return {"credentials": result.get("credentials", [])}
 
-    async def admin_create_user_mcp_credential(
+    def admin_create_user_mcp_credential(
         self, username: str, description: str = ""
     ) -> Dict[str, Any]:
         """Create a new MCP credential for a specific user (Admin only).
@@ -339,9 +337,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
         if description:
             arguments["description"] = description
 
-        result = await self._call_mcp_tool(
-            "admin_create_user_mcp_credential", arguments
-        )
+        result = self._call_mcp_tool("admin_create_user_mcp_credential", arguments)
 
         if not result.get("success", False):
             error_msg = result.get("error", "Unknown error")
@@ -355,7 +351,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             "description": result.get("description", ""),
         }
 
-    async def admin_delete_user_mcp_credential(
+    def admin_delete_user_mcp_credential(
         self, username: str, credential_id: str
     ) -> Dict[str, Any]:
         """Delete an MCP credential for a specific user (Admin only).
@@ -371,7 +367,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             APIClientError: If deletion fails, user not found, or credential not found
             AuthenticationError: If authentication fails or permission denied
         """
-        result = await self._call_mcp_tool(
+        result = self._call_mcp_tool(
             "admin_delete_user_mcp_credential",
             {"username": username, "credential_id": credential_id},
         )
@@ -386,7 +382,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
 
         return {"success": True}
 
-    async def admin_list_all_mcp_credentials(self) -> Dict[str, Any]:
+    def admin_list_all_mcp_credentials(self) -> Dict[str, Any]:
         """List all MCP credentials across all users (Admin only).
 
         Returns:
@@ -396,7 +392,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             APIClientError: If API request fails
             AuthenticationError: If authentication fails or permission denied
         """
-        result = await self._call_mcp_tool("admin_list_all_mcp_credentials", {})
+        result = self._call_mcp_tool("admin_list_all_mcp_credentials", {})
 
         if not result.get("success", False):
             error = result.get("error", "Unknown error")

@@ -1,6 +1,7 @@
 """Unit tests for Hybrid Search handler-level truncation integration.
 
 Story #682: S4 - Hybrid Search with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 Tests: Handler-level verification that search_mode="hybrid" triggers BOTH truncations
 
 These tests verify the actual handler code path applies truncation correctly,
@@ -12,10 +13,12 @@ from unittest.mock import patch
 
 
 class TestHybridModeHandlerTruncationLogic:
-    """Test that hybrid mode in handler triggers correct truncation sequence."""
+    """Test that hybrid mode in handler triggers correct truncation sequence.
 
-    @pytest.mark.asyncio
-    async def test_hybrid_search_mode_triggers_fts_truncation(self, cache):
+    Story #50: _apply_payload_truncation, _apply_fts_payload_truncation, and PayloadCache are now sync.
+    """
+
+    def test_hybrid_search_mode_triggers_fts_truncation(self, cache):
         """Verify search_mode='hybrid' triggers FTS truncation."""
         from code_indexer.server.mcp.handlers import (
             _apply_fts_payload_truncation,
@@ -43,7 +46,7 @@ class TestHybridModeHandlerTruncationLogic:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
         assert "snippet_preview" in result
@@ -51,8 +54,7 @@ class TestHybridModeHandlerTruncationLogic:
         assert "match_text_preview" in result
         assert "match_text_cache_handle" in result
 
-    @pytest.mark.asyncio
-    async def test_hybrid_search_mode_triggers_semantic_truncation(self, cache):
+    def test_hybrid_search_mode_triggers_semantic_truncation(self, cache):
         """Verify search_mode='hybrid' triggers semantic truncation (non-temporal)."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -74,25 +76,24 @@ class TestHybridModeHandlerTruncationLogic:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_payload_truncation(results)
+            truncated = _apply_payload_truncation(results)  # Sync call
 
         result = truncated[0]
         assert "preview" in result
         assert "cache_handle" in result
         assert result["has_more"] is True
 
-    @pytest.mark.asyncio
-    async def test_hybrid_mode_full_handler_truncation_sequence(self, cache):
+    def test_hybrid_mode_full_handler_truncation_sequence(self, cache):
         """Test the exact truncation sequence as in handler for hybrid mode.
 
         This test replicates the handler code at lines 805-815:
 
         if search_mode in ["fts", "hybrid"]:
-            response_results = await _apply_fts_payload_truncation(response_results)
+            response_results = _apply_fts_payload_truncation(response_results)
         if _is_temporal_query(params):
-            response_results = await _apply_temporal_payload_truncation(...)
+            response_results = _apply_temporal_payload_truncation(...)
         else:
-            response_results = await _apply_payload_truncation(response_results)
+            response_results = _apply_payload_truncation(response_results)
         """
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -124,14 +125,14 @@ class TestHybridModeHandlerTruncationLogic:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            # Replicate exact handler logic
+            # Replicate exact handler logic (sync calls)
             if search_mode in ["fts", "hybrid"]:
-                response_results = await _apply_fts_payload_truncation(response_results)
+                response_results = _apply_fts_payload_truncation(response_results)
             if _is_temporal_query(params):
                 # Not executed for non-temporal
                 pass
             else:
-                response_results = await _apply_payload_truncation(response_results)
+                response_results = _apply_payload_truncation(response_results)
 
         result = response_results[0]
 
@@ -157,8 +158,7 @@ class TestHybridModeHandlerTruncationLogic:
         # Verify score preserved
         assert result["hybrid_score"] == 0.92
 
-    @pytest.mark.asyncio
-    async def test_hybrid_mode_independent_cache_handles(self, cache):
+    def test_hybrid_mode_independent_cache_handles(self, cache):
         """Verify each hybrid field gets unique cache handle through handler logic."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -179,9 +179,9 @@ class TestHybridModeHandlerTruncationLogic:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            # Apply both truncations as handler does for hybrid mode
-            results = await _apply_fts_payload_truncation(results)
-            results = await _apply_payload_truncation(results)
+            # Apply both truncations as handler does for hybrid mode (sync calls)
+            results = _apply_fts_payload_truncation(results)
+            results = _apply_payload_truncation(results)
 
         result = results[0]
 
@@ -196,10 +196,10 @@ class TestHybridModeHandlerTruncationLogic:
         assert match_handle is not None
         assert len({content_handle, snippet_handle, match_handle}) == 3
 
-        # Verify retrieval returns correct content
-        content_retrieved = await cache.retrieve(content_handle, page=0)
-        snippet_retrieved = await cache.retrieve(snippet_handle, page=0)
-        match_retrieved = await cache.retrieve(match_handle, page=0)
+        # Verify retrieval returns correct content (sync calls)
+        content_retrieved = cache.retrieve(content_handle, page=0)
+        snippet_retrieved = cache.retrieve(snippet_handle, page=0)
+        match_retrieved = cache.retrieve(match_handle, page=0)
 
         assert content_retrieved.content == "A" * 3000
         assert snippet_retrieved.content == "B" * 3000

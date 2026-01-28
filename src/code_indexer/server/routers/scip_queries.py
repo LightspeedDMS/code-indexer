@@ -307,7 +307,7 @@ async def get_dependents(
 
 
 @router.get("/impact")
-async def get_impact(
+def get_impact(
     request: Request,
     symbol: str = Query(..., description="Symbol name to analyze"),
     depth: int = Query(
@@ -355,7 +355,7 @@ async def get_impact(
 
 
 @router.get("/callchain")
-async def get_callchain(
+def get_callchain(
     request: Request,
     from_symbol: str = Query(..., description="Starting symbol"),
     to_symbol: str = Query(..., description="Target symbol"),
@@ -404,7 +404,7 @@ async def get_callchain(
 
 
 @router.get("/context")
-async def get_context(
+def get_context(
     request: Request,
     symbol: str = Query(..., description="Symbol name to analyze"),
     limit: int = Query(

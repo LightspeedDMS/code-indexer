@@ -1,6 +1,7 @@
 """Unit tests for Hybrid Search truncation - basic functionality.
 
 Story #682: S4 - Hybrid Search with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 Tests: Core integration, AC1, AC2, AC3
 
 These tests follow TDD methodology - written BEFORE verification.
@@ -12,10 +13,12 @@ from unittest.mock import patch
 
 
 class TestHybridTruncationFunctionIntegration:
-    """Test that hybrid mode applies both truncation functions."""
+    """Test that hybrid mode applies both truncation functions.
 
-    @pytest.mark.asyncio
-    async def test_hybrid_mode_applies_both_semantic_and_fts_truncation(self, cache):
+    Story #50: _apply_payload_truncation and _apply_fts_payload_truncation are now sync.
+    """
+
+    def test_hybrid_mode_applies_both_semantic_and_fts_truncation(self, cache):
         """Test that hybrid search results have ALL fields truncated.
 
         AC4: Mixed Result Handling - Results from hybrid have ALL fields truncated.
@@ -52,8 +55,8 @@ class TestHybridTruncationFunctionIntegration:
             mock_state.payload_cache = cache
 
             # Simulate hybrid mode processing order (FTS first, then semantic)
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
+            truncated = _apply_payload_truncation(truncated)  # Sync call
 
         result = truncated[0]
 
@@ -88,10 +91,12 @@ class TestHybridTruncationFunctionIntegration:
 
 
 class TestAC1HybridContentTruncation:
-    """AC1: Hybrid Content Truncation (Semantic Component)."""
+    """AC1: Hybrid Content Truncation (Semantic Component).
 
-    @pytest.mark.asyncio
-    async def test_large_content_is_truncated_in_hybrid_result(self, cache):
+    Story #50: _apply_payload_truncation and _apply_fts_payload_truncation are now sync.
+    """
+
+    def test_large_content_is_truncated_in_hybrid_result(self, cache):
         """Test that content > 2000 chars is truncated with cache handle."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -113,8 +118,8 @@ class TestAC1HybridContentTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
+            truncated = _apply_payload_truncation(truncated)  # Sync call
 
         result = truncated[0]
 
@@ -131,8 +136,7 @@ class TestAC1HybridContentTruncation:
         assert result["snippet_has_more"] is False
         assert result["snippet_cache_handle"] is None
 
-    @pytest.mark.asyncio
-    async def test_small_content_not_truncated_in_hybrid_result(self, cache):
+    def test_small_content_not_truncated_in_hybrid_result(self, cache):
         """Test that content <= 2000 chars is NOT truncated."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -154,8 +158,8 @@ class TestAC1HybridContentTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
+            truncated = _apply_payload_truncation(truncated)  # Sync call
 
         result = truncated[0]
 
@@ -166,10 +170,12 @@ class TestAC1HybridContentTruncation:
 
 
 class TestAC2HybridSnippetTruncation:
-    """AC2: Hybrid Snippet Truncation (FTS Component)."""
+    """AC2: Hybrid Snippet Truncation (FTS Component).
 
-    @pytest.mark.asyncio
-    async def test_large_snippet_is_truncated_in_hybrid_result(self, cache):
+    Story #50: _apply_payload_truncation and _apply_fts_payload_truncation are now sync.
+    """
+
+    def test_large_snippet_is_truncated_in_hybrid_result(self, cache):
         """Test that code_snippet > 2000 chars is truncated with cache handle."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -191,8 +197,8 @@ class TestAC2HybridSnippetTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
+            truncated = _apply_payload_truncation(truncated)  # Sync call
 
         result = truncated[0]
 
@@ -211,10 +217,12 @@ class TestAC2HybridSnippetTruncation:
 
 
 class TestAC3HybridMatchTextTruncation:
-    """AC3: Hybrid Match Text Truncation (FTS Component)."""
+    """AC3: Hybrid Match Text Truncation (FTS Component).
 
-    @pytest.mark.asyncio
-    async def test_large_match_text_is_truncated_in_hybrid_result(self, cache):
+    Story #50: _apply_payload_truncation and _apply_fts_payload_truncation are now sync.
+    """
+
+    def test_large_match_text_is_truncated_in_hybrid_result(self, cache):
         """Test that match_text > 2000 chars is truncated with cache handle."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -236,8 +244,8 @@ class TestAC3HybridMatchTextTruncation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
-            truncated = await _apply_payload_truncation(truncated)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
+            truncated = _apply_payload_truncation(truncated)  # Sync call
 
         result = truncated[0]
 

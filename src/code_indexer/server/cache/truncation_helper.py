@@ -98,12 +98,14 @@ class TruncationHelper:
         default_limit = int(self.content_limits.file_content_max_tokens)
         return type_limits.get(content_type, default_limit)
 
-    async def truncate_and_cache(
+    def truncate_and_cache(
         self,
         content: str,
         content_type: str,
     ) -> TruncationResult:
         """Truncate content if needed and cache the full content.
+
+        Story #50: Converted from async to sync for FastAPI thread pool execution.
 
         Args:
             content: Full content to potentially truncate
@@ -134,8 +136,8 @@ class TruncationHelper:
         preview = content[:max_chars]
         preview_tokens = self.estimate_tokens(preview)
 
-        # Store full content in cache
-        cache_handle = await self.payload_cache.store(content)
+        # Store full content in cache (sync call)
+        cache_handle = self.payload_cache.store(content)
 
         # Calculate total_pages based on content size and max_fetch_size_chars
         # This matches the pagination calculation in PayloadCache.retrieve()

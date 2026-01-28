@@ -78,7 +78,7 @@ class TestImpactRouteDelegation:
             "code_indexer.server.routers.scip_queries._get_scip_query_service",
             return_value=mock_scip_service,
         ):
-            response = await get_impact(
+            response = get_impact(
                 request=mock_request,
                 symbol="UserService",
                 depth=3,
@@ -122,7 +122,7 @@ class TestImpactRouteDelegation:
             "code_indexer.server.routers.scip_queries._get_scip_query_service",
             return_value=mock_scip_service,
         ):
-            await get_impact(
+            get_impact(
                 request=mock_request,
                 symbol="UserService",
                 depth=5,
@@ -163,7 +163,7 @@ class TestCallchainRouteDelegation:
             "code_indexer.server.routers.scip_queries._get_scip_query_service",
             return_value=mock_scip_service,
         ):
-            response = await get_callchain(
+            response = get_callchain(
                 request=mock_request,
                 from_symbol="Controller",
                 to_symbol="Database",
@@ -201,7 +201,7 @@ class TestCallchainRouteDelegation:
             "code_indexer.server.routers.scip_queries._get_scip_query_service",
             return_value=mock_scip_service,
         ):
-            await get_callchain(
+            get_callchain(
                 request=mock_request,
                 from_symbol="A",
                 to_symbol="B",
@@ -262,7 +262,7 @@ class TestContextRouteDelegation:
             "code_indexer.server.routers.scip_queries._get_scip_query_service",
             return_value=mock_scip_service,
         ):
-            response = await get_context(
+            response = get_context(
                 request=mock_request,
                 symbol="UserService",
                 limit=20,
@@ -307,7 +307,7 @@ class TestContextRouteDelegation:
             "code_indexer.server.routers.scip_queries._get_scip_query_service",
             return_value=mock_scip_service,
         ):
-            await get_context(
+            get_context(
                 request=mock_request,
                 symbol="UserService",
                 limit=30,

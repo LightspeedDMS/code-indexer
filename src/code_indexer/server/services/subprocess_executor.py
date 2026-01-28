@@ -231,6 +231,43 @@ class SubprocessExecutor:
                 error_message=str(e),
             )
 
+    def execute_with_limits_sync(
+        self,
+        command: List[str],
+        working_dir: str,
+        timeout_seconds: int,
+        output_file_path: str,
+    ) -> SearchExecutionResult:
+        """
+        Execute command synchronously with timeout and file output.
+
+        Story #51: Sync version for use in sync handler contexts.
+        This directly calls _run_subprocess() without asyncio wrapping.
+
+        Args:
+            command: Command and arguments to execute
+            working_dir: Working directory for command execution
+            timeout_seconds: Maximum execution time in seconds
+            output_file_path: Path to file for capturing output
+
+        Returns:
+            SearchExecutionResult with execution status and output file path
+        """
+        if self._shutdown:
+            raise RuntimeError("Executor has been shut down")
+
+        # Ensure output file directory exists
+        output_path = Path(output_file_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Run subprocess directly (no async wrapping needed)
+        return self._run_subprocess(
+            command,
+            working_dir,
+            output_file_path,
+            timeout_seconds,
+        )
+
     def shutdown(self, wait: bool = True, cancel_futures: bool = False):
         """
         Shutdown the executor and clean up resources.

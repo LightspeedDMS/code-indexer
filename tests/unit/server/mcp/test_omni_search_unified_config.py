@@ -10,7 +10,7 @@ Written following TDD methodology - tests first, implementation second.
 
 import pytest
 from datetime import datetime
-from unittest.mock import Mock, patch, AsyncMock
+from unittest.mock import Mock, patch
 
 from code_indexer.server.auth.user_manager import User, UserRole
 
@@ -39,8 +39,7 @@ def mock_wildcard_expansion():
 class TestMcpUsesUnifiedMultiSearchConfig:
     """Test that MCP uses MultiSearchConfig.from_config() for unified configuration."""
 
-    @pytest.mark.asyncio
-    async def test_mcp_calls_multi_search_config_from_config(
+    def test_mcp_calls_multi_search_config_from_config(
         self, mock_user, mock_wildcard_expansion
     ):
         """
@@ -104,17 +103,17 @@ class TestMcpUsesUnifiedMultiSearchConfig:
                         ),
                         errors=None,
                     )
-                    mock_service.search = AsyncMock(return_value=mock_response)
+                    # Story #51: handlers are now sync
+                    mock_service.search = Mock(return_value=mock_response)
                     mock_service_class.return_value = mock_service
 
                     from code_indexer.server.mcp.handlers import _omni_search_code
-                    await _omni_search_code(params, mock_user)
+                    _omni_search_code(params, mock_user)
 
                     # CRITICAL ASSERTION: from_config MUST be called with config_service
                     mock_from_config.assert_called_once_with(mock_config_service)
 
-    @pytest.mark.asyncio
-    async def test_mcp_uses_unified_config_values(
+    def test_mcp_uses_unified_config_values(
         self, mock_user, mock_wildcard_expansion
     ):
         """
@@ -167,13 +166,14 @@ class TestMcpUsesUnifiedMultiSearchConfig:
                         ),
                         errors=None,
                     )
-                    mock_service.search = AsyncMock(return_value=mock_response)
+                    # Story #51: handlers are now sync
+                    mock_service.search = Mock(return_value=mock_response)
                     return mock_service
 
                 mock_service_class.side_effect = capture_config
 
                 from code_indexer.server.mcp.handlers import _omni_search_code
-                await _omni_search_code(params, mock_user)
+                _omni_search_code(params, mock_user)
 
         # CRITICAL ASSERTIONS: Must use unified values, not omni-specific
         assert captured_config is not None, "MultiSearchService was not called"

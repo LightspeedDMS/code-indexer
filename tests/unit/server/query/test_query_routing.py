@@ -145,7 +145,7 @@ class TestSearchRouting:
         manager = SemanticQueryManager()
 
         # Act: Call search
-        await manager.search(repo_path=repo_path, query="test query", limit=10)
+        manager.search(repo_path=repo_path, query="test query", limit=10)
 
         # Assert: Should route to search_composite
         mock_is_composite.assert_called_once_with(repo_path)
@@ -169,7 +169,7 @@ class TestSearchRouting:
         manager = SemanticQueryManager()
 
         # Act: Call search
-        await manager.search(repo_path=repo_path, query="test query", limit=10)
+        manager.search(repo_path=repo_path, query="test query", limit=10)
 
         # Assert: Should route to search_single
         mock_is_composite.assert_called_once_with(repo_path)
@@ -193,7 +193,7 @@ class TestSearchRouting:
         manager = SemanticQueryManager()
 
         # Act: Call search with multiple kwargs
-        await manager.search(
+        manager.search(
             repo_path=repo_path,
             query="test query",
             limit=20,
@@ -226,7 +226,7 @@ class TestSearchRouting:
         manager = SemanticQueryManager()
 
         # Act: Call search with multiple kwargs
-        await manager.search(
+        manager.search(
             repo_path=repo_path,
             query="test query",
             limit=20,
@@ -273,7 +273,7 @@ class TestSearchSingleBackwardCompatibility:
         manager = SemanticQueryManager()
 
         # Act: Call search_single (will be implemented)
-        results = await manager.search_single(
+        results = manager.search_single(
             repo_path=repo_path,
             repository_alias="test-alias",
             query="test query",
@@ -315,7 +315,7 @@ class TestSearchCompositeStub:
         manager = SemanticQueryManager()
 
         # Act: Call search_composite with empty repos
-        results = await manager.search_composite(
+        results = manager.search_composite(
             repo_path=repo_path, query="test query", limit=10
         )
 
@@ -344,7 +344,7 @@ class TestSearchCompositeStub:
         manager = SemanticQueryManager()
 
         # Act: Call with all parameters (should not raise)
-        results = await manager.search_composite(
+        results = manager.search_composite(
             repo_path=repo_path,
             query="test query",
             limit=20,

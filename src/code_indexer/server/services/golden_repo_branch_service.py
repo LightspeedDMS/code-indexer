@@ -81,7 +81,7 @@ class GoldenRepoBranchService:
         """
         self.golden_repo_manager = golden_repo_manager
 
-    async def get_golden_repo_branches(
+    def get_golden_repo_branches(
         self, repo_alias: str
     ) -> List[GoldenRepoBranchInfo]:
         """

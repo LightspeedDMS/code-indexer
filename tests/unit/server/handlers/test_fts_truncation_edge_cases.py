@@ -1,6 +1,7 @@
 """Unit tests for FTS truncation edge cases.
 
 Story #680: S2 - FTS Search with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 
 These tests follow TDD methodology - written BEFORE implementation.
 """
@@ -10,10 +11,12 @@ from unittest.mock import patch
 
 
 class TestFtsTruncationEdgeCases:
-    """Edge case tests for FTS truncation."""
+    """Edge case tests for FTS truncation.
 
-    @pytest.mark.asyncio
-    async def test_empty_results_list(self, cache):
+    Story #50: _apply_fts_payload_truncation and PayloadCache are now sync.
+    """
+
+    def test_empty_results_list(self, cache):
         """Test that empty results list is handled correctly."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -22,12 +25,11 @@ class TestFtsTruncationEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation([])
+            truncated = _apply_fts_payload_truncation([])  # Sync call
 
         assert truncated == []
 
-    @pytest.mark.asyncio
-    async def test_multiple_results_truncated_independently(self, cache):
+    def test_multiple_results_truncated_independently(self, cache):
         """Test that multiple results in list are each truncated independently."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -42,7 +44,7 @@ class TestFtsTruncationEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         assert len(truncated) == 3
 
@@ -69,8 +71,7 @@ class TestFtsTruncationEdgeCases:
         valid_handles = [h for h in handles if h is not None]
         assert len(valid_handles) == len(set(valid_handles))
 
-    @pytest.mark.asyncio
-    async def test_unicode_content_handled_correctly(self, cache):
+    def test_unicode_content_handled_correctly(self, cache):
         """Test that unicode content is truncated correctly by character count."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -84,7 +85,7 @@ class TestFtsTruncationEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -93,8 +94,7 @@ class TestFtsTruncationEdgeCases:
         assert len(result["snippet_preview"]) == 2000
         assert result["snippet_total_size"] == 3000
 
-    @pytest.mark.asyncio
-    async def test_cache_unavailable_returns_results_unchanged(self):
+    def test_cache_unavailable_returns_results_unchanged(self):
         """Test that results are returned unchanged when cache is unavailable."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -106,14 +106,13 @@ class TestFtsTruncationEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = None  # Cache unavailable
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         # Results should be unchanged when cache unavailable
         assert truncated[0]["code_snippet"] == large_snippet
         assert truncated[0]["match_text"] == "test"
 
-    @pytest.mark.asyncio
-    async def test_very_large_content_over_100kb(self, cache):
+    def test_very_large_content_over_100kb(self, cache):
         """Test handling of very large content (>100KB)."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -127,7 +126,7 @@ class TestFtsTruncationEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -136,12 +135,11 @@ class TestFtsTruncationEdgeCases:
         assert result["snippet_total_size"] == 150000
         assert result["snippet_cache_handle"] is not None
 
-        # Verify we can retrieve the full content
-        retrieved = await cache.retrieve(result["snippet_cache_handle"], page=0)
+        # Verify we can retrieve the full content (sync call)
+        retrieved = cache.retrieve(result["snippet_cache_handle"], page=0)
         assert retrieved.total_pages > 1  # Should span multiple pages
 
-    @pytest.mark.asyncio
-    async def test_result_with_no_truncatable_fields(self, cache):
+    def test_result_with_no_truncatable_fields(self, cache):
         """Test result with no code_snippet or match_text fields."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -152,7 +150,7 @@ class TestFtsTruncationEdgeCases:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 

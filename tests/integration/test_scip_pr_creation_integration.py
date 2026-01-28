@@ -115,7 +115,7 @@ async def test_pr_creation_triggered_on_full_success(
         ],
     )
 
-    await self_healing_service.handle_scip_failure(
+    self_healing_service.handle_scip_failure(
         job_id, generation_result, "test-repo"
     )
 
@@ -148,7 +148,7 @@ async def test_pr_creation_triggered_on_full_success(
         mock_git_manager = MockGitStateManager.return_value
         mock_create_pr = mock_git_manager.create_pr_after_fix
 
-        final_status = await self_healing_service.determine_job_completion(job_id)
+        final_status = self_healing_service.determine_job_completion(job_id)
 
     # Assert: Job completed successfully
     assert final_status == JobStatus.COMPLETED
@@ -196,7 +196,7 @@ async def test_pr_creation_triggered_on_partial_success(
         ],
     )
 
-    await self_healing_service.handle_scip_failure(
+    self_healing_service.handle_scip_failure(
         job_id, generation_result, "test-repo"
     )
 
@@ -229,7 +229,7 @@ async def test_pr_creation_triggered_on_partial_success(
         mock_git_manager = MockGitStateManager.return_value
         mock_create_pr = mock_git_manager.create_pr_after_fix
 
-        final_status = await self_healing_service.determine_job_completion(job_id)
+        final_status = self_healing_service.determine_job_completion(job_id)
 
     # Assert: Job completed with partial success
     assert final_status == JobStatus.COMPLETED
@@ -275,7 +275,7 @@ async def test_pr_creation_not_triggered_on_total_failure(
         ],
     )
 
-    await self_healing_service.handle_scip_failure(
+    self_healing_service.handle_scip_failure(
         job_id, generation_result, "test-repo"
     )
 
@@ -297,7 +297,7 @@ async def test_pr_creation_not_triggered_on_total_failure(
         mock_git_manager = MockGitStateManager.return_value
         mock_create_pr = mock_git_manager.create_pr_after_fix
 
-        final_status = await self_healing_service.determine_job_completion(job_id)
+        final_status = self_healing_service.determine_job_completion(job_id)
 
     # Assert: Job failed
     assert final_status == JobStatus.FAILED
@@ -339,7 +339,7 @@ async def test_pr_creation_error_does_not_block_completion(
         ],
     )
 
-    await self_healing_service.handle_scip_failure(
+    self_healing_service.handle_scip_failure(
         job_id, generation_result, "test-repo"
     )
 
@@ -362,7 +362,7 @@ async def test_pr_creation_error_does_not_block_completion(
             "GitHub API rate limit exceeded"
         )
 
-        final_status = await self_healing_service.determine_job_completion(job_id)
+        final_status = self_healing_service.determine_job_completion(job_id)
 
     # Assert: Job still completed despite PR creation failure
     assert final_status == JobStatus.COMPLETED

@@ -51,7 +51,7 @@ class TestSCIPSelfHealingServiceAC7:
             job_manager._persist_jobs()
 
         # Act
-        final_status = await service.determine_job_completion(job_id)
+        final_status = service.determine_job_completion(job_id)
 
         # Assert
         assert final_status == JobStatus.COMPLETED
@@ -82,7 +82,7 @@ class TestSCIPSelfHealingServiceAC7:
             job_manager._persist_jobs()
 
         # Act
-        final_status = await service.determine_job_completion(job_id)
+        final_status = service.determine_job_completion(job_id)
 
         # Assert
         assert final_status == JobStatus.COMPLETED
@@ -116,7 +116,7 @@ class TestSCIPSelfHealingServiceAC7:
             job_manager._persist_jobs()
 
         # Act
-        final_status = await service.determine_job_completion(job_id)
+        final_status = service.determine_job_completion(job_id)
 
         # Assert
         assert final_status == JobStatus.FAILED

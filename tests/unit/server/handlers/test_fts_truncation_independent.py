@@ -1,6 +1,7 @@
 """Unit tests for FTS independent caching per field.
 
 Story #680: S2 - FTS Search with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 AC3: Independent Caching Per Field
 
 These tests follow TDD methodology - written BEFORE implementation.
@@ -16,10 +17,11 @@ class TestAC3IndependentCachingPerField:
 
     When both snippet and match_text exceed 2000 chars, each gets its OWN cache handle.
     Handles can be retrieved independently via cache API.
+
+    Story #50: _apply_fts_payload_truncation and PayloadCache are now sync.
     """
 
-    @pytest.mark.asyncio
-    async def test_both_fields_large_get_independent_handles(self, cache):
+    def test_both_fields_large_get_independent_handles(self, cache):
         """Test that large snippet and large match_text each get their own handle."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -38,7 +40,7 @@ class TestAC3IndependentCachingPerField:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -59,8 +61,7 @@ class TestAC3IndependentCachingPerField:
         uuid.UUID(snippet_handle, version=4)
         uuid.UUID(match_text_handle, version=4)
 
-    @pytest.mark.asyncio
-    async def test_independent_cache_retrieval(self, cache):
+    def test_independent_cache_retrieval(self, cache):
         """Test that each handle retrieves the correct content."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -79,15 +80,15 @@ class TestAC3IndependentCachingPerField:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
         snippet_handle = result["snippet_cache_handle"]
         match_text_handle = result["match_text_cache_handle"]
 
-        # Retrieve each independently
-        snippet_retrieved = await cache.retrieve(snippet_handle, page=0)
-        match_text_retrieved = await cache.retrieve(match_text_handle, page=0)
+        # Retrieve each independently (sync calls)
+        snippet_retrieved = cache.retrieve(snippet_handle, page=0)
+        match_text_retrieved = cache.retrieve(match_text_handle, page=0)
 
         # Verify correct content was cached
         assert (
@@ -99,8 +100,7 @@ class TestAC3IndependentCachingPerField:
             or match_text_retrieved.content in match_text_content
         )
 
-    @pytest.mark.asyncio
-    async def test_only_snippet_large(self, cache):
+    def test_only_snippet_large(self, cache):
         """Test when only snippet is large, match_text is small."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -118,7 +118,7 @@ class TestAC3IndependentCachingPerField:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -133,8 +133,7 @@ class TestAC3IndependentCachingPerField:
         assert result["match_text_cache_handle"] is None
         assert result["match_text"] == small_match_text
 
-    @pytest.mark.asyncio
-    async def test_only_match_text_large(self, cache):
+    def test_only_match_text_large(self, cache):
         """Test when only match_text is large, snippet is small."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -152,7 +151,7 @@ class TestAC3IndependentCachingPerField:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -167,8 +166,7 @@ class TestAC3IndependentCachingPerField:
         assert result["match_text_cache_handle"] is not None
         assert "match_text_preview" in result
 
-    @pytest.mark.asyncio
-    async def test_neither_field_large(self, cache):
+    def test_neither_field_large(self, cache):
         """Test when neither field is large, both keep original content."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -186,7 +184,7 @@ class TestAC3IndependentCachingPerField:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_fts_payload_truncation(results)
+            truncated = _apply_fts_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 

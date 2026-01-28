@@ -206,7 +206,7 @@ def get_csrf_token_from_cookie(request: Request) -> Optional[str]:
 
 
 @web_router.get("/logout")
-async def logout(request: Request):
+def logout(request: Request):
     """
     Logout and clear session.
 
@@ -229,7 +229,7 @@ def _get_dashboard_service():
 
 
 @web_router.get("/", response_class=HTMLResponse)
-async def dashboard(request: Request):
+def dashboard(request: Request):
     """
     Dashboard page - main admin landing page.
 
@@ -276,7 +276,7 @@ async def dashboard(request: Request):
 
 
 @web_router.get("/partials/dashboard-health", response_class=HTMLResponse)
-async def dashboard_health_partial(request: Request):
+def dashboard_health_partial(request: Request):
     """
     Partial refresh endpoint for dashboard health section.
 
@@ -314,7 +314,7 @@ async def dashboard_health_partial(request: Request):
 
 
 @web_router.get("/partials/dashboard-stats", response_class=HTMLResponse)
-async def dashboard_stats_partial(
+def dashboard_stats_partial(
     request: Request,
     time_filter: str = "24h",
     recent_filter: str = "30d",
@@ -443,7 +443,7 @@ def _create_users_page_response(
 
 
 @web_router.get("/users", response_class=HTMLResponse)
-async def users_page(request: Request):
+def users_page(request: Request):
     """Users management page - list all users with CRUD operations."""
     session = _require_admin_session(request)
     if not session:
@@ -453,7 +453,7 @@ async def users_page(request: Request):
 
 
 @web_router.post("/users/create", response_class=HTMLResponse)
-async def create_user(
+def create_user(
     request: Request,
     new_username: str = Form(...),
     new_password: str = Form(...),
@@ -533,7 +533,7 @@ async def create_user(
 
 
 @web_router.post("/users/{username}/role", response_class=HTMLResponse)
-async def update_user_role(
+def update_user_role(
     request: Request,
     username: str,
     role: str = Form(...),
@@ -583,7 +583,7 @@ async def update_user_role(
 
 
 @web_router.post("/users/{username}/password", response_class=HTMLResponse)
-async def change_user_password(
+def change_user_password(
     request: Request,
     username: str,
     new_password: str = Form(...),
@@ -626,7 +626,7 @@ async def change_user_password(
 
 
 @web_router.post("/users/{username}/email", response_class=HTMLResponse)
-async def update_user_email(
+def update_user_email(
     request: Request,
     username: str,
     new_email: str = Form(""),
@@ -719,7 +719,7 @@ async def delete_user(
 
 
 @web_router.get("/partials/users-list", response_class=HTMLResponse)
-async def users_list_partial(request: Request):
+def users_list_partial(request: Request):
     """
     Partial refresh endpoint for users list section.
 
@@ -928,7 +928,7 @@ def _create_groups_page_response(
 
 
 @web_router.get("/groups", response_class=HTMLResponse)
-async def groups_page(request: Request):
+def groups_page(request: Request):
     """Groups management page - list all groups with CRUD operations."""
     session = _require_admin_session(request)
     if not session:
@@ -938,7 +938,7 @@ async def groups_page(request: Request):
 
 
 @web_router.post("/groups/create", response_class=HTMLResponse)
-async def create_group(
+def create_group(
     request: Request,
     name: str = Form(...),
     description: str = Form(...),
@@ -974,7 +974,7 @@ async def create_group(
 
 
 @web_router.post("/groups/{group_id}/update", response_class=HTMLResponse)
-async def update_group(
+def update_group(
     request: Request,
     group_id: int,
     name: str = Form(...),
@@ -1030,7 +1030,7 @@ async def update_group(
 
 
 @web_router.post("/groups/{group_id}/delete", response_class=HTMLResponse)
-async def delete_group(
+def delete_group(
     request: Request,
     group_id: int,
     csrf_token: Optional[str] = Form(None),
@@ -1078,7 +1078,7 @@ async def delete_group(
 
 
 @web_router.post("/groups/users/{user_id:path}/assign", response_class=HTMLResponse)
-async def assign_user_to_group(
+def assign_user_to_group(
     request: Request,
     user_id: str,
     group_id: int = Form(...),
@@ -1136,7 +1136,7 @@ async def assign_user_to_group(
 
 
 @web_router.get("/partials/groups-list", response_class=HTMLResponse)
-async def groups_list_partial(request: Request):
+def groups_list_partial(request: Request):
     """Partial refresh endpoint for groups list section."""
     session = _require_admin_session(request)
     if not session:
@@ -1154,7 +1154,7 @@ async def groups_list_partial(request: Request):
 
 
 @web_router.get("/partials/groups-users-list", response_class=HTMLResponse)
-async def groups_users_list_partial(request: Request):
+def groups_users_list_partial(request: Request):
     """Partial refresh endpoint for users group assignments section."""
     session = _require_admin_session(request)
     if not session:
@@ -1211,7 +1211,7 @@ async def groups_users_list_partial(request: Request):
 
 
 @web_router.get("/partials/groups-audit-logs", response_class=HTMLResponse)
-async def groups_audit_logs_partial(
+def groups_audit_logs_partial(
     request: Request,
     action_type: Optional[str] = None,
     date_from: Optional[str] = None,
@@ -1242,7 +1242,7 @@ async def groups_audit_logs_partial(
 
 
 @web_router.get("/partials/groups-repo-access", response_class=HTMLResponse)
-async def groups_repo_access_partial(request: Request):
+def groups_repo_access_partial(request: Request):
     """Partial refresh endpoint for repository access section."""
     session = _require_admin_session(request)
     if not session:
@@ -1291,7 +1291,7 @@ async def groups_repo_access_partial(request: Request):
 
 
 @web_router.post("/groups/repo-access/grant", response_class=HTMLResponse)
-async def grant_repo_access(
+def grant_repo_access(
     request: Request,
     repo_name: str = Form(...),
     group_id: int = Form(...),
@@ -1354,7 +1354,7 @@ async def grant_repo_access(
 
 
 @web_router.post("/groups/repo-access/revoke", response_class=HTMLResponse)
-async def revoke_repo_access(
+def revoke_repo_access(
     request: Request,
     repo_name: str = Form(...),
     group_id: int = Form(...),
@@ -1751,7 +1751,7 @@ def _create_golden_repos_page_response(
 
 
 @web_router.get("/golden-repos", response_class=HTMLResponse)
-async def golden_repos_page(request: Request):
+def golden_repos_page(request: Request):
     """Golden repositories management page - list all golden repos with CRUD operations."""
     session = _require_admin_session(request)
     if not session:
@@ -1761,7 +1761,7 @@ async def golden_repos_page(request: Request):
 
 
 @web_router.post("/golden-repos/add", response_class=HTMLResponse)
-async def add_golden_repo(
+def add_golden_repo(
     request: Request,
     alias: str = Form(...),
     repo_url: str = Form(...),
@@ -1817,7 +1817,7 @@ async def add_golden_repo(
 
 
 @web_router.post("/golden-repos/batch-create")
-async def batch_create_golden_repos(
+def batch_create_golden_repos(
     request: Request,
     repos: str = Form(...),
     csrf_token: Optional[str] = Form(None),
@@ -1870,7 +1870,7 @@ async def batch_create_golden_repos(
 
 
 @web_router.post("/golden-repos/{alias}/delete", response_class=HTMLResponse)
-async def delete_golden_repo(
+def delete_golden_repo(
     request: Request,
     alias: str,
     csrf_token: Optional[str] = Form(None),
@@ -1908,7 +1908,7 @@ async def delete_golden_repo(
 
 
 @web_router.post("/golden-repos/{alias}/refresh", response_class=HTMLResponse)
-async def refresh_golden_repo(
+def refresh_golden_repo(
     request: Request,
     alias: str,
     csrf_token: Optional[str] = Form(None),
@@ -1946,7 +1946,7 @@ async def refresh_golden_repo(
 
 
 @web_router.post("/golden-repos/activate", response_class=HTMLResponse)
-async def activate_golden_repo(
+def activate_golden_repo(
     request: Request,
     golden_alias: str = Form(...),
     username: str = Form(...),
@@ -2005,7 +2005,7 @@ async def activate_golden_repo(
 
 
 @web_router.get("/golden-repos/{alias}/details", response_class=HTMLResponse)
-async def golden_repo_details(
+def golden_repo_details(
     request: Request,
     alias: str,
 ):
@@ -2052,7 +2052,7 @@ async def golden_repo_details(
 
 
 @web_router.get("/partials/golden-repos-list", response_class=HTMLResponse)
-async def golden_repos_list_partial(request: Request):
+def golden_repos_list_partial(request: Request):
     """
     Partial refresh endpoint for golden repos list section.
 
@@ -2289,7 +2289,7 @@ def _create_repos_page_response(
 
 
 @web_router.get("/repos", response_class=HTMLResponse)
-async def repos_page(
+def repos_page(
     request: Request,
     search: Optional[str] = None,
     golden_repo: Optional[str] = None,
@@ -2317,7 +2317,7 @@ async def repos_page(
 
 
 @web_router.get("/partials/repos-list", response_class=HTMLResponse)
-async def repos_list_partial(
+def repos_list_partial(
     request: Request,
     search: Optional[str] = None,
     golden_repo: Optional[str] = None,
@@ -2368,7 +2368,7 @@ async def repos_list_partial(
 
 
 @web_router.get("/repos/{username}/{user_alias}/details", response_class=HTMLResponse)
-async def repo_details(
+def repo_details(
     request: Request,
     username: str,
     user_alias: str,
@@ -2423,7 +2423,7 @@ async def repo_details(
 @web_router.post(
     "/repos/{username}/{user_alias}/deactivate", response_class=HTMLResponse
 )
-async def deactivate_repo(
+def deactivate_repo(
     request: Request,
     username: str,
     user_alias: str,
@@ -2671,7 +2671,7 @@ def _create_jobs_page_response(
 
 
 @web_router.get("/jobs", response_class=HTMLResponse)
-async def jobs_page(
+def jobs_page(
     request: Request,
     status_filter: Optional[str] = None,
     job_type: Optional[str] = None,
@@ -2694,7 +2694,7 @@ async def jobs_page(
 
 
 @web_router.get("/partials/jobs-list", response_class=HTMLResponse)
-async def jobs_list_partial(
+def jobs_list_partial(
     request: Request,
     status_filter: Optional[str] = None,
     job_type: Optional[str] = None,
@@ -2740,7 +2740,7 @@ async def jobs_list_partial(
 
 
 @web_router.post("/jobs/{job_id}/cancel", response_class=HTMLResponse)
-async def cancel_job(
+def cancel_job(
     request: Request,
     job_id: str,
     csrf_token: Optional[str] = Form(None),
@@ -2783,7 +2783,7 @@ async def cancel_job(
 
 
 @web_router.get("/api/queue-status")
-async def get_queue_status_api(request: Request):
+def get_queue_status_api(request: Request):
     """
     Get current job queue status.
 
@@ -2969,7 +2969,7 @@ def _create_query_page_response(
 
 
 @web_router.get("/query", response_class=HTMLResponse)
-async def query_page(request: Request):
+def query_page(request: Request):
     """Query testing interface page."""
     session = _require_admin_session(request)
     if not session:
@@ -2979,7 +2979,7 @@ async def query_page(request: Request):
 
 
 @web_router.post("/query", response_class=HTMLResponse)
-async def query_submit(
+def query_submit(
     request: Request,
     query_text: str = Form(""),
     repository: str = Form(""),
@@ -3457,7 +3457,7 @@ async def query_submit(
 
 
 @web_router.get("/partials/query-results", response_class=HTMLResponse)
-async def query_results_partial(request: Request):
+def query_results_partial(request: Request):
     """
     Partial refresh endpoint for query results.
 
@@ -3680,7 +3680,7 @@ def _execute_scip_query(
 
 
 @web_router.post("/partials/query-results", response_class=HTMLResponse)
-async def query_results_partial_post(
+def query_results_partial_post(
     request: Request,
     query_text: str = Form(""),
     repository: str = Form(""),
@@ -5244,7 +5244,7 @@ def _build_github_repos_response(
 
 
 @web_router.get("/auto-discovery", response_class=HTMLResponse)
-async def auto_discovery_page(request: Request):
+def auto_discovery_page(request: Request):
     """Auto-discovery page - discover repositories from GitLab/GitHub."""
     session = _require_admin_session(request)
     if not session:
@@ -5265,7 +5265,7 @@ async def auto_discovery_page(request: Request):
 
 
 @web_router.get("/partials/auto-discovery/gitlab", response_class=HTMLResponse)
-async def gitlab_repos_partial(
+def gitlab_repos_partial(
     request: Request, page: int = 1, page_size: int = 50, search: Optional[str] = None
 ):
     """HTMX partial for GitLab repository discovery."""
@@ -5280,7 +5280,7 @@ async def gitlab_repos_partial(
 
     try:
         provider = _get_gitlab_provider()
-        if not await provider.is_configured():
+        if not provider.is_configured():
             return _build_gitlab_repos_response(
                 request,
                 error_type="not_configured",
@@ -5288,7 +5288,7 @@ async def gitlab_repos_partial(
                 search_term=search_term,
             )
 
-        result = await provider.discover_repositories(
+        result = provider.discover_repositories(
             page=page, page_size=page_size, search=search_term
         )
         return _build_gitlab_repos_response(
@@ -5325,7 +5325,7 @@ async def gitlab_repos_partial(
 
 
 @web_router.get("/partials/auto-discovery/github", response_class=HTMLResponse)
-async def github_repos_partial(
+def github_repos_partial(
     request: Request, page: int = 1, page_size: int = 50, search: Optional[str] = None
 ):
     """HTMX partial for GitHub repository discovery."""
@@ -5340,7 +5340,7 @@ async def github_repos_partial(
 
     try:
         provider = _get_github_provider()
-        if not await provider.is_configured():
+        if not provider.is_configured():
             return _build_github_repos_response(
                 request,
                 error_type="not_configured",
@@ -5348,7 +5348,7 @@ async def github_repos_partial(
                 search_term=search_term,
             )
 
-        result = await provider.discover_repositories(
+        result = provider.discover_repositories(
             page=page, page_size=page_size, search=search_term
         )
         return _build_github_repos_response(
@@ -5509,7 +5509,7 @@ async def fetch_discovery_branches(request: Request):
 
 
 @web_router.get("/config", response_class=HTMLResponse)
-async def config_page(request: Request):
+def config_page(request: Request):
     """Configuration management page - view and edit CIDX configuration."""
     session = _require_admin_session(request)
     if not session:
@@ -5580,7 +5580,7 @@ async def update_claude_delegation_config(
 # NOTE: This specific route MUST come BEFORE /config/{section} to avoid being
 # caught by the parameterized route. FastAPI matches routes in order of definition.
 @web_router.post("/config/reset", response_class=HTMLResponse)
-async def reset_config(
+def reset_config(
     request: Request,
     csrf_token: Optional[str] = Form(None),
 ):
@@ -5776,7 +5776,7 @@ async def update_config_section(
 
 
 @web_router.post("/config/reset", response_class=HTMLResponse)
-async def reset_config(
+def reset_config(
     request: Request,
     csrf_token: Optional[str] = Form(None),
 ):
@@ -5820,7 +5820,7 @@ async def reset_config(
 
 
 @web_router.get("/partials/config-section", response_class=HTMLResponse)
-async def config_section_partial(
+def config_section_partial(
     request: Request,
     section: Optional[str] = None,
 ):
@@ -5869,7 +5869,7 @@ async def config_section_partial(
 
 
 @web_router.post("/config/api-keys/{platform}", response_class=HTMLResponse)
-async def save_api_key(
+def save_api_key(
     request: Request,
     platform: str,
     csrf_token: Optional[str] = Form(None),
@@ -5931,7 +5931,7 @@ async def save_api_key(
 
 
 @web_router.delete("/config/api-keys/{platform}", response_class=HTMLResponse)
-async def delete_api_key(
+def delete_api_key(
     request: Request,
     platform: str,
 ):
@@ -5992,7 +5992,7 @@ async def delete_api_key(
 
 
 @web_router.get("/settings/git", response_class=HTMLResponse)
-async def git_settings_page(request: Request):
+def git_settings_page(request: Request):
     """
     Git settings page - view and edit git service configuration.
 
@@ -6036,7 +6036,7 @@ async def git_settings_page(request: Request):
 
 
 @web_router.get("/settings/file-content-limits", response_class=HTMLResponse)
-async def file_content_limits_page(request: Request):
+def file_content_limits_page(request: Request):
     """
     File content limits settings page - view and edit token limits configuration.
 
@@ -6080,7 +6080,7 @@ async def file_content_limits_page(request: Request):
 
 
 @web_router.post("/settings/file-content-limits", response_class=HTMLResponse)
-async def update_file_content_limits(
+def update_file_content_limits(
     request: Request,
     max_tokens_per_request: int = Form(...),
     chars_per_token: int = Form(...),
@@ -6193,7 +6193,7 @@ def _create_file_content_limits_response(
 
 
 @web_router.get("/api-keys", response_class=HTMLResponse)
-async def api_keys_page(request: Request):
+def api_keys_page(request: Request):
     """API Keys management page - manage personal API keys."""
     session = _require_admin_session(request)
     if not session:
@@ -6230,7 +6230,7 @@ def _create_api_keys_page_response(
 
 
 @web_router.get("/partials/api-keys-list", response_class=HTMLResponse)
-async def api_keys_list_partial(request: Request):
+def api_keys_list_partial(request: Request):
     """Partial for API keys list (HTMX refresh)."""
     assert dependencies.user_manager is not None  # Initialized at app startup
     session = _require_admin_session(request)
@@ -6251,7 +6251,7 @@ async def api_keys_list_partial(request: Request):
 
 
 @web_router.get("/mcp-credentials", response_class=HTMLResponse)
-async def admin_mcp_credentials_page(request: Request):
+def admin_mcp_credentials_page(request: Request):
     """Admin MCP Credentials management page - manage personal MCP credentials."""
     session = _require_admin_session(request)
     if not session:
@@ -6287,7 +6287,7 @@ def _create_admin_mcp_credentials_page_response(
 
 
 @web_router.get("/partials/mcp-credentials-list", response_class=HTMLResponse)
-async def admin_mcp_credentials_list_partial(request: Request):
+def admin_mcp_credentials_list_partial(request: Request):
     """Partial for admin MCP credentials list (HTMX refresh)."""
     assert dependencies.user_manager is not None  # Initialized at app startup
     session = _require_admin_session(request)
@@ -6328,7 +6328,7 @@ def _require_authenticated_session(request: Request) -> Optional[SessionData]:
 
 
 @user_router.get("/api-keys", response_class=HTMLResponse)
-async def user_api_keys_page(request: Request):
+def user_api_keys_page(request: Request):
     """User API Keys management page - any authenticated user can manage their own API keys."""
     session = _require_authenticated_session(request)
     if not session:
@@ -6365,7 +6365,7 @@ def _create_user_api_keys_page_response(
 
 
 @user_router.get("/partials/api-keys-list", response_class=HTMLResponse)
-async def user_api_keys_list_partial(request: Request):
+def user_api_keys_list_partial(request: Request):
     """Partial for user API keys list (HTMX refresh)."""
     assert dependencies.user_manager is not None  # Initialized at app startup
     session = _require_authenticated_session(request)
@@ -6386,7 +6386,7 @@ async def user_api_keys_list_partial(request: Request):
 
 
 @user_router.get("/mcp-credentials", response_class=HTMLResponse)
-async def user_mcp_credentials_page(request: Request):
+def user_mcp_credentials_page(request: Request):
     """User MCP Credentials management page - any authenticated user can manage their own MCP credentials."""
     session = _require_authenticated_session(request)
     if not session:
@@ -6423,7 +6423,7 @@ def _create_user_mcp_credentials_page_response(
 
 
 @user_router.get("/partials/mcp-credentials-list", response_class=HTMLResponse)
-async def user_mcp_credentials_list_partial(request: Request):
+def user_mcp_credentials_list_partial(request: Request):
     """Partial for user MCP credentials list (HTMX refresh)."""
     assert dependencies.user_manager is not None  # Initialized at app startup
     session = _require_authenticated_session(request)
@@ -6444,7 +6444,7 @@ async def user_mcp_credentials_list_partial(request: Request):
 
 
 @user_router.get("/logout")
-async def user_logout(request: Request):
+def user_logout(request: Request):
     """
     Logout and clear session for user portal.
 
@@ -6464,7 +6464,7 @@ async def user_logout(request: Request):
 
 # SSH Keys Management Page
 @web_router.get("/ssh-keys", response_class=HTMLResponse)
-async def ssh_keys_page(request: Request):
+def ssh_keys_page(request: Request):
     """SSH Keys management page - view migration status and manage SSH keys."""
     session = _require_admin_session(request)
     if not session:
@@ -6558,7 +6558,7 @@ def _create_ssh_keys_page_response(
 
 
 @web_router.post("/ssh-keys/create", response_class=HTMLResponse)
-async def create_ssh_key(
+def create_ssh_key(
     request: Request,
     key_name: str = Form(...),
     key_type: str = Form(...),
@@ -6615,7 +6615,7 @@ async def create_ssh_key(
 
 
 @web_router.post("/ssh-keys/delete", response_class=HTMLResponse)
-async def delete_ssh_key(
+def delete_ssh_key(
     request: Request,
     key_name: str = Form(...),
     csrf_token: Optional[str] = Form(None),
@@ -6651,7 +6651,7 @@ async def delete_ssh_key(
 
 
 @web_router.post("/ssh-keys/assign-host", response_class=HTMLResponse)
-async def assign_host_to_key(
+def assign_host_to_key(
     request: Request,
     key_name: str = Form(...),
     hostname: str = Form(...),
@@ -6699,7 +6699,7 @@ async def assign_host_to_key(
 
 
 @web_router.get("/logs", response_class=HTMLResponse)
-async def logs_page(
+def logs_page(
     request: Request,
     level: Optional[str] = None,
     logger: Optional[str] = None,
@@ -6773,7 +6773,7 @@ async def logs_page(
 
 
 @web_router.get("/partials/logs-list", response_class=HTMLResponse)
-async def logs_list_partial(
+def logs_list_partial(
     request: Request,
     level: Optional[str] = None,
     logger: Optional[str] = None,
@@ -6846,7 +6846,7 @@ async def logs_list_partial(
 
 
 @web_router.get("/logs/export")
-async def export_logs_web(
+def export_logs_web(
     request: Request,
     format: str = "json",
     search: Optional[str] = None,
@@ -6931,7 +6931,7 @@ async def export_logs_web(
 
 
 @login_router.get("/login", response_class=HTMLResponse)
-async def unified_login_page(
+def unified_login_page(
     request: Request,
     redirect_to: Optional[str] = None,
     error: Optional[str] = None,
@@ -6996,7 +6996,7 @@ async def unified_login_page(
 
 
 @login_router.post("/login", response_class=HTMLResponse)
-async def unified_login_submit(
+def unified_login_submit(
     request: Request,
     response: Response,
     username: str = Form(...),
@@ -7210,7 +7210,7 @@ async def unified_login_sso(
 
 
 @login_router.get("/admin/login")
-async def redirect_admin_login(redirect_to: Optional[str] = None):
+def redirect_admin_login(redirect_to: Optional[str] = None):
     """
     Backwards compatibility redirect: /admin/login → /login.
 
@@ -7225,7 +7225,7 @@ async def redirect_admin_login(redirect_to: Optional[str] = None):
 
 
 @login_router.get("/user/login")
-async def redirect_user_login(redirect_to: Optional[str] = None):
+def redirect_user_login(redirect_to: Optional[str] = None):
     """
     Backwards compatibility redirect: /user/login → /login.
 

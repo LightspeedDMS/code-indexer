@@ -218,7 +218,7 @@ router = APIRouter(prefix="/api/api-keys", tags=["API Keys"])
 
 
 @router.post("/anthropic", response_model=SaveApiKeyResponse)
-async def save_anthropic_key(
+def save_anthropic_key(
     request: SaveApiKeyRequest,
     http_request: Request,
     _current_user: User = Depends(get_current_admin_user_hybrid),
@@ -264,7 +264,7 @@ async def save_anthropic_key(
 
 
 @router.post("/voyageai", response_model=SaveApiKeyResponse)
-async def save_voyageai_key(
+def save_voyageai_key(
     request: SaveApiKeyRequest,
     http_request: Request,
     _current_user: User = Depends(get_current_admin_user_hybrid),
@@ -424,7 +424,7 @@ async def test_configured_voyageai_key(
 
 
 @router.get("/status", response_model=ApiKeysStatusResponse)
-async def get_api_keys_status(
+def get_api_keys_status(
     http_request: Request,
     _current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> ApiKeysStatusResponse:
@@ -455,7 +455,7 @@ class ClearApiKeyResponse(BaseModel):
 
 
 @router.delete("/anthropic", response_model=ClearApiKeyResponse)
-async def clear_anthropic_key(
+def clear_anthropic_key(
     http_request: Request,
     _current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> ClearApiKeyResponse:
@@ -494,7 +494,7 @@ async def clear_anthropic_key(
 
 
 @router.delete("/voyageai", response_model=ClearApiKeyResponse)
-async def clear_voyageai_key(
+def clear_voyageai_key(
     http_request: Request,
     _current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> ClearApiKeyResponse:

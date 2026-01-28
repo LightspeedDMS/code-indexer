@@ -258,7 +258,7 @@ async def test_scenario1_total_failure_resolved(
     )
 
     # Handle SCIP failure (AC1)
-    await self_healing_service.handle_scip_failure(
+    self_healing_service.handle_scip_failure(
         job_id=job_id, generation_result=generation_result, repo_alias="test-repo"
     )
 
@@ -283,7 +283,7 @@ async def test_scenario1_total_failure_resolved(
     )
 
     # Determine final job status
-    final_status = await self_healing_service.determine_job_completion(job_id)
+    final_status = self_healing_service.determine_job_completion(job_id)
 
     # Assert results
     assert response.status == "progress"
@@ -346,7 +346,7 @@ async def test_scenario2_partial_failure_all_resolved(
     )
 
     # Handle SCIP failure (AC1)
-    await self_healing_service.handle_scip_failure(
+    self_healing_service.handle_scip_failure(
         job_id=job_id, generation_result=generation_result, repo_alias="multi-lang-repo"
     )
 
@@ -387,7 +387,7 @@ async def test_scenario2_partial_failure_all_resolved(
     )
 
     # Determine final job status
-    final_status = await self_healing_service.determine_job_completion(job_id)
+    final_status = self_healing_service.determine_job_completion(job_id)
 
     # Assert both projects resolved
     job = job_manager.jobs[job_id]
@@ -450,7 +450,7 @@ async def test_scenario3_partial_resolution(
     )
 
     # Handle SCIP failure
-    await self_healing_service.handle_scip_failure(
+    self_healing_service.handle_scip_failure(
         job_id=job_id, generation_result=generation_result, repo_alias="mixed-repo"
     )
 
@@ -485,7 +485,7 @@ async def test_scenario3_partial_resolution(
     )
 
     # Determine final job status
-    final_status = await self_healing_service.determine_job_completion(job_id)
+    final_status = self_healing_service.determine_job_completion(job_id)
 
     # Assert partial success
     job = job_manager.jobs[job_id]
@@ -549,7 +549,7 @@ async def test_scenario4_all_unresolvable(
     )
 
     # Handle SCIP failure
-    await self_healing_service.handle_scip_failure(
+    self_healing_service.handle_scip_failure(
         job_id=job_id, generation_result=generation_result, repo_alias="broken-repo"
     )
 
@@ -594,7 +594,7 @@ async def test_scenario4_all_unresolvable(
         )
 
     # Determine final job status
-    final_status = await self_healing_service.determine_job_completion(job_id)
+    final_status = self_healing_service.determine_job_completion(job_id)
 
     # Assert all unresolvable
     job = job_manager.jobs[job_id]

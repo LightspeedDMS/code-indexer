@@ -77,7 +77,7 @@ class RealServerHealthChecker:
             self._remote_config = RemoteConfig(self.project_root)
         return self._remote_config
 
-    async def check_server_health(self) -> HealthCheckResult:
+    def check_server_health(self) -> HealthCheckResult:
         """Perform comprehensive real server health check.
 
         Returns:
@@ -97,7 +97,7 @@ class RealServerHealthChecker:
             logger.debug(f"Starting health check for server: {server_url}")
 
             # Test basic server connectivity first (unauthenticated)
-            server_reachable = await self._check_server_connectivity(server_url)
+            server_reachable = self._check_server_connectivity(server_url)
 
             if not server_reachable:
                 return HealthCheckResult(
@@ -110,7 +110,7 @@ class RealServerHealthChecker:
                 )
 
             # Test authentication with real stored credentials
-            auth_result = await self._check_authentication(remote_config)
+            auth_result = self._check_authentication(remote_config)
 
             if not auth_result["valid"]:
                 return HealthCheckResult(
@@ -123,15 +123,15 @@ class RealServerHealthChecker:
                 )
 
             # Test repository accessibility with authenticated client
-            repo_accessible = await self._check_repository_access(
+            repo_accessible = self._check_repository_access(
                 remote_config, auth_result["client"]
             )
 
             # Get server information from authenticated endpoints
-            server_info = await self._get_server_info(auth_result["client"])
+            server_info = self._get_server_info(auth_result["client"])
 
             # CRITICAL: Close the client to prevent resource leak
-            await auth_result["client"].close()
+            auth_result["client"].close()
 
             # Determine overall health status
             if repo_accessible:
@@ -177,7 +177,7 @@ class RealServerHealthChecker:
                 check_timestamp=check_timestamp,
             )
 
-    async def _check_server_connectivity(self, server_url: str) -> bool:
+    def _check_server_connectivity(self, server_url: str) -> bool:
         """Test basic server connectivity (unauthenticated).
 
         Args:
@@ -190,11 +190,11 @@ class RealServerHealthChecker:
             # Test unauthenticated health endpoint if available, or any known endpoint
             import httpx
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            with httpx.Client(timeout=10.0) as client:
                 # Try a simple GET to the server root or health endpoint
                 # Even if it returns 401, that proves the server is reachable
                 try:
-                    await client.get(f"{server_url}/health")
+                    client.get(f"{server_url}/health")
                     # Any response (even 401) means server is reachable
                     return True
                 except httpx.HTTPStatusError:
@@ -213,9 +213,7 @@ class RealServerHealthChecker:
             logger.warning(f"Unexpected error in connectivity test: {e}")
             return False
 
-    async def _check_authentication(
-        self, remote_config: RemoteConfig
-    ) -> Dict[str, Any]:
+    def _check_authentication(self, remote_config: RemoteConfig) -> Dict[str, Any]:
         """Test authentication with real stored credentials.
 
         Args:
@@ -240,13 +238,13 @@ class RealServerHealthChecker:
 
             # Test authentication by making a simple authenticated request
             # Try the health endpoint which should require authentication
-            response = await client.get("/health")
+            response = client.get("/health")
 
             if response.status_code == 200:
                 logger.debug("Authentication successful")
                 return {"valid": True, "client": client}
             else:
-                await client.close()
+                client.close()
                 return {
                     "valid": False,
                     "error": f"Unexpected response: HTTP {response.status_code}",
@@ -262,7 +260,7 @@ class RealServerHealthChecker:
             logger.error(f"Unexpected error during authentication: {e}")
             return {"valid": False, "error": f"Authentication error: {e}"}
 
-    async def _check_repository_access(
+    def _check_repository_access(
         self, remote_config: RemoteConfig, client: CIDXRemoteAPIClient
     ) -> bool:
         """Test repository accessibility with authenticated client.
@@ -277,7 +275,7 @@ class RealServerHealthChecker:
         try:
             # Test repository access by trying to list activated repositories
             # This verifies both authentication and repository permissions
-            response = await client.get("/api/repos")
+            response = client.get("/api/repos")
             return bool(response.status_code == 200)
 
         except APIClientError as e:
@@ -287,9 +285,7 @@ class RealServerHealthChecker:
             logger.warning(f"Unexpected error checking repository access: {e}")
             return False
 
-    async def _get_server_info(
-        self, client: CIDXRemoteAPIClient
-    ) -> Optional[Dict[str, Any]]:
+    def _get_server_info(self, client: CIDXRemoteAPIClient) -> Optional[Dict[str, Any]]:
         """Get server information from authenticated endpoints.
 
         Args:
@@ -300,7 +296,7 @@ class RealServerHealthChecker:
         """
         try:
             # Get comprehensive health information
-            response = await client.get("/api/system/health")
+            response = client.get("/api/system/health")
 
             if response.status_code == 200:
                 health_data = response.json()
@@ -312,7 +308,7 @@ class RealServerHealthChecker:
                 }
             else:
                 # Try basic health endpoint
-                response = await client.get("/health")
+                response = client.get("/health")
                 if response.status_code == 200:
                     health_data = response.json()
                     return {
@@ -327,13 +323,13 @@ class RealServerHealthChecker:
 
         return None
 
-    async def close(self):
+    def close(self):
         """Clean up resources."""
         # Nothing to clean up currently, but provides interface for future use
         pass
 
 
-async def check_remote_server_health(project_root: Path) -> HealthCheckResult:
+def check_remote_server_health(project_root: Path) -> HealthCheckResult:
     """Convenience function for checking remote server health.
 
     Args:
@@ -344,6 +340,6 @@ async def check_remote_server_health(project_root: Path) -> HealthCheckResult:
     """
     checker = RealServerHealthChecker(project_root)
     try:
-        return await checker.check_server_health()
+        return checker.check_server_health()
     finally:
-        await checker.close()
+        checker.close()

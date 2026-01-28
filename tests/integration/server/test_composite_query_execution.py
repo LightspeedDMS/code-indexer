@@ -86,7 +86,7 @@ class TestCompositeQueryExecutionIntegration:
         manager = SemanticQueryManager()
 
         # Execute composite query
-        results = await manager.search_composite(
+        results = manager.search_composite(
             repo_path=composite_repo_setup, query="user authentication", limit=10
         )
 
@@ -105,7 +105,7 @@ class TestCompositeQueryExecutionIntegration:
         manager = SemanticQueryManager()
 
         # Query with limit=1
-        results = await manager.search_composite(
+        results = manager.search_composite(
             repo_path=composite_repo_setup, query="user", limit=1
         )
 
@@ -120,7 +120,7 @@ class TestCompositeQueryExecutionIntegration:
         manager = SemanticQueryManager()
 
         # Query with high min_score
-        results = await manager.search_composite(
+        results = manager.search_composite(
             repo_path=composite_repo_setup,
             query="user authentication",
             limit=10,
@@ -136,7 +136,7 @@ class TestCompositeQueryExecutionIntegration:
         """Test that results are sorted by score descending."""
         manager = SemanticQueryManager()
 
-        results = await manager.search_composite(
+        results = manager.search_composite(
             repo_path=composite_repo_setup, query="user", limit=10
         )
 
@@ -152,7 +152,7 @@ class TestCompositeQueryExecutionIntegration:
         """Test that repository alias is preserved in results."""
         manager = SemanticQueryManager()
 
-        results = await manager.search_composite(
+        results = manager.search_composite(
             repo_path=composite_repo_setup, query="user", limit=10
         )
 
@@ -167,7 +167,7 @@ class TestCompositeQueryExecutionIntegration:
         """Test that language filter is passed to CLI."""
         manager = SemanticQueryManager()
 
-        results = await manager.search_composite(
+        results = manager.search_composite(
             repo_path=composite_repo_setup, query="user", limit=10, language="python"
         )
 
@@ -180,7 +180,7 @@ class TestCompositeQueryExecutionIntegration:
         manager = SemanticQueryManager()
 
         with pytest.raises(Exception):
-            await manager.search_composite(
+            manager.search_composite(
                 repo_path=Path("/nonexistent/path"), query="test", limit=10
             )
 

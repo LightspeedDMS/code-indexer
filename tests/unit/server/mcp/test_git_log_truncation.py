@@ -17,7 +17,7 @@ The new `truncated` field reflects TOKEN-based truncation. These are distinct co
 import json
 from datetime import datetime
 from typing import cast
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock, Mock
 import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -43,9 +43,12 @@ def mock_user():
 
 @pytest.fixture
 def mock_payload_cache():
-    """Create configured mock payload cache."""
-    cache = AsyncMock()
-    cache.store = AsyncMock(return_value="cache-handle-log-123")
+    """Create configured mock payload cache.
+
+    Epic #48: Handlers are now sync, so cache must use Mock (not AsyncMock).
+    """
+    cache = MagicMock()
+    cache.store = Mock(return_value="cache-handle-log-123")
     cache.config = MagicMock()
     cache.config.max_fetch_size_chars = MAX_FETCH_SIZE_CHARS
     return cache
@@ -133,8 +136,7 @@ def _mock_config_service(token_limit):
 class TestGitLogTruncationWithCacheHandle:
     """Test git_log handler truncation with cache_handle support."""
 
-    @pytest.mark.asyncio
-    async def test_large_log_returns_cache_handle(
+    def test_large_log_returns_cache_handle(
         self, mock_user, mock_payload_cache
     ):
         """Verify large log returns cache_handle when truncated.
@@ -174,7 +176,7 @@ class TestGitLogTruncationWithCacheHandle:
                 _mock_config_service(LOW_TOKEN_LIMIT)
             )
 
-            result = await handlers.handle_git_log(
+            result = handlers.handle_git_log(
                 {
                     "repository_alias": "test-repo",
                     "limit": 100,
@@ -192,8 +194,7 @@ class TestGitLogTruncationWithCacheHandle:
             assert data.get("preview_tokens") > 0
             assert data.get("total_pages") >= 1
 
-    @pytest.mark.asyncio
-    async def test_small_log_no_truncation(self, mock_user, mock_payload_cache):
+    def test_small_log_no_truncation(self, mock_user, mock_payload_cache):
         """Verify small log returns no cache_handle when not truncated.
 
         Story #35 AC2: Small logs that fit within token limit should not be
@@ -231,7 +232,7 @@ class TestGitLogTruncationWithCacheHandle:
                 _mock_config_service(HIGH_TOKEN_LIMIT)
             )
 
-            result = await handlers.handle_git_log(
+            result = handlers.handle_git_log(
                 {
                     "repository_alias": "test-repo",
                     "limit": 50,
@@ -246,8 +247,7 @@ class TestGitLogTruncationWithCacheHandle:
             assert data.get("truncated") is False  # TOKEN-based, not truncated
             mock_payload_cache.store.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_log_response_contains_truncation_fields(
+    def test_log_response_contains_truncation_fields(
         self, mock_user, mock_payload_cache
     ):
         """Verify all required truncation fields are in response.
@@ -285,7 +285,7 @@ class TestGitLogTruncationWithCacheHandle:
                 _mock_config_service(LOW_TOKEN_LIMIT)
             )
 
-            result = await handlers.handle_git_log(
+            result = handlers.handle_git_log(
                 {
                     "repository_alias": "test-repo",
                 },
@@ -310,8 +310,7 @@ class TestGitLogTruncationWithCacheHandle:
             for field in required_fields:
                 assert field in data, f"Missing required field: {field}"
 
-    @pytest.mark.asyncio
-    async def test_log_stores_serialized_json_in_cache(
+    def test_log_stores_serialized_json_in_cache(
         self, mock_user, mock_payload_cache
     ):
         """Verify full log is serialized to JSON and stored in cache.
@@ -349,7 +348,7 @@ class TestGitLogTruncationWithCacheHandle:
                 _mock_config_service(LOW_TOKEN_LIMIT)
             )
 
-            await handlers.handle_git_log(
+            handlers.handle_git_log(
                 {
                     "repository_alias": "test-repo",
                 },
@@ -365,8 +364,7 @@ class TestGitLogTruncationWithCacheHandle:
             assert "commits" in stored_data
             assert "total_count" in stored_data
 
-    @pytest.mark.asyncio
-    async def test_log_no_cache_when_payload_cache_unavailable(self, mock_user):
+    def test_log_no_cache_when_payload_cache_unavailable(self, mock_user):
         """Verify log returns without truncation when cache is unavailable.
 
         Story #35 AC5: Graceful handling when payload_cache is None.
@@ -403,7 +401,7 @@ class TestGitLogTruncationWithCacheHandle:
                 _mock_config_service(LOW_TOKEN_LIMIT)
             )
 
-            result = await handlers.handle_git_log(
+            result = handlers.handle_git_log(
                 {
                     "repository_alias": "test-repo",
                 },
@@ -417,8 +415,7 @@ class TestGitLogTruncationWithCacheHandle:
             assert data.get("cache_handle") is None
             assert data.get("truncated") is False
 
-    @pytest.mark.asyncio
-    async def test_log_preserves_backward_compatibility(
+    def test_log_preserves_backward_compatibility(
         self, mock_user, mock_payload_cache
     ):
         """Verify existing response fields are preserved.
@@ -456,7 +453,7 @@ class TestGitLogTruncationWithCacheHandle:
                 _mock_config_service(HIGH_TOKEN_LIMIT)
             )
 
-            result = await handlers.handle_git_log(
+            result = handlers.handle_git_log(
                 {
                     "repository_alias": "test-repo",
                     "limit": 50,
@@ -490,8 +487,7 @@ class TestGitLogTruncationWithCacheHandle:
 class TestGitLogTruncationHelperIntegration:
     """Test git_log handler's integration with TruncationHelper."""
 
-    @pytest.mark.asyncio
-    async def test_uses_truncation_helper_with_log_content_type(
+    def test_uses_truncation_helper_with_log_content_type(
         self, mock_user, mock_payload_cache
     ):
         """Verify TruncationHelper is called with content_type='log'.
@@ -533,7 +529,7 @@ class TestGitLogTruncationHelperIntegration:
             config = _mock_config_service(LOW_TOKEN_LIMIT)
             mock_config_svc.return_value.get_config.return_value = config
 
-            # Set up mock TruncationHelper
+            # Set up mock TruncationHelper (Epic #48: sync, not async)
             mock_truncation_result = TruncationResult(
                 preview='{"commits": [], ...}',
                 cache_handle="cache-handle-xyz",
@@ -543,13 +539,13 @@ class TestGitLogTruncationHelperIntegration:
                 total_pages=5,
                 has_more=True,
             )
-            mock_truncation_helper = AsyncMock()
-            mock_truncation_helper.truncate_and_cache = AsyncMock(
+            mock_truncation_helper = MagicMock()
+            mock_truncation_helper.truncate_and_cache = Mock(
                 return_value=mock_truncation_result
             )
             mock_truncation_helper_class.return_value = mock_truncation_helper
 
-            await handlers.handle_git_log(
+            handlers.handle_git_log(
                 {
                     "repository_alias": "test-repo",
                 },

@@ -78,12 +78,12 @@ class TestJobsCancelStatusRealIntegration:
         try:
             yield client
         finally:
-            await client.close()
+            client.close()
 
     async def test_get_job_status_with_real_server(self, jobs_client):
         """Test get_job_status with real server integration."""
         # Get status of a running job
-        job_status = await jobs_client.get_job_status("job-running-1")
+        job_status = jobs_client.get_job_status("job-running-1")
 
         # Verify response structure
         assert "id" in job_status
@@ -95,7 +95,7 @@ class TestJobsCancelStatusRealIntegration:
 
     async def test_get_job_status_completed_job(self, jobs_client):
         """Test get_job_status for completed job."""
-        job_status = await jobs_client.get_job_status("job-completed-1")
+        job_status = jobs_client.get_job_status("job-completed-1")
 
         # Verify completed job status
         assert job_status["id"] == "job-completed-1"
@@ -105,7 +105,7 @@ class TestJobsCancelStatusRealIntegration:
     async def test_get_job_status_nonexistent_job(self, jobs_client):
         """Test get_job_status for nonexistent job."""
         with pytest.raises(APIClientError) as exc_info:
-            await jobs_client.get_job_status("nonexistent-job")
+            jobs_client.get_job_status("nonexistent-job")
 
         assert exc_info.value.status_code == 404
         assert "Job not found" in str(exc_info.value)
@@ -113,7 +113,7 @@ class TestJobsCancelStatusRealIntegration:
     async def test_cancel_job_with_real_server(self, jobs_client):
         """Test cancel_job with real server integration."""
         # Cancel a running job
-        result = await jobs_client.cancel_job("job-running-1")
+        result = jobs_client.cancel_job("job-running-1")
 
         # Verify response structure
         assert "id" in result or "job_id" in result
@@ -125,7 +125,7 @@ class TestJobsCancelStatusRealIntegration:
     async def test_cancel_nonexistent_job(self, jobs_client):
         """Test cancel_job for nonexistent job."""
         with pytest.raises(APIClientError) as exc_info:
-            await jobs_client.cancel_job("nonexistent-job")
+            jobs_client.cancel_job("nonexistent-job")
 
         assert exc_info.value.status_code == 404
         assert "Job not found" in str(exc_info.value)
@@ -134,7 +134,7 @@ class TestJobsCancelStatusRealIntegration:
         """Test that cancelling completed job fails appropriately."""
         # Try to cancel a completed job (should fail)
         with pytest.raises(APIClientError) as exc_info:
-            await jobs_client.cancel_job("job-completed-1")
+            jobs_client.cancel_job("job-completed-1")
 
         # Should be a 409 conflict or similar error
         assert exc_info.value.status_code in [400, 409]
@@ -142,19 +142,19 @@ class TestJobsCancelStatusRealIntegration:
     async def test_job_workflow_status_then_cancel(self, jobs_client):
         """Test complete workflow: check status then cancel job."""
         # First get status
-        initial_status = await jobs_client.get_job_status("job-running-1")
+        initial_status = jobs_client.get_job_status("job-running-1")
         assert initial_status["status"] == "running"
         assert initial_status["id"] == "job-running-1"
 
         # Then cancel the job
-        cancel_result = await jobs_client.cancel_job("job-running-1")
+        cancel_result = jobs_client.cancel_job("job-running-1")
         job_id_field = cancel_result.get("id") or cancel_result.get("job_id")
         assert job_id_field == "job-running-1"
 
         # Verify job was cancelled (status should change)
         # Note: Depending on server implementation, status might be immediately
         # updated or take some time
-        final_status = await jobs_client.get_job_status("job-running-1")
+        final_status = jobs_client.get_job_status("job-running-1")
         assert final_status["id"] == "job-running-1"
         # Status should be cancelled or in process of being cancelled
         assert final_status["status"] in ["cancelled", "cancelling", "running"]
@@ -166,18 +166,18 @@ class TestJobsCancelStatusRealIntegration:
 
         # Test get_job_status error handling
         with pytest.raises(APIClientError):
-            await jobs_client.get_job_status(nonexistent_job_id)
+            jobs_client.get_job_status(nonexistent_job_id)
 
         # Test cancel_job error handling
         with pytest.raises(APIClientError):
-            await jobs_client.cancel_job(nonexistent_job_id)
+            jobs_client.cancel_job(nonexistent_job_id)
 
     async def test_multiple_job_operations(self, jobs_client):
         """Test multiple job operations in sequence."""
         # Get status of multiple jobs
-        running_status = await jobs_client.get_job_status("job-running-1")
-        completed_status = await jobs_client.get_job_status("job-completed-1")
-        failed_status = await jobs_client.get_job_status("job-failed-1")
+        running_status = jobs_client.get_job_status("job-running-1")
+        completed_status = jobs_client.get_job_status("job-completed-1")
+        failed_status = jobs_client.get_job_status("job-failed-1")
 
         # Verify all have correct statuses
         assert running_status["status"] == "running"
@@ -186,12 +186,12 @@ class TestJobsCancelStatusRealIntegration:
 
         # Try to cancel different job types
         # Cancel running job (should succeed)
-        await jobs_client.cancel_job("job-running-1")
+        jobs_client.cancel_job("job-running-1")
 
         # Try to cancel completed job (should fail)
         with pytest.raises(APIClientError):
-            await jobs_client.cancel_job("job-completed-1")
+            jobs_client.cancel_job("job-completed-1")
 
         # Try to cancel failed job (should fail)
         with pytest.raises(APIClientError):
-            await jobs_client.cancel_job("job-failed-1")
+            jobs_client.cancel_job("job-failed-1")

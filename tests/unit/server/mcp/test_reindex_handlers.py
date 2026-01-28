@@ -16,11 +16,10 @@ def mock_user():
     return user
 
 
-@pytest.mark.asyncio
 class TestTriggerReindexHandler:
     """Test trigger_reindex handler."""
 
-    async def test_trigger_reindex_success(self, mock_user):
+    def test_trigger_reindex_success(self, mock_user):
         """Test successful reindex job creation."""
         from code_indexer.server.mcp.handlers import trigger_reindex
 
@@ -37,7 +36,7 @@ class TestTriggerReindexHandler:
             mock_manager.trigger_reindex.return_value = "job-123"
             MockManager.return_value = mock_manager
 
-            result = await trigger_reindex(params, mock_user)
+            result = trigger_reindex(params, mock_user)
 
             # Parse MCP response
             data = json.loads(result["content"][0]["text"])
@@ -57,7 +56,7 @@ class TestTriggerReindexHandler:
                 username="testuser",
             )
 
-    async def test_trigger_reindex_invalid_index_type(self, mock_user):
+    def test_trigger_reindex_invalid_index_type(self, mock_user):
         """Test reindex with invalid index type."""
         from code_indexer.server.mcp.handlers import trigger_reindex
 
@@ -76,13 +75,13 @@ class TestTriggerReindexHandler:
             )
             MockManager.return_value = mock_manager
 
-            result = await trigger_reindex(params, mock_user)
+            result = trigger_reindex(params, mock_user)
 
             data = json.loads(result["content"][0]["text"])
             assert data["success"] is False
             assert "Invalid index type" in data["error"]
 
-    async def test_trigger_reindex_repo_not_found(self, mock_user):
+    def test_trigger_reindex_repo_not_found(self, mock_user):
         """Test reindex with repository not found."""
         from code_indexer.server.mcp.handlers import trigger_reindex
 
@@ -101,18 +100,17 @@ class TestTriggerReindexHandler:
             )
             MockManager.return_value = mock_manager
 
-            result = await trigger_reindex(params, mock_user)
+            result = trigger_reindex(params, mock_user)
 
             data = json.loads(result["content"][0]["text"])
             assert data["success"] is False
             assert "not found" in data["error"]
 
 
-@pytest.mark.asyncio
 class TestGetIndexStatusHandler:
     """Test get_index_status handler."""
 
-    async def test_get_index_status_success(self, mock_user):
+    def test_get_index_status_success(self, mock_user):
         """Test successful index status query."""
         from code_indexer.server.mcp.handlers import get_index_status
 
@@ -152,7 +150,7 @@ class TestGetIndexStatusHandler:
             mock_manager.get_index_status.return_value = status_data
             MockManager.return_value = mock_manager
 
-            result = await get_index_status(params, mock_user)
+            result = get_index_status(params, mock_user)
 
             data = json.loads(result["content"][0]["text"])
 
@@ -167,7 +165,7 @@ class TestGetIndexStatusHandler:
                 repo_alias="my-repo", username="testuser"
             )
 
-    async def test_get_index_status_repo_not_found(self, mock_user):
+    def test_get_index_status_repo_not_found(self, mock_user):
         """Test status query with repository not found."""
         from code_indexer.server.mcp.handlers import get_index_status
 
@@ -182,13 +180,13 @@ class TestGetIndexStatusHandler:
             )
             MockManager.return_value = mock_manager
 
-            result = await get_index_status(params, mock_user)
+            result = get_index_status(params, mock_user)
 
             data = json.loads(result["content"][0]["text"])
             assert data["success"] is False
             assert "not found" in data["error"]
 
-    async def test_get_index_status_not_indexed(self, mock_user):
+    def test_get_index_status_not_indexed(self, mock_user):
         """Test status query for repository with no indexes."""
         from code_indexer.server.mcp.handlers import get_index_status
 
@@ -206,7 +204,7 @@ class TestGetIndexStatusHandler:
             }
             MockManager.return_value = mock_manager
 
-            result = await get_index_status(params, mock_user)
+            result = get_index_status(params, mock_user)
 
             data = json.loads(result["content"][0]["text"])
 

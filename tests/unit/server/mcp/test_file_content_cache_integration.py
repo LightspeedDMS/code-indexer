@@ -37,14 +37,14 @@ def _extract_response_data(mcp_response: dict) -> dict:
     return mcp_response
 
 
-async def _collect_paginated_content(handlers, cache_handle: str, user, initial: str):
+def _collect_paginated_content(handlers, cache_handle: str, user, initial: str):
     """Collect all pages of content from cache."""
     all_content = initial
     page = 0
 
     while True:
         page += 1
-        response = await handlers.handle_get_cached_content(
+        response = handlers.handle_get_cached_content(
             {"handle": cache_handle, "page": page}, user
         )
         data = _extract_response_data(response)
@@ -61,7 +61,7 @@ class TestCacheRetrievalIntegration:
     """Test complete flow: truncate file -> retrieve via cache handle (AC3)."""
 
     @pytest.fixture
-    async def setup_with_cache(self, tmp_path: Path):
+    def setup_with_cache(self, tmp_path: Path):
         """Set up test environment with real PayloadCache."""
         from code_indexer.server.cache.payload_cache import (
             PayloadCache,
@@ -76,7 +76,7 @@ class TestCacheRetrievalIntegration:
             cache_ttl_seconds=3600,
         )
         payload_cache = PayloadCache(db_path, cache_config)
-        await payload_cache.initialize()
+        payload_cache.initialize()
 
         content_limits = ContentLimitsConfig(
             chars_per_token=4,
@@ -85,8 +85,7 @@ class TestCacheRetrievalIntegration:
 
         return payload_cache, content_limits
 
-    @pytest.mark.asyncio
-    async def test_truncated_content_can_be_retrieved_via_cache(
+    def test_truncated_content_can_be_retrieved_via_cache(
         self, mock_user, setup_with_cache
     ):
         """AC3: Cache handle can retrieve full content after truncation."""
@@ -118,7 +117,7 @@ class TestCacheRetrievalIntegration:
             ),
         ):
             # Step 1: Get truncated file content
-            file_response = await handlers.get_file_content(
+            file_response = handlers.get_file_content(
                 {"repository_alias": "test-repo", "file_path": "large_file.py"},
                 mock_user,
             )
@@ -129,7 +128,7 @@ class TestCacheRetrievalIntegration:
             assert cache_handle is not None
 
             # Step 2: Retrieve full content via cache handle
-            cache_response = await handlers.handle_get_cached_content(
+            cache_response = handlers.handle_get_cached_content(
                 {"handle": cache_handle}, mock_user
             )
             cache_data = _extract_response_data(cache_response)
@@ -138,7 +137,7 @@ class TestCacheRetrievalIntegration:
             # Collect all paginated content
             initial_content = cache_data.get("content", "")
             if cache_data.get("has_more", False):
-                all_content = await _collect_paginated_content(
+                all_content = _collect_paginated_content(
                     handlers, cache_handle, mock_user, initial_content
                 )
             else:
@@ -146,8 +145,7 @@ class TestCacheRetrievalIntegration:
 
             assert all_content == large_content
 
-    @pytest.mark.asyncio
-    async def test_non_truncated_content_has_no_cache_handle(
+    def test_non_truncated_content_has_no_cache_handle(
         self, mock_user, setup_with_cache
     ):
         """AC4: Non-truncated content has cache_handle=null."""
@@ -178,7 +176,7 @@ class TestCacheRetrievalIntegration:
                 return_value=mock_config_service,
             ),
         ):
-            response = await handlers.get_file_content(
+            response = handlers.get_file_content(
                 {"repository_alias": "test-repo", "file_path": "small_file.py"},
                 mock_user,
             )

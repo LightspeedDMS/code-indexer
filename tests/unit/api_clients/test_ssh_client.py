@@ -6,7 +6,7 @@ Following TDD methodology - tests written before implementation.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 
 class TestSSHAPIClientImport:
@@ -80,7 +80,7 @@ class TestSSHAPIClientCreateMethod:
     async def test_create_calls_correct_endpoint(self, ssh_client):
         """Test create calls the correct REST endpoint."""
         with patch.object(
-            ssh_client, "_authenticated_request", new_callable=AsyncMock
+            ssh_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 201
@@ -93,7 +93,7 @@ class TestSSHAPIClientCreateMethod:
             }
             mock_request.return_value = mock_response
 
-            _ = await ssh_client.create_key(
+            _ = ssh_client.create_key(
                 name="my-key",
                 email="test@example.com",
                 key_type="ed25519",
@@ -112,7 +112,7 @@ class TestSSHAPIClientCreateMethod:
     async def test_create_returns_key_data(self, ssh_client):
         """Test create returns the created key data."""
         with patch.object(
-            ssh_client, "_authenticated_request", new_callable=AsyncMock
+            ssh_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 201
@@ -125,7 +125,7 @@ class TestSSHAPIClientCreateMethod:
             }
             mock_request.return_value = mock_response
 
-            result = await ssh_client.create_key(
+            result = ssh_client.create_key(
                 name="my-key",
                 email="test@example.com",
             )
@@ -159,7 +159,7 @@ class TestSSHAPIClientListMethod:
     async def test_list_calls_correct_endpoint(self, ssh_client):
         """Test list calls the correct REST endpoint."""
         with patch.object(
-            ssh_client, "_authenticated_request", new_callable=AsyncMock
+            ssh_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -181,7 +181,7 @@ class TestSSHAPIClientListMethod:
             }
             mock_request.return_value = mock_response
 
-            _ = await ssh_client.list_keys()
+            _ = ssh_client.list_keys()
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -192,7 +192,7 @@ class TestSSHAPIClientListMethod:
     async def test_list_returns_keys_array(self, ssh_client):
         """Test list returns an array of keys."""
         with patch.object(
-            ssh_client, "_authenticated_request", new_callable=AsyncMock
+            ssh_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -204,7 +204,7 @@ class TestSSHAPIClientListMethod:
             }
             mock_request.return_value = mock_response
 
-            result = await ssh_client.list_keys()
+            result = ssh_client.list_keys()
 
             assert "keys" in result
             assert len(result["keys"]) == 2
@@ -234,7 +234,7 @@ class TestSSHAPIClientDeleteMethod:
     async def test_delete_calls_correct_endpoint(self, ssh_client):
         """Test delete calls the correct REST endpoint."""
         with patch.object(
-            ssh_client, "_authenticated_request", new_callable=AsyncMock
+            ssh_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -244,7 +244,7 @@ class TestSSHAPIClientDeleteMethod:
             }
             mock_request.return_value = mock_response
 
-            await ssh_client.delete_key("my-key")
+            ssh_client.delete_key("my-key")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -276,7 +276,7 @@ class TestSSHAPIClientShowPublicMethod:
     async def test_show_public_calls_correct_endpoint(self, ssh_client):
         """Test show_public calls the correct REST endpoint."""
         with patch.object(
-            ssh_client, "_authenticated_request", new_callable=AsyncMock
+            ssh_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -288,7 +288,7 @@ class TestSSHAPIClientShowPublicMethod:
             }
             mock_request.return_value = mock_response
 
-            _ = await ssh_client.show_public_key("my-key")
+            _ = ssh_client.show_public_key("my-key")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -299,7 +299,7 @@ class TestSSHAPIClientShowPublicMethod:
     async def test_show_public_returns_public_key(self, ssh_client):
         """Test show_public returns the public key."""
         with patch.object(
-            ssh_client, "_authenticated_request", new_callable=AsyncMock
+            ssh_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -309,7 +309,7 @@ class TestSSHAPIClientShowPublicMethod:
             }
             mock_request.return_value = mock_response
 
-            result = await ssh_client.show_public_key("my-key")
+            result = ssh_client.show_public_key("my-key")
 
             assert "public_key" in result
             assert result["public_key"].startswith("ssh-ed25519")
@@ -339,7 +339,7 @@ class TestSSHAPIClientAssignMethod:
     async def test_assign_calls_correct_endpoint(self, ssh_client):
         """Test assign calls the correct REST endpoint."""
         with patch.object(
-            ssh_client, "_authenticated_request", new_callable=AsyncMock
+            ssh_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -350,7 +350,7 @@ class TestSSHAPIClientAssignMethod:
             }
             mock_request.return_value = mock_response
 
-            await ssh_client.assign_key("my-key", "github.com")
+            ssh_client.assign_key("my-key", "github.com")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -362,7 +362,7 @@ class TestSSHAPIClientAssignMethod:
     async def test_assign_with_force_option(self, ssh_client):
         """Test assign with force option."""
         with patch.object(
-            ssh_client, "_authenticated_request", new_callable=AsyncMock
+            ssh_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -374,7 +374,7 @@ class TestSSHAPIClientAssignMethod:
             }
             mock_request.return_value = mock_response
 
-            await ssh_client.assign_key("my-key", "github.com", force=True)
+            ssh_client.assign_key("my-key", "github.com", force=True)
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -401,7 +401,7 @@ class TestSSHAPIClientErrorHandling:
         from code_indexer.api_clients.base_client import APIClientError
 
         with patch.object(
-            ssh_client, "_authenticated_request", new_callable=AsyncMock
+            ssh_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 409
@@ -409,7 +409,7 @@ class TestSSHAPIClientErrorHandling:
             mock_request.return_value = mock_response
 
             with pytest.raises(APIClientError) as exc_info:
-                await ssh_client.create_key(
+                ssh_client.create_key(
                     name="my-key",
                     email="test@example.com",
                 )
@@ -422,7 +422,7 @@ class TestSSHAPIClientErrorHandling:
         from code_indexer.api_clients.base_client import APIClientError
 
         with patch.object(
-            ssh_client, "_authenticated_request", new_callable=AsyncMock
+            ssh_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 404
@@ -430,6 +430,6 @@ class TestSSHAPIClientErrorHandling:
             mock_request.return_value = mock_response
 
             with pytest.raises(APIClientError) as exc_info:
-                await ssh_client.delete_key("nonexistent")
+                ssh_client.delete_key("nonexistent")
 
             assert "not found" in str(exc_info.value).lower()

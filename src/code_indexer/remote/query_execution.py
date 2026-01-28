@@ -43,7 +43,7 @@ class RepositoryNotLinkedException(RemoteQueryExecutionError):
     pass
 
 
-async def execute_remote_query(
+def execute_remote_query(
     query_text: str,
     limit: int,
     project_root: Path,
@@ -117,7 +117,7 @@ async def execute_remote_query(
             logger.info(
                 "No repository link found - attempting automatic repository linking"
             )
-            repository_link = await _establish_repository_link(project_root)
+            repository_link = _establish_repository_link(project_root)
 
             if not repository_link:
                 raise RepositoryNotLinkedException(
@@ -130,7 +130,7 @@ async def execute_remote_query(
             logger.info(f"Repository successfully linked: {repository_link.alias}")
 
         # Execute authenticated query using established repository link
-        results = await _execute_authenticated_query(
+        results = _execute_authenticated_query(
             query=query_text,
             limit=limit,
             repository_alias=repository_link.alias,
@@ -164,7 +164,7 @@ async def execute_remote_query(
         )
 
 
-async def _establish_repository_link(project_root: Path) -> Optional[RepositoryLink]:
+def _establish_repository_link(project_root: Path) -> Optional[RepositoryLink]:
     """Establish repository link automatically using exact branch matching.
 
     Args:
@@ -229,13 +229,13 @@ async def _establish_repository_link(project_root: Path) -> Optional[RepositoryL
         credentials = _get_decrypted_credentials(project_root)
 
         # Initialize repository linking client and exact branch matcher
-        async with RepositoryLinkingClient(
+        with RepositoryLinkingClient(
             server_url=server_url, credentials=credentials
         ) as linking_client:
             exact_matcher = ExactBranchMatcher(linking_client)
 
             # Attempt exact branch matching
-            repository_link = await exact_matcher.find_exact_branch_match(
+            repository_link = exact_matcher.find_exact_branch_match(
                 project_root, repo_url
             )
 
@@ -258,7 +258,7 @@ async def _establish_repository_link(project_root: Path) -> Optional[RepositoryL
         raise RepositoryLinkingError(f"Unexpected error during repository linking: {e}")
 
 
-async def _execute_authenticated_query(
+def _execute_authenticated_query(
     query: str,
     limit: int,
     repository_alias: str,
@@ -295,10 +295,10 @@ async def _execute_authenticated_query(
         credentials = _get_decrypted_credentials(project_root)
 
         # Execute query using remote query client
-        async with RemoteQueryClient(
+        with RemoteQueryClient(
             server_url=server_url, credentials=credentials
         ) as query_client:
-            results = await query_client.execute_query(
+            results = query_client.execute_query(
                 repository_alias=repository_alias,
                 query=query,
                 limit=limit,

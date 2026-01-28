@@ -30,8 +30,7 @@ def mock_user() -> User:
 class TestSCIPDefinitionDelegatesToService:
     """Tests for scip_definition handler delegation to SCIPQueryService."""
 
-    @pytest.mark.asyncio
-    async def test_scip_definition_calls_service_find_definition(
+    def test_scip_definition_calls_service_find_definition(
         self, mock_user: User
     ) -> None:
         """AC: scip_definition handler delegates to SCIPQueryService.find_definition()."""
@@ -56,7 +55,7 @@ class TestSCIPDefinitionDelegatesToService:
             return_value=mock_service,
         ):
             params = {"symbol": "UserService", "exact": False}
-            response = await scip_definition(params, mock_user)
+            response = scip_definition(params, mock_user)
 
             # Verify service method was called with correct parameters
             mock_service.find_definition.assert_called_once_with(
@@ -73,8 +72,7 @@ class TestSCIPDefinitionDelegatesToService:
             assert data["symbol"] == "UserService"
             assert len(data["results"]) == 1
 
-    @pytest.mark.asyncio
-    async def test_scip_definition_passes_repository_alias_to_service(
+    def test_scip_definition_passes_repository_alias_to_service(
         self, mock_user: User
     ) -> None:
         """Verify repository_alias is passed to service."""
@@ -92,7 +90,7 @@ class TestSCIPDefinitionDelegatesToService:
                 "exact": True,
                 "repository_alias": "my-repo",
             }
-            await scip_definition(params, mock_user)
+            scip_definition(params, mock_user)
 
             mock_service.find_definition.assert_called_once_with(
                 symbol="UserService",
@@ -101,8 +99,7 @@ class TestSCIPDefinitionDelegatesToService:
                 username="testuser",
             )
 
-    @pytest.mark.asyncio
-    async def test_scip_definition_passes_username_for_access_control(
+    def test_scip_definition_passes_username_for_access_control(
         self, mock_user: User
     ) -> None:
         """AC: Verify username is passed to service for access control filtering."""
@@ -115,27 +112,25 @@ class TestSCIPDefinitionDelegatesToService:
             "code_indexer.server.mcp.handlers._get_scip_query_service",
             return_value=mock_service,
         ):
-            await scip_definition({"symbol": "Symbol"}, mock_user)
+            scip_definition({"symbol": "Symbol"}, mock_user)
 
             call_kwargs = mock_service.find_definition.call_args[1]
             assert call_kwargs["username"] == "testuser"
 
-    @pytest.mark.asyncio
-    async def test_scip_definition_returns_error_for_missing_symbol(
+    def test_scip_definition_returns_error_for_missing_symbol(
         self, mock_user: User
     ) -> None:
         """AC: Verify error response for missing symbol parameter."""
         from code_indexer.server.mcp.handlers import scip_definition
 
-        response = await scip_definition({}, mock_user)
+        response = scip_definition({}, mock_user)
 
         data = json.loads(response["content"][0]["text"])
         assert data["success"] is False
         assert "symbol" in data["error"].lower()
         assert "required" in data["error"].lower()
 
-    @pytest.mark.asyncio
-    async def test_scip_definition_catches_service_exceptions(
+    def test_scip_definition_catches_service_exceptions(
         self, mock_user: User
     ) -> None:
         """Verify handler catches and returns errors when service raises exception."""
@@ -148,7 +143,7 @@ class TestSCIPDefinitionDelegatesToService:
             "code_indexer.server.mcp.handlers._get_scip_query_service",
             return_value=mock_service,
         ):
-            response = await scip_definition({"symbol": "test"}, mock_user)
+            response = scip_definition({"symbol": "test"}, mock_user)
 
             data = json.loads(response["content"][0]["text"])
             assert data["success"] is False

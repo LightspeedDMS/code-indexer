@@ -316,10 +316,17 @@ def initialize_api_metrics_service(tmp_path):
 
     Note: We initialize both import paths (src.code_indexer and code_indexer)
     since different tests may use different import patterns.
+
+    Note: The database is placed in a hidden subdirectory (.test_internal/) to
+    prevent pollution of tests that enumerate files in tmp_path (e.g., directory
+    explorer tests that count files).
     """
     import logging
 
-    db_path = tmp_path / "test_api_metrics.db"
+    # Isolate database in hidden subdirectory to avoid polluting tmp_path
+    db_dir = tmp_path / ".test_internal"
+    db_dir.mkdir(exist_ok=True)
+    db_path = db_dir / "test_api_metrics.db"
     services_initialized = []
 
     # Initialize via src.code_indexer path (used by most unit tests)

@@ -253,31 +253,31 @@ def assign_host(name: str, request: AssignHostRequest) -> KeyWithHostsResponse:
 
 # Register routes with proper decorators
 @router.post("", response_model=CreateKeyResponse, status_code=201)
-async def api_create_ssh_key(request: CreateKeyRequest) -> CreateKeyResponse:
+def api_create_ssh_key(request: CreateKeyRequest) -> CreateKeyResponse:
     """Create a new SSH key pair."""
     return create_ssh_key(request)
 
 
 @router.get("", response_model=KeyListResponse)
-async def api_list_ssh_keys() -> KeyListResponse:
+def api_list_ssh_keys() -> KeyListResponse:
     """List all managed and unmanaged SSH keys."""
     return list_ssh_keys()
 
 
 @router.delete("/{name}", response_model=DeleteKeyResponse)
-async def api_delete_ssh_key(name: str) -> DeleteKeyResponse:
+def api_delete_ssh_key(name: str) -> DeleteKeyResponse:
     """Delete an SSH key."""
     return delete_ssh_key(name)
 
 
 @router.get("/{name}/public")
-async def api_get_public_key(name: str) -> Response:
+def api_get_public_key(name: str) -> Response:
     """Get public key content."""
     return get_public_key(name)
 
 
 @router.post("/{name}/hosts", response_model=KeyWithHostsResponse)
-async def api_assign_host(
+def api_assign_host(
     name: str, request: AssignHostRequest
 ) -> KeyWithHostsResponse:
     """Assign a host to an SSH key."""

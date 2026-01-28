@@ -6,7 +6,7 @@ Following TDD methodology - tests written before implementation.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 
 class TestCICDAPIClientImport:
@@ -81,7 +81,7 @@ class TestCICDAPIClientGitHubMethods:
     async def test_github_list_runs_calls_correct_endpoint(self, cicd_client):
         """Test github_list_runs calls the correct REST endpoint."""
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -91,7 +91,7 @@ class TestCICDAPIClientGitHubMethods:
             }
             mock_request.return_value = mock_response
 
-            await cicd_client.github_list_runs("owner", "repo")
+            cicd_client.github_list_runs("owner", "repo")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -102,14 +102,14 @@ class TestCICDAPIClientGitHubMethods:
     async def test_github_list_runs_with_filters(self, cicd_client):
         """Test github_list_runs passes filter parameters."""
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"runs": [], "total_count": 0}
             mock_request.return_value = mock_response
 
-            await cicd_client.github_list_runs(
+            cicd_client.github_list_runs(
                 "owner", "repo", status="failure", branch="main", limit=5
             )
 
@@ -131,7 +131,7 @@ class TestCICDAPIClientGitHubMethods:
     async def test_github_get_run_calls_correct_endpoint(self, cicd_client):
         """Test github_get_run calls the correct REST endpoint."""
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -142,7 +142,7 @@ class TestCICDAPIClientGitHubMethods:
             }
             mock_request.return_value = mock_response
 
-            await cicd_client.github_get_run("owner", "repo", 12345)
+            cicd_client.github_get_run("owner", "repo", 12345)
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -160,14 +160,14 @@ class TestCICDAPIClientGitHubMethods:
     async def test_github_search_logs_calls_correct_endpoint(self, cicd_client):
         """Test github_search_logs calls the correct REST endpoint."""
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"matches": [], "total_matches": 0}
             mock_request.return_value = mock_response
 
-            await cicd_client.github_search_logs("owner", "repo", 12345)
+            cicd_client.github_search_logs("owner", "repo", 12345)
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -178,14 +178,14 @@ class TestCICDAPIClientGitHubMethods:
     async def test_github_search_logs_with_query(self, cicd_client):
         """Test github_search_logs passes query parameter."""
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"matches": [], "total_matches": 0}
             mock_request.return_value = mock_response
 
-            await cicd_client.github_search_logs("owner", "repo", 12345, query="error")
+            cicd_client.github_search_logs("owner", "repo", 12345, query="error")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -203,14 +203,14 @@ class TestCICDAPIClientGitHubMethods:
     async def test_github_get_job_logs_calls_correct_endpoint(self, cicd_client):
         """Test github_get_job_logs calls the correct REST endpoint."""
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"logs": "log content here"}
             mock_request.return_value = mock_response
 
-            await cicd_client.github_get_job_logs("owner", "repo", 67890)
+            cicd_client.github_get_job_logs("owner", "repo", 67890)
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -228,7 +228,7 @@ class TestCICDAPIClientGitHubMethods:
     async def test_github_retry_run_calls_correct_endpoint(self, cicd_client):
         """Test github_retry_run calls the correct REST endpoint."""
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -238,7 +238,7 @@ class TestCICDAPIClientGitHubMethods:
             }
             mock_request.return_value = mock_response
 
-            await cicd_client.github_retry_run("owner", "repo", 12345)
+            cicd_client.github_retry_run("owner", "repo", 12345)
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -256,7 +256,7 @@ class TestCICDAPIClientGitHubMethods:
     async def test_github_cancel_run_calls_correct_endpoint(self, cicd_client):
         """Test github_cancel_run calls the correct REST endpoint."""
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -266,7 +266,7 @@ class TestCICDAPIClientGitHubMethods:
             }
             mock_request.return_value = mock_response
 
-            await cicd_client.github_cancel_run("owner", "repo", 12345)
+            cicd_client.github_cancel_run("owner", "repo", 12345)
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -299,14 +299,14 @@ class TestCICDAPIClientGitLabMethods:
     async def test_gitlab_list_pipelines_calls_correct_endpoint(self, cicd_client):
         """Test gitlab_list_pipelines calls the correct REST endpoint."""
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"pipelines": [], "total_count": 0}
             mock_request.return_value = mock_response
 
-            await cicd_client.gitlab_list_pipelines("my-project")
+            cicd_client.gitlab_list_pipelines("my-project")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -317,14 +317,14 @@ class TestCICDAPIClientGitLabMethods:
     async def test_gitlab_list_pipelines_with_filters(self, cicd_client):
         """Test gitlab_list_pipelines passes filter parameters."""
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"pipelines": [], "total_count": 0}
             mock_request.return_value = mock_response
 
-            await cicd_client.gitlab_list_pipelines(
+            cicd_client.gitlab_list_pipelines(
                 "my-project", status="failed", ref="main", limit=5
             )
 
@@ -346,7 +346,7 @@ class TestCICDAPIClientGitLabMethods:
     async def test_gitlab_get_pipeline_calls_correct_endpoint(self, cicd_client):
         """Test gitlab_get_pipeline calls the correct REST endpoint."""
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -357,7 +357,7 @@ class TestCICDAPIClientGitLabMethods:
             }
             mock_request.return_value = mock_response
 
-            await cicd_client.gitlab_get_pipeline("my-project", 12345)
+            cicd_client.gitlab_get_pipeline("my-project", 12345)
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -375,14 +375,14 @@ class TestCICDAPIClientGitLabMethods:
     async def test_gitlab_search_logs_calls_correct_endpoint(self, cicd_client):
         """Test gitlab_search_logs calls the correct REST endpoint."""
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"matches": [], "total_matches": 0}
             mock_request.return_value = mock_response
 
-            await cicd_client.gitlab_search_logs("my-project", 12345)
+            cicd_client.gitlab_search_logs("my-project", 12345)
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -393,14 +393,14 @@ class TestCICDAPIClientGitLabMethods:
     async def test_gitlab_search_logs_with_query(self, cicd_client):
         """Test gitlab_search_logs passes query parameter."""
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"matches": [], "total_matches": 0}
             mock_request.return_value = mock_response
 
-            await cicd_client.gitlab_search_logs("my-project", 12345, query="error")
+            cicd_client.gitlab_search_logs("my-project", 12345, query="error")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -418,14 +418,14 @@ class TestCICDAPIClientGitLabMethods:
     async def test_gitlab_get_job_logs_calls_correct_endpoint(self, cicd_client):
         """Test gitlab_get_job_logs calls the correct REST endpoint."""
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"logs": "log content here"}
             mock_request.return_value = mock_response
 
-            await cicd_client.gitlab_get_job_logs("my-project", 67890)
+            cicd_client.gitlab_get_job_logs("my-project", 67890)
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -443,7 +443,7 @@ class TestCICDAPIClientGitLabMethods:
     async def test_gitlab_retry_pipeline_calls_correct_endpoint(self, cicd_client):
         """Test gitlab_retry_pipeline calls the correct REST endpoint."""
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -453,7 +453,7 @@ class TestCICDAPIClientGitLabMethods:
             }
             mock_request.return_value = mock_response
 
-            await cicd_client.gitlab_retry_pipeline("my-project", 12345)
+            cicd_client.gitlab_retry_pipeline("my-project", 12345)
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -473,7 +473,7 @@ class TestCICDAPIClientGitLabMethods:
     async def test_gitlab_cancel_pipeline_calls_correct_endpoint(self, cicd_client):
         """Test gitlab_cancel_pipeline calls the correct REST endpoint."""
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -483,7 +483,7 @@ class TestCICDAPIClientGitLabMethods:
             }
             mock_request.return_value = mock_response
 
-            await cicd_client.gitlab_cancel_pipeline("my-project", 12345)
+            cicd_client.gitlab_cancel_pipeline("my-project", 12345)
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -513,7 +513,7 @@ class TestCICDAPIClientErrorHandling:
         from code_indexer.api_clients.base_client import APIClientError
 
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 404
@@ -521,7 +521,7 @@ class TestCICDAPIClientErrorHandling:
             mock_request.return_value = mock_response
 
             with pytest.raises(APIClientError) as exc_info:
-                await cicd_client.github_list_runs("owner", "repo")
+                cicd_client.github_list_runs("owner", "repo")
 
             assert "not found" in str(exc_info.value).lower()
 
@@ -531,7 +531,7 @@ class TestCICDAPIClientErrorHandling:
         from code_indexer.api_clients.base_client import APIClientError
 
         with patch.object(
-            cicd_client, "_authenticated_request", new_callable=AsyncMock
+            cicd_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 404
@@ -539,6 +539,6 @@ class TestCICDAPIClientErrorHandling:
             mock_request.return_value = mock_response
 
             with pytest.raises(APIClientError) as exc_info:
-                await cicd_client.gitlab_list_pipelines("my-project")
+                cicd_client.gitlab_list_pipelines("my-project")
 
             assert "not found" in str(exc_info.value).lower()

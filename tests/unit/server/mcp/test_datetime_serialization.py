@@ -28,11 +28,10 @@ def mock_user():
     )
 
 
-@pytest.mark.asyncio
 class TestDatetimeSerialization:
     """Test datetime serialization in handlers using Pydantic models."""
 
-    async def test_check_health_with_real_datetime_objects(self, mock_user):
+    def test_check_health_with_real_datetime_objects(self, mock_user):
         """Test that check_health correctly serializes datetime objects to ISO strings.
 
         This test verifies the fix for: "Object of type datetime is not JSON serializable"
@@ -64,7 +63,7 @@ class TestDatetimeSerialization:
             mock_service.get_system_health = Mock(return_value=mock_response)
 
             # Call handler - this would fail with TypeError if mode='json' wasn't used
-            result = await check_health({}, mock_user)
+            result = check_health({}, mock_user)
 
             # Verify MCP format with content array
             assert "content" in result

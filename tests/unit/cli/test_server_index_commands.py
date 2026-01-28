@@ -475,11 +475,11 @@ class TestAdminAPIClientJobStatus:
             "progress": 100,
         }
 
-        # Assign AsyncMock to _authenticated_request
-        client._authenticated_request = AsyncMock(return_value=mock_response)
+        # Assign MagicMock to _authenticated_request (sync method, not async)
+        client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Call get_job_status
-        result = await client.get_job_status("test-job-123")
+        result = client.get_job_status("test-job-123")
 
         assert result["job_id"] == "test-job-123"
         assert result["status"] == "completed"

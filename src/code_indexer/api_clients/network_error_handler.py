@@ -4,11 +4,11 @@ Provides comprehensive network error classification, retry logic with exponentia
 and user guidance system for network failures in remote repository linking mode.
 """
 
-import asyncio
 import json
 import logging
 import random
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional, List, Callable, cast
 
@@ -508,7 +508,7 @@ class NetworkErrorHandler:
         # Default to non-retryable for unknown errors
         return False
 
-    async def retry_with_backoff(
+    def retry_with_backoff(
         self,
         operation: Callable[[], Any],
         config: RetryConfig,
@@ -517,7 +517,7 @@ class NetworkErrorHandler:
         """Execute operation with retry logic and exponential backoff.
 
         Args:
-            operation: Async function to execute
+            operation: Sync function to execute
             config: Retry configuration
             progress_callback: Optional callback for progress indication
 
@@ -531,7 +531,7 @@ class NetworkErrorHandler:
 
         for attempt in range(config.max_retries + 1):  # +1 for initial attempt
             try:
-                return await operation()
+                return operation()
             except Exception as e:
                 last_exception = e
 
@@ -576,9 +576,9 @@ class NetworkErrorHandler:
                                 attempt + 1,
                                 config.max_retries,
                             )
-                        await asyncio.sleep(chunk_delay)
+                        time.sleep(chunk_delay)
                 else:
-                    await asyncio.sleep(delay)
+                    time.sleep(delay)
 
         # This should never be reached
         if last_exception:

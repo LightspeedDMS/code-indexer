@@ -6,7 +6,7 @@ that were added to fix business logic integration test failures.
 
 import pytest
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 from code_indexer.remote_status import RemoteStatusDisplayer
 from code_indexer.remote.models import RepositoryStatus, StalenessInfo
 from code_indexer.remote.services.repository_service import RemoteRepositoryService
@@ -47,15 +47,14 @@ class TestFixedRemoteStatusMethods:
     def status_displayer(self, mock_project_with_config):
         """Create RemoteStatusDisplayer with mock config."""
         # Create mock services for dependency injection
-        mock_api_client = AsyncMock()
+        mock_api_client = MagicMock()
         mock_staleness_detector = MagicMock()
         mock_repository_service = RemoteRepositoryService(
             api_client=mock_api_client, staleness_detector=mock_staleness_detector
         )
         return RemoteStatusDisplayer(repository_service=mock_repository_service)
 
-    @pytest.mark.asyncio
-    async def test_get_repository_status_success(self, status_displayer):
+    def test_get_repository_status_success(self, status_displayer):
         """Test get_repository_status returns expected structure."""
         repository_alias = "test-repo"
 
@@ -68,11 +67,11 @@ class TestFixedRemoteStatusMethods:
             "last_commit_sha": "abc123def456",
             "indexing_progress": 100,
         }
-        status_displayer.repository_service.get_repository_details = AsyncMock(
+        status_displayer.repository_service.get_repository_details = MagicMock(
             return_value=test_repository_details
         )
 
-        status = await status_displayer.get_repository_status(repository_alias)
+        status = status_displayer.get_repository_status(repository_alias)
 
         # Verify status is a proper RepositoryStatus Pydantic model
         assert isinstance(status, RepositoryStatus)
@@ -82,16 +81,15 @@ class TestFixedRemoteStatusMethods:
         assert status.status == "active"  # From mock data with completed indexing
         assert status.last_updated == "2024-01-15T10:30:00Z"  # From mock branch data
 
-    @pytest.mark.asyncio
-    async def test_get_repository_status_missing_config(self, tmp_path):
+    def test_get_repository_status_missing_config(self, tmp_path):
         """Test get_repository_status with missing repository."""
         # Create mock services that simulate missing repository
-        mock_api_client = AsyncMock()
+        mock_api_client = MagicMock()
         mock_staleness_detector = MagicMock()
         mock_repository_service = RemoteRepositoryService(
             api_client=mock_api_client, staleness_detector=mock_staleness_detector
         )
-        mock_repository_service.get_repository_details = AsyncMock(return_value=None)
+        mock_repository_service.get_repository_details = MagicMock(return_value=None)
 
         status_displayer = RemoteStatusDisplayer(
             repository_service=mock_repository_service
@@ -104,10 +102,9 @@ class TestFixedRemoteStatusMethods:
         with pytest.raises(
             RepositoryNotFoundError, match="Repository test-repo not found"
         ):
-            await status_displayer.get_repository_status("test-repo")
+            status_displayer.get_repository_status("test-repo")
 
-    @pytest.mark.asyncio
-    async def test_check_staleness_success(self, status_displayer):
+    def test_check_staleness_success(self, status_displayer):
         """Test check_staleness returns expected structure."""
         local_timestamp = "2024-01-15T10:30:00Z"
         repository_alias = "test-repo"
@@ -121,11 +118,11 @@ class TestFixedRemoteStatusMethods:
             "last_commit_sha": "abc123def456",
             "indexing_progress": 100,
         }
-        status_displayer.repository_service.get_repository_details = AsyncMock(
+        status_displayer.repository_service.get_repository_details = MagicMock(
             return_value=test_repository_details
         )
 
-        staleness_info = await status_displayer.check_staleness(
+        staleness_info = status_displayer.check_staleness(
             local_timestamp=local_timestamp, repository_alias=repository_alias
         )
 
@@ -141,16 +138,15 @@ class TestFixedRemoteStatusMethods:
         # Since timestamps are equal, should not be stale
         assert staleness_info.is_stale is False
 
-    @pytest.mark.asyncio
-    async def test_check_staleness_missing_config(self, tmp_path):
+    def test_check_staleness_missing_config(self, tmp_path):
         """Test check_staleness with missing repository."""
         # Create mock services that simulate missing repository
-        mock_api_client = AsyncMock()
+        mock_api_client = MagicMock()
         mock_staleness_detector = MagicMock()
         mock_repository_service = RemoteRepositoryService(
             api_client=mock_api_client, staleness_detector=mock_staleness_detector
         )
-        mock_repository_service.get_repository_details = AsyncMock(return_value=None)
+        mock_repository_service.get_repository_details = MagicMock(return_value=None)
 
         status_displayer = RemoteStatusDisplayer(
             repository_service=mock_repository_service
@@ -163,15 +159,14 @@ class TestFixedRemoteStatusMethods:
         with pytest.raises(
             RepositoryNotFoundError, match="Repository test-repo not found"
         ):
-            await status_displayer.check_staleness(
+            status_displayer.check_staleness(
                 local_timestamp="2024-01-15T10:30:00Z", repository_alias="test-repo"
             )
 
-    @pytest.mark.asyncio
-    async def test_get_repository_status_corrupted_config(self, tmp_path):
+    def test_get_repository_status_corrupted_config(self, tmp_path):
         """Test get_repository_status with API client error."""
         # Create mock services that simulate API client error
-        mock_api_client = AsyncMock()
+        mock_api_client = MagicMock()
         mock_staleness_detector = MagicMock()
         mock_repository_service = RemoteRepositoryService(
             api_client=mock_api_client, staleness_detector=mock_staleness_detector
@@ -179,7 +174,7 @@ class TestFixedRemoteStatusMethods:
         # Simulate API error that might be caused by configuration issues
         from code_indexer.api_clients.base_client import APIClientError
 
-        mock_repository_service.get_repository_details = AsyncMock(
+        mock_repository_service.get_repository_details = MagicMock(
             side_effect=APIClientError("Configuration error")
         )
 
@@ -188,13 +183,12 @@ class TestFixedRemoteStatusMethods:
         )
 
         with pytest.raises(APIClientError, match="Configuration error"):
-            await status_displayer.get_repository_status("test-repo")
+            status_displayer.get_repository_status("test-repo")
 
-    @pytest.mark.asyncio
-    async def test_check_staleness_corrupted_config(self, tmp_path):
+    def test_check_staleness_corrupted_config(self, tmp_path):
         """Test check_staleness with API client error."""
         # Create mock services that simulate API client error
-        mock_api_client = AsyncMock()
+        mock_api_client = MagicMock()
         mock_staleness_detector = MagicMock()
         mock_repository_service = RemoteRepositoryService(
             api_client=mock_api_client, staleness_detector=mock_staleness_detector
@@ -202,7 +196,7 @@ class TestFixedRemoteStatusMethods:
         # Simulate API error that might be caused by configuration issues
         from code_indexer.api_clients.base_client import APIClientError
 
-        mock_repository_service.get_repository_details = AsyncMock(
+        mock_repository_service.get_repository_details = MagicMock(
             side_effect=APIClientError("Configuration error")
         )
 
@@ -211,14 +205,14 @@ class TestFixedRemoteStatusMethods:
         )
 
         with pytest.raises(APIClientError, match="Configuration error"):
-            await status_displayer.check_staleness(
+            status_displayer.check_staleness(
                 local_timestamp="2024-01-15T10:30:00Z", repository_alias="test-repo"
             )
 
     def test_remotestatusdisplayer_constructor_parameters(self, tmp_path):
         """Test RemoteStatusDisplayer constructor with correct parameters."""
         # Create mock repository service
-        mock_api_client = AsyncMock()
+        mock_api_client = MagicMock()
         mock_staleness_detector = MagicMock()
         mock_repository_service = RemoteRepositoryService(
             api_client=mock_api_client, staleness_detector=mock_staleness_detector
@@ -243,11 +237,10 @@ class TestFixedRemoteStatusMethods:
 class TestRemoteStatusDisplayerIntegration:
     """Integration tests for RemoteStatusDisplayer with real config scenarios."""
 
-    @pytest.mark.asyncio
-    async def test_complete_status_workflow(self, tmp_path):
+    def test_complete_status_workflow(self, tmp_path):
         """Test complete workflow: get status, check staleness."""
         # Create mock services with test data
-        mock_api_client = AsyncMock()
+        mock_api_client = MagicMock()
         mock_staleness_detector = MagicMock()
         mock_repository_service = RemoteRepositoryService(
             api_client=mock_api_client, staleness_detector=mock_staleness_detector
@@ -262,7 +255,7 @@ class TestRemoteStatusDisplayerIntegration:
             "last_commit_sha": "workflow123",
             "indexing_progress": 100,
         }
-        mock_repository_service.get_repository_details = AsyncMock(
+        mock_repository_service.get_repository_details = MagicMock(
             return_value=test_repository_details
         )
 
@@ -272,13 +265,13 @@ class TestRemoteStatusDisplayerIntegration:
         )
 
         # Step 1: Get repository status
-        status = await status_displayer.get_repository_status("workflow-repo")
+        status = status_displayer.get_repository_status("workflow-repo")
         assert isinstance(status, RepositoryStatus)
         assert status.repository_alias == "workflow-repo"
         assert status.status == "active"
 
         # Step 2: Check staleness
-        staleness_info = await status_displayer.check_staleness(
+        staleness_info = status_displayer.check_staleness(
             local_timestamp="2024-01-15T09:00:00Z", repository_alias="workflow-repo"
         )
         assert isinstance(staleness_info, StalenessInfo)
@@ -287,11 +280,10 @@ class TestRemoteStatusDisplayerIntegration:
         # Local is older (09:00) than remote (10:00), so should be stale
         assert staleness_info.is_stale is True
 
-    @pytest.mark.asyncio
-    async def test_different_repository_aliases(self, tmp_path):
+    def test_different_repository_aliases(self, tmp_path):
         """Test methods work with different repository aliases."""
         # Create mock services
-        mock_api_client = AsyncMock()
+        mock_api_client = MagicMock()
         mock_staleness_detector = MagicMock()
         mock_repository_service = RemoteRepositoryService(
             api_client=mock_api_client, staleness_detector=mock_staleness_detector
@@ -306,7 +298,7 @@ class TestRemoteStatusDisplayerIntegration:
             "last_commit_sha": "alias123",
             "indexing_progress": 100,
         }
-        mock_repository_service.get_repository_details = AsyncMock(
+        mock_repository_service.get_repository_details = MagicMock(
             return_value=test_repository_details
         )
 
@@ -316,13 +308,11 @@ class TestRemoteStatusDisplayerIntegration:
 
         # Test different aliases
         for alias in ["repo-1", "my-special-repo", "test_repo_123"]:
-            status = await status_displayer.get_repository_status(alias)
+            status = status_displayer.get_repository_status(alias)
             assert isinstance(status, RepositoryStatus)
             assert status.repository_alias == alias
 
-            staleness = await status_displayer.check_staleness(
-                "2024-01-15T10:00:00Z", alias
-            )
+            staleness = status_displayer.check_staleness("2024-01-15T10:00:00Z", alias)
             assert isinstance(staleness, StalenessInfo)
             assert staleness.local_timestamp == "2024-01-15T10:00:00Z"
             # Timestamps are equal, so should not be stale

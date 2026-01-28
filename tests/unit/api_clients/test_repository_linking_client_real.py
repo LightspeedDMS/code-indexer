@@ -57,7 +57,7 @@ class TestRealRepositoryLinkingClientDiscovery:
             pytest.skip("Test server not available for real integration testing")
 
         try:
-            result = await real_linking_client.discover_repositories(
+            result = real_linking_client.discover_repositories(
                 "https://github.com/example/cidx.git"
             )
 
@@ -100,7 +100,7 @@ class TestRealRepositoryLinkingClientDiscovery:
 
         for git_url in test_urls:
             try:
-                result = await real_linking_client.discover_repositories(git_url)
+                result = real_linking_client.discover_repositories(git_url)
 
                 # Verify response structure for real multiple matches
                 assert isinstance(result, RepositoryDiscoveryResponse)
@@ -132,7 +132,7 @@ class TestRealRepositoryLinkingClientDiscovery:
 
         for invalid_url in invalid_urls:
             try:
-                await real_linking_client.discover_repositories(invalid_url)
+                real_linking_client.discover_repositories(invalid_url)
                 # If no exception, continue (server might handle some gracefully)
             except (ValueError, RepositoryNotFoundError) as e:
                 # Expected real validation or not-found errors
@@ -153,7 +153,7 @@ class TestRealRepositoryLinkingClientDiscovery:
         real_linking_client._request_timeout = 0.1  # 100ms
 
         try:
-            await real_linking_client.discover_repositories(
+            real_linking_client.discover_repositories(
                 "https://github.com/large/repository.git"
             )
         except Exception as e:
@@ -205,7 +205,7 @@ class TestRealRepositoryLinkingClientBranches:
 
         # First discover a repository to get a valid alias
         try:
-            discovery_result = await real_linking_client.discover_repositories(
+            discovery_result = real_linking_client.discover_repositories(
                 "https://github.com/example/test-repo.git"
             )
 
@@ -215,9 +215,7 @@ class TestRealRepositoryLinkingClientBranches:
             # Use first discovered repository for real branch testing
             repo_alias = discovery_result.matches[0].alias
 
-            branches = await real_linking_client.get_golden_repository_branches(
-                repo_alias
-            )
+            branches = real_linking_client.get_golden_repository_branches(repo_alias)
 
             # Verify real branch information structure
             assert isinstance(branches, list)
@@ -254,9 +252,7 @@ class TestRealRepositoryLinkingClientBranches:
             pytest.skip("Test server not available for real integration testing")
 
         try:
-            await real_linking_client.get_golden_repository_branches(
-                "nonexistent-repo-12345"
-            )
+            real_linking_client.get_golden_repository_branches("nonexistent-repo-12345")
             pytest.fail("Expected RepositoryNotFoundError for non-existent repository")
         except RepositoryNotFoundError as e:
             # Expected real error
@@ -273,7 +269,7 @@ class TestRealRepositoryLinkingClientBranches:
 
         try:
             # Discover repository first
-            discovery_result = await real_linking_client.discover_repositories(
+            discovery_result = real_linking_client.discover_repositories(
                 "https://github.com/example/indexed-repo.git"
             )
 
@@ -281,9 +277,7 @@ class TestRealRepositoryLinkingClientBranches:
                 pytest.skip("No repositories found for indexing status testing")
 
             repo_alias = discovery_result.matches[0].alias
-            branches = await real_linking_client.get_golden_repository_branches(
-                repo_alias
-            )
+            branches = real_linking_client.get_golden_repository_branches(repo_alias)
 
             if branches:
                 for branch in branches:
@@ -348,7 +342,7 @@ class TestRealRepositoryLinkingClientActivation:
 
         try:
             # Step 1: Real repository discovery
-            discovery_result = await real_linking_client.discover_repositories(
+            discovery_result = real_linking_client.discover_repositories(
                 "https://github.com/example/activation-test.git"
             )
 
@@ -358,9 +352,7 @@ class TestRealRepositoryLinkingClientActivation:
             repo = discovery_result.matches[0]
 
             # Step 2: Real branch retrieval
-            branches = await real_linking_client.get_golden_repository_branches(
-                repo.alias
-            )
+            branches = real_linking_client.get_golden_repository_branches(repo.alias)
 
             if not branches:
                 pytest.skip("No branches found for activation testing")
@@ -369,7 +361,7 @@ class TestRealRepositoryLinkingClientActivation:
             target_branch = next((b for b in branches if b.is_default), branches[0])
 
             # Step 3: Real repository activation
-            activation = await real_linking_client.activate_repository(
+            activation = real_linking_client.activate_repository(
                 golden_alias=repo.alias,
                 branch=target_branch.name,
                 user_alias=f"{repo.alias}-test-user",
@@ -412,7 +404,7 @@ class TestRealRepositoryLinkingClientActivation:
 
         try:
             # Discover repository first
-            discovery_result = await real_linking_client.discover_repositories(
+            discovery_result = real_linking_client.discover_repositories(
                 "https://github.com/example/test-repo.git"
             )
 
@@ -422,7 +414,7 @@ class TestRealRepositoryLinkingClientActivation:
             repo_alias = discovery_result.matches[0].alias
 
             # Try to activate with non-existent branch
-            await real_linking_client.activate_repository(
+            real_linking_client.activate_repository(
                 golden_alias=repo_alias,
                 branch="nonexistent-branch-12345",
                 user_alias=f"{repo_alias}-invalid-branch-test",
@@ -449,7 +441,7 @@ class TestRealRepositoryLinkingClientActivation:
 
         try:
             # Discover repository
-            discovery_result = await real_linking_client.discover_repositories(
+            discovery_result = real_linking_client.discover_repositories(
                 "https://github.com/example/duplicate-test.git"
             )
 
@@ -457,9 +449,7 @@ class TestRealRepositoryLinkingClientActivation:
                 pytest.skip("No repositories found for duplicate activation testing")
 
             repo = discovery_result.matches[0]
-            branches = await real_linking_client.get_golden_repository_branches(
-                repo.alias
-            )
+            branches = real_linking_client.get_golden_repository_branches(repo.alias)
 
             if not branches:
                 pytest.skip("No branches found for duplicate activation testing")
@@ -468,7 +458,7 @@ class TestRealRepositoryLinkingClientActivation:
             user_alias = f"{repo.alias}-duplicate-test"
 
             # First activation
-            first_activation = await real_linking_client.activate_repository(
+            first_activation = real_linking_client.activate_repository(
                 golden_alias=repo.alias,
                 branch=target_branch.name,
                 user_alias=user_alias,
@@ -478,7 +468,7 @@ class TestRealRepositoryLinkingClientActivation:
 
             # Attempt duplicate activation
             try:
-                await real_linking_client.activate_repository(
+                real_linking_client.activate_repository(
                     golden_alias=repo.alias,
                     branch=target_branch.name,
                     user_alias=user_alias,
@@ -524,9 +514,7 @@ class TestRealRepositoryLinkingClientErrorHandling:
         )
 
         try:
-            await client.discover_repositories(
-                "https://github.com/example/auth-test.git"
-            )
+            client.discover_repositories("https://github.com/example/auth-test.git")
             # If no error, server might not require authentication
         except Exception as e:
             # Real authentication error expected
@@ -555,9 +543,7 @@ class TestRealRepositoryLinkingClientErrorHandling:
         )
 
         try:
-            await client.discover_repositories(
-                "https://github.com/example/network-test.git"
-            )
+            client.discover_repositories("https://github.com/example/network-test.git")
             pytest.fail("Expected network error with unreachable server")
         except Exception as e:
             # Real network error expected
@@ -592,7 +578,7 @@ class TestRealRepositoryLinkingClientErrorHandling:
 
         for malformed_url in malformed_requests:
             try:
-                await client.discover_repositories(malformed_url)
+                client.discover_repositories(malformed_url)
                 # If no error, server handled gracefully
             except (ValueError, RepositoryNotFoundError) as e:
                 # Expected real validation errors
@@ -650,13 +636,11 @@ class TestRealRepositoryLinkingClientResourceManagement:
         assert client is not None
 
         # Manual cleanup
-        await client.close()
+        client.close()
 
         # Verify client can't be used after cleanup (real behavior test)
         with pytest.raises(Exception):
-            await client.discover_repositories(
-                "https://github.com/example/cleanup-test.git"
-            )
+            client.discover_repositories("https://github.com/example/cleanup-test.git")
 
     @pytest.mark.asyncio
     async def test_real_multiple_clients_resource_isolation(self, test_credentials):
@@ -699,7 +683,7 @@ class TestRealRepositoryLinkingClientResourceManagement:
             # Define concurrent operations
             async def discover_operation(url):
                 try:
-                    return await client.discover_repositories(url)
+                    return client.discover_repositories(url)
                 except Exception:
                     return None  # Handle real errors gracefully
 
@@ -724,7 +708,7 @@ class TestRealRepositoryLinkingClientResourceManagement:
                 )
 
         finally:
-            await client.close()
+            client.close()
 
     def _is_test_server_available(self):
         """Check if real test server is available."""

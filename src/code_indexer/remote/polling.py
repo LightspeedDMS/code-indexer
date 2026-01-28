@@ -4,10 +4,10 @@ Implements intelligent polling loop that monitors job status and provides real-t
 progress updates with familiar CIDX UX patterns (single-line progress bar).
 """
 
-import asyncio
 import logging
 import signal
 import time
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, Optional, cast, Protocol
@@ -127,7 +127,7 @@ class JobPollingEngine:
         # Polling state
         self.is_polling = False
         self.current_job_id: Optional[str] = None
-        self._polling_task: Optional[asyncio.Task] = None
+        self._polling_thread: Optional[threading.Thread] = None
         self._interrupted = False
 
         # Setup interrupt handler
@@ -147,10 +147,8 @@ class JobPollingEngine:
         """Handle interrupt signal (Ctrl+C)."""
         logger.info("Interrupt signal received, stopping polling...")
         self._interrupted = True
-        if self._polling_task and not self._polling_task.done():
-            self._polling_task.cancel()
 
-    async def start_polling(
+    def start_polling(
         self, job_id: str, timeout_seconds: Optional[int] = None
     ) -> JobStatus:
         """Start polling for job status updates.
@@ -182,8 +180,6 @@ class JobPollingEngine:
         )
 
         try:
-            self._polling_task = asyncio.current_task()
-
             while True:
                 # Check for timeout
                 elapsed = time.time() - start_time
@@ -192,7 +188,7 @@ class JobPollingEngine:
                 if elapsed >= effective_timeout:
                     # Try to cancel job on timeout
                     try:
-                        await self._cancel_job_on_timeout(job_id)
+                        self._cancel_job_on_timeout(job_id)
                     except Exception as cancel_error:
                         logger.warning(
                             f"Failed to cancel job {job_id} on timeout: {cancel_error}"
@@ -209,9 +205,7 @@ class JobPollingEngine:
 
                 try:
                     # Get job status with retry logic
-                    status = await self._get_job_status_with_retry(
-                        job_id, consecutive_errors
-                    )
+                    status = self._get_job_status_with_retry(job_id, consecutive_errors)
                     consecutive_errors = 0  # Reset error count on success
 
                     # Display progress update with timeout information
@@ -234,7 +228,7 @@ class JobPollingEngine:
 
                     # Calculate next polling interval
                     interval = self._calculate_polling_interval(status, elapsed)
-                    await asyncio.sleep(interval)
+                    time.sleep(interval)
 
                 except (NetworkError, APIClientError) as e:
                     consecutive_errors += 1
@@ -256,31 +250,24 @@ class JobPollingEngine:
                     logger.warning(
                         f"Network error (attempt {consecutive_errors}): {e}. Retrying in {backoff_interval}s"
                     )
-                    await asyncio.sleep(backoff_interval)
+                    time.sleep(backoff_interval)
 
-        except asyncio.CancelledError:
-            raise InterruptedPollingError("Polling was interrupted")
+        except InterruptedPollingError:
+            raise
         finally:
             self._cleanup_polling()
 
-    async def stop_polling(self) -> None:
+    def stop_polling(self) -> None:
         """Stop current polling operation."""
         if not self.is_polling:
             return
 
         self._interrupted = True
 
-        if self._polling_task and not self._polling_task.done():
-            self._polling_task.cancel()
-            try:
-                await self._polling_task
-            except asyncio.CancelledError:
-                pass
-
         if self._interrupted:
             raise InterruptedPollingError("Polling was interrupted")
 
-    async def _get_job_status_with_retry(self, job_id: str, attempt: int) -> JobStatus:
+    def _get_job_status_with_retry(self, job_id: str, attempt: int) -> JobStatus:
         """Get job status from server with proper error handling.
 
         Args:
@@ -297,7 +284,7 @@ class JobPollingEngine:
         """
         try:
             # Call API client to get job status
-            response = await self.api_client.get_job_status(job_id)
+            response = self.api_client.get_job_status(job_id)
 
             # Convert response to JobStatus
             if isinstance(response, dict):
@@ -454,7 +441,7 @@ class JobPollingEngine:
         # Cap at maximum interval
         return cast(float, min(interval, self.config.max_interval))
 
-    async def _cancel_job_on_timeout(self, job_id: str) -> None:
+    def _cancel_job_on_timeout(self, job_id: str) -> None:
         """Cancel job when timeout occurs.
 
         Args:
@@ -463,7 +450,7 @@ class JobPollingEngine:
         try:
             # Check if API client supports job cancellation
             if hasattr(self.api_client, "cancel_job"):
-                await self.api_client.cancel_job(job_id)
+                self.api_client.cancel_job(job_id)
                 logger.info(f"Job {job_id} cancelled due to polling timeout")
             else:
                 logger.warning(
@@ -477,4 +464,4 @@ class JobPollingEngine:
         """Clean up polling state."""
         self.is_polling = False
         self.current_job_id = None
-        self._polling_task = None
+        self._polling_thread = None

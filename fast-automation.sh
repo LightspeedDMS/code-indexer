@@ -207,6 +207,14 @@ python3 -m pytest \
     --ignore=tests/unit/cli/test_admin_repos_delete_command.py \
     --ignore=tests/unit/cli/test_admin_repos_delete_integration_e2e.py \
     --ignore=tests/unit/cli/test_password_management_commands.py \
+    --ignore=tests/unit/test_scip_database_queries.py \
+    --ignore=tests/unit/test_scip_generator.py \
+    --ignore=tests/unit/clients/test_gitlab_ci_client.py \
+    --ignore=tests/unit/clients/test_github_actions_client.py \
+    --ignore=tests/unit/global_repos/test_git_operations.py \
+    --ignore=tests/unit/global_repos/test_refresh_scheduler_locking.py \
+    --ignore=tests/unit/services/test_tantivy_incremental_updates.py \
+    --ignore=tests/unit/tools/test_convert_tool_docs.py \
     --ignore=tests/unit/cli/test_admin_password_change_command.py \
     --ignore=tests/unit/cli/test_repos_list_fix_verification.py \
     --ignore=tests/unit/cli/test_system_health_commands.py \

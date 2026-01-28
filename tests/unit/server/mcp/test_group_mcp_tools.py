@@ -492,8 +492,7 @@ class TestListGroupsHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    @pytest.mark.asyncio
-    async def test_list_groups_returns_success_true(
+    def test_list_groups_returns_success_true(
         self, admin_user, mock_group_manager
     ):
         """list_groups handler returns success=True on valid call."""
@@ -502,15 +501,14 @@ class TestListGroupsHandler:
             return_value=mock_group_manager,
         ):
             handler = HANDLER_REGISTRY["list_groups"]
-            result = await handler({}, admin_user)
+            result = handler({}, admin_user)
 
             # Parse MCP response format
             assert "content" in result
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    @pytest.mark.asyncio
-    async def test_list_groups_returns_groups_array(
+    def test_list_groups_returns_groups_array(
         self, admin_user, mock_group_manager
     ):
         """list_groups handler returns groups array."""
@@ -519,14 +517,13 @@ class TestListGroupsHandler:
             return_value=mock_group_manager,
         ):
             handler = HANDLER_REGISTRY["list_groups"]
-            result = await handler({}, admin_user)
+            result = handler({}, admin_user)
 
             content = json.loads(result["content"][0]["text"])
             assert "groups" in content
             assert isinstance(content["groups"], list)
 
-    @pytest.mark.asyncio
-    async def test_list_groups_returns_default_groups(
+    def test_list_groups_returns_default_groups(
         self, admin_user, mock_group_manager
     ):
         """list_groups handler returns default groups (admins, powerusers, users)."""
@@ -535,7 +532,7 @@ class TestListGroupsHandler:
             return_value=mock_group_manager,
         ):
             handler = HANDLER_REGISTRY["list_groups"]
-            result = await handler({}, admin_user)
+            result = handler({}, admin_user)
 
             content = json.loads(result["content"][0]["text"])
             group_names = {g["name"] for g in content["groups"]}
@@ -555,15 +552,14 @@ class TestCreateGroupHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    @pytest.mark.asyncio
-    async def test_create_group_returns_success(self, admin_user, mock_group_manager):
+    def test_create_group_returns_success(self, admin_user, mock_group_manager):
         """create_group handler returns success on valid creation."""
         with patch(
             "code_indexer.server.mcp.handlers._get_group_manager",
             return_value=mock_group_manager,
         ):
             handler = HANDLER_REGISTRY["create_group"]
-            result = await handler(
+            result = handler(
                 {"name": "test_group", "description": "Test description"}, admin_user
             )
 
@@ -572,8 +568,7 @@ class TestCreateGroupHandler:
             assert "group_id" in content
             assert content["name"] == "test_group"
 
-    @pytest.mark.asyncio
-    async def test_create_group_duplicate_fails(self, admin_user, mock_group_manager):
+    def test_create_group_duplicate_fails(self, admin_user, mock_group_manager):
         """create_group handler fails for duplicate group name."""
         with patch(
             "code_indexer.server.mcp.handlers._get_group_manager",
@@ -581,9 +576,9 @@ class TestCreateGroupHandler:
         ):
             handler = HANDLER_REGISTRY["create_group"]
             # First creation should succeed
-            await handler({"name": "unique_group"}, admin_user)
+            handler({"name": "unique_group"}, admin_user)
             # Second creation should fail
-            result = await handler({"name": "unique_group"}, admin_user)
+            result = handler({"name": "unique_group"}, admin_user)
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is False
@@ -601,8 +596,7 @@ class TestGetGroupHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    @pytest.mark.asyncio
-    async def test_get_group_returns_details(self, admin_user, mock_group_manager):
+    def test_get_group_returns_details(self, admin_user, mock_group_manager):
         """get_group handler returns group details."""
         with patch(
             "code_indexer.server.mcp.handlers._get_group_manager",
@@ -613,7 +607,7 @@ class TestGetGroupHandler:
             group_id = groups[0].id
 
             handler = HANDLER_REGISTRY["get_group"]
-            result = await handler({"group_id": str(group_id)}, admin_user)
+            result = handler({"group_id": str(group_id)}, admin_user)
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
@@ -623,15 +617,14 @@ class TestGetGroupHandler:
             assert "members" in content
             assert "repos" in content
 
-    @pytest.mark.asyncio
-    async def test_get_group_invalid_id_fails(self, admin_user, mock_group_manager):
+    def test_get_group_invalid_id_fails(self, admin_user, mock_group_manager):
         """get_group handler fails for invalid group ID."""
         with patch(
             "code_indexer.server.mcp.handlers._get_group_manager",
             return_value=mock_group_manager,
         ):
             handler = HANDLER_REGISTRY["get_group"]
-            result = await handler({"group_id": "99999"}, admin_user)
+            result = handler({"group_id": "99999"}, admin_user)
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is False
@@ -649,8 +642,7 @@ class TestUpdateGroupHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    @pytest.mark.asyncio
-    async def test_update_group_returns_success(self, admin_user, mock_group_manager):
+    def test_update_group_returns_success(self, admin_user, mock_group_manager):
         """update_group handler returns success on valid update."""
         with patch(
             "code_indexer.server.mcp.handlers._get_group_manager",
@@ -662,7 +654,7 @@ class TestUpdateGroupHandler:
             )
 
             handler = HANDLER_REGISTRY["update_group"]
-            result = await handler(
+            result = handler(
                 {
                     "group_id": str(custom_group.id),
                     "name": "updated_name",
@@ -686,8 +678,7 @@ class TestDeleteGroupHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    @pytest.mark.asyncio
-    async def test_delete_group_custom_succeeds(self, admin_user, mock_group_manager):
+    def test_delete_group_custom_succeeds(self, admin_user, mock_group_manager):
         """delete_group handler succeeds for custom groups."""
         with patch(
             "code_indexer.server.mcp.handlers._get_group_manager",
@@ -699,13 +690,12 @@ class TestDeleteGroupHandler:
             )
 
             handler = HANDLER_REGISTRY["delete_group"]
-            result = await handler({"group_id": str(custom_group.id)}, admin_user)
+            result = handler({"group_id": str(custom_group.id)}, admin_user)
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    @pytest.mark.asyncio
-    async def test_delete_group_default_fails(self, admin_user, mock_group_manager):
+    def test_delete_group_default_fails(self, admin_user, mock_group_manager):
         """delete_group handler fails for default groups."""
         with patch(
             "code_indexer.server.mcp.handlers._get_group_manager",
@@ -715,7 +705,7 @@ class TestDeleteGroupHandler:
             admins = mock_group_manager.get_group_by_name("admins")
 
             handler = HANDLER_REGISTRY["delete_group"]
-            result = await handler({"group_id": str(admins.id)}, admin_user)
+            result = handler({"group_id": str(admins.id)}, admin_user)
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is False
@@ -733,8 +723,7 @@ class TestAddMemberToGroupHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    @pytest.mark.asyncio
-    async def test_add_member_to_group_succeeds(self, admin_user, mock_group_manager):
+    def test_add_member_to_group_succeeds(self, admin_user, mock_group_manager):
         """add_member_to_group handler succeeds for valid inputs."""
         with patch(
             "code_indexer.server.mcp.handlers._get_group_manager",
@@ -745,7 +734,7 @@ class TestAddMemberToGroupHandler:
             group_id = groups[0].id
 
             handler = HANDLER_REGISTRY["add_member_to_group"]
-            result = await handler(
+            result = handler(
                 {"group_id": str(group_id), "user_id": "test_user"}, admin_user
             )
 
@@ -764,8 +753,7 @@ class TestRemoveMemberFromGroupHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    @pytest.mark.asyncio
-    async def test_remove_member_from_group_succeeds(self, admin_user, mock_group_manager):
+    def test_remove_member_from_group_succeeds(self, admin_user, mock_group_manager):
         """remove_member_from_group handler succeeds for valid inputs."""
         with patch(
             "code_indexer.server.mcp.handlers._get_group_manager",
@@ -777,15 +765,14 @@ class TestRemoveMemberFromGroupHandler:
             mock_group_manager.assign_user_to_group("test_user", group_id, "admin_test")
 
             handler = HANDLER_REGISTRY["remove_member_from_group"]
-            result = await handler(
+            result = handler(
                 {"group_id": str(group_id), "user_id": "test_user"}, admin_user
             )
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    @pytest.mark.asyncio
-    async def test_remove_member_from_group_user_not_in_group(self, admin_user, mock_group_manager):
+    def test_remove_member_from_group_user_not_in_group(self, admin_user, mock_group_manager):
         """remove_member_from_group handler returns success even if user not in that specific group."""
         with patch(
             "code_indexer.server.mcp.handlers._get_group_manager",
@@ -796,7 +783,7 @@ class TestRemoveMemberFromGroupHandler:
             group_id = groups[0].id
 
             handler = HANDLER_REGISTRY["remove_member_from_group"]
-            result = await handler(
+            result = handler(
                 {"group_id": str(group_id), "user_id": "nonexistent_user"}, admin_user
             )
 
@@ -816,8 +803,7 @@ class TestAddReposToGroupHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    @pytest.mark.asyncio
-    async def test_add_repos_to_group_succeeds(self, admin_user, mock_group_manager):
+    def test_add_repos_to_group_succeeds(self, admin_user, mock_group_manager):
         """add_repos_to_group handler succeeds for valid inputs."""
         with patch(
             "code_indexer.server.mcp.handlers._get_group_manager",
@@ -828,7 +814,7 @@ class TestAddReposToGroupHandler:
             group_id = groups[0].id
 
             handler = HANDLER_REGISTRY["add_repos_to_group"]
-            result = await handler(
+            result = handler(
                 {"group_id": str(group_id), "repo_names": ["repo1", "repo2"]},
                 admin_user,
             )
@@ -837,8 +823,7 @@ class TestAddReposToGroupHandler:
             assert content["success"] is True
             assert "added_count" in content
 
-    @pytest.mark.asyncio
-    async def test_add_repos_to_group_returns_added_count(
+    def test_add_repos_to_group_returns_added_count(
         self, admin_user, mock_group_manager
     ):
         """add_repos_to_group handler returns count of repos added."""
@@ -850,7 +835,7 @@ class TestAddReposToGroupHandler:
             group_id = groups[0].id
 
             handler = HANDLER_REGISTRY["add_repos_to_group"]
-            result = await handler(
+            result = handler(
                 {"group_id": str(group_id), "repo_names": ["repo1", "repo2", "repo3"]},
                 admin_user,
             )
@@ -870,8 +855,7 @@ class TestRemoveRepoFromGroupHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    @pytest.mark.asyncio
-    async def test_remove_repo_from_group_succeeds(
+    def test_remove_repo_from_group_succeeds(
         self, admin_user, mock_group_manager
     ):
         """remove_repo_from_group handler succeeds for existing repo access."""
@@ -885,7 +869,7 @@ class TestRemoveRepoFromGroupHandler:
             mock_group_manager.grant_repo_access("test_repo", group_id, "admin_test")
 
             handler = HANDLER_REGISTRY["remove_repo_from_group"]
-            result = await handler(
+            result = handler(
                 {"group_id": str(group_id), "repo_name": "test_repo"}, admin_user
             )
 
@@ -904,8 +888,7 @@ class TestBulkRemoveReposFromGroupHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    @pytest.mark.asyncio
-    async def test_bulk_remove_repos_from_group_succeeds(
+    def test_bulk_remove_repos_from_group_succeeds(
         self, admin_user, mock_group_manager
     ):
         """bulk_remove_repos_from_group handler succeeds for valid inputs."""
@@ -920,7 +903,7 @@ class TestBulkRemoveReposFromGroupHandler:
             mock_group_manager.grant_repo_access("repo2", group_id, "admin_test")
 
             handler = HANDLER_REGISTRY["bulk_remove_repos_from_group"]
-            result = await handler(
+            result = handler(
                 {"group_id": str(group_id), "repo_names": ["repo1", "repo2"]},
                 admin_user,
             )
@@ -929,8 +912,7 @@ class TestBulkRemoveReposFromGroupHandler:
             assert content["success"] is True
             assert "removed_count" in content
 
-    @pytest.mark.asyncio
-    async def test_bulk_remove_repos_from_group_returns_removed_count(
+    def test_bulk_remove_repos_from_group_returns_removed_count(
         self, admin_user, mock_group_manager
     ):
         """bulk_remove_repos_from_group handler returns count of repos removed."""
@@ -944,7 +926,7 @@ class TestBulkRemoveReposFromGroupHandler:
             mock_group_manager.grant_repo_access("repo_b", group_id, "admin_test")
 
             handler = HANDLER_REGISTRY["bulk_remove_repos_from_group"]
-            result = await handler(
+            result = handler(
                 {"group_id": str(group_id), "repo_names": ["repo_a", "repo_b"]},
                 admin_user,
             )

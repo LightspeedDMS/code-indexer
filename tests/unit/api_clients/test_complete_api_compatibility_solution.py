@@ -5,7 +5,7 @@ issues identified by the code reviewer have been completely resolved.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 from httpx import Response
 
 from src.code_indexer.api_clients.repository_linking_client import (
@@ -72,10 +72,10 @@ class TestCompleteAPICompatibilitySolution:
             "usage_limits": {},
         }
 
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # This should now work without validation errors
-        result = await repository_client.activate_repository(
+        result = repository_client.activate_repository(
             golden_alias="test-repo", branch="main", user_alias="user1"
         )
 
@@ -115,10 +115,10 @@ class TestCompleteAPICompatibilitySolution:
         mock_response.status_code = 401
         mock_response.json.return_value = {"detail": "Token expired"}
 
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         with pytest.raises(AuthenticationError) as exc_info:
-            await repository_client.list_user_repositories()
+            repository_client.list_user_repositories()
 
         # ✅ VERIFY: Now clearly identified as authentication issue
         assert "Authentication failed: Token expired" in str(exc_info.value)
@@ -129,10 +129,10 @@ class TestCompleteAPICompatibilitySolution:
         mock_response.status_code = 403
         mock_response.json.return_value = {"detail": "Insufficient permissions"}
 
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         with pytest.raises(ActivationError) as exc_info:
-            await repository_client.list_user_repositories()
+            repository_client.list_user_repositories()
 
         # ✅ VERIFY: Now clearly identified as access issue
         assert "Access denied: Insufficient permissions" in str(exc_info.value)
@@ -143,10 +143,10 @@ class TestCompleteAPICompatibilitySolution:
         mock_response.status_code = 404
         mock_response.json.return_value = {"detail": "Not Found"}
 
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         with pytest.raises(ActivationError) as exc_info:
-            await repository_client.list_user_repositories()
+            repository_client.list_user_repositories()
 
         # ✅ VERIFY: True 404s now have endpoint-specific message
         assert "Repository list endpoint not available: Not Found" in str(
@@ -168,10 +168,10 @@ class TestCompleteAPICompatibilitySolution:
         mock_response.status_code = 404  # Still 404 because endpoint doesn't exist yet
         mock_response.json.return_value = {"detail": "Not Found"}
 
-        query_client._authenticated_request = AsyncMock(return_value=mock_response)
+        query_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Test query history endpoint (returns empty list directly)
-        history_result = await query_client.get_query_history("test-repo")
+        history_result = query_client.get_query_history("test-repo")
 
         # ✅ VERIFY: Returns empty list without HTTP calls
         assert isinstance(history_result, list)
@@ -187,9 +187,9 @@ class TestCompleteAPICompatibilitySolution:
                 "embedding_count": 500,
             }
         }
-        query_client._authenticated_request = AsyncMock(return_value=mock_response)
+        query_client._authenticated_request = MagicMock(return_value=mock_response)
 
-        stats_result = await query_client.get_repository_statistics("test-repo")
+        stats_result = query_client.get_repository_statistics("test-repo")
 
         # ✅ VERIFY: Returns statistics data
         assert isinstance(stats_result, dict)
@@ -230,10 +230,10 @@ class TestCompleteAPICompatibilitySolution:
             "usage_limits": {},
         }
 
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # ✅ Repository activation now works with correct parameters
-        result = await repository_client.activate_repository(
+        result = repository_client.activate_repository(
             golden_alias="e2e-repo", branch="e2e-branch", user_alias="e2e-user"
         )
 
@@ -248,20 +248,20 @@ class TestCompleteAPICompatibilitySolution:
         mock_response.status_code = 200
         mock_response.json.return_value = {"repositories": []}
 
-        repository_client._authenticated_request = AsyncMock(return_value=mock_response)
+        repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # ✅ Repository listing now works with proper error handling
-        repos = await repository_client.list_user_repositories()
+        repos = repository_client.list_user_repositories()
         assert repos == []
 
         # END-TO-END TEST 3: Query operations with correct prefixes
         mock_response.status_code = 200
         mock_response.json.return_value = {"repositories": []}
 
-        query_client._authenticated_request = AsyncMock(return_value=mock_response)
+        query_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # ✅ Query client repository listing works
-        repos = await query_client.list_repositories()
+        repos = query_client.list_repositories()
         assert repos == []
 
         # Verify correct endpoint usage

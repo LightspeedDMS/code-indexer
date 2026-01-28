@@ -19,10 +19,20 @@ Thank you for considering contributing to CIDX! This guide will help you set up 
    cd code-indexer
    ```
 
-2. **Install development dependencies**
+2. **Initialize submodules**
 
    ```bash
-   pip install -e ".[dev]"
+   git submodule update --init --recursive
+   ```
+
+   This pulls required dependencies:
+   - `third_party/hnswlib` - HNSW vector index library
+   - `test-fixtures/multimodal-mock-repo` - E2E test fixtures (if present)
+
+3. **Install development dependencies**
+
+   ```bash
+   python3 -m pip install -e ".[dev]" --break-system-packages
    ```
 
    This installs CIDX in editable mode with all development dependencies including:
@@ -31,7 +41,7 @@ Thank you for considering contributing to CIDX! This guide will help you set up 
    - ruff (linting and formatting)
    - pre-commit (git hooks)
 
-3. **Install pre-commit hooks** (CRITICAL)
+4. **Install pre-commit hooks** (CRITICAL)
 
    ```bash
    pre-commit install
@@ -44,7 +54,7 @@ Thank you for considering contributing to CIDX! This guide will help you set up 
 All commits are automatically validated for:
 
 - **Linting**: Ruff checks for code quality issues and auto-fixes many of them
-- **Formatting**: Ruff-format ensures consistent code style (replaces black)
+- **Formatting**: Ruff-format ensures consistent code style
 - **Type Checking**: Mypy validates type annotations on `src/` code
 - **Standard Checks**: Trailing whitespace, EOF newlines, YAML syntax, etc.
 
@@ -70,12 +80,28 @@ pre-commit run --all-files
 pre-commit run
 ```
 
-**Emergency bypass** (use sparingly):
+## Architecture Overview
 
-```bash
-# Only use for urgent fixes, will be caught in CI
-git commit --no-verify -m "emergency fix"
-```
+CIDX v8.0+ uses a container-free, filesystem-based architecture:
+
+### Operational Modes
+
+1. **CLI Mode** (Direct, Local)
+   - Direct command-line tool for local semantic code search
+   - Vectors stored in `.code-indexer/index/` as JSON files
+   - No daemon, no server, no network required
+
+2. **Daemon Mode** (Local, Cached)
+   - Local RPyC-based background service for faster queries
+   - In-memory HNSW/FTS index caching
+   - Unix socket communication (`.code-indexer/daemon.sock`)
+
+### Key Components
+
+- **VoyageAI** - Only supported embedding provider (voyage-3, voyage-3-large, voyage-code-3)
+- **FilesystemVectorStore** - Container-free vector storage
+- **HNSW** - Graph-based approximate nearest neighbor search
+- **Tantivy** - Full-text search (FTS) with regex support
 
 ## Code Quality Standards
 
@@ -85,19 +111,18 @@ CIDX maintains **zero linting errors**:
 
 - Ruff: 0 errors
 - Mypy: 0 errors (on `src/` code)
-- Black/Ruff-format: All files formatted consistently
+- Ruff-format: All files formatted consistently
 
-Pre-commit hooks enforce this automatically, but you can check manually:
+Run linting manually with `./lint.sh`:
 
 ```bash
-# Check linting
+# Check and auto-fix linting issues
+./lint.sh
+
+# Or manually:
 ruff check src/ tests/
-
-# Check type errors
-mypy src/
-
-# Format code
 ruff format src/ tests/
+mypy src/
 ```
 
 ### Type Annotations
@@ -116,26 +141,32 @@ ruff format src/ tests/
 
 ## Testing
 
-### Running Tests
+### Testing Hierarchy (CRITICAL)
 
-CIDX has multiple test suites optimized for different scenarios:
+Follow this workflow during development:
 
-```bash
-# Fast unit tests (~6-7 minutes)
-./fast-automation.sh
-
-# Server-specific tests
-./server-fast-automation.sh
-
-# Complete integration tests (~10+ minutes)
-./full-automation.sh
+```
+1. Targeted unit tests (FAST - seconds)
+   |
+   v
+2. Manual testing (verify feature works)
+   |
+   v
+3. fast-automation.sh (FINAL GATE - must pass before done)
 ```
 
-**During development**, run targeted tests:
+**NEVER run fast-automation.sh after every small change.** That wastes time.
+
+### During Development - Targeted Tests Only
+
+Run specific tests related to your changes:
 
 ```bash
-# Run specific test file
-pytest tests/unit/test_something.py -v
+# Change base_client.py -> run related tests
+pytest tests/unit/api_clients/test_base_*.py -v --tb=short
+
+# Change handlers.py -> run handler tests
+pytest tests/unit/server/mcp/test_handlers*.py -v --tb=short
 
 # Run specific test function
 pytest tests/unit/test_something.py::test_function_name -v
@@ -144,20 +175,51 @@ pytest tests/unit/test_something.py::test_function_name -v
 pytest tests/ -k "test_scip" -v
 ```
 
+Targeted tests give fast feedback (seconds, not minutes).
+
+### Final Validation - fast-automation.sh
+
+Run **only after ALL changes are complete**:
+
+```bash
+# Full test suite (~6-7 minutes, 865+ tests)
+./fast-automation.sh
+```
+
+**Performance Requirements:**
+- Must complete in under 10 minutes
+- If exceeded, investigate with `pytest --durations=20`
+- Move inherently slow tests (>30s) to full-automation.sh
+- Mark slow tests with `@pytest.mark.slow`
+
+### Test Suites
+
+| Suite | Tests | Time | When to Use |
+|-------|-------|------|-------------|
+| Targeted pytest | varies | seconds | During development |
+| fast-automation.sh | 865+ | ~6-7 min | Final validation before commit |
+| server-fast-automation.sh | varies | varies | Server-specific changes |
+| full-automation.sh | all | 10+ min | Complete validation (ask user to run) |
+
 ### Writing Tests
 
 - Use pytest for all tests
 - Follow existing test patterns in the codebase
 - Test files go in `tests/unit/`, `tests/integration/`, or `tests/e2e/`
-- Mock external dependencies (VoyageAI API, network calls)
 - Aim for >85% code coverage for new features
+- Use real implementations where possible, minimize mocking
 
 ### Test Organization
 
-- `tests/unit/` - Fast unit tests, no external dependencies
-- `tests/integration/` - Tests requiring multiple components
-- `tests/e2e/` - End-to-end workflow tests
-- `tests/server/` - Server-specific tests
+```
+tests/
+├── unit/           # Fast unit tests, no external dependencies
+├── integration/    # Tests requiring multiple components
+├── e2e/            # End-to-end workflow tests
+│   ├── server/     # Server E2E tests
+│   └── multimodal/ # Multimodal image vectorization tests
+└── conftest.py     # Shared fixtures
+```
 
 ## Development Workflow
 
@@ -174,27 +236,33 @@ pytest tests/ -k "test_scip" -v
    - Add/update tests as needed
    - Update documentation if needed
 
-3. **Run tests locally**
+3. **Run targeted tests during development**
+
+   ```bash
+   pytest tests/unit/path/to/relevant_tests.py -v --tb=short
+   ```
+
+4. **Run final validation**
 
    ```bash
    ./fast-automation.sh
    ```
 
-4. **Commit your changes**
+5. **Commit your changes**
 
    ```bash
    git add .
-   git commit -m "Add feature: description"
+   git commit -m "feat: description of change"
    # Pre-commit hooks run automatically
    ```
 
-5. **Push to your fork**
+6. **Push to your fork**
 
    ```bash
    git push origin feature/your-feature-name
    ```
 
-6. **Open a Pull Request**
+7. **Open a Pull Request**
    - Describe what you changed and why
    - Reference any related issues
    - Ensure CI checks pass
@@ -222,10 +290,10 @@ test: add coverage for temporal search edge cases
 ## Pull Request Process
 
 1. **Ensure all checks pass**
-   - Pre-commit hooks: ✅
-   - Tests: ✅ (fast-automation.sh)
-   - Type checking: ✅ (mypy)
-   - Linting: ✅ (ruff)
+   - Pre-commit hooks: pass
+   - Tests: pass (fast-automation.sh)
+   - Type checking: pass (mypy)
+   - Linting: pass (ruff)
 
 2. **Update documentation**
    - Update README.md if adding user-facing features
@@ -256,26 +324,58 @@ When reviewing PRs:
 
 ```
 code-indexer/
-├── src/code_indexer/       # Main source code
-│   ├── cli.py              # CLI entry point
-│   ├── daemon/             # Daemon mode implementation
-│   ├── scip/               # SCIP code intelligence
-│   ├── server/             # Multi-user server
-│   └── services/           # Core services
-├── tests/                  # Test suite
-│   ├── unit/               # Unit tests
-│   ├── integration/        # Integration tests
-│   ├── e2e/                # End-to-end tests
-│   └── server/             # Server tests
-├── docs/                   # Documentation
-└── scripts/                # Utility scripts
+├── src/code_indexer/           # Main source code
+│   ├── __init__.py             # Version definition
+│   ├── cli.py                  # CLI entry point
+│   ├── daemon/                 # Daemon mode implementation
+│   ├── indexing/               # Indexing pipeline
+│   ├── scip/                   # SCIP code intelligence
+│   ├── server/                 # Multi-user server
+│   │   ├── mcp/                # MCP protocol handlers
+│   │   ├── multi/              # Multi-repo search
+│   │   └── routers/            # REST API routers
+│   ├── services/               # Core services (VoyageAI, etc.)
+│   └── storage/                # Vector storage (FilesystemVectorStore)
+├── tests/                      # Test suite
+│   ├── unit/                   # Unit tests
+│   ├── integration/            # Integration tests
+│   └── e2e/                    # End-to-end tests
+├── docs/                       # Documentation
+├── third_party/                # Git submodules
+│   └── hnswlib/                # HNSW library
+├── test-fixtures/              # Test fixture submodules
+│   └── multimodal-mock-repo/   # Multimodal E2E test fixtures
+├── fast-automation.sh          # Fast test suite
+├── full-automation.sh          # Complete test suite
+├── lint.sh                     # Linting script
+└── CLAUDE.md                   # Development guidelines
 ```
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `CLAUDE.md` | Comprehensive development guidelines and rules |
+| `README.md` | User-facing documentation |
+| `CHANGELOG.md` | Version history and release notes |
+| `pyproject.toml` | Project configuration and dependencies |
+
+## Version Bumping
+
+When bumping version, update ALL of these files:
+
+1. `src/code_indexer/__init__.py` - Primary source of truth
+2. `README.md` - Version badge
+3. `CHANGELOG.md` - New version entry
+4. `docs/architecture.md` - Version references
+5. `docs/query-guide.md` - Version references
 
 ## Getting Help
 
 - **Questions**: Open a [GitHub Discussion](https://github.com/LightspeedDMS/code-indexer/discussions)
 - **Bugs**: Report via [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
 - **Features**: Suggest via [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
+- **Development Guidelines**: See `CLAUDE.md` for comprehensive rules
 
 ## License
 

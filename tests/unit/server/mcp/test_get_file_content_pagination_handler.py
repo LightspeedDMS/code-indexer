@@ -58,8 +58,7 @@ def _extract_response_data(mcp_response: dict) -> dict:
 class TestGetFileContentPaginationParameters:
     """Test get_file_content handler parameter extraction and validation."""
 
-    @pytest.mark.asyncio
-    async def test_offset_and_limit_forwarded_to_service(
+    def test_offset_and_limit_forwarded_to_service(
         self, mock_user, mock_file_service
     ):
         """Test that offset and limit parameters are forwarded to FileService."""
@@ -90,7 +89,7 @@ class TestGetFileContentPaginationParameters:
         }
 
         # Execute handler
-        mcp_response = await handlers.get_file_content(params, mock_user)
+        mcp_response = handlers.get_file_content(params, mock_user)
 
         # Verify service was called with pagination parameters
         # Story #33 Fix: MCP handler now passes skip_truncation=True
@@ -116,8 +115,7 @@ class TestGetFileContentPaginationParameters:
         # Check next_offset instead to verify pagination metadata is preserved
         assert metadata.get("next_offset") == 102  # offset(100) + limit(2)
 
-    @pytest.mark.asyncio
-    async def test_no_pagination_params_defaults_to_full_file(
+    def test_no_pagination_params_defaults_to_full_file(
         self, mock_user, mock_file_service
     ):
         """Test that omitting offset/limit returns full file (backward compatibility)."""
@@ -146,7 +144,7 @@ class TestGetFileContentPaginationParameters:
         }
 
         # Execute handler
-        await handlers.get_file_content(params, mock_user)
+        handlers.get_file_content(params, mock_user)
 
         # Verify service was called without pagination parameters (defaults to None)
         call_args = mock_file_service.get_file_content.call_args
@@ -154,8 +152,7 @@ class TestGetFileContentPaginationParameters:
         assert call_args[1]["file_path"] == "test.py"
         # offset and limit should be None (or not passed if using positional args)
 
-    @pytest.mark.asyncio
-    async def test_limit_only_no_offset(self, mock_user, mock_file_service):
+    def test_limit_only_no_offset(self, mock_user, mock_file_service):
         """Test using limit without offset (offset defaults to 1)."""
         from code_indexer.server.mcp import handlers
 
@@ -182,7 +179,7 @@ class TestGetFileContentPaginationParameters:
         }
 
         # Execute handler
-        await handlers.get_file_content(params, mock_user)
+        handlers.get_file_content(params, mock_user)
 
         # Verify service was called with limit only
         call_args = mock_file_service.get_file_content.call_args
@@ -192,8 +189,7 @@ class TestGetFileContentPaginationParameters:
 class TestGetFileContentInvalidParameters:
     """Test AC9-10: Invalid offset/limit parameter validation."""
 
-    @pytest.mark.asyncio
-    async def test_invalid_offset_zero(self, mock_user, mock_file_service):
+    def test_invalid_offset_zero(self, mock_user, mock_file_service):
         """AC9: offset=0 returns error."""
         from code_indexer.server.mcp import handlers
 
@@ -204,7 +200,7 @@ class TestGetFileContentInvalidParameters:
             "limit": 100,
         }
 
-        mcp_response = await handlers.get_file_content(params, mock_user)
+        mcp_response = handlers.get_file_content(params, mock_user)
 
         # Extract response data
         # For error responses, check both the direct response and content blocks
@@ -220,8 +216,7 @@ class TestGetFileContentInvalidParameters:
         # Service should NOT be called with invalid parameters
         mock_file_service.get_file_content.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_invalid_offset_negative(self, mock_user, mock_file_service):
+    def test_invalid_offset_negative(self, mock_user, mock_file_service):
         """AC9: offset=-5 returns error."""
         from code_indexer.server.mcp import handlers
 
@@ -232,7 +227,7 @@ class TestGetFileContentInvalidParameters:
             "limit": 100,
         }
 
-        mcp_response = await handlers.get_file_content(params, mock_user)
+        mcp_response = handlers.get_file_content(params, mock_user)
 
         # Extract error
         if "error" in mcp_response:
@@ -245,8 +240,7 @@ class TestGetFileContentInvalidParameters:
 
         mock_file_service.get_file_content.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_invalid_limit_zero(self, mock_user, mock_file_service):
+    def test_invalid_limit_zero(self, mock_user, mock_file_service):
         """AC10: limit=0 returns error."""
         from code_indexer.server.mcp import handlers
 
@@ -257,7 +251,7 @@ class TestGetFileContentInvalidParameters:
             "limit": 0,
         }
 
-        mcp_response = await handlers.get_file_content(params, mock_user)
+        mcp_response = handlers.get_file_content(params, mock_user)
 
         # Extract error
         if "error" in mcp_response:
@@ -271,8 +265,7 @@ class TestGetFileContentInvalidParameters:
 
         mock_file_service.get_file_content.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_invalid_limit_negative(self, mock_user, mock_file_service):
+    def test_invalid_limit_negative(self, mock_user, mock_file_service):
         """AC10: limit=-10 returns error."""
         from code_indexer.server.mcp import handlers
 
@@ -283,7 +276,7 @@ class TestGetFileContentInvalidParameters:
             "limit": -10,
         }
 
-        mcp_response = await handlers.get_file_content(params, mock_user)
+        mcp_response = handlers.get_file_content(params, mock_user)
 
         # Extract error
         if "error" in mcp_response:
@@ -296,8 +289,7 @@ class TestGetFileContentInvalidParameters:
 
         mock_file_service.get_file_content.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_non_integer_offset(self, mock_user, mock_file_service):
+    def test_non_integer_offset(self, mock_user, mock_file_service):
         """Test that non-integer offset returns error."""
         from code_indexer.server.mcp import handlers
 
@@ -308,7 +300,7 @@ class TestGetFileContentInvalidParameters:
             "limit": 100,
         }
 
-        mcp_response = await handlers.get_file_content(params, mock_user)
+        mcp_response = handlers.get_file_content(params, mock_user)
 
         # Extract error
         if "error" in mcp_response:
@@ -321,8 +313,7 @@ class TestGetFileContentInvalidParameters:
 
         mock_file_service.get_file_content.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_non_integer_limit(self, mock_user, mock_file_service):
+    def test_non_integer_limit(self, mock_user, mock_file_service):
         """Test that non-integer limit returns error."""
         from code_indexer.server.mcp import handlers
 
@@ -333,7 +324,7 @@ class TestGetFileContentInvalidParameters:
             "limit": 3.14,
         }
 
-        mcp_response = await handlers.get_file_content(params, mock_user)
+        mcp_response = handlers.get_file_content(params, mock_user)
 
         # Extract error
         if "error" in mcp_response:
@@ -350,8 +341,7 @@ class TestGetFileContentInvalidParameters:
 class TestGetFileContentGlobalRepositories:
     """Test pagination with global repositories (uses get_file_content_by_path)."""
 
-    @pytest.mark.asyncio
-    async def test_global_repo_pagination(self, mock_user, mock_file_service):
+    def test_global_repo_pagination(self, mock_user, mock_file_service):
         """Test that pagination works with global repositories."""
         from code_indexer.server.mcp import handlers
 
@@ -407,7 +397,7 @@ class TestGetFileContentGlobalRepositories:
             }
 
             # Execute handler
-            mcp_response = await handlers.get_file_content(params, mock_user)
+            mcp_response = handlers.get_file_content(params, mock_user)
 
             # Verify get_file_content_by_path was called with pagination params
             # Story #33 Fix: MCP handler now passes skip_truncation=True

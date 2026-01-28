@@ -4,7 +4,6 @@ Handles repository discovery, browsing, and status operations
 with clean API abstractions for repository management commands.
 """
 
-import asyncio
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -120,7 +119,7 @@ class RepositoryStatusSummary(BaseModel):
 class ReposAPIClient(CIDXRemoteAPIClient):
     """Client for repository management operations via CIDX Remote API."""
 
-    async def list_activated_repositories(
+    def list_activated_repositories(
         self, filter_pattern: Optional[str] = None
     ) -> List[ActivatedRepository]:
         """List user's activated repositories.
@@ -139,7 +138,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
         if filter_pattern:
             params["filter"] = filter_pattern
 
-        response = await self._authenticated_request("GET", "/api/repos", params=params)
+        response = self._authenticated_request("GET", "/api/repos", params=params)
 
         if response.status_code == 200:
             try:
@@ -168,7 +167,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 f"Failed to list repositories: {error_detail}", response.status_code
             )
 
-    async def list_available_repositories(
+    def list_available_repositories(
         self, search_term: Optional[str] = None
     ) -> List[GoldenRepository]:
         """List available golden repositories.
@@ -187,7 +186,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
         if search_term:
             params["search"] = search_term
 
-        response = await self._authenticated_request(
+        response = self._authenticated_request(
             "GET", "/api/repos/available", params=params
         )
 
@@ -207,7 +206,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 response.status_code,
             )
 
-    async def discover_repositories(self, source: str) -> RepositoryDiscoveryResult:
+    def discover_repositories(self, source: str) -> RepositoryDiscoveryResult:
         """Discover repositories from remote sources.
 
         Args:
@@ -222,7 +221,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
         """
         params = {"source": source}
 
-        response = await self._authenticated_request(
+        response = self._authenticated_request(
             "GET", "/api/repos/discover", params=params
         )
 
@@ -238,7 +237,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 f"Failed to discover repositories: {error_detail}", response.status_code
             )
 
-    async def get_repository_status_summary(self) -> RepositoryStatusSummary:
+    def get_repository_status_summary(self) -> RepositoryStatusSummary:
         """Get comprehensive repository status summary.
 
         Returns:
@@ -248,7 +247,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
             AuthenticationError: If authentication fails
             APIClientError: If the request fails
         """
-        response = await self._authenticated_request("GET", "/api/repos/status")
+        response = self._authenticated_request("GET", "/api/repos/status")
 
         if response.status_code == 200:
             try:
@@ -262,7 +261,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 f"Failed to get repository status: {error_detail}", response.status_code
             )
 
-    async def activate_repository(
+    def activate_repository(
         self, golden_alias: str, user_alias: str, target_branch: Optional[str] = None
     ) -> Dict[str, Any]:
         """Activate a golden repository for personal use.
@@ -285,7 +284,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
             "target_branch": target_branch,
         }
 
-        response = await self._authenticated_request(
+        response = self._authenticated_request(
             "POST", "/api/repos/activate", json=request_data
         )
 
@@ -301,7 +300,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 f"Failed to activate repository: {error_detail}", response.status_code
             )
 
-    async def deactivate_repository(
+    def deactivate_repository(
         self, user_alias: str, force: bool = False
     ) -> Dict[str, Any]:
         """Deactivate a personal repository.
@@ -319,7 +318,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
         """
         request_data = {"force": force}
 
-        response = await self._authenticated_request(
+        response = self._authenticated_request(
             "DELETE", f"/api/repos/{user_alias}", json=request_data
         )
 
@@ -335,7 +334,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 f"Failed to deactivate repository: {error_detail}", response.status_code
             )
 
-    async def get_activation_progress(self, activation_id: str) -> Dict[str, Any]:
+    def get_activation_progress(self, activation_id: str) -> Dict[str, Any]:
         """Get activation progress for monitoring.
 
         Args:
@@ -348,7 +347,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
             AuthenticationError: If authentication fails
             APIClientError: If the request fails (404 for not found, etc.)
         """
-        response = await self._authenticated_request(
+        response = self._authenticated_request(
             "GET", f"/api/repos/activation/{activation_id}/progress"
         )
 
@@ -365,7 +364,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 response.status_code,
             )
 
-    async def get_repository_info(
+    def get_repository_info(
         self,
         user_alias: str,
         branches: bool = False,
@@ -395,7 +394,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
         if activity:
             params["activity"] = "true"
 
-        response = await self._authenticated_request(
+        response = self._authenticated_request(
             "GET", f"/api/repos/{user_alias}", params=params
         )
 
@@ -412,7 +411,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 response.status_code,
             )
 
-    async def switch_repository_branch(
+    def switch_repository_branch(
         self, user_alias: str, branch_name: str, create: bool = False
     ) -> Dict[str, Any]:
         """Switch branch in activated repository.
@@ -431,7 +430,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
         """
         request_data = {"branch_name": branch_name, "create": create}
 
-        response = await self._authenticated_request(
+        response = self._authenticated_request(
             "PUT", f"/api/repos/{user_alias}/branch", json=request_data
         )
 
@@ -448,7 +447,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 response.status_code,
             )
 
-    async def sync_repository(
+    def sync_repository(
         self,
         user_alias: str,
         force_sync: bool = False,
@@ -481,7 +480,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
             "timeout": timeout,
         }
 
-        response = await self._authenticated_request(
+        response = self._authenticated_request(
             "POST", f"/api/repos/{user_alias}/sync", json=sync_request
         )
 
@@ -505,7 +504,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 response.status_code,
             )
 
-    async def sync_all_repositories(
+    def sync_all_repositories(
         self,
         force_sync: bool = False,
         incremental: bool = True,
@@ -530,7 +529,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
         from ..remote.sync_execution import SyncJobResult
 
         # First get list of activated repositories
-        repositories = await self.list_activated_repositories()
+        repositories = self.list_activated_repositories()
 
         if not repositories:
             return []
@@ -539,7 +538,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
         results = []
         for repo in repositories:
             try:
-                result = await self.sync_repository(
+                result = self.sync_repository(
                     user_alias=repo.alias,
                     force_sync=force_sync,
                     incremental=incremental,
@@ -559,7 +558,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
 
         return results
 
-    async def get_sync_status(self, user_alias: str) -> Dict[str, Any]:
+    def get_sync_status(self, user_alias: str) -> Dict[str, Any]:
         """Get sync status for specific repository.
 
         Args:
@@ -572,7 +571,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
             AuthenticationError: If authentication fails
             APIClientError: If the request fails
         """
-        response = await self._authenticated_request(
+        response = self._authenticated_request(
             "GET", f"/api/repos/{user_alias}/sync-status"
         )
 
@@ -589,7 +588,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 response.status_code,
             )
 
-    async def get_sync_status_all(self) -> Dict[str, Dict[str, Any]]:
+    def get_sync_status_all(self) -> Dict[str, Dict[str, Any]]:
         """Get sync status for all activated repositories.
 
         Returns:
@@ -599,7 +598,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
             AuthenticationError: If authentication fails
             APIClientError: If the request fails
         """
-        response = await self._authenticated_request("GET", "/api/repos/sync-status")
+        response = self._authenticated_request("GET", "/api/repos/sync-status")
 
         if response.status_code == 200:
             try:
@@ -614,14 +613,14 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 response.status_code,
             )
 
-    async def list_repository_files(
+    def list_repository_files(
         self, repo_alias: str, path: str = "", recursive: bool = False
     ) -> Dict[str, Any]:
         params = {"recursive": str(recursive).lower()}
         if path:
             params["path"] = path
 
-        response = await self._authenticated_request(
+        response = self._authenticated_request(
             "GET", f"/api/repositories/{repo_alias}/files", params=params
         )
 
@@ -635,7 +634,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 response.status_code,
             )
 
-    async def get_file_content(self, repo_alias: str, file_path: str) -> Dict[str, Any]:
+    def get_file_content(self, repo_alias: str, file_path: str) -> Dict[str, Any]:
         """
         Get content of a specific file in repository.
 
@@ -656,7 +655,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
         # Call API with content=true
         params = {"path": file_path, "content": "true"}
 
-        response = await self._authenticated_request(
+        response = self._authenticated_request(
             "GET", f"/api/repositories/{repo_alias}/files", params=params
         )
 
@@ -674,8 +673,9 @@ class ReposAPIClient(CIDXRemoteAPIClient):
 class SyncReposAPIClient:
     """Synchronous wrapper for repository management operations.
 
-    Provides synchronous access to repository management functionality
-    for CLI commands that cannot use async/await.
+    Note: With the async-to-sync conversion of ReposAPIClient, this wrapper
+    now simply delegates to the underlying sync client without asyncio.run().
+    Maintained for API compatibility.
     """
 
     def __init__(self, project_root: Path):
@@ -685,11 +685,11 @@ class SyncReposAPIClient:
             project_root: Path to project root directory
         """
         self.project_root = project_root
-        self._async_client: Optional["ReposAPIClient"] = None
+        self._client: Optional["ReposAPIClient"] = None
 
-    def _get_async_client(self) -> "ReposAPIClient":
-        """Get or create async client instance."""
-        if self._async_client is None:
+    def _get_client(self) -> "ReposAPIClient":
+        """Get or create client instance."""
+        if self._client is None:
             from ..remote.credential_manager import (
                 load_encrypted_credentials,
                 ProjectCredentialManager,
@@ -712,13 +712,13 @@ class SyncReposAPIClient:
                 remote_config["server_url"],
             )
 
-            self._async_client = ReposAPIClient(
+            self._client = ReposAPIClient(
                 server_url=remote_config["server_url"],
                 credentials=decrypted_creds._asdict(),
                 project_root=self.project_root,
             )
 
-        return self._async_client
+        return self._client
 
     def sync_repository(
         self,
@@ -740,21 +740,17 @@ class SyncReposAPIClient:
         Returns:
             SyncJobResult with sync operation details
         """
-
-        async def _sync() -> "SyncJobResult":
-            client = self._get_async_client()
-            try:
-                return await client.sync_repository(
-                    user_alias=user_alias,
-                    force_sync=force_sync,
-                    incremental=incremental,
-                    pull_remote=pull_remote,
-                    timeout=timeout,
-                )
-            finally:
-                await client.close()
-
-        return asyncio.run(_sync())
+        client = self._get_client()
+        try:
+            return client.sync_repository(
+                user_alias=user_alias,
+                force_sync=force_sync,
+                incremental=incremental,
+                pull_remote=pull_remote,
+                timeout=timeout,
+            )
+        finally:
+            client.close()
 
     def sync_all_repositories(
         self,
@@ -774,20 +770,16 @@ class SyncReposAPIClient:
         Returns:
             List of SyncJobResult for each repository
         """
-
-        async def _sync_all():
-            client = self._get_async_client()
-            try:
-                return await client.sync_all_repositories(
-                    force_sync=force_sync,
-                    incremental=incremental,
-                    pull_remote=pull_remote,
-                    timeout=timeout,
-                )
-            finally:
-                await client.close()
-
-        return asyncio.run(_sync_all())
+        client = self._get_client()
+        try:
+            return client.sync_all_repositories(
+                force_sync=force_sync,
+                incremental=incremental,
+                pull_remote=pull_remote,
+                timeout=timeout,
+            )
+        finally:
+            client.close()
 
     def get_sync_status(self, user_alias: str) -> Dict[str, Any]:
         """Get sync status for specific repository.
@@ -798,15 +790,11 @@ class SyncReposAPIClient:
         Returns:
             Dictionary containing sync status information
         """
-
-        async def _get_status():
-            client = self._get_async_client()
-            try:
-                return await client.get_sync_status(user_alias)
-            finally:
-                await client.close()
-
-        return asyncio.run(_get_status())
+        client = self._get_client()
+        try:
+            return client.get_sync_status(user_alias)
+        finally:
+            client.close()
 
     def get_sync_status_all(self) -> Dict[str, Dict[str, Any]]:
         """Get sync status for all activated repositories.
@@ -814,12 +802,8 @@ class SyncReposAPIClient:
         Returns:
             Dictionary mapping repository alias to sync status information
         """
-
-        async def _get_status_all():
-            client = self._get_async_client()
-            try:
-                return await client.get_sync_status_all()
-            finally:
-                await client.close()
-
-        return asyncio.run(_get_status_all())
+        client = self._get_client()
+        try:
+            return client.get_sync_status_all()
+        finally:
+            client.close()

@@ -37,9 +37,9 @@ class TestEliteAPICompatibility:
             "token": TEST_TOKEN,
         }
         client = RemoteQueryClient(server_url=TEST_URL, credentials=credentials)
-        await client.__aenter__()
+        client.__enter__()
         yield client
-        await client.__aexit__(None, None, None)
+        client.__exit__(None, None, None)
 
     @pytest.mark.asyncio
     async def test_query_history_endpoint_does_not_exist_on_server(self, client):
@@ -51,14 +51,14 @@ class TestEliteAPICompatibility:
         AFTER FIX: Method returns empty list until server implements endpoint.
         """
         # No mocking needed - the fixed method doesn't make HTTP requests
-        result = await client.get_query_history("test-repo")
+        result = client.get_query_history("test-repo")
 
         # Verify it returns empty list (not calling non-existent endpoint)
         assert result == []
 
         # If we had mocked _authenticated_request, it would NOT be called
         with patch.object(client, "_authenticated_request") as mock_request:
-            result = await client.get_query_history("test-repo", limit=100)
+            result = client.get_query_history("test-repo", limit=100)
 
             # Verify NO HTTP request was made (fixed implementation)
             mock_request.assert_not_called()
@@ -93,7 +93,7 @@ class TestEliteAPICompatibility:
             mock_request.return_value = mock_response
 
             # Call the fixed method
-            stats = await client.get_repository_statistics("test-repo")
+            stats = client.get_repository_statistics("test-repo")
 
             # Verify it uses the CORRECT endpoint (repository details)
             mock_request.assert_called_once_with(
@@ -156,7 +156,7 @@ class TestEliteAPICompatibility:
             mock_request.return_value = mock_response
 
             # Make direct HTTP call to the CORRECT endpoint
-            response = await client.session.request(
+            response = client.session.request(
                 "GET",
                 f"{TEST_URL}/api/repositories/test-repo",
                 headers={"Authorization": f"Bearer {TEST_TOKEN}"},
@@ -207,7 +207,7 @@ class TestEliteAPICompatibility:
             mock_request.return_value = mock_response
 
             # Call the FIXED implementation
-            stats = await client.get_repository_statistics("test-repo")
+            stats = client.get_repository_statistics("test-repo")
 
             # Verify it called the CORRECT endpoint
             mock_request.assert_called_with(
@@ -233,15 +233,15 @@ class TestEliteAPICompatibility:
         This is a graceful degradation until server adds this feature.
         """
         # The FIXED method returns empty list without HTTP calls
-        result = await client.get_query_history("test-repo")
+        result = client.get_query_history("test-repo")
         assert result == []
 
         # Verify parameter validation still works
         with pytest.raises(ValueError, match="Repository alias cannot be empty"):
-            await client.get_query_history("")
+            client.get_query_history("")
 
         with pytest.raises(ValueError, match="Limit must be positive"):
-            await client.get_query_history("test-repo", limit=0)
+            client.get_query_history("test-repo", limit=0)
 
     @pytest.mark.asyncio
     async def test_semantic_query_parameter_compatibility(self, client):
@@ -273,7 +273,7 @@ class TestEliteAPICompatibility:
             mock_request.return_value = mock_response
 
             # Execute query
-            results = await client.execute_query(
+            results = client.execute_query(
                 query="test function", repository_alias="test-repo", limit=10
             )
 

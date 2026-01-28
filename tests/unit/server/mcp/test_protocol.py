@@ -220,7 +220,7 @@ class TestToolsListHandler:
             created_at=__import__("datetime").datetime.now(),
         )
 
-        result = await handle_tools_list({}, user)
+        result = handle_tools_list({}, user)
 
         assert "tools" in result
         assert isinstance(result["tools"], list)
@@ -236,7 +236,7 @@ class TestToolsListHandler:
             created_at=__import__("datetime").datetime.now(),
         )
 
-        result = await handle_tools_list({}, user)
+        result = handle_tools_list({}, user)
 
         assert result is not None
         assert "tools" in result
@@ -262,7 +262,6 @@ class TestToolsCallHandler:
         assert "name" in str(exc_info.value).lower()
 
     @pytest.mark.asyncio
-    @pytest.mark.asyncio
     async def test_valid_call_returns_stub_success(self):
         """Test tools/call dispatches to actual handler."""
         from pathlib import Path
@@ -280,11 +279,15 @@ class TestToolsCallHandler:
             patch(
                 "code_indexer.server.mcp.handlers._get_golden_repos_dir"
             ) as mock_get_dir,
-            patch("code_indexer.server.mcp.handlers.GlobalRegistry") as mock_registry,
+            patch(
+                "code_indexer.server.mcp.handlers.get_server_global_registry"
+            ) as mock_get_registry,
         ):
             mock_mgr.list_activated_repositories = Mock(return_value=[])
             mock_get_dir.return_value = Path("/fake/golden/repos")
-            mock_registry.return_value.list_global_repos.return_value = []
+            mock_registry = Mock()
+            mock_registry.list_global_repos.return_value = []
+            mock_get_registry.return_value = mock_registry
             result = await handle_tools_call(params, user)
 
         # MCP responses have content array with text blocks
@@ -318,11 +321,15 @@ class TestToolsCallHandler:
             patch(
                 "code_indexer.server.mcp.handlers._get_golden_repos_dir"
             ) as mock_get_dir,
-            patch("code_indexer.server.mcp.handlers.GlobalRegistry") as mock_registry,
+            patch(
+                "code_indexer.server.mcp.handlers.get_server_global_registry"
+            ) as mock_get_registry,
         ):
             mock_mgr.list_activated_repositories = Mock(return_value=[])
             mock_get_dir.return_value = Path("/fake/golden/repos")
-            mock_registry.return_value.list_global_repos.return_value = []
+            mock_registry = Mock()
+            mock_registry.list_global_repos.return_value = []
+            mock_get_registry.return_value = mock_registry
             result = await handle_tools_call(params, user)
 
         # MCP responses have content array with text blocks
@@ -733,8 +740,8 @@ class TestStreamableHTTPTransport:
             "resource_metadata=" in www_auth
         ), f"Expected resource_metadata URL in WWW-Authenticate, got: {www_auth}"
         assert (
-            "/.well-known/oauth-authorization-server" in www_auth
-        ), f"Expected OAuth discovery URL in WWW-Authenticate, got: {www_auth}"
+            "/.well-known/oauth-protected-resource" in www_auth
+        ), f"Expected OAuth protected resource URL in WWW-Authenticate, got: {www_auth}"
 
     def test_delete_mcp_terminates_session(self):
         """Test DELETE /mcp terminates session."""
@@ -778,12 +785,12 @@ class TestStreamableHTTPTransport:
         from fastapi.testclient import TestClient
         from code_indexer.server.app import create_app
         from code_indexer.server.auth.user_manager import User, UserRole
-        from code_indexer.server.auth.dependencies import get_current_user
+        from code_indexer.server.auth.dependencies import get_current_user_for_mcp
         import datetime
 
         app = create_app()
 
-        # Mock authentication
+        # Mock authentication - use get_current_user_for_mcp (POST /mcp dependency)
         test_user = User(
             username="test_user",
             password_hash="hashed",
@@ -791,7 +798,7 @@ class TestStreamableHTTPTransport:
             created_at=datetime.datetime.now(),
         )
 
-        app.dependency_overrides[get_current_user] = lambda: test_user
+        app.dependency_overrides[get_current_user_for_mcp] = lambda: test_user
         client = TestClient(app)
 
         try:

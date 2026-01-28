@@ -1,7 +1,7 @@
 """Unit tests for AdminAPIClient.get_golden_repository_branches() error handling."""
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 from src.code_indexer.api_clients.admin_client import AdminAPIClient
 from src.code_indexer.api_clients.base_client import APIClientError, AuthenticationError
@@ -28,11 +28,11 @@ class TestGetGoldenRepositoryBranchesErrorHandling:
         mock_response.json.return_value = {"detail": "Repository not found"}
 
         # Mock _authenticated_request to return 404
-        admin_client._authenticated_request = AsyncMock(return_value=mock_response)
+        admin_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should raise APIClientError with 404 status
         with pytest.raises(APIClientError) as exc_info:
-            await admin_client.get_golden_repository_branches("nonexistent-repo")
+            admin_client.get_golden_repository_branches("nonexistent-repo")
 
         assert exc_info.value.status_code == 404
         assert "not found" in str(exc_info.value).lower()
@@ -47,11 +47,11 @@ class TestGetGoldenRepositoryBranchesErrorHandling:
         mock_response.json.return_value = {"detail": "Insufficient privileges"}
 
         # Mock _authenticated_request to return 403
-        admin_client._authenticated_request = AsyncMock(return_value=mock_response)
+        admin_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should raise AuthenticationError
         with pytest.raises(AuthenticationError) as exc_info:
-            await admin_client.get_golden_repository_branches("some-repo")
+            admin_client.get_golden_repository_branches("some-repo")
 
         assert "insufficient privileges" in str(exc_info.value).lower()
         assert "admin role required" in str(exc_info.value).lower()
@@ -65,11 +65,11 @@ class TestGetGoldenRepositoryBranchesErrorHandling:
         mock_response.json.return_value = {"detail": "Internal server error"}
 
         # Mock _authenticated_request to return 500
-        admin_client._authenticated_request = AsyncMock(return_value=mock_response)
+        admin_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should raise APIClientError with proper error message
         with pytest.raises(APIClientError) as exc_info:
-            await admin_client.get_golden_repository_branches("some-repo")
+            admin_client.get_golden_repository_branches("some-repo")
 
         assert exc_info.value.status_code == 500
         assert "failed to get repository branches" in str(exc_info.value).lower()
@@ -83,11 +83,11 @@ class TestGetGoldenRepositoryBranchesErrorHandling:
         mock_response.json.side_effect = ValueError("Invalid JSON")
 
         # Mock _authenticated_request to return malformed response
-        admin_client._authenticated_request = AsyncMock(return_value=mock_response)
+        admin_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should raise APIClientError with HTTP status code fallback
         with pytest.raises(APIClientError) as exc_info:
-            await admin_client.get_golden_repository_branches("some-repo")
+            admin_client.get_golden_repository_branches("some-repo")
 
         assert exc_info.value.status_code == 500
         assert "http 500" in str(exc_info.value).lower()
@@ -96,13 +96,13 @@ class TestGetGoldenRepositoryBranchesErrorHandling:
     async def test_get_branches_handles_unexpected_exception(self, admin_client):
         """Test get_golden_repository_branches handles unexpected exceptions."""
         # Mock _authenticated_request to raise unexpected exception
-        admin_client._authenticated_request = AsyncMock(
+        admin_client._authenticated_request = MagicMock(
             side_effect=RuntimeError("Network timeout")
         )
 
         # Should wrap unexpected exceptions in APIClientError
         with pytest.raises(APIClientError) as exc_info:
-            await admin_client.get_golden_repository_branches("some-repo")
+            admin_client.get_golden_repository_branches("some-repo")
 
         assert (
             "unexpected error getting repository branches"
@@ -122,10 +122,10 @@ class TestGetGoldenRepositoryBranchesErrorHandling:
         }
 
         # Mock _authenticated_request to return success
-        admin_client._authenticated_request = AsyncMock(return_value=mock_response)
+        admin_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # Should return the response data
-        result = await admin_client.get_golden_repository_branches("test-repo")
+        result = admin_client.get_golden_repository_branches("test-repo")
 
         assert isinstance(result, dict)
         assert "branches" in result

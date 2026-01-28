@@ -1,5 +1,7 @@
 """Unit tests for Semantic Search Payload Control with code_snippet field (Story #683).
 
+Story #50: Updated to sync operations for FastAPI thread pool execution.
+
 BUG FIX: Real semantic search results from QueryResult.to_dict() use 'code_snippet'
 field, not 'content'. The _apply_payload_truncation function must handle both.
 
@@ -14,10 +16,12 @@ import pytest
 
 
 class TestCodeSnippetTruncation:
-    """Tests for code_snippet field truncation in semantic search results."""
+    """Tests for code_snippet field truncation in semantic search results.
 
-    @pytest.mark.asyncio
-    async def test_code_snippet_large_content_truncated(self, cache_100_chars):
+    Story #50: _apply_payload_truncation is now sync.
+    """
+
+    def test_code_snippet_large_content_truncated(self, cache_100_chars):
         """Large code_snippet gets preview + cache_handle (BUG FIX VALIDATION)."""
         from code_indexer.server.mcp.handlers import _apply_payload_truncation
         from code_indexer.server import app as app_module
@@ -38,7 +42,7 @@ class TestCodeSnippetTruncation:
                 }
             ]
 
-            truncated = await _apply_payload_truncation(results)
+            truncated = _apply_payload_truncation(results)  # Sync call
 
             assert len(truncated) == 1
             result = truncated[0]
@@ -64,8 +68,7 @@ class TestCodeSnippetTruncation:
             else:
                 app_module.app.state.payload_cache = original
 
-    @pytest.mark.asyncio
-    async def test_code_snippet_small_content_preserved(self, cache_100_chars):
+    def test_code_snippet_small_content_preserved(self, cache_100_chars):
         """Small code_snippet is preserved (not truncated)."""
         from code_indexer.server.mcp.handlers import _apply_payload_truncation
         from code_indexer.server import app as app_module
@@ -85,7 +88,7 @@ class TestCodeSnippetTruncation:
                 }
             ]
 
-            truncated = await _apply_payload_truncation(results)
+            truncated = _apply_payload_truncation(results)  # Sync call
 
             result = truncated[0]
 

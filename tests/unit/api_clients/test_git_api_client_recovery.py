@@ -6,7 +6,7 @@ Testing reset, clean, merge_abort, checkout_file methods.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 
 class TestGitAPIClientRecoveryMethods:
@@ -33,7 +33,7 @@ class TestGitAPIClientRecoveryMethods:
     async def test_reset_calls_correct_endpoint(self, git_client):
         """Test reset calls the correct REST endpoint."""
         with patch.object(
-            git_client, "_authenticated_request", new_callable=AsyncMock
+            git_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -44,7 +44,7 @@ class TestGitAPIClientRecoveryMethods:
             }
             mock_request.return_value = mock_response
 
-            await git_client.reset("test-repo", mode="mixed")
+            git_client.reset("test-repo", mode="mixed")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args
@@ -61,7 +61,7 @@ class TestGitAPIClientRecoveryMethods:
     async def test_clean_calls_correct_endpoint(self, git_client):
         """Test clean calls the correct REST endpoint."""
         with patch.object(
-            git_client, "_authenticated_request", new_callable=AsyncMock
+            git_client, "_authenticated_request", new_callable=MagicMock
         ) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -71,7 +71,7 @@ class TestGitAPIClientRecoveryMethods:
             }
             mock_request.return_value = mock_response
 
-            await git_client.clean("test-repo", confirmation_token="token")
+            git_client.clean("test-repo", confirmation_token="token")
 
             mock_request.assert_called_once()
             call_args = mock_request.call_args

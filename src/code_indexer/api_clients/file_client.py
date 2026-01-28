@@ -50,7 +50,7 @@ class FileAPIClient(CIDXRemoteAPIClient):
             project_root=project_root,
         )
 
-    async def create_file(
+    def create_file(
         self,
         repository_alias: str,
         file_path: str,
@@ -72,7 +72,7 @@ class FileAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST",
                 f"/api/v1/repos/{repository_alias}/files",
                 json={"file_path": file_path, "content": content},
@@ -103,7 +103,7 @@ class FileAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error creating file: {e}")
 
-    async def edit_file(
+    def edit_file(
         self,
         repository_alias: str,
         file_path: str,
@@ -143,7 +143,7 @@ class FileAPIClient(CIDXRemoteAPIClient):
             data["content_hash"] = content_hash
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "PATCH",
                 f"/api/v1/repos/{repository_alias}/files/{encoded_path}",
                 json=data,
@@ -179,7 +179,7 @@ class FileAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error editing file: {e}")
 
-    async def delete_file(
+    def delete_file(
         self,
         repository_alias: str,
         file_path: str,
@@ -209,7 +209,7 @@ class FileAPIClient(CIDXRemoteAPIClient):
             params = {"content_hash": content_hash}
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "DELETE",
                 f"/api/v1/repos/{repository_alias}/files/{encoded_path}",
                 params=params,

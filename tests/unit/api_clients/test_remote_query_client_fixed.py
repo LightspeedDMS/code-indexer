@@ -29,9 +29,9 @@ class TestFixedRemoteQueryClient:
     async def client(self):
         """Create a RemoteQueryClient instance."""
         client = RemoteQueryClient(server_url=TEST_URL, credentials=TEST_CREDENTIALS)
-        await client.__aenter__()
+        client.__enter__()
         yield client
-        await client.__aexit__(None, None, None)
+        client.__exit__(None, None, None)
 
     @pytest.mark.asyncio
     async def test_fixed_query_history_returns_empty_list(self, client):
@@ -40,7 +40,7 @@ class TestFixedRemoteQueryClient:
         This avoids 404 errors from trying to call endpoints that don't exist on the server.
         """
         # No mocking needed - method should return empty list directly
-        result = await client.get_query_history("test-repo", limit=100)
+        result = client.get_query_history("test-repo", limit=100)
 
         # Verify it returns empty list
         assert result == []
@@ -53,15 +53,15 @@ class TestFixedRemoteQueryClient:
         """FIXED: get_query_history still validates parameters properly."""
         # Test empty repository alias
         with pytest.raises(ValueError, match="Repository alias cannot be empty"):
-            await client.get_query_history("")
+            client.get_query_history("")
 
         # Test invalid limit
         with pytest.raises(ValueError, match="Limit must be positive"):
-            await client.get_query_history("test-repo", limit=0)
+            client.get_query_history("test-repo", limit=0)
 
         # Test excessive limit
         with pytest.raises(ValueError, match="Limit cannot exceed 1000"):
-            await client.get_query_history("test-repo", limit=1001)
+            client.get_query_history("test-repo", limit=1001)
 
     @pytest.mark.asyncio
     async def test_fixed_repository_statistics_uses_correct_endpoint(self, client):
@@ -98,7 +98,7 @@ class TestFixedRemoteQueryClient:
             mock_request.return_value = mock_response
 
             # Call the fixed method
-            stats = await client.get_repository_statistics("test-repo")
+            stats = client.get_repository_statistics("test-repo")
 
             # Verify it calls the CORRECT endpoint
             mock_request.assert_called_once_with(
@@ -137,7 +137,7 @@ class TestFixedRemoteQueryClient:
                 RepositoryAccessError,
                 match="Repository statistics not available for 'test-repo'",
             ):
-                await client.get_repository_statistics("test-repo")
+                client.get_repository_statistics("test-repo")
 
     @pytest.mark.asyncio
     async def test_fixed_statistics_handles_404_correctly(self, client):
@@ -150,7 +150,7 @@ class TestFixedRemoteQueryClient:
 
             # Should raise appropriate error
             with pytest.raises(RepositoryAccessError, match="Repository not found"):
-                await client.get_repository_statistics("non-existent-repo")
+                client.get_repository_statistics("non-existent-repo")
 
     @pytest.mark.asyncio
     async def test_fixed_statistics_handles_403_correctly(self, client):
@@ -163,7 +163,7 @@ class TestFixedRemoteQueryClient:
 
             # Should raise appropriate error
             with pytest.raises(RepositoryAccessError, match="Access denied"):
-                await client.get_repository_statistics("restricted-repo")
+                client.get_repository_statistics("restricted-repo")
 
     @pytest.mark.asyncio
     async def test_semantic_query_still_works_correctly(self, client):
@@ -189,7 +189,7 @@ class TestFixedRemoteQueryClient:
             mock_request.return_value = mock_response
 
             # Execute query using the correct method name
-            results = await client.execute_query(
+            results = client.execute_query(
                 query="test function",  # Parameter name used by execute_query
                 repository_alias="test-repo",
                 limit=10,

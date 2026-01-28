@@ -1,6 +1,7 @@
 """Unit tests for SCIP payload truncation.
 
 Story #685: S7 - SCIP with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 
 Tests for _apply_scip_payload_truncation() function that truncates
 large context fields in SCIP results (definition, references, dependencies, dependents).
@@ -25,25 +26,30 @@ def mock_user():
 
 @pytest.fixture
 def mock_payload_cache():
-    """Create a mock PayloadCache for testing."""
-    mock_cache = AsyncMock()
+    """Create a mock PayloadCache for testing.
+
+    Story #50: PayloadCache methods are now sync, so use Mock() not AsyncMock().
+    """
+    mock_cache = Mock()
     mock_cache.config = Mock()
     mock_cache.config.preview_size_chars = 2000
     return mock_cache
 
 
 class TestApplyScipPayloadTruncation:
-    """Tests for _apply_scip_payload_truncation function (Story #685)."""
+    """Tests for _apply_scip_payload_truncation function (Story #685).
 
-    @pytest.mark.asyncio
-    async def test_small_context_unchanged(self, mock_payload_cache):
+    Story #50: This function is now sync, so tests use sync assertions.
+    """
+
+    def test_small_context_unchanged(self, mock_payload_cache):
         """Test that small context (<= 2000 chars) is not truncated."""
         from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
 
         small_context = "x" * 100  # Small context (< preview_size_chars)
 
         # store() should not be called for small content
-        mock_payload_cache.store = AsyncMock(return_value="uuid-should-not-be-used")
+        mock_payload_cache.store = Mock(return_value="uuid-should-not-be-used")
 
         results = [
             {
@@ -63,7 +69,7 @@ class TestApplyScipPayloadTruncation:
         ) as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
-            result = await _apply_scip_payload_truncation(results)
+            result = _apply_scip_payload_truncation(results)  # Sync call
 
         # Context should remain unchanged
         assert result[0]["context"] == small_context
@@ -72,16 +78,15 @@ class TestApplyScipPayloadTruncation:
         # store() should not have been called
         mock_payload_cache.store.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_large_context_truncated_with_cache_handle(self, mock_payload_cache):
+    def test_large_context_truncated_with_cache_handle(self, mock_payload_cache):
         """Test that large context (> 2000 chars) is truncated and cached."""
         from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
 
         large_context = "x" * 5000  # Large context
         preview = large_context[:2000]  # First 2000 chars
 
-        # Mock store() to return cache handle
-        mock_payload_cache.store = AsyncMock(return_value="uuid-123")
+        # Mock store() to return cache handle (sync Mock)
+        mock_payload_cache.store = Mock(return_value="uuid-123")
 
         results = [
             {
@@ -101,7 +106,7 @@ class TestApplyScipPayloadTruncation:
         ) as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
-            result = await _apply_scip_payload_truncation(results)
+            result = _apply_scip_payload_truncation(results)  # Sync call
 
         # Context should be replaced with context_preview
         assert "context" not in result[0]
@@ -112,16 +117,15 @@ class TestApplyScipPayloadTruncation:
         # Verify store was called with the full context
         mock_payload_cache.store.assert_called_once_with(large_context)
 
-    @pytest.mark.asyncio
-    async def test_multiple_results_mixed_sizes(self, mock_payload_cache):
+    def test_multiple_results_mixed_sizes(self, mock_payload_cache):
         """Test truncation with mixed result sizes."""
         from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
 
         small_context = "small" * 10  # 50 chars
         large_context = "x" * 4000  # 4000 chars
 
-        # Mock store() to return cache handle with content length in it
-        mock_payload_cache.store = AsyncMock(return_value=f"uuid-{len(large_context)}")
+        # Mock store() to return cache handle with content length in it (sync Mock)
+        mock_payload_cache.store = Mock(return_value=f"uuid-{len(large_context)}")
 
         results = [
             {
@@ -151,7 +155,7 @@ class TestApplyScipPayloadTruncation:
         ) as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
-            result = await _apply_scip_payload_truncation(results)
+            result = _apply_scip_payload_truncation(results)  # Sync call
 
         # First result: small context unchanged
         assert result[0]["context"] == small_context
@@ -167,8 +171,7 @@ class TestApplyScipPayloadTruncation:
         # Verify store was only called once (for the large context)
         mock_payload_cache.store.assert_called_once_with(large_context)
 
-    @pytest.mark.asyncio
-    async def test_null_context_handled_gracefully(self, mock_payload_cache):
+    def test_null_context_handled_gracefully(self, mock_payload_cache):
         """Test that null/None context is handled gracefully."""
         from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
 
@@ -190,15 +193,14 @@ class TestApplyScipPayloadTruncation:
         ) as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
-            result = await _apply_scip_payload_truncation(results)
+            result = _apply_scip_payload_truncation(results)  # Sync call
 
         # Should have default metadata
         assert result[0]["context"] is None
         assert result[0].get("context_cache_handle") is None
         assert result[0].get("context_has_more") is False
 
-    @pytest.mark.asyncio
-    async def test_missing_context_handled_gracefully(self, mock_payload_cache):
+    def test_missing_context_handled_gracefully(self, mock_payload_cache):
         """Test that missing context field is handled gracefully."""
         from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
 
@@ -220,14 +222,13 @@ class TestApplyScipPayloadTruncation:
         ) as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
-            result = await _apply_scip_payload_truncation(results)
+            result = _apply_scip_payload_truncation(results)  # Sync call
 
         # Should have default metadata, no crash
         assert result[0].get("context_cache_handle") is None
         assert result[0].get("context_has_more") is False
 
-    @pytest.mark.asyncio
-    async def test_cache_unavailable_returns_unchanged(self):
+    def test_cache_unavailable_returns_unchanged(self):
         """Test that results are unchanged when cache is unavailable."""
         from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
 
@@ -251,7 +252,7 @@ class TestApplyScipPayloadTruncation:
         ) as mock_state:
             mock_state.payload_cache = None  # Cache unavailable
 
-            result = await _apply_scip_payload_truncation(results)
+            result = _apply_scip_payload_truncation(results)  # Sync call
 
         # Results should be unchanged
         assert result[0]["context"] == context
@@ -259,8 +260,7 @@ class TestApplyScipPayloadTruncation:
         assert "context_cache_handle" not in result[0]
         assert "context_has_more" not in result[0]
 
-    @pytest.mark.asyncio
-    async def test_cache_error_returns_unchanged_with_metadata(
+    def test_cache_error_returns_unchanged_with_metadata(
         self, mock_payload_cache
     ):
         """Test that cache errors leave context unchanged but add metadata."""
@@ -268,8 +268,8 @@ class TestApplyScipPayloadTruncation:
 
         context = "x" * 5000  # Large context
 
-        # Mock store() to raise an exception
-        mock_payload_cache.store = AsyncMock(side_effect=Exception("Cache error"))
+        # Mock store() to raise an exception (sync Mock)
+        mock_payload_cache.store = Mock(side_effect=Exception("Cache error"))
 
         results = [
             {
@@ -289,15 +289,14 @@ class TestApplyScipPayloadTruncation:
         ) as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
-            result = await _apply_scip_payload_truncation(results)
+            result = _apply_scip_payload_truncation(results)  # Sync call
 
         # Context should remain (error in store doesn't delete it), metadata indicates no truncation
         assert result[0]["context"] == context
         assert result[0].get("context_cache_handle") is None
         assert result[0].get("context_has_more") is False
 
-    @pytest.mark.asyncio
-    async def test_empty_results_list(self, mock_payload_cache):
+    def test_empty_results_list(self, mock_payload_cache):
         """Test that empty results list is handled correctly."""
         from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
 
@@ -306,16 +305,20 @@ class TestApplyScipPayloadTruncation:
         ) as mock_state:
             mock_state.payload_cache = mock_payload_cache
 
-            result = await _apply_scip_payload_truncation([])
+            result = _apply_scip_payload_truncation([])  # Sync call
 
         assert result == []
 
 
 class TestScipDefinitionPayloadTruncation:
-    """Tests for SCIP definition handler with payload truncation."""
+    """Tests for SCIP definition handler with payload truncation.
 
-    @pytest.mark.asyncio
-    async def test_scip_definition_applies_truncation(
+    Note: The scip_definition handler is still async (will be converted in Story #51).
+    Only the _apply_scip_payload_truncation helper is sync now (Story #50).
+    PayloadCache.store() is now sync, so use Mock() not AsyncMock().
+    """
+
+    def test_scip_definition_applies_truncation(
         self, mock_user, mock_payload_cache
     ):
         """Test that scip_definition applies payload truncation to results."""
@@ -338,8 +341,8 @@ class TestScipDefinitionPayloadTruncation:
             }
         ]
 
-        # Set up store() mock for truncation (AsyncMock imported at line 12)
-        mock_payload_cache.store = AsyncMock(return_value="uuid-def-123")
+        # Story #50: store() is now sync, use Mock() not AsyncMock()
+        mock_payload_cache.store = Mock(return_value="uuid-def-123")
 
         with (
             patch(
@@ -352,7 +355,7 @@ class TestScipDefinitionPayloadTruncation:
         ):
             mock_state.payload_cache = mock_payload_cache
 
-            result = await scip_definition({"symbol": "MyClass"}, mock_user)
+            result = scip_definition({"symbol": "MyClass"}, mock_user)
 
         import json
 
@@ -368,10 +371,14 @@ class TestScipDefinitionPayloadTruncation:
 
 
 class TestScipReferencesPayloadTruncation:
-    """Tests for SCIP references handler with payload truncation."""
+    """Tests for SCIP references handler with payload truncation.
 
-    @pytest.mark.asyncio
-    async def test_scip_references_applies_truncation(
+    Note: The scip_references handler is still async (will be converted in Story #51).
+    Only the _apply_scip_payload_truncation helper is sync now (Story #50).
+    PayloadCache.store() is now sync, so use Mock() not AsyncMock().
+    """
+
+    def test_scip_references_applies_truncation(
         self, mock_user, mock_payload_cache
     ):
         """Test that scip_references applies payload truncation to results."""
@@ -394,8 +401,8 @@ class TestScipReferencesPayloadTruncation:
             }
         ]
 
-        # Set up store() mock for truncation (AsyncMock imported at line 12)
-        mock_payload_cache.store = AsyncMock(return_value="uuid-ref-123")
+        # Story #50: store() is now sync, use Mock() not AsyncMock()
+        mock_payload_cache.store = Mock(return_value="uuid-ref-123")
 
         with (
             patch(
@@ -408,7 +415,7 @@ class TestScipReferencesPayloadTruncation:
         ):
             mock_state.payload_cache = mock_payload_cache
 
-            result = await scip_references({"symbol": "MyClass"}, mock_user)
+            result = scip_references({"symbol": "MyClass"}, mock_user)
 
         import json
 
@@ -422,10 +429,14 @@ class TestScipReferencesPayloadTruncation:
 
 
 class TestScipDependenciesPayloadTruncation:
-    """Tests for SCIP dependencies handler with payload truncation."""
+    """Tests for SCIP dependencies handler with payload truncation.
 
-    @pytest.mark.asyncio
-    async def test_scip_dependencies_applies_truncation(
+    Note: The scip_dependencies handler is still async (will be converted in Story #51).
+    Only the _apply_scip_payload_truncation helper is sync now (Story #50).
+    PayloadCache.store() is now sync, so use Mock() not AsyncMock().
+    """
+
+    def test_scip_dependencies_applies_truncation(
         self, mock_user, mock_payload_cache
     ):
         """Test that scip_dependencies applies payload truncation to results."""
@@ -448,8 +459,8 @@ class TestScipDependenciesPayloadTruncation:
             }
         ]
 
-        # Set up store() mock for truncation (AsyncMock imported at line 12)
-        mock_payload_cache.store = AsyncMock(return_value="uuid-dep-123")
+        # Story #50: store() is now sync, use Mock() not AsyncMock()
+        mock_payload_cache.store = Mock(return_value="uuid-dep-123")
 
         with (
             patch(
@@ -462,7 +473,7 @@ class TestScipDependenciesPayloadTruncation:
         ):
             mock_state.payload_cache = mock_payload_cache
 
-            result = await scip_dependencies({"symbol": "MyClass"}, mock_user)
+            result = scip_dependencies({"symbol": "MyClass"}, mock_user)
 
         import json
 
@@ -474,10 +485,14 @@ class TestScipDependenciesPayloadTruncation:
 
 
 class TestScipDependentsPayloadTruncation:
-    """Tests for SCIP dependents handler with payload truncation."""
+    """Tests for SCIP dependents handler with payload truncation.
 
-    @pytest.mark.asyncio
-    async def test_scip_dependents_applies_truncation(
+    Note: The scip_dependents handler is still async (will be converted in Story #51).
+    Only the _apply_scip_payload_truncation helper is sync now (Story #50).
+    PayloadCache.store() is now sync, so use Mock() not AsyncMock().
+    """
+
+    def test_scip_dependents_applies_truncation(
         self, mock_user, mock_payload_cache
     ):
         """Test that scip_dependents applies payload truncation to results."""
@@ -500,8 +515,8 @@ class TestScipDependentsPayloadTruncation:
             }
         ]
 
-        # Set up store() mock for truncation (AsyncMock imported at line 12)
-        mock_payload_cache.store = AsyncMock(return_value="uuid-dpt-123")
+        # Story #50: store() is now sync, use Mock() not AsyncMock()
+        mock_payload_cache.store = Mock(return_value="uuid-dpt-123")
 
         with (
             patch(
@@ -514,7 +529,7 @@ class TestScipDependentsPayloadTruncation:
         ):
             mock_state.payload_cache = mock_payload_cache
 
-            result = await scip_dependents({"symbol": "MyClass"}, mock_user)
+            result = scip_dependents({"symbol": "MyClass"}, mock_user)
 
         import json
 

@@ -51,7 +51,7 @@ class TestSCIPImpactParity:
             "code_indexer.server.routers.scip_queries._get_scip_query_service",
             return_value=mock_scip_query_service,
         ):
-            rest_response = await get_impact(
+            rest_response = get_impact(
                 request=mock_request,
                 symbol="PaymentProcessor",
                 depth=3,
@@ -101,7 +101,7 @@ class TestSCIPCallchainParity:
             "code_indexer.server.routers.scip_queries._get_scip_query_service",
             return_value=mock_scip_query_service,
         ):
-            rest_response = await get_callchain(
+            rest_response = get_callchain(
                 request=mock_request,
                 from_symbol="handleRequest",
                 to_symbol="sanitize",
@@ -145,7 +145,7 @@ class TestSCIPContextParity:
             "code_indexer.server.routers.scip_queries._get_scip_query_service",
             return_value=mock_scip_query_service,
         ):
-            rest_response = await get_context(
+            rest_response = get_context(
                 request=mock_request,
                 symbol="UserService",
                 limit=20,

@@ -156,7 +156,7 @@ class TestRealRepositoryLinkingBusinessLogic:
             pytest.skip("Test server not available for real integration testing")
 
         try:
-            result = await linking_manager.discover_repositories(
+            result = linking_manager.discover_repositories(
                 git_url="https://github.com/example/test-repo.git"
             )
 
@@ -184,7 +184,7 @@ class TestRealRepositoryLinkingBusinessLogic:
 
         try:
             # Step 1: Real discovery
-            discovery_result = await linking_manager.discover_repositories(git_url)
+            discovery_result = linking_manager.discover_repositories(git_url)
 
             if discovery_result.total_matches == 0:
                 pytest.skip("No repositories found for linking test")
@@ -199,7 +199,7 @@ class TestRealRepositoryLinkingBusinessLogic:
                 default_branch = next(
                     (b for b in branches if b.is_default), branches[0]
                 )
-                activation = await linking_manager.activate_repository(
+                activation = linking_manager.activate_repository(
                     golden_alias=first_repo.alias,
                     branch=default_branch.name,
                     user_alias=f"{first_repo.alias}-test",
@@ -441,9 +441,9 @@ class TestRealBusinessLogicResourceManagement:
             assert manager is not None
         finally:
             # Real cleanup
-            await manager.close()
+            manager.close()
 
         # Verify manager can't be used after cleanup
         # (Real behavior test, not mocked)
         with pytest.raises(Exception):
-            await manager.discover_repositories("https://github.com/test/repo.git")
+            manager.discover_repositories("https://github.com/test/repo.git")

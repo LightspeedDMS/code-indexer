@@ -73,7 +73,7 @@ class TestQueryEndpointRouting:
         manager = SemanticQueryManager()
 
         # Act: Perform search on single repo
-        results = await manager.search(
+        results = manager.search(
             repo_path=setup_single_repo, query="test query", limit=10
         )
 
@@ -93,7 +93,7 @@ class TestQueryEndpointRouting:
         manager = SemanticQueryManager()
 
         # Act: Perform search on composite repo
-        results = await manager.search(
+        results = manager.search(
             repo_path=setup_composite_repo, query="test query", limit=10
         )
 
@@ -126,12 +126,12 @@ class TestQueryEndpointRouting:
         manager = SemanticQueryManager()
 
         # Act: Query single repo
-        single_results = await manager.search(
+        single_results = manager.search(
             repo_path=setup_single_repo, query="test query", limit=10
         )
 
         # Query composite repo
-        composite_results = await manager.search(
+        composite_results = manager.search(
             repo_path=setup_composite_repo, query="test query", limit=10
         )
 
@@ -167,7 +167,7 @@ class TestQueryEndpointRouting:
             manager = SemanticQueryManager()
 
             # Act: Call search (should route through to search_single)
-            results = await manager.search(
+            results = manager.search(
                 repo_path=setup_single_repo, query="existing query", limit=10
             )
 
@@ -198,8 +198,8 @@ class TestQueryEndpointRouting:
                     "file_extensions": [".py"],
                 }
 
-                await manager.search(repo_path=setup_single_repo, **kwargs)
-                await manager.search(repo_path=setup_composite_repo, **kwargs)
+                manager.search(repo_path=setup_single_repo, **kwargs)
+                manager.search(repo_path=setup_composite_repo, **kwargs)
 
                 # Assert: Both handlers should be called
                 assert mock_single.call_count == 1
@@ -225,7 +225,7 @@ class TestQueryRoutingErrorHandling:
             manager = SemanticQueryManager()
 
             # Act: Query repo without config
-            results = await manager.search(
+            results = manager.search(
                 repo_path=repo_path, query="test query", limit=10
             )
 
@@ -253,4 +253,4 @@ class TestQueryRoutingErrorHandling:
 
             # Act & Assert: Exception should propagate
             with pytest.raises(Exception, match="Search failed"):
-                await manager.search(repo_path=repo_path, query="test query", limit=10)
+                manager.search(repo_path=repo_path, query="test query", limit=10)

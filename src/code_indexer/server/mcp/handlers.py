@@ -144,10 +144,12 @@ def _get_scip_query_service():
     )
 
 
-async def _apply_payload_truncation(
+def _apply_payload_truncation(
     results: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Apply payload truncation to search results (Story #679, Bug Fix #683).
+
+    Story #50: Converted from async to sync for FastAPI thread pool execution.
 
     For results with large content, replaces content with preview + cache_handle.
     This reduces response size while allowing clients to fetch full content on demand.
@@ -196,7 +198,7 @@ async def _apply_payload_truncation(
             continue
 
         try:
-            truncated = await payload_cache.truncate_result(content)
+            truncated = payload_cache.truncate_result(content)  # Sync call
             if truncated.get("has_more", False):
                 # Large content: replace with preview and cache handle
                 result_dict["preview"] = truncated["preview"]
@@ -221,10 +223,12 @@ async def _apply_payload_truncation(
     return results
 
 
-async def _apply_fts_payload_truncation(
+def _apply_fts_payload_truncation(
     results: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Apply payload truncation to FTS search results (Story #680).
+
+    Story #50: Converted from async to sync for FastAPI thread pool execution.
 
     For FTS results with large code_snippet or match_text fields, replaces
     them with preview + cache_handle. Each field is cached independently.
@@ -249,8 +253,8 @@ async def _apply_fts_payload_truncation(
         if code_snippet is not None:
             try:
                 if len(code_snippet) > preview_size:
-                    # Large snippet: store and replace with preview
-                    cache_handle = await payload_cache.store(code_snippet)
+                    # Large snippet: store and replace with preview (sync call)
+                    cache_handle = payload_cache.store(code_snippet)
                     result_dict["snippet_preview"] = code_snippet[:preview_size]
                     result_dict["snippet_cache_handle"] = cache_handle
                     result_dict["snippet_has_more"] = True
@@ -273,8 +277,8 @@ async def _apply_fts_payload_truncation(
         if match_text is not None:
             try:
                 if len(match_text) > preview_size:
-                    # Large match_text: store and replace with preview
-                    cache_handle = await payload_cache.store(match_text)
+                    # Large match_text: store and replace with preview (sync call)
+                    cache_handle = payload_cache.store(match_text)
                     result_dict["match_text_preview"] = match_text[:preview_size]
                     result_dict["match_text_cache_handle"] = cache_handle
                     result_dict["match_text_has_more"] = True
@@ -295,7 +299,7 @@ async def _apply_fts_payload_truncation(
     return results
 
 
-async def _truncate_regex_field(
+def _truncate_regex_field(
     result_dict: Dict[str, Any],
     field_name: str,
     payload_cache,
@@ -303,6 +307,8 @@ async def _truncate_regex_field(
     is_list: bool = False,
 ) -> None:
     """Truncate a single regex field if needed (Story #684 helper).
+
+    Story #50: Converted from async to sync for FastAPI thread pool execution.
 
     Args:
         result_dict: Dict containing the field to truncate
@@ -318,7 +324,7 @@ async def _truncate_regex_field(
     try:
         content = "\n".join(field_value) if is_list else field_value
         if len(content) > preview_size:
-            cache_handle = await payload_cache.store(content)
+            cache_handle = payload_cache.store(content)  # Sync call
             result_dict[f"{field_name}_preview"] = content[:preview_size]
             result_dict[f"{field_name}_cache_handle"] = cache_handle
             result_dict[f"{field_name}_has_more"] = True
@@ -336,10 +342,12 @@ async def _truncate_regex_field(
         result_dict[f"{field_name}_has_more"] = False
 
 
-async def _apply_regex_payload_truncation(
+def _apply_regex_payload_truncation(
     results: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Apply payload truncation to regex search results (Story #684).
+
+    Story #50: Converted from async to sync for FastAPI thread pool execution.
 
     For regex results with large line_content, context_before, or context_after
     fields, replaces them with preview + cache_handle. Each field is cached
@@ -358,23 +366,23 @@ async def _apply_regex_payload_truncation(
     preview_size = payload_cache.config.preview_size_chars
 
     for result_dict in results:
-        # AC1: Handle line_content field
-        await _truncate_regex_field(
+        # AC1: Handle line_content field (sync call)
+        _truncate_regex_field(
             result_dict, "line_content", payload_cache, preview_size, is_list=False
         )
-        # AC2: Handle context_before field (list of strings)
-        await _truncate_regex_field(
+        # AC2: Handle context_before field (list of strings, sync call)
+        _truncate_regex_field(
             result_dict, "context_before", payload_cache, preview_size, is_list=True
         )
-        # AC2: Handle context_after field (list of strings)
-        await _truncate_regex_field(
+        # AC2: Handle context_after field (list of strings, sync call)
+        _truncate_regex_field(
             result_dict, "context_after", payload_cache, preview_size, is_list=True
         )
 
     return results
 
 
-async def _truncate_field(
+def _truncate_field(
     container: Dict[str, Any],
     field_name: str,
     payload_cache,
@@ -382,6 +390,8 @@ async def _truncate_field(
     log_context: str = "field",
 ) -> None:
     """Truncate a single field if it exceeds preview_size (Story #681 helper).
+
+    Story #50: Converted from async to sync for FastAPI thread pool execution.
 
     Args:
         container: Dict containing the field to truncate
@@ -396,7 +406,7 @@ async def _truncate_field(
 
     try:
         if len(value) > preview_size:
-            cache_handle = await payload_cache.store(value)
+            cache_handle = payload_cache.store(value)  # Sync call
             container[f"{field_name}_preview"] = value[:preview_size]
             container[f"{field_name}_cache_handle"] = cache_handle
             container[f"{field_name}_has_more"] = True
@@ -414,10 +424,12 @@ async def _truncate_field(
         container[f"{field_name}_has_more"] = False
 
 
-async def _apply_temporal_payload_truncation(
+def _apply_temporal_payload_truncation(
     results: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Apply payload truncation to temporal search results (Story #681).
+
+    Story #50: Converted from async to sync for FastAPI thread pool execution.
 
     Truncates large content fields with preview + cache_handle pattern.
 
@@ -434,13 +446,13 @@ async def _apply_temporal_payload_truncation(
     preview_size = payload_cache.config.preview_size_chars
 
     for result_dict in results:
-        # AC1: Handle main content field
-        await _truncate_field(
+        # AC1: Handle main content field (sync call)
+        _truncate_field(
             result_dict, "content", payload_cache, preview_size, "temporal content"
         )
 
         # Handle code_snippet field (temporal results use QueryResult.to_dict() format)
-        await _truncate_field(
+        _truncate_field(
             result_dict,
             "code_snippet",
             payload_cache,
@@ -448,24 +460,26 @@ async def _apply_temporal_payload_truncation(
             "temporal code_snippet",
         )
 
-        # AC2/AC3: Handle temporal_context.evolution entries
+        # AC2/AC3: Handle temporal_context.evolution entries (sync calls)
         temporal_context = result_dict.get("temporal_context")
         if temporal_context and "evolution" in temporal_context:
             for entry in temporal_context["evolution"]:
-                await _truncate_field(
+                _truncate_field(
                     entry, "content", payload_cache, preview_size, "evolution content"
                 )
-                await _truncate_field(
+                _truncate_field(
                     entry, "diff", payload_cache, preview_size, "evolution diff"
                 )
 
     return results
 
 
-async def _apply_scip_payload_truncation(
+def _apply_scip_payload_truncation(
     results: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Apply payload truncation to SCIP query results (Story #685).
+
+    Story #50: Converted from async to sync for FastAPI thread pool execution.
 
     For SCIP results with large context fields (> preview_size_chars), replaces
     context with context_preview + context_cache_handle. This reduces response
@@ -501,8 +515,8 @@ async def _apply_scip_payload_truncation(
 
         try:
             if len(context) > preview_size:
-                # Large context: store full content and replace with preview
-                cache_handle = await payload_cache.store(context)
+                # Large context: store full content and replace with preview (sync call)
+                cache_handle = payload_cache.store(context)
                 result_dict["context_preview"] = context[:preview_size]
                 result_dict["context_cache_handle"] = cache_handle
                 result_dict["context_has_more"] = True
@@ -748,7 +762,7 @@ def _expand_wildcard_patterns(patterns: List[str]) -> List[str]:
     return result
 
 
-async def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handle omni-search across multiple repositories.
 
     Called when repository_alias is an array of repository names.
@@ -756,6 +770,8 @@ async def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any
 
     Story #36: Refactored to use MultiSearchService.search() for parallel execution
     instead of inline asyncio.gather implementation.
+
+    Story #51: Converted from async to sync for FastAPI thread pool execution.
     """
     from collections import defaultdict
     from ..multi.multi_search_config import MultiSearchConfig
@@ -825,9 +841,10 @@ async def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any
     )
 
     # Story #36: Delegate to MultiSearchService for parallel execution
+    # Story #51: service.search() is now synchronous
     service = MultiSearchService(config)
     try:
-        response = await service.search(request)
+        response = service.search(request)
     except Exception as e:
         logger.warning(
             f"MultiSearchService failed: {e}",
@@ -899,13 +916,14 @@ async def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any
 
     # Story #683: Apply payload truncation to aggregated multi-repo results
     # This ensures consistency with REST API which calls _apply_multi_truncation()
+    # Story #50: Truncation functions are now sync
     if final_results:
         if search_mode in ["fts", "hybrid"]:
-            final_results = await _apply_fts_payload_truncation(final_results)
+            final_results = _apply_fts_payload_truncation(final_results)
         elif _is_temporal_query(params):
-            final_results = await _apply_temporal_payload_truncation(final_results)
+            final_results = _apply_temporal_payload_truncation(final_results)
         else:
-            final_results = await _apply_payload_truncation(final_results)
+            final_results = _apply_payload_truncation(final_results)
 
     # Use _format_omni_response helper to format results
     formatted = _format_omni_response(
@@ -931,7 +949,7 @@ async def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any
     )
 
 
-async def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Search code using semantic search, FTS, or hybrid mode."""
     try:
         from pathlib import Path
@@ -947,8 +965,9 @@ async def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         params["repository_alias"] = repository_alias  # Update params for downstream
 
         # Route to omni-search when repository_alias is an array
+        # Story #51: _omni_search_code is now synchronous
         if isinstance(repository_alias, list):
-            return await _omni_search_code(params, user)
+            return _omni_search_code(params, user)
 
         # Check if this is a global repository query (ends with -global suffix)
         if repository_alias and repository_alias.endswith("-global"):
@@ -1078,18 +1097,19 @@ async def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 response_results.append(result_dict)
 
             # Apply payload truncation based on search mode
+            # Story #50: Truncation functions are now sync
             search_mode = params.get("search_mode", "semantic")
             if search_mode in ["fts", "hybrid"]:
                 # Story #680: FTS truncation for code_snippet and match_text
-                response_results = await _apply_fts_payload_truncation(response_results)
+                response_results = _apply_fts_payload_truncation(response_results)
             # Story #681: Temporal truncation for temporal queries
             if _is_temporal_query(params):
-                response_results = await _apply_temporal_payload_truncation(
+                response_results = _apply_temporal_payload_truncation(
                     response_results
                 )
             else:
                 # Story #679: Semantic truncation for content field
-                response_results = await _apply_payload_truncation(response_results)
+                response_results = _apply_payload_truncation(response_results)
 
             result = {
                 "results": response_results,
@@ -1139,28 +1159,29 @@ async def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
         # Apply payload truncation based on search mode
+        # Story #50: Truncation functions are now sync
         if "results" in result and isinstance(result["results"], list):
             search_mode = params.get("search_mode", "semantic")
             if search_mode in ["fts", "hybrid"]:
                 # Story #680: FTS truncation for code_snippet and match_text
-                result["results"] = await _apply_fts_payload_truncation(
+                result["results"] = _apply_fts_payload_truncation(
                     result["results"]
                 )
             # Story #681: Temporal truncation for temporal queries
             if _is_temporal_query(params):
-                result["results"] = await _apply_temporal_payload_truncation(
+                result["results"] = _apply_temporal_payload_truncation(
                     result["results"]
                 )
             else:
                 # Story #679: Semantic truncation for content field
-                result["results"] = await _apply_payload_truncation(result["results"])
+                result["results"] = _apply_payload_truncation(result["results"])
 
         return _mcp_response({"success": True, "results": result})
     except Exception as e:
         return _mcp_response({"success": False, "error": str(e), "results": []})
 
 
-async def discover_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def discover_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Discover available repositories from configured sources."""
     try:
         # List all golden repositories (source_type filter not currently used)
@@ -1171,7 +1192,7 @@ async def discover_repositories(params: Dict[str, Any], user: User) -> Dict[str,
         return _mcp_response({"success": False, "error": str(e), "repositories": []})
 
 
-async def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List activated repositories for the current user, plus global repos."""
     try:
         # Get activated repos from database
@@ -1228,7 +1249,7 @@ async def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any
         return _mcp_response({"success": False, "error": str(e), "repositories": []})
 
 
-async def activate_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def activate_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Activate a repository for querying (supports single or composite)."""
     try:
         job_id = app_module.activated_repo_manager.activate_repository(
@@ -1249,7 +1270,7 @@ async def activate_repository(params: Dict[str, Any], user: User) -> Dict[str, A
         return _mcp_response({"success": False, "error": str(e), "job_id": None})
 
 
-async def deactivate_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def deactivate_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Deactivate a repository."""
     try:
         user_alias = params["user_alias"]
@@ -1267,7 +1288,7 @@ async def deactivate_repository(params: Dict[str, Any], user: User) -> Dict[str,
         return _mcp_response({"success": False, "error": str(e), "job_id": None})
 
 
-async def get_repository_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def get_repository_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get detailed status of a repository."""
 
     try:
@@ -1315,7 +1336,7 @@ async def get_repository_status(params: Dict[str, Any], user: User) -> Dict[str,
         return _mcp_response({"success": False, "error": str(e), "status": {}})
 
 
-async def sync_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def sync_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Sync repository with upstream."""
     try:
         user_alias = params["user_alias"]
@@ -1377,7 +1398,7 @@ async def sync_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e), "job_id": None})
 
 
-async def switch_branch(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def switch_branch(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Switch repository to different branch."""
     try:
         user_alias = params["user_alias"]
@@ -1396,7 +1417,7 @@ async def switch_branch(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def _omni_list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def _omni_list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handle omni-list-files across multiple repositories."""
     import json as json_module
 
@@ -1423,7 +1444,7 @@ async def _omni_list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]
             single_params = dict(params)
             single_params["repository_alias"] = repo_alias
 
-            single_result = await list_files(single_params, user)
+            single_result = list_files(single_params, user)
 
             content = single_result.get("content", [])
             if content and content[0].get("type") == "text":
@@ -1459,7 +1480,7 @@ async def _omni_list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]
     return _mcp_response(formatted)
 
 
-async def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List files in a repository."""
     from code_indexer.server.models.api_models import FileListQueryParams
     from pathlib import Path
@@ -1471,7 +1492,7 @@ async def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Route to omni-search when repository_alias is an array
         if isinstance(repository_alias, list):
-            return await _omni_list_files(params, user)
+            return _omni_list_files(params, user)
 
         # Extract parameters for path pattern building
         path = params.get("path", "")
@@ -1590,7 +1611,7 @@ async def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e), "files": []})
 
 
-async def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get content of a specific file with optional pagination.
 
     Returns MCP-compliant response with content as array of text blocks.
@@ -1719,7 +1740,7 @@ async def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]
             from code_indexer.server.cache.truncation_helper import TruncationHelper
 
             truncation_helper = TruncationHelper(payload_cache, content_limits)
-            truncation_result = await truncation_helper.truncate_and_cache(
+            truncation_result = truncation_helper.truncate_and_cache(
                 content=file_content,
                 content_type="file",
             )
@@ -1769,7 +1790,7 @@ async def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]
         )
 
 
-async def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Browse directory recursively.
 
     FileListingService doesn't have browse_directory method.
@@ -1920,7 +1941,7 @@ async def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]
         return _mcp_response({"success": False, "error": str(e), "structure": {}})
 
 
-async def get_branches(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def get_branches(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get available branches for a repository."""
     from pathlib import Path
     from code_indexer.services.git_topology_service import GitTopologyService
@@ -2028,7 +2049,7 @@ async def get_branches(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e), "branches": []})
 
 
-async def check_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def check_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Check system health status."""
     try:
         from code_indexer import __version__
@@ -2048,7 +2069,7 @@ async def check_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e), "health": {}})
 
 
-async def add_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def add_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Add a golden repository (admin only).
 
     Supports temporal indexing via enable_temporal and temporal_options parameters.
@@ -2083,7 +2104,7 @@ async def add_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def remove_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def remove_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Remove a golden repository (admin only)."""
     try:
         alias = params["alias"]
@@ -2101,7 +2122,7 @@ async def remove_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, An
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Refresh a golden repository (admin only)."""
     try:
         alias = params["alias"]
@@ -2119,7 +2140,7 @@ async def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, A
         return _mcp_response({"success": False, "error": str(e), "job_id": None})
 
 
-async def list_users(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def list_users(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List all users (admin only)."""
     try:
         all_users = app_module.user_manager.get_all_users()
@@ -2143,7 +2164,7 @@ async def list_users(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
 
-async def create_user(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def create_user(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Create a new user (admin only)."""
     try:
         username = params["username"]
@@ -2168,7 +2189,7 @@ async def create_user(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e), "user": None})
 
 
-async def get_repository_statistics(
+def get_repository_statistics(
     params: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Get repository statistics."""
@@ -2234,7 +2255,7 @@ async def get_repository_statistics(
         return _mcp_response({"success": False, "error": str(e), "statistics": {}})
 
 
-async def get_job_statistics(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def get_job_statistics(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get background job statistics.
 
     BackgroundJobManager doesn't have get_job_statistics method.
@@ -2257,7 +2278,7 @@ async def get_job_statistics(params: Dict[str, Any], user: User) -> Dict[str, An
         return _mcp_response({"success": False, "error": str(e), "statistics": {}})
 
 
-async def get_job_details(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def get_job_details(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get detailed information about a specific job including error messages."""
     try:
         job_id = params.get("job_id")
@@ -2280,7 +2301,7 @@ async def get_job_details(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def get_all_repositories_status(
+def get_all_repositories_status(
     params: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Get status summary of all repositories."""
@@ -2344,7 +2365,7 @@ async def get_all_repositories_status(
         )
 
 
-async def manage_composite_repository(
+def manage_composite_repository(
     params: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Manage composite repository operations."""
@@ -2410,7 +2431,7 @@ async def manage_composite_repository(
         return _mcp_response({"success": False, "error": str(e), "job_id": None})
 
 
-async def handle_list_global_repos(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_list_global_repos(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for list_global_repos tool."""
     from code_indexer.global_repos.shared_operations import GlobalRepoOperations
 
@@ -2420,7 +2441,7 @@ async def handle_list_global_repos(args: Dict[str, Any], user: User) -> Dict[str
     return _mcp_response({"success": True, "repos": repos})
 
 
-async def handle_global_repo_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_global_repo_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for global_repo_status tool."""
     from code_indexer.global_repos.shared_operations import GlobalRepoOperations
 
@@ -2442,7 +2463,7 @@ async def handle_global_repo_status(args: Dict[str, Any], user: User) -> Dict[st
         )
 
 
-async def handle_get_global_config(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_get_global_config(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for get_global_config tool."""
     from code_indexer.global_repos.shared_operations import GlobalRepoOperations
 
@@ -2452,7 +2473,7 @@ async def handle_get_global_config(args: Dict[str, Any], user: User) -> Dict[str
     return _mcp_response({"success": True, **config})
 
 
-async def handle_set_global_config(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_set_global_config(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for set_global_config tool."""
     from code_indexer.global_repos.shared_operations import GlobalRepoOperations
 
@@ -2474,7 +2495,7 @@ async def handle_set_global_config(args: Dict[str, Any], user: User) -> Dict[str
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_add_golden_repo_index(
+def handle_add_golden_repo_index(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Handler for add_golden_repo_index tool (Story #596 AC1, AC3, AC4, AC5)."""
@@ -2526,7 +2547,7 @@ async def handle_add_golden_repo_index(
         )
 
 
-async def handle_get_golden_repo_indexes(
+def handle_get_golden_repo_indexes(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Handler for get_golden_repo_indexes tool (Story #596 AC2, AC4)."""
@@ -2564,7 +2585,7 @@ async def handle_get_golden_repo_indexes(
         )
 
 
-async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handle omni-regex search across multiple repositories."""
     import json as json_module
     import time
@@ -2597,7 +2618,7 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
             single_args = dict(args)
             single_args["repository_alias"] = repo_alias
 
-            single_result = await handle_regex_search(single_args, user)
+            single_result = handle_regex_search(single_args, user)
 
             content = single_result.get("content", [])
             if content and content[0].get("type") == "text":
@@ -2638,7 +2659,7 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
     return _mcp_response(formatted)
 
 
-async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for regex_search tool - pattern matching with timeout protection."""
     from pathlib import Path
     from code_indexer.global_repos.regex_search import RegexSearchService
@@ -2655,7 +2676,7 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
 
     # Route to omni-search when repository_alias is an array
     if isinstance(repository_alias, list):
-        return await _omni_regex_search(args, user)
+        return _omni_regex_search(args, user)
 
     pattern = args.get("pattern")
 
@@ -2692,7 +2713,7 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
         service = RegexSearchService(
             repo_path, subprocess_max_workers=subprocess_max_workers
         )
-        result = await service.search(
+        result = service.search(
             pattern=pattern,
             path=args.get("path"),
             include_patterns=args.get("include_patterns"),
@@ -2717,7 +2738,8 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
         ]
 
         # Story #684: Apply payload truncation to regex search results
-        matches = await _apply_regex_payload_truncation(matches)
+        # Story #50: Truncation functions are now sync
+        matches = _apply_regex_payload_truncation(matches)
 
         return _mcp_response(
             {
@@ -2758,7 +2780,7 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
 # =============================================================================
 
 
-async def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Create new file in activated repository.
 
@@ -2856,7 +2878,7 @@ async def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, An
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Edit file using exact string replacement with optimistic locking.
 
@@ -2976,7 +2998,7 @@ async def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Delete file from activated repository.
 
@@ -3116,7 +3138,7 @@ HANDLER_REGISTRY: Dict[str, Any] = {
 }
 
 
-async def _omni_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def _omni_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handle omni-git-log across multiple repositories."""
     import json as json_module
 
@@ -3149,7 +3171,7 @@ async def _omni_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             single_args["repository_alias"] = repo_alias
             single_args["limit"] = per_repo_limit
 
-            single_result = await handle_git_log(single_args, user)
+            single_result = handle_git_log(single_args, user)
 
             resp_content = single_result.get("content", [])
             if resp_content and resp_content[0].get("type") == "text":
@@ -3190,7 +3212,7 @@ async def _omni_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     return _mcp_response(formatted)
 
 
-async def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_log tool - retrieve commit history from a repository.
 
     Story #35: When log exceeds git_log_max_tokens, stores full log in
@@ -3206,7 +3228,7 @@ async def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     # Route to omni-search when repository_alias is an array
     if isinstance(repository_alias, list):
-        return await _omni_git_log(args, user)
+        return _omni_git_log(args, user)
 
     # Validate required parameters
     if not repository_alias:
@@ -3279,7 +3301,7 @@ async def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             from code_indexer.server.cache.truncation_helper import TruncationHelper
 
             truncation_helper = TruncationHelper(payload_cache, content_limits)
-            truncation_result = await truncation_helper.truncate_and_cache(
+            truncation_result = truncation_helper.truncate_and_cache(
                 content=log_json,
                 content_type="log",
             )
@@ -3316,7 +3338,7 @@ async def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_git_show_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_git_show_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_show_commit tool - get detailed commit information."""
     from pathlib import Path
     from code_indexer.global_repos.git_operations import GitOperationsService
@@ -3398,7 +3420,7 @@ async def handle_git_show_commit(args: Dict[str, Any], user: User) -> Dict[str, 
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_git_file_at_revision(
+def handle_git_file_at_revision(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Handler for git_file_at_revision tool - get file contents at specific revision."""
@@ -3563,7 +3585,7 @@ HANDLER_REGISTRY["git_file_at_revision"] = handle_git_file_at_revision
 
 # Story #555: Git Diff and Blame handlers
 # Story #34: Git Diff Returns Cache Handle on Truncation
-async def handle_git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_diff tool - get diff between revisions.
 
     Story #34: When diff exceeds git_diff_max_tokens, stores full diff in
@@ -3659,7 +3681,7 @@ async def handle_git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             from code_indexer.server.cache.truncation_helper import TruncationHelper
 
             truncation_helper = TruncationHelper(payload_cache, content_limits)
-            truncation_result = await truncation_helper.truncate_and_cache(
+            truncation_result = truncation_helper.truncate_and_cache(
                 content=diff_json,
                 content_type="diff",
             )
@@ -3700,7 +3722,7 @@ async def handle_git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_git_blame(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_git_blame(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_blame tool - get line-by-line blame annotations."""
     from pathlib import Path
     from code_indexer.global_repos.git_operations import GitOperationsService
@@ -3771,7 +3793,7 @@ async def handle_git_blame(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_git_file_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_git_file_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_file_history tool - get commit history for a file."""
     from pathlib import Path
     from code_indexer.global_repos.git_operations import GitOperationsService
@@ -3849,7 +3871,7 @@ HANDLER_REGISTRY["git_blame"] = handle_git_blame
 HANDLER_REGISTRY["git_file_history"] = handle_git_file_history
 
 
-async def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handle omni-git-search across multiple repositories."""
     import json as json_module
     import time
@@ -3885,7 +3907,7 @@ async def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str
             single_args = dict(args)
             single_args["repository_alias"] = repo_alias
 
-            single_result = await handle_git_search_commits(single_args, user)
+            single_result = handle_git_search_commits(single_args, user)
 
             resp_content = single_result.get("content", [])
             if resp_content and resp_content[0].get("type") == "text":
@@ -3928,7 +3950,7 @@ async def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str
 
 
 # Story #556: Git Content Search handlers
-async def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_search_commits tool - search commit messages."""
     from pathlib import Path
     from code_indexer.global_repos.git_operations import GitOperationsService
@@ -3940,7 +3962,7 @@ async def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[st
 
     # Route to omni-search when repository_alias is an array
     if isinstance(repository_alias, list):
-        return await _omni_git_search_commits(args, user)
+        return _omni_git_search_commits(args, user)
 
     # Validate required parameters
     if not repository_alias:
@@ -4008,7 +4030,7 @@ async def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[st
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_search_diffs tool - search for code changes (pickaxe search)."""
     from pathlib import Path
     from code_indexer.global_repos.git_operations import GitOperationsService
@@ -4111,7 +4133,7 @@ HANDLER_REGISTRY["git_search_diffs"] = handle_git_search_diffs
 
 
 # Story #557: Directory Tree handler
-async def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for directory_tree tool - generate hierarchical tree view."""
     from pathlib import Path
     from code_indexer.global_repos.directory_explorer import DirectoryExplorerService
@@ -4187,7 +4209,7 @@ async def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, A
 HANDLER_REGISTRY["directory_tree"] = handle_directory_tree
 
 
-async def handle_authenticate(
+def handle_authenticate(
     args: Dict[str, Any], http_request, http_response
 ) -> Dict[str, Any]:
     """
@@ -4285,7 +4307,7 @@ def get_ssh_key_manager() -> SSHKeyManager:
     return _ssh_key_manager
 
 
-async def handle_ssh_key_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_ssh_key_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Create a new SSH key pair.
 
@@ -4345,7 +4367,7 @@ async def handle_ssh_key_create(args: Dict[str, Any], user: User) -> Dict[str, A
 HANDLER_REGISTRY["cidx_ssh_key_create"] = handle_ssh_key_create
 
 
-async def handle_ssh_key_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_ssh_key_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     List all managed and unmanaged SSH keys.
 
@@ -4402,7 +4424,7 @@ async def handle_ssh_key_list(args: Dict[str, Any], user: User) -> Dict[str, Any
 HANDLER_REGISTRY["cidx_ssh_key_list"] = handle_ssh_key_list
 
 
-async def handle_ssh_key_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_ssh_key_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Delete an SSH key.
 
@@ -4441,7 +4463,7 @@ async def handle_ssh_key_delete(args: Dict[str, Any], user: User) -> Dict[str, A
 HANDLER_REGISTRY["cidx_ssh_key_delete"] = handle_ssh_key_delete
 
 
-async def handle_ssh_key_show_public(
+def handle_ssh_key_show_public(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -4485,7 +4507,7 @@ async def handle_ssh_key_show_public(
 HANDLER_REGISTRY["cidx_ssh_key_show_public"] = handle_ssh_key_show_public
 
 
-async def handle_ssh_key_assign_host(
+def handle_ssh_key_assign_host(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -4553,7 +4575,7 @@ HANDLER_REGISTRY["cidx_ssh_key_assign_host"] = handle_ssh_key_assign_host
 # The legacy _get_golden_repos_scip_dir() and _find_scip_files() functions have been removed.
 
 
-async def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Find definition locations for a symbol across all indexed projects.
 
     Args:
@@ -4594,7 +4616,8 @@ async def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             ]
 
         # Story #685: Apply SCIP payload truncation to context fields
-        results_dicts = await _apply_scip_payload_truncation(results_dicts)
+        # Story #50: Truncation functions are now sync
+        results_dicts = _apply_scip_payload_truncation(results_dicts)
 
         return _mcp_response(
             {
@@ -4612,7 +4635,7 @@ async def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e), "results": []})
 
 
-async def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Find all references to a symbol across all indexed projects.
 
     Args:
@@ -4656,7 +4679,8 @@ async def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             ]
 
         # Story #685: Apply SCIP payload truncation to context fields
-        results_dicts = await _apply_scip_payload_truncation(results_dicts)
+        # Story #50: Truncation functions are now sync
+        results_dicts = _apply_scip_payload_truncation(results_dicts)
 
         return _mcp_response(
             {
@@ -4674,7 +4698,7 @@ async def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e), "results": []})
 
 
-async def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get dependencies for a symbol across all indexed projects.
 
     Args:
@@ -4718,7 +4742,8 @@ async def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any
             ]
 
         # Story #685: Apply SCIP payload truncation to context fields
-        results_dicts = await _apply_scip_payload_truncation(results_dicts)
+        # Story #50: Truncation functions are now sync
+        results_dicts = _apply_scip_payload_truncation(results_dicts)
 
         return _mcp_response(
             {
@@ -4736,7 +4761,7 @@ async def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any
         return _mcp_response({"success": False, "error": str(e), "results": []})
 
 
-async def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get dependents (symbols that depend on target symbol) across all indexed projects.
 
     Args:
@@ -4780,7 +4805,8 @@ async def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             ]
 
         # Story #685: Apply SCIP payload truncation to context fields
-        results_dicts = await _apply_scip_payload_truncation(results_dicts)
+        # Story #50: Truncation functions are now sync
+        results_dicts = _apply_scip_payload_truncation(results_dicts)
 
         return _mcp_response(
             {
@@ -4798,7 +4824,7 @@ async def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e), "results": []})
 
 
-async def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Analyze impact of changes to a symbol.
 
     Args:
@@ -4850,7 +4876,7 @@ async def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
 
-async def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Find call chains between two symbols.
 
     Args:
@@ -4963,7 +4989,7 @@ async def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e), "chains": []})
 
 
-async def scip_context(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def scip_context(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get smart context for a symbol.
 
     Args:
@@ -5012,7 +5038,7 @@ async def scip_context(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e), "files": []})
 
 
-async def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Generate quick reference documentation for available MCP tools.
 
@@ -5197,7 +5223,7 @@ async def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
 
-async def trigger_reindex(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def trigger_reindex(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Trigger manual re-indexing for activated repository.
 
     Args:
@@ -5316,7 +5342,7 @@ async def trigger_reindex(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
 
-async def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get indexing status for all index types.
 
     Args:
@@ -5408,7 +5434,7 @@ HANDLER_REGISTRY["get_index_status"] = get_index_status
 # =============================================================================
 
 
-async def git_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def git_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_status tool - get repository working tree status."""
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -5449,7 +5475,7 @@ async def git_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def git_stage(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def git_stage(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_stage tool - stage files for commit."""
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -5495,7 +5521,7 @@ async def git_stage(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def git_unstage(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def git_unstage(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_unstage tool - unstage files."""
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -5541,7 +5567,7 @@ async def git_unstage(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def git_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def git_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_commit tool - create a git commit."""
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -5595,7 +5621,7 @@ async def git_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def git_push(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def git_push(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_push tool - push commits to remote."""
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -5638,7 +5664,7 @@ async def git_push(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def git_pull(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def git_pull(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_pull tool - pull updates from remote."""
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -5681,7 +5707,7 @@ async def git_pull(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def git_fetch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def git_fetch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_fetch tool - fetch refs from remote."""
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -5720,7 +5746,7 @@ async def git_fetch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_reset tool - reset working tree."""
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -5795,7 +5821,7 @@ async def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_clean tool - remove untracked files."""
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -5865,7 +5891,7 @@ async def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def git_merge_abort(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def git_merge_abort(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_merge_abort tool - abort in-progress merge."""
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -5906,7 +5932,7 @@ async def git_merge_abort(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def git_checkout_file(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def git_checkout_file(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_checkout_file tool - restore file from HEAD."""
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -5953,7 +5979,7 @@ async def git_checkout_file(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def git_branch_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def git_branch_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_branch_list tool - list all branches."""
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -5995,7 +6021,7 @@ async def git_branch_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def git_branch_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def git_branch_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_branch_create tool - create new branch."""
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -6045,7 +6071,7 @@ async def git_branch_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def git_branch_switch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def git_branch_switch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_branch_switch tool - switch to different branch."""
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -6095,7 +6121,7 @@ async def git_branch_switch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_branch_delete tool - delete branch."""
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -6190,7 +6216,7 @@ HANDLER_REGISTRY["git_branch_switch"] = git_branch_switch
 HANDLER_REGISTRY["git_branch_delete"] = git_branch_delete
 
 
-async def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_diff tool - get diff of working tree changes with pagination."""
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -6241,7 +6267,7 @@ async def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 HANDLER_REGISTRY["git_diff"] = git_diff
 
 
-async def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_log tool - get commit history with pagination."""
     repository_alias = args.get("repository_alias")
     if not repository_alias:
@@ -6296,7 +6322,7 @@ HANDLER_REGISTRY["git_log"] = git_log
 # =============================================================================
 
 
-async def first_time_user_guide(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def first_time_user_guide(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for first_time_user_guide tool - returns step-by-step onboarding guide."""
     guide = {
         "steps": [
@@ -6397,7 +6423,7 @@ async def first_time_user_guide(args: Dict[str, Any], user: User) -> Dict[str, A
 HANDLER_REGISTRY["first_time_user_guide"] = first_time_user_guide
 
 
-async def get_tool_categories(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def get_tool_categories(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for get_tool_categories tool - returns tools organized by category.
 
     Uses ToolDocLoader to dynamically build categories from markdown documentation
@@ -6443,7 +6469,7 @@ HANDLER_REGISTRY["get_tool_categories"] = get_tool_categories
 # =============================================================================
 
 
-async def handle_admin_logs_query(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_admin_logs_query(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Query operational logs with pagination and filtering.
 
@@ -6504,7 +6530,7 @@ async def handle_admin_logs_query(args: Dict[str, Any], user: User) -> Dict[str,
     )
 
 
-async def admin_logs_export(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def admin_logs_export(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Export operational logs in JSON or CSV format.
 
@@ -6587,7 +6613,7 @@ HANDLER_REGISTRY["admin_logs_query"] = handle_admin_logs_query
 HANDLER_REGISTRY["admin_logs_export"] = admin_logs_export
 
 
-async def get_scip_audit_log(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def get_scip_audit_log(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Get SCIP dependency installation audit log with filtering.
 
@@ -6687,7 +6713,7 @@ HANDLER_REGISTRY["scip_context"] = scip_context
 
 
 # Story #633: GitHub Actions Monitoring Handlers
-async def handle_gh_actions_list_runs(
+def handle_gh_actions_list_runs(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -6739,7 +6765,7 @@ async def handle_gh_actions_list_runs(
 
         # Create client and list runs
         client = GitHubActionsClient(token)
-        runs = await client.list_runs(
+        runs = client.list_runs(
             repository=repository, branch=branch, status=status
         )
 
@@ -6790,7 +6816,7 @@ async def handle_gh_actions_list_runs(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gh_actions_get_run tool.
 
@@ -6838,7 +6864,7 @@ async def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[st
 
         # Create client and get run details
         client = GitHubActionsClient(token)
-        run_info = await client.get_run(repository=repository, run_id=run_id)
+        run_info = client.get_run(repository=repository, run_id=run_id)
 
         return _mcp_response(
             {
@@ -6882,7 +6908,7 @@ async def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[st
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_gh_actions_search_logs(
+def handle_gh_actions_search_logs(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -6939,7 +6965,7 @@ async def handle_gh_actions_search_logs(
 
         # Create client and search logs
         client = GitHubActionsClient(token)
-        matches = await client.search_logs(
+        matches = client.search_logs(
             repository=repository,
             run_id=run_id,
             pattern=pattern,
@@ -6989,7 +7015,7 @@ async def handle_gh_actions_search_logs(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_gh_actions_get_job_logs(
+def handle_gh_actions_get_job_logs(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -7039,7 +7065,7 @@ async def handle_gh_actions_get_job_logs(
 
         # Create client and get job logs
         client = GitHubActionsClient(token)
-        logs = await client.get_job_logs(repository=repository, job_id=job_id)
+        logs = client.get_job_logs(repository=repository, job_id=job_id)
 
         return _mcp_response(
             {
@@ -7084,7 +7110,7 @@ async def handle_gh_actions_get_job_logs(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_gh_actions_retry_run(
+def handle_gh_actions_retry_run(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -7134,7 +7160,7 @@ async def handle_gh_actions_retry_run(
 
         # Create client and retry run
         client = GitHubActionsClient(token)
-        result = await client.retry_run(repository=repository, run_id=run_id)
+        result = client.retry_run(repository=repository, run_id=run_id)
 
         return _mcp_response(
             {
@@ -7179,7 +7205,7 @@ async def handle_gh_actions_retry_run(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_gh_actions_cancel_run(
+def handle_gh_actions_cancel_run(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -7229,7 +7255,7 @@ async def handle_gh_actions_cancel_run(
 
         # Create client and cancel run
         client = GitHubActionsClient(token)
-        result = await client.cancel_run(repository=repository, run_id=run_id)
+        result = client.cancel_run(repository=repository, run_id=run_id)
 
         return _mcp_response(
             {
@@ -7288,7 +7314,7 @@ HANDLER_REGISTRY["gh_actions_cancel_run"] = handle_gh_actions_cancel_run
 # ============================================================================
 
 
-async def handle_gitlab_ci_list_pipelines(
+def handle_gitlab_ci_list_pipelines(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -7338,9 +7364,9 @@ async def handle_gitlab_ci_list_pipelines(
         status = args.get("status")
         limit = args.get("limit", 10)
 
-        # Create client and list pipelines (CRITICAL: await keyword)
+        # Create client and list pipelines (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        pipelines = await client.list_pipelines(
+        pipelines = client.list_pipelines(
             project_id=project_id, ref=ref, status=status
         )
 
@@ -7391,7 +7417,7 @@ async def handle_gitlab_ci_list_pipelines(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_gitlab_ci_get_pipeline(
+def handle_gitlab_ci_get_pipeline(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -7439,9 +7465,9 @@ async def handle_gitlab_ci_get_pipeline(
                 }
             )
 
-        # Create client and get pipeline details (CRITICAL: await keyword)
+        # Create client and get pipeline details (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        pipeline_info = await client.get_pipeline(
+        pipeline_info = client.get_pipeline(
             project_id=project_id, pipeline_id=pipeline_id
         )
 
@@ -7487,7 +7513,7 @@ async def handle_gitlab_ci_get_pipeline(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_gitlab_ci_search_logs(
+def handle_gitlab_ci_search_logs(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -7545,9 +7571,9 @@ async def handle_gitlab_ci_search_logs(
         # Extract optional parameters
         case_sensitive = args.get("case_sensitive", True)
 
-        # Create client and search logs (CRITICAL: await keyword)
+        # Create client and search logs (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        matches = await client.search_logs(
+        matches = client.search_logs(
             project_id=project_id,
             pipeline_id=pipeline_id,
             pattern=pattern,
@@ -7604,7 +7630,7 @@ HANDLER_REGISTRY["gitlab_ci_get_pipeline"] = handle_gitlab_ci_get_pipeline
 HANDLER_REGISTRY["gitlab_ci_search_logs"] = handle_gitlab_ci_search_logs
 
 
-async def handle_gitlab_ci_get_job_logs(
+def handle_gitlab_ci_get_job_logs(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -7652,9 +7678,9 @@ async def handle_gitlab_ci_get_job_logs(
                 }
             )
 
-        # Create client and get job logs (CRITICAL: await keyword)
+        # Create client and get job logs (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        logs = await client.get_job_logs(project_id=project_id, job_id=job_id)
+        logs = client.get_job_logs(project_id=project_id, job_id=job_id)
 
         return _mcp_response(
             {
@@ -7698,7 +7724,7 @@ async def handle_gitlab_ci_get_job_logs(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_gitlab_ci_retry_pipeline(
+def handle_gitlab_ci_retry_pipeline(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -7746,9 +7772,9 @@ async def handle_gitlab_ci_retry_pipeline(
                 }
             )
 
-        # Create client and retry pipeline (CRITICAL: await keyword)
+        # Create client and retry pipeline (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        result = await client.retry_pipeline(
+        result = client.retry_pipeline(
             project_id=project_id, pipeline_id=pipeline_id
         )
 
@@ -7795,7 +7821,7 @@ async def handle_gitlab_ci_retry_pipeline(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_gitlab_ci_cancel_pipeline(
+def handle_gitlab_ci_cancel_pipeline(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -7843,9 +7869,9 @@ async def handle_gitlab_ci_cancel_pipeline(
                 }
             )
 
-        # Create client and cancel pipeline (CRITICAL: await keyword)
+        # Create client and cancel pipeline (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        result = await client.cancel_pipeline(
+        result = client.cancel_pipeline(
             project_id=project_id, pipeline_id=pipeline_id
         )
 
@@ -7903,7 +7929,7 @@ HANDLER_REGISTRY["gitlab_ci_cancel_pipeline"] = handle_gitlab_ci_cancel_pipeline
 # =============================================================================
 
 
-async def handle_github_actions_list_runs(
+def handle_github_actions_list_runs(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -7964,9 +7990,9 @@ async def handle_github_actions_list_runs(
         # Combine owner and repo into repository format
         repository = f"{owner}/{repo}"
 
-        # Create client and list runs (CRITICAL: await keyword)
+        # Create client and list runs (CRITICAL: keyword)
         client = GitHubActionsClient(token)
-        runs = await client.list_runs(
+        runs = client.list_runs(
             repository=repository, branch=branch, status=status
         )
 
@@ -8023,7 +8049,7 @@ async def handle_github_actions_list_runs(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_github_actions_get_run(
+def handle_github_actions_get_run(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -8080,9 +8106,9 @@ async def handle_github_actions_get_run(
         # Combine owner and repo into repository format
         repository = f"{owner}/{repo}"
 
-        # Create client and get run details (CRITICAL: await keyword)
+        # Create client and get run details (CRITICAL: keyword)
         client = GitHubActionsClient(token)
-        run_details = await client.get_run(repository=repository, run_id=run_id)
+        run_details = client.get_run(repository=repository, run_id=run_id)
 
         return _mcp_response(
             {
@@ -8126,7 +8152,7 @@ async def handle_github_actions_get_run(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_github_actions_search_logs(
+def handle_github_actions_search_logs(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -8189,9 +8215,9 @@ async def handle_github_actions_search_logs(
         # Combine owner and repo into repository format
         repository = f"{owner}/{repo}"
 
-        # Create client and search logs (CRITICAL: await keyword)
+        # Create client and search logs (CRITICAL: keyword)
         client = GitHubActionsClient(token)
-        matches = await client.search_logs(
+        matches = client.search_logs(
             repository=repository, run_id=run_id, pattern=query
         )
 
@@ -8240,7 +8266,7 @@ async def handle_github_actions_search_logs(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_github_actions_get_job_logs(
+def handle_github_actions_get_job_logs(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -8297,9 +8323,9 @@ async def handle_github_actions_get_job_logs(
         # Combine owner and repo into repository format
         repository = f"{owner}/{repo}"
 
-        # Create client and get job logs (CRITICAL: await keyword)
+        # Create client and get job logs (CRITICAL: keyword)
         client = GitHubActionsClient(token)
-        logs = await client.get_job_logs(repository=repository, job_id=job_id)
+        logs = client.get_job_logs(repository=repository, job_id=job_id)
 
         return _mcp_response(
             {
@@ -8344,7 +8370,7 @@ async def handle_github_actions_get_job_logs(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_github_actions_retry_run(
+def handle_github_actions_retry_run(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -8401,9 +8427,9 @@ async def handle_github_actions_retry_run(
         # Combine owner and repo into repository format
         repository = f"{owner}/{repo}"
 
-        # Create client and retry run (CRITICAL: await keyword)
+        # Create client and retry run (CRITICAL: keyword)
         client = GitHubActionsClient(token)
-        result = await client.retry_run(repository=repository, run_id=run_id)
+        result = client.retry_run(repository=repository, run_id=run_id)
 
         return _mcp_response(
             {
@@ -8449,7 +8475,7 @@ async def handle_github_actions_retry_run(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_github_actions_cancel_run(
+def handle_github_actions_cancel_run(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -8506,9 +8532,9 @@ async def handle_github_actions_cancel_run(
         # Combine owner and repo into repository format
         repository = f"{owner}/{repo}"
 
-        # Create client and cancel run (CRITICAL: await keyword)
+        # Create client and cancel run (CRITICAL: keyword)
         client = GitHubActionsClient(token)
-        result = await client.cancel_run(repository=repository, run_id=run_id)
+        result = client.cancel_run(repository=repository, run_id=run_id)
 
         return _mcp_response(
             {
@@ -8568,7 +8594,7 @@ HANDLER_REGISTRY["github_actions_cancel_run"] = handle_github_actions_cancel_run
 # ============================================================================
 
 
-async def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for get_cached_content tool.
 
@@ -8609,7 +8635,7 @@ async def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[st
         )
 
     try:
-        result = await payload_cache.retrieve(handle, page=page)
+        result = payload_cache.retrieve(handle, page=page)
         return _mcp_response(
             {
                 "success": True,
@@ -8649,7 +8675,7 @@ HANDLER_REGISTRY["get_cached_content"] = handle_get_cached_content
 # =============================================================================
 
 
-async def handle_set_session_impersonation(
+def handle_set_session_impersonation(
     args: Dict[str, Any], user: User, session_state=None
 ) -> Dict[str, Any]:
     """
@@ -8805,7 +8831,7 @@ def _get_user_groups(user: User) -> set:
         return set()
 
 
-async def handle_list_delegation_functions(
+def handle_list_delegation_functions(
     args: Dict[str, Any], user: User, *, session_state=None
 ) -> Dict[str, Any]:
     """
@@ -9115,6 +9141,8 @@ async def handle_poll_delegation_job(
     Wait for delegation job completion via callback mechanism.
 
     Story #720: Callback-Based Delegation Job Completion
+    Story #50: This handler remains async (justified exception) because
+    DelegationJobTracker uses asyncio.Future for callback-based completion.
 
     Instead of polling Claude Server repeatedly, this waits on a Future
     that gets resolved when Claude Server POSTs the callback to CIDX.
@@ -9268,7 +9296,7 @@ def _validate_group_id(
     return group_id, group, None
 
 
-async def handle_list_groups(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_list_groups(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List all groups with member counts and repository access information."""
     try:
         group_manager = _get_group_manager()
@@ -9300,7 +9328,7 @@ async def handle_list_groups(args: Dict[str, Any], user: User) -> Dict[str, Any]
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_create_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_create_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Create a new custom group."""
     try:
         group_manager = _get_group_manager()
@@ -9339,7 +9367,7 @@ async def handle_create_group(args: Dict[str, Any], user: User) -> Dict[str, Any
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_get_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_get_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get detailed information about a specific group."""
     try:
         group_manager = _get_group_manager()
@@ -9372,7 +9400,7 @@ async def handle_get_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Update a custom group's name and/or description."""
     try:
         group_manager = _get_group_manager()
@@ -9413,7 +9441,7 @@ async def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Delete a custom group."""
     from ..services.group_access_manager import (
         DefaultGroupCannotBeDeletedError,
@@ -9456,7 +9484,7 @@ async def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_add_member_to_group(
+def handle_add_member_to_group(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Assign a user to a group."""
@@ -9496,7 +9524,7 @@ async def handle_add_member_to_group(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_remove_member_from_group(
+def handle_remove_member_from_group(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Remove a user from a group."""
@@ -9534,7 +9562,7 @@ async def handle_remove_member_from_group(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Grant a group access to one or more repositories."""
     try:
         group_manager = _get_group_manager()
@@ -9575,7 +9603,7 @@ async def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[st
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_remove_repo_from_group(
+def handle_remove_repo_from_group(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Revoke a group's access to a single repository."""
@@ -9631,7 +9659,7 @@ async def handle_remove_repo_from_group(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_bulk_remove_repos_from_group(
+def handle_bulk_remove_repos_from_group(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Revoke a group's access to multiple repositories."""
@@ -9700,7 +9728,7 @@ HANDLER_REGISTRY["bulk_remove_repos_from_group"] = handle_bulk_remove_repos_from
 # =============================================================================
 
 
-async def handle_list_api_keys(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_list_api_keys(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List all API keys for the authenticated user."""
     try:
         keys = app_module.user_manager.get_api_keys(user.username)
@@ -9726,7 +9754,7 @@ async def handle_list_api_keys(args: Dict[str, Any], user: User) -> Dict[str, An
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_create_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_create_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Create a new API key for the authenticated user."""
     try:
         from code_indexer.server.auth.api_key_manager import ApiKeyManager
@@ -9750,7 +9778,7 @@ async def handle_create_api_key(args: Dict[str, Any], user: User) -> Dict[str, A
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_delete_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_delete_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Delete an API key belonging to the authenticated user."""
     try:
         key_id = args.get("key_id", "")
@@ -9783,7 +9811,7 @@ HANDLER_REGISTRY["delete_api_key"] = handle_delete_api_key
 # =============================================================================
 
 
-async def handle_list_mcp_credentials(
+def handle_list_mcp_credentials(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """List all MCP credentials for the authenticated user."""
@@ -9810,7 +9838,7 @@ async def handle_list_mcp_credentials(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_create_mcp_credential(
+def handle_create_mcp_credential(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Create a new MCP credential for the authenticated user."""
@@ -9837,7 +9865,7 @@ async def handle_create_mcp_credential(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_delete_mcp_credential(
+def handle_delete_mcp_credential(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Delete an MCP credential belonging to the authenticated user."""
@@ -9874,7 +9902,7 @@ HANDLER_REGISTRY["delete_mcp_credential"] = handle_delete_mcp_credential
 # =============================================================================
 
 
-async def handle_admin_list_user_mcp_credentials(
+def handle_admin_list_user_mcp_credentials(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """List all MCP credentials for a specific user (admin only)."""
@@ -9910,7 +9938,7 @@ async def handle_admin_list_user_mcp_credentials(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_admin_create_user_mcp_credential(
+def handle_admin_create_user_mcp_credential(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Create a new MCP credential for a specific user (admin only)."""
@@ -9960,7 +9988,7 @@ HANDLER_REGISTRY["admin_create_user_mcp_credential"] = (
 # =============================================================================
 
 
-async def handle_admin_delete_user_mcp_credential(
+def handle_admin_delete_user_mcp_credential(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Delete an MCP credential for a specific user (admin only)."""
@@ -9995,7 +10023,7 @@ async def handle_admin_delete_user_mcp_credential(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_admin_list_all_mcp_credentials(
+def handle_admin_list_all_mcp_credentials(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """List all MCP credentials across all users (admin only)."""
@@ -10074,7 +10102,7 @@ def _filter_audit_entries(
     return filtered[:limit]
 
 
-async def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Query security audit logs with optional filtering (admin only)."""
     try:
         if user.role != UserRole.ADMIN:
@@ -10130,7 +10158,7 @@ async def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str,
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_enter_maintenance_mode(
+def handle_enter_maintenance_mode(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Enter server maintenance mode (admin only)."""
@@ -10160,7 +10188,7 @@ async def handle_enter_maintenance_mode(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_exit_maintenance_mode(
+def handle_exit_maintenance_mode(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Exit server maintenance mode (admin only)."""
@@ -10193,7 +10221,7 @@ HANDLER_REGISTRY["enter_maintenance_mode"] = handle_enter_maintenance_mode
 HANDLER_REGISTRY["exit_maintenance_mode"] = handle_exit_maintenance_mode
 
 
-async def handle_get_maintenance_status(
+def handle_get_maintenance_status(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Get current server maintenance mode status (any authenticated user)."""
@@ -10223,7 +10251,7 @@ async def handle_get_maintenance_status(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_scip_pr_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def handle_scip_pr_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get SCIP self-healing PR creation history (admin only)."""
     try:
         if user.role != UserRole.ADMIN:
@@ -10269,7 +10297,7 @@ async def handle_scip_pr_history(args: Dict[str, Any], user: User) -> Dict[str, 
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_scip_cleanup_history(
+def handle_scip_cleanup_history(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Get SCIP workspace cleanup history (admin only)."""
@@ -10343,7 +10371,7 @@ def _execute_workspace_cleanup() -> Dict[str, Any]:
     return {"message": "Workspace cleanup service not available"}
 
 
-async def handle_scip_cleanup_workspaces(
+def handle_scip_cleanup_workspaces(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Trigger SCIP workspace cleanup job (admin only)."""
@@ -10401,7 +10429,7 @@ async def handle_scip_cleanup_workspaces(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_scip_cleanup_status(
+def handle_scip_cleanup_status(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Get SCIP workspace cleanup job status (admin only)."""

@@ -5,7 +5,7 @@ import httpx
 from .exceptions import ServerConnectivityError
 
 
-async def test_server_connectivity(server_url: str, timeout: float = 10.0) -> None:
+def test_server_connectivity(server_url: str, timeout: float = 10.0) -> None:
     """Test basic connectivity to a remote CIDX server.
 
     Args:
@@ -19,10 +19,10 @@ async def test_server_connectivity(server_url: str, timeout: float = 10.0) -> No
         raise ServerConnectivityError("Server URL cannot be empty")
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        with httpx.Client(timeout=timeout) as client:
             # Try to reach a basic health endpoint or root
             # Most servers will respond to GET / even if they don't have a health endpoint
-            response = await client.get(server_url)
+            response = client.get(server_url)
 
             # Accept any response that indicates the server is reachable
             # Even 404 is fine - it means the server is responding

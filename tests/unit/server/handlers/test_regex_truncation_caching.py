@@ -1,6 +1,7 @@
 """Unit tests for Regex metadata and caching logic.
 
 Story #684: S6 - Regex Search with Payload Control
+Story #50: Updated to sync operations for FastAPI thread pool execution.
 AC3: Regex-Specific Context Preservation
 AC4: Independent Field Caching
 
@@ -15,10 +16,12 @@ from unittest.mock import patch
 
 
 class TestAC3MetadataPreservation:
-    """AC3: Regex-Specific Context Preservation tests."""
+    """AC3: Regex-Specific Context Preservation tests.
 
-    @pytest.mark.asyncio
-    async def test_all_metadata_preserved_after_truncation(self, cache):
+    Story #50: _apply_regex_payload_truncation is now sync.
+    """
+
+    def test_all_metadata_preserved_after_truncation(self, cache):
         """Test that all regex metadata is preserved after truncation."""
         from code_indexer.server.mcp.handlers import _apply_regex_payload_truncation
 
@@ -39,7 +42,7 @@ class TestAC3MetadataPreservation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -52,8 +55,7 @@ class TestAC3MetadataPreservation:
         assert result["context_before"] == ["prev1", "prev2"]
         assert result["context_after"] == ["next1", "next2"]
 
-    @pytest.mark.asyncio
-    async def test_extra_fields_preserved(self, cache):
+    def test_extra_fields_preserved(self, cache):
         """Test that any extra/unknown fields are preserved."""
         from code_indexer.server.mcp.handlers import _apply_regex_payload_truncation
 
@@ -75,7 +77,7 @@ class TestAC3MetadataPreservation:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -85,10 +87,12 @@ class TestAC3MetadataPreservation:
 
 
 class TestAC4IndependentFieldCaching:
-    """AC4: Independent Field Caching tests."""
+    """AC4: Independent Field Caching tests.
 
-    @pytest.mark.asyncio
-    async def test_all_large_fields_get_independent_handles(self, cache):
+    Story #50: _apply_regex_payload_truncation and PayloadCache are now sync.
+    """
+
+    def test_all_large_fields_get_independent_handles(self, cache):
         """Test that each large field gets its own independent cache handle."""
         from code_indexer.server.mcp.handlers import _apply_regex_payload_truncation
 
@@ -112,7 +116,7 @@ class TestAC4IndependentFieldCaching:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
@@ -133,8 +137,7 @@ class TestAC4IndependentFieldCaching:
         for handle in handles:
             uuid.UUID(handle, version=4)
 
-    @pytest.mark.asyncio
-    async def test_handles_are_retrievable_independently(self, cache):
+    def test_handles_are_retrievable_independently(self, cache):
         """Test that each cache handle can be retrieved independently."""
         from code_indexer.server.mcp.handlers import _apply_regex_payload_truncation
 
@@ -155,18 +158,18 @@ class TestAC4IndependentFieldCaching:
         ) as mock_state:
             mock_state.payload_cache = cache
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)  # Sync call
 
         result = truncated[0]
 
-        # Retrieve each cached content independently
-        line_retrieved = await cache.retrieve(
+        # Retrieve each cached content independently (sync calls)
+        line_retrieved = cache.retrieve(
             result["line_content_cache_handle"], page=0
         )
-        before_retrieved = await cache.retrieve(
+        before_retrieved = cache.retrieve(
             result["context_before_cache_handle"], page=0
         )
-        after_retrieved = await cache.retrieve(
+        after_retrieved = cache.retrieve(
             result["context_after_cache_handle"], page=0
         )
 

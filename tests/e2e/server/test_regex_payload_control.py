@@ -27,7 +27,7 @@ class TestRegexPayloadCacheE2E:
     """E2E tests for Regex PayloadCache truncation functionality."""
 
     @pytest.fixture
-    async def cache_with_standard_config(self, tmp_path):
+    def cache_with_standard_config(self, tmp_path):
         """Create PayloadCache with standard settings."""
         config = PayloadCacheConfig(
             preview_size_chars=2000,
@@ -35,9 +35,9 @@ class TestRegexPayloadCacheE2E:
             cache_ttl_seconds=900,
         )
         cache = PayloadCache(db_path=tmp_path / "test_cache.db", config=config)
-        await cache.initialize()
+        cache.initialize()
         yield cache
-        await cache.close()
+        cache.close()
 
     @pytest.mark.asyncio
     async def test_regex_large_line_content_truncation_workflow(
@@ -63,7 +63,7 @@ class TestRegexPayloadCacheE2E:
         ) as mock_state:
             mock_state.payload_cache = cache_with_standard_config
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)
 
         result = truncated[0]
 
@@ -73,7 +73,7 @@ class TestRegexPayloadCacheE2E:
         assert result["line_content_cache_handle"] is not None
 
         # Verify full content can be retrieved
-        retrieved = await cache_with_standard_config.retrieve(
+        retrieved = cache_with_standard_config.retrieve(
             result["line_content_cache_handle"], page=0
         )
         assert retrieved.content == large_line
@@ -105,7 +105,7 @@ class TestRegexPayloadCacheE2E:
         ) as mock_state:
             mock_state.payload_cache = cache_with_standard_config
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)
 
         result = truncated[0]
 
@@ -114,7 +114,7 @@ class TestRegexPayloadCacheE2E:
         assert result["context_before_cache_handle"] is not None
 
         # Verify full content can be retrieved (stored as newline-joined)
-        retrieved = await cache_with_standard_config.retrieve(
+        retrieved = cache_with_standard_config.retrieve(
             result["context_before_cache_handle"], page=0
         )
         assert retrieved.content == "\n".join(large_context)
@@ -146,7 +146,7 @@ class TestRegexPayloadCacheE2E:
         ) as mock_state:
             mock_state.payload_cache = cache_with_standard_config
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)
 
         result = truncated[0]
 
@@ -163,13 +163,13 @@ class TestRegexPayloadCacheE2E:
         )
 
         # Retrieve each independently and verify correct content
-        line_retrieved = await cache_with_standard_config.retrieve(
+        line_retrieved = cache_with_standard_config.retrieve(
             result["line_content_cache_handle"], page=0
         )
-        before_retrieved = await cache_with_standard_config.retrieve(
+        before_retrieved = cache_with_standard_config.retrieve(
             result["context_before_cache_handle"], page=0
         )
-        after_retrieved = await cache_with_standard_config.retrieve(
+        after_retrieved = cache_with_standard_config.retrieve(
             result["context_after_cache_handle"], page=0
         )
 
@@ -200,7 +200,7 @@ class TestRegexPayloadCacheE2E:
         ) as mock_state:
             mock_state.payload_cache = cache_with_standard_config
 
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)
 
         result = truncated[0]
 
@@ -222,7 +222,7 @@ class TestRegexMcpCacheRetrievalE2E:
     """E2E tests for MCP get_cached_content tool with regex handles (AC5)."""
 
     @pytest.fixture
-    async def cache(self, tmp_path):
+    def cache(self, tmp_path):
         """Create PayloadCache for testing."""
         config = PayloadCacheConfig(
             preview_size_chars=2000,
@@ -230,9 +230,9 @@ class TestRegexMcpCacheRetrievalE2E:
             cache_ttl_seconds=900,
         )
         cache = PayloadCache(db_path=tmp_path / "test_cache.db", config=config)
-        await cache.initialize()
+        cache.initialize()
         yield cache
-        await cache.close()
+        cache.close()
 
     @pytest.fixture
     def mock_user(self):
@@ -269,7 +269,7 @@ class TestRegexMcpCacheRetrievalE2E:
             "code_indexer.server.mcp.handlers.app_module.app.state"
         ) as mock_state:
             mock_state.payload_cache = cache
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)
 
         line_handle = truncated[0]["line_content_cache_handle"]
 
@@ -317,7 +317,7 @@ class TestRegexMcpCacheRetrievalE2E:
             "code_indexer.server.mcp.handlers.app_module.app.state"
         ) as mock_state:
             mock_state.payload_cache = cache
-            truncated = await _apply_regex_payload_truncation(results)
+            truncated = _apply_regex_payload_truncation(results)
 
         context_handle = truncated[0]["context_before_cache_handle"]
 

@@ -77,8 +77,7 @@ def mock_activated_repos():
 class TestListRepositoriesWithGlobalRepos:
     """Test MCP list_repositories handler includes global repos."""
 
-    @pytest.mark.asyncio
-    async def test_global_repos_appear_in_list(
+    def test_global_repos_appear_in_list(
         self, mock_user, mock_global_registry_data, mock_activated_repos
     ):
         """Test that global repos from registry appear in list_repositories response."""
@@ -94,13 +93,14 @@ class TestListRepositoriesWithGlobalRepos:
                 mock_global_registry_data.values()
             )
 
-            # Patch GlobalRegistry instantiation
+            # Patch get_server_global_registry to return our mock
+            # GlobalRegistry is accessed via get_server_global_registry(), not directly imported
             with patch(
-                "code_indexer.server.mcp.handlers.GlobalRegistry",
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
                 return_value=mock_registry,
             ):
                 # Execute
-                result = await list_repositories({}, mock_user)
+                result = list_repositories({}, mock_user)
 
                 # Verify: Response contains content
                 assert "content" in result
@@ -141,8 +141,7 @@ class TestListRepositoriesWithGlobalRepos:
                 assert "my-project" in activated_aliases
                 assert "auth-lib" in activated_aliases
 
-    @pytest.mark.asyncio
-    async def test_global_repos_marked_with_is_global_true(
+    def test_global_repos_marked_with_is_global_true(
         self, mock_user, mock_global_registry_data, mock_activated_repos
     ):
         """Test that global repos have is_global: true field."""
@@ -157,10 +156,10 @@ class TestListRepositoriesWithGlobalRepos:
             )
 
             with patch(
-                "code_indexer.server.mcp.handlers.GlobalRegistry",
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
                 return_value=mock_registry,
             ):
-                result = await list_repositories({}, mock_user)
+                result = list_repositories({}, mock_user)
 
                 import json
 
@@ -181,8 +180,7 @@ class TestListRepositoriesWithGlobalRepos:
                             repo.get("is_global") is not True
                         ), "Activated repo should not have is_global=True"
 
-    @pytest.mark.asyncio
-    async def test_global_repos_include_metadata(
+    def test_global_repos_include_metadata(
         self, mock_user, mock_global_registry_data
     ):
         """Test that global repos include repo name, last update time, and index path."""
@@ -197,10 +195,10 @@ class TestListRepositoriesWithGlobalRepos:
             )
 
             with patch(
-                "code_indexer.server.mcp.handlers.GlobalRegistry",
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
                 return_value=mock_registry,
             ):
-                result = await list_repositories({}, mock_user)
+                result = list_repositories({}, mock_user)
 
                 import json
 
@@ -222,8 +220,7 @@ class TestListRepositoriesWithGlobalRepos:
                         # Verify user_alias has -global suffix
                         assert repo["user_alias"].endswith("-global")
 
-    @pytest.mark.asyncio
-    async def test_empty_global_registry_handled_gracefully(
+    def test_empty_global_registry_handled_gracefully(
         self, mock_user, mock_activated_repos
     ):
         """Test that empty golden-repos directory is handled without errors."""
@@ -237,10 +234,10 @@ class TestListRepositoriesWithGlobalRepos:
             mock_registry.list_global_repos.return_value = []
 
             with patch(
-                "code_indexer.server.mcp.handlers.GlobalRegistry",
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
                 return_value=mock_registry,
             ):
-                result = await list_repositories({}, mock_user)
+                result = list_repositories({}, mock_user)
 
                 import json
 
@@ -256,8 +253,7 @@ class TestListRepositoriesWithGlobalRepos:
                     repo.get("is_global") is not True for repo in repos
                 ), "Should not have any global repos"
 
-    @pytest.mark.asyncio
-    async def test_only_global_repos_no_activated_repos(
+    def test_only_global_repos_no_activated_repos(
         self, mock_user, mock_global_registry_data
     ):
         """Test list_repositories when user has no activated repos but global repos exist."""
@@ -273,10 +269,10 @@ class TestListRepositoriesWithGlobalRepos:
             )
 
             with patch(
-                "code_indexer.server.mcp.handlers.GlobalRegistry",
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
                 return_value=mock_registry,
             ):
-                result = await list_repositories({}, mock_user)
+                result = list_repositories({}, mock_user)
 
                 import json
 
@@ -289,8 +285,7 @@ class TestListRepositoriesWithGlobalRepos:
                     repo["is_global"] is True for repo in repos
                 ), "All repos should be global"
 
-    @pytest.mark.asyncio
-    async def test_global_registry_error_does_not_break_activated_list(self, mock_user):
+    def test_global_registry_error_does_not_break_activated_list(self, mock_user):
         """Test that global registry errors don't prevent listing activated repos."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.activated_repo_manager.list_activated_repositories.return_value = [
@@ -301,12 +296,12 @@ class TestListRepositoriesWithGlobalRepos:
                 }
             ]
 
-            # Mock GlobalRegistry to raise exception
+            # Mock get_server_global_registry to raise exception
             with patch(
-                "code_indexer.server.mcp.handlers.GlobalRegistry",
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
                 side_effect=Exception("Registry load failed"),
             ):
-                result = await list_repositories({}, mock_user)
+                result = list_repositories({}, mock_user)
 
                 import json
 
@@ -322,8 +317,7 @@ class TestListRepositoriesWithGlobalRepos:
                     repo.get("user_alias") == "my-project" for repo in repos
                 ), "Activated repo should still be listed despite global registry error"
 
-    @pytest.mark.asyncio
-    async def test_golden_repos_dir_from_environment(self, mock_user, tmp_path):
+    def test_golden_repos_dir_from_environment(self, mock_user, tmp_path):
         """Test that golden_repos_dir is loaded from environment variable."""
         # Create temporary golden repos directory
         temp_golden_dir = tmp_path / "test-golden-repos"
@@ -340,21 +334,20 @@ class TestListRepositoriesWithGlobalRepos:
                 []
             )
 
-            # Mock GlobalRegistry
+            # Mock get_server_global_registry
             mock_registry = MagicMock()
             mock_registry.list_global_repos.return_value = []
 
             with patch(
-                "code_indexer.server.mcp.handlers.GlobalRegistry",
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
                 return_value=mock_registry,
-            ) as mock_registry_class:
-                await list_repositories({}, mock_user)
+            ) as mock_registry_factory:
+                list_repositories({}, mock_user)
 
-                # Verify: GlobalRegistry was instantiated with app.state.golden_repos_dir
-                mock_registry_class.assert_called_once_with(str(temp_golden_dir))
+                # Verify: get_server_global_registry was called with app.state.golden_repos_dir
+                mock_registry_factory.assert_called_once_with(str(temp_golden_dir))
 
-    @pytest.mark.asyncio
-    async def test_duplicate_alias_names_handled(
+    def test_duplicate_alias_names_handled(
         self, mock_user, mock_global_registry_data
     ):
         """Test that duplicate alias names between activated and global repos are handled."""
@@ -378,10 +371,10 @@ class TestListRepositoriesWithGlobalRepos:
             ]
 
             with patch(
-                "code_indexer.server.mcp.handlers.GlobalRegistry",
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
                 return_value=mock_registry,
             ):
-                result = await list_repositories({}, mock_user)
+                result = list_repositories({}, mock_user)
 
                 import json
 

@@ -64,8 +64,7 @@ def _extract_response_data(mcp_response: dict) -> dict:
 class TestGitStatusHandler:
     """Test git_status MCP handler."""
 
-    @pytest.mark.asyncio
-    async def test_git_status_success(
+    def test_git_status_success(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test successful git status operation."""
@@ -81,7 +80,7 @@ class TestGitStatusHandler:
         params = {"repository_alias": "test-repo"}
 
         # Execute handler
-        mcp_response = await handlers.git_status(params, mock_user)
+        mcp_response = handlers.git_status(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         # Verify response
@@ -93,21 +92,19 @@ class TestGitStatusHandler:
         # Verify service was called correctly
         mock_git_service.git_status.assert_called_once_with(Path("/tmp/test-repo"))
 
-    @pytest.mark.asyncio
-    async def test_git_status_missing_repository(self, mock_user):
+    def test_git_status_missing_repository(self, mock_user):
         """Test git status with missing repository_alias parameter."""
         from code_indexer.server.mcp import handlers
 
         params = {}  # Missing repository_alias
 
-        mcp_response = await handlers.git_status(params, mock_user)
+        mcp_response = handlers.git_status(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert "Missing required parameter: repository_alias" in data["error"]
 
-    @pytest.mark.asyncio
-    async def test_git_status_git_command_error(
+    def test_git_status_git_command_error(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git status with GitCommandError."""
@@ -124,7 +121,7 @@ class TestGitStatusHandler:
 
         params = {"repository_alias": "test-repo"}
 
-        mcp_response = await handlers.git_status(params, mock_user)
+        mcp_response = handlers.git_status(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
@@ -136,8 +133,7 @@ class TestGitStatusHandler:
 class TestGitDiffHandler:
     """Test git_diff MCP handler."""
 
-    @pytest.mark.asyncio
-    async def test_git_diff_success(
+    def test_git_diff_success(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test successful git diff operation."""
@@ -150,15 +146,14 @@ class TestGitDiffHandler:
 
         params = {"repository_alias": "test-repo"}
 
-        mcp_response = await handlers.git_diff(params, mock_user)
+        mcp_response = handlers.git_diff(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
         assert "diff --git" in data["diff_text"]
         assert data["files_changed"] == 1
 
-    @pytest.mark.asyncio
-    async def test_git_diff_with_file_paths(
+    def test_git_diff_with_file_paths(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git diff with specific file paths."""
@@ -171,22 +166,22 @@ class TestGitDiffHandler:
 
         params = {"repository_alias": "test-repo", "file_paths": ["specific.py"]}
 
-        mcp_response = await handlers.git_diff(params, mock_user)
+        mcp_response = handlers.git_diff(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
+        # Story #686: git_diff now includes offset and limit parameters
         mock_git_service.git_diff.assert_called_once_with(
-            Path("/tmp/test-repo"), file_paths=["specific.py"]
+            Path("/tmp/test-repo"), file_paths=["specific.py"], offset=0, limit=None
         )
 
-    @pytest.mark.asyncio
-    async def test_git_diff_missing_repository(self, mock_user):
+    def test_git_diff_missing_repository(self, mock_user):
         """Test git diff with missing repository_alias parameter."""
         from code_indexer.server.mcp import handlers
 
         params = {}  # Missing repository_alias
 
-        mcp_response = await handlers.git_diff(params, mock_user)
+        mcp_response = handlers.git_diff(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
@@ -196,8 +191,7 @@ class TestGitDiffHandler:
 class TestGitLogHandler:
     """Test git_log MCP handler."""
 
-    @pytest.mark.asyncio
-    async def test_git_log_success(
+    def test_git_log_success(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test successful git log operation."""
@@ -216,15 +210,14 @@ class TestGitLogHandler:
 
         params = {"repository_alias": "test-repo", "limit": 10}
 
-        mcp_response = await handlers.git_log(params, mock_user)
+        mcp_response = handlers.git_log(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
         assert len(data["commits"]) == 1
         assert data["commits"][0]["commit_hash"] == "abc123"
 
-    @pytest.mark.asyncio
-    async def test_git_log_with_since_date(
+    def test_git_log_with_since_date(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git log with since_date filter."""
@@ -238,16 +231,16 @@ class TestGitLogHandler:
             "since_date": "2025-01-10",
         }
 
-        mcp_response = await handlers.git_log(params, mock_user)
+        mcp_response = handlers.git_log(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
+        # Story #686: git_log now includes offset parameter
         mock_git_service.git_log.assert_called_once_with(
-            Path("/tmp/test-repo"), limit=10, since_date="2025-01-10"
+            Path("/tmp/test-repo"), limit=10, offset=0, since_date="2025-01-10"
         )
 
-    @pytest.mark.asyncio
-    async def test_git_log_default_limit(
+    def test_git_log_default_limit(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git log uses default limit when not specified."""
@@ -257,23 +250,22 @@ class TestGitLogHandler:
 
         params = {"repository_alias": "test-repo"}
 
-        mcp_response = await handlers.git_log(params, mock_user)
+        mcp_response = handlers.git_log(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
-        # Verify default limit (10) was used
+        # Story #686: Default limit is now 50 (not 10), and offset parameter added
         mock_git_service.git_log.assert_called_once_with(
-            Path("/tmp/test-repo"), limit=10, since_date=None
+            Path("/tmp/test-repo"), limit=50, offset=0, since_date=None
         )
 
-    @pytest.mark.asyncio
-    async def test_git_log_missing_repository(self, mock_user):
+    def test_git_log_missing_repository(self, mock_user):
         """Test git log with missing repository_alias parameter."""
         from code_indexer.server.mcp import handlers
 
         params = {}  # Missing repository_alias
 
-        mcp_response = await handlers.git_log(params, mock_user)
+        mcp_response = handlers.git_log(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
@@ -283,8 +275,7 @@ class TestGitLogHandler:
 class TestGitStageHandler:
     """Test git_stage MCP handler (F3: Staging/Commit)."""
 
-    @pytest.mark.asyncio
-    async def test_git_stage_success(
+    def test_git_stage_success(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test successful git stage operation."""
@@ -300,7 +291,7 @@ class TestGitStageHandler:
             "file_paths": ["file1.py", "file2.py"],
         }
 
-        mcp_response = await handlers.git_stage(params, mock_user)
+        mcp_response = handlers.git_stage(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
@@ -309,27 +300,25 @@ class TestGitStageHandler:
             Path("/tmp/test-repo"), ["file1.py", "file2.py"]
         )
 
-    @pytest.mark.asyncio
-    async def test_git_stage_missing_parameters(self, mock_user):
+    def test_git_stage_missing_parameters(self, mock_user):
         """Test git stage with missing required parameters."""
         from code_indexer.server.mcp import handlers
 
         # Missing repository_alias
         params = {"file_paths": ["file1.py"]}
-        mcp_response = await handlers.git_stage(params, mock_user)
+        mcp_response = handlers.git_stage(params, mock_user)
         data = _extract_response_data(mcp_response)
         assert data["success"] is False
         assert "Missing required parameter: repository_alias" in data["error"]
 
         # Missing file_paths
         params = {"repository_alias": "test-repo"}
-        mcp_response = await handlers.git_stage(params, mock_user)
+        mcp_response = handlers.git_stage(params, mock_user)
         data = _extract_response_data(mcp_response)
         assert data["success"] is False
         assert "Missing required parameter: file_paths" in data["error"]
 
-    @pytest.mark.asyncio
-    async def test_git_stage_git_command_error(
+    def test_git_stage_git_command_error(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git stage with GitCommandError."""
@@ -345,7 +334,7 @@ class TestGitStageHandler:
 
         params = {"repository_alias": "test-repo", "file_paths": ["nonexistent.py"]}
 
-        mcp_response = await handlers.git_stage(params, mock_user)
+        mcp_response = handlers.git_stage(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
@@ -356,8 +345,7 @@ class TestGitStageHandler:
 class TestGitUnstageHandler:
     """Test git_unstage MCP handler (F3: Staging/Commit)."""
 
-    @pytest.mark.asyncio
-    async def test_git_unstage_success(
+    def test_git_unstage_success(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test successful git unstage operation."""
@@ -370,7 +358,7 @@ class TestGitUnstageHandler:
 
         params = {"repository_alias": "test-repo", "file_paths": ["file1.py"]}
 
-        mcp_response = await handlers.git_unstage(params, mock_user)
+        mcp_response = handlers.git_unstage(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
@@ -379,20 +367,18 @@ class TestGitUnstageHandler:
             Path("/tmp/test-repo"), ["file1.py"]
         )
 
-    @pytest.mark.asyncio
-    async def test_git_unstage_missing_parameters(self, mock_user):
+    def test_git_unstage_missing_parameters(self, mock_user):
         """Test git unstage with missing required parameters."""
         from code_indexer.server.mcp import handlers
 
         params = {}  # Missing both parameters
-        mcp_response = await handlers.git_unstage(params, mock_user)
+        mcp_response = handlers.git_unstage(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert "Missing required parameter" in data["error"]
 
-    @pytest.mark.asyncio
-    async def test_git_unstage_git_command_error(
+    def test_git_unstage_git_command_error(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git unstage with GitCommandError."""
@@ -408,7 +394,7 @@ class TestGitUnstageHandler:
 
         params = {"repository_alias": "test-repo", "file_paths": ["file.py"]}
 
-        mcp_response = await handlers.git_unstage(params, mock_user)
+        mcp_response = handlers.git_unstage(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
@@ -418,8 +404,7 @@ class TestGitUnstageHandler:
 class TestGitCommitHandler:
     """Test git_commit MCP handler (F3: Staging/Commit)."""
 
-    @pytest.mark.asyncio
-    async def test_git_commit_success_with_email_extraction(
+    def test_git_commit_success_with_email_extraction(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test successful git commit with email extracted from User object."""
@@ -435,7 +420,7 @@ class TestGitCommitHandler:
 
         params = {"repository_alias": "test-repo", "message": "Test commit"}
 
-        mcp_response = await handlers.git_commit(params, mock_user)
+        mcp_response = handlers.git_commit(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
@@ -450,20 +435,18 @@ class TestGitCommitHandler:
             "testuser",  # Derived from username
         )
 
-    @pytest.mark.asyncio
-    async def test_git_commit_missing_parameters(self, mock_user):
+    def test_git_commit_missing_parameters(self, mock_user):
         """Test git commit with missing required parameters."""
         from code_indexer.server.mcp import handlers
 
         params = {}  # Missing both parameters
-        mcp_response = await handlers.git_commit(params, mock_user)
+        mcp_response = handlers.git_commit(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False
         assert "Missing required parameter" in data["error"]
 
-    @pytest.mark.asyncio
-    async def test_git_commit_git_command_error(
+    def test_git_commit_git_command_error(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git commit with GitCommandError."""
@@ -479,7 +462,7 @@ class TestGitCommitHandler:
 
         params = {"repository_alias": "test-repo", "message": "Empty commit"}
 
-        mcp_response = await handlers.git_commit(params, mock_user)
+        mcp_response = handlers.git_commit(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is False

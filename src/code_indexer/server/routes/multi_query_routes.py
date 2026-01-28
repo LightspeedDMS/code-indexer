@@ -181,7 +181,7 @@ async def multi_repository_query(
         service = get_multi_search_service()
 
         # Execute search
-        response = await service.search(request)
+        response = service.search(request)
 
         # Story #683: Apply payload truncation to results
         response.results = await _apply_multi_truncation(

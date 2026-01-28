@@ -49,7 +49,7 @@ class IndexAPIClient(CIDXRemoteAPIClient):
             project_root=project_root,
         )
 
-    async def trigger(
+    def trigger(
         self,
         repository: str,
         clear: bool = False,
@@ -78,7 +78,7 @@ class IndexAPIClient(CIDXRemoteAPIClient):
             data["types"] = index_types
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST",
                 f"/api/v1/index/{repository}/trigger",
                 json=data if data else None,
@@ -106,7 +106,7 @@ class IndexAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error triggering indexing: {e}")
 
-    async def status(self, repository: str) -> Dict[str, Any]:
+    def status(self, repository: str) -> Dict[str, Any]:
         """Get index status for a repository.
 
         Args:
@@ -121,7 +121,7 @@ class IndexAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "GET", f"/api/v1/index/{repository}/status"
             )
 
@@ -147,7 +147,7 @@ class IndexAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error getting index status: {e}")
 
-    async def add_type(self, repository: str, index_type: str) -> Dict[str, Any]:
+    def add_type(self, repository: str, index_type: str) -> Dict[str, Any]:
         """Add an index type to a repository.
 
         Args:
@@ -165,7 +165,7 @@ class IndexAPIClient(CIDXRemoteAPIClient):
         data: Dict[str, Any] = {"type": index_type}
 
         try:
-            response = await self._authenticated_request(
+            response = self._authenticated_request(
                 "POST", f"/api/v1/index/{repository}/add-type", json=data
             )
 
