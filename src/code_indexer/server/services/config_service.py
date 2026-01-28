@@ -191,6 +191,8 @@ class ConfigService:
                 "require_email_verification": config.oidc_provider_config.require_email_verification,
                 "enable_jit_provisioning": config.oidc_provider_config.enable_jit_provisioning,
                 "default_role": config.oidc_provider_config.default_role,
+                "groups_claim": config.oidc_provider_config.groups_claim,
+                "group_mappings": config.oidc_provider_config.group_mappings,
             },
             # SCIP workspace cleanup (Story #647, Story #15 AC2: moved to scip_config)
             "scip_cleanup": {
@@ -580,6 +582,30 @@ class ConfigService:
             oidc.enable_jit_provisioning = value in ["true", True]
         elif key == "default_role":
             oidc.default_role = str(value)
+        elif key == "groups_claim":
+            oidc.groups_claim = str(value)
+        elif key == "group_mappings":
+            # Parse JSON string, dict (old format), or list (new format)
+            import json
+
+            if isinstance(value, (dict, list)):
+                oidc.group_mappings = value
+            elif isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    if not isinstance(parsed, (dict, list)):
+                        raise ValueError(
+                            f"Invalid JSON for group_mappings: must be dict or list, got {type(parsed)}"
+                        )
+                    oidc.group_mappings = parsed
+                except json.JSONDecodeError:
+                    raise ValueError(
+                        f"Invalid JSON for group_mappings: {value}. Expected format: [{{'external_group_id': 'guid', 'cidx_group': 'admins'}}]"
+                    )
+            else:
+                raise ValueError(
+                    f"Invalid type for group_mappings: {type(value)}. Expected dict, list, or JSON string"
+                )
         else:
             raise ValueError(f"Unknown OIDC setting: {key}")
 

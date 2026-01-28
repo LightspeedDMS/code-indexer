@@ -473,6 +473,31 @@
                         <td class="config-note"></td>
                     </tr>
                     <tr>
+                        <td class="config-label">Groups Claim</td>
+                        <td class="config-value">{{ config.oidc.groups_claim }}</td>
+                        <td class="config-note"><small>Claim containing user's groups</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Group Mappings</td>
+                        <td class="config-value">
+                            {% if config.oidc.group_mappings %}
+                                <div style="font-family: monospace; font-size: 0.9em;">
+                                {% for mapping in config.oidc.group_mappings %}
+                                    {% if mapping.external_group_name %}
+                                        <strong>{{ mapping.external_group_name }}</strong><br>
+                                        <span style="color: #666; font-size: 0.85em;">{{ mapping.external_group_id }}</span> → {{ mapping.cidx_group }}<br>
+                                    {% else %}
+                                        {{ mapping.external_group_id }} → {{ mapping.cidx_group }}<br>
+                                    {% endif %}
+                                {% endfor %}
+                                </div>
+                            {% else %}
+                                None configured
+                            {% endif %}
+                        </td>
+                        <td class="config-note"><small>Maps external groups to CIDX groups</small></td>
+                    </tr>
+                    <tr>
                         <td class="config-label">Use PKCE</td>
                         <td class="config-value">{{ 'Yes' if config.oidc.use_pkce else 'No' }}</td>
                         <td class="config-note"><small>Recommended for security</small></td>
@@ -540,6 +565,16 @@
                     Username Claim
                     <input type="text" id="oidc-username-claim" name="username_claim" value="{{ config.oidc.username_claim }}">
                     <small>OIDC claim for username (used ONLY when creating new users via JIT provisioning)</small>
+                </label>
+                <label for="oidc-groups-claim">
+                    Groups Claim
+                    <input type="text" id="oidc-groups-claim" name="groups_claim" value="{{ config.oidc.groups_claim }}">
+                    <small>OIDC claim containing user's groups (e.g., "groups", "roles")</small>
+                </label>
+                <label for="oidc-group-mappings" style="grid-column: 1 / -1;">
+                    Group Mappings (JSON Array)
+                    <textarea id="oidc-group-mappings" name="group_mappings" rows="8" placeholder='[{"external_group_id": "guid-or-name", "external_group_name": "Display Name (optional)", "cidx_group": "admins"}]'>{{ config.oidc.group_mappings | tojson if config.oidc.group_mappings else '[]' }}</textarea>
+                    <small>Map external SSO groups to CIDX groups. Each mapping object has: <code>external_group_id</code> (required, GUID or name from token), <code>external_group_name</code> (optional, for display/documentation), <code>cidx_group</code> (required, "admins"/"powerusers"/"users"). First matching group is assigned during JIT provisioning.</small>
                 </label>
                 <label for="oidc-use-pkce">
                     Use PKCE

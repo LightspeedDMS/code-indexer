@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.7.0] - 2026-01-26
+
+### Added
+
+- **SSO Group Mapping** - Map external SSO groups (from Entra/Keycloak) to internal CIDX groups:
+  - Configure mappings with external group ID, optional display name, and target CIDX group
+  - First-match strategy: user assigned to first matching group in mapping list
+  - Graceful fallback to "users" group when no mappings match or mapped group doesn't exist
+  - Backward compatible: automatic migration from old dict format to new list format
+  - Optional display names for better UI readability in configuration
+
+### Changed
+
+- **ID Token-Based User Info** - OIDC authentication now parses ID token directly instead of calling userinfo endpoint:
+  - More reliable: works universally with Entra, Keycloak, and other OIDC providers
+  - Eliminates potential userinfo endpoint configuration issues
+  - Groups extracted directly from ID token claims
+  - All OIDC tests updated for new implementation
+
+---
+
 ## [8.6.17] - 2026-01-26
 
 ### Fixed
