@@ -2,13 +2,14 @@
 Unit tests for REST SCIP query route delegation to SCIPQueryService.
 
 Story #41: Refactor REST SCIP Routes to Use SCIPQueryService
+Story #50: Route handlers converted from async to sync for proper FastAPI threadpool execution.
 
 Tests for definition, references, dependencies, and dependents endpoints.
 Following TDD methodology - these tests are written FIRST before implementation.
 """
 
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone
 
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -76,10 +77,12 @@ class TestGetScipQueryServiceHelper:
 
 
 class TestDefinitionRouteDelegation:
-    """Tests for /scip/definition route delegation to SCIPQueryService."""
+    """Tests for /scip/definition route delegation to SCIPQueryService.
 
-    @pytest.mark.asyncio
-    async def test_definition_route_calls_service_find_definition(
+    Story #50: Tests converted from async to sync since route handlers are now sync.
+    """
+
+    def test_definition_route_calls_service_find_definition(
         self, mock_user, mock_scip_service
     ):
         """AC: /scip/definition route delegates to SCIPQueryService.find_definition()."""
@@ -107,12 +110,12 @@ class TestDefinitionRouteDelegation:
         ):
             with patch(
                 "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
-                new_callable=AsyncMock,
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.find_definition.return_value
                 )
-                response = await get_definition(
+                # Sync call - no await needed
+                response = get_definition(
                     request=mock_request,
                     symbol="UserService",
                     exact=False,
@@ -134,8 +137,7 @@ class TestDefinitionRouteDelegation:
                 assert response["total_results"] == 1
                 assert len(response["results"]) == 1
 
-    @pytest.mark.asyncio
-    async def test_definition_route_passes_project_as_repository_alias(
+    def test_definition_route_passes_project_as_repository_alias(
         self, mock_user, mock_scip_service
     ):
         """Verify project parameter is passed as repository_alias to service."""
@@ -151,10 +153,10 @@ class TestDefinitionRouteDelegation:
         ):
             with patch(
                 "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
-                new_callable=AsyncMock,
             ) as mock_truncate:
                 mock_truncate.return_value = []
-                await get_definition(
+                # Sync call - no await needed
+                get_definition(
                     request=mock_request,
                     symbol="UserService",
                     exact=True,
@@ -171,10 +173,12 @@ class TestDefinitionRouteDelegation:
 
 
 class TestReferencesRouteDelegation:
-    """Tests for /scip/references route delegation to SCIPQueryService."""
+    """Tests for /scip/references route delegation to SCIPQueryService.
 
-    @pytest.mark.asyncio
-    async def test_references_route_calls_service_find_references(
+    Story #50: Tests converted from async to sync since route handlers are now sync.
+    """
+
+    def test_references_route_calls_service_find_references(
         self, mock_user, mock_scip_service
     ):
         """AC: /scip/references route delegates to SCIPQueryService.find_references()."""
@@ -202,12 +206,12 @@ class TestReferencesRouteDelegation:
         ):
             with patch(
                 "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
-                new_callable=AsyncMock,
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.find_references.return_value
                 )
-                response = await get_references(
+                # Sync call - no await needed
+                response = get_references(
                     request=mock_request,
                     symbol="UserService",
                     limit=50,
@@ -230,10 +234,12 @@ class TestReferencesRouteDelegation:
 
 
 class TestDependenciesRouteDelegation:
-    """Tests for /scip/dependencies route delegation to SCIPQueryService."""
+    """Tests for /scip/dependencies route delegation to SCIPQueryService.
 
-    @pytest.mark.asyncio
-    async def test_dependencies_route_calls_service_get_dependencies(
+    Story #50: Tests converted from async to sync since route handlers are now sync.
+    """
+
+    def test_dependencies_route_calls_service_get_dependencies(
         self, mock_user, mock_scip_service
     ):
         """AC: /scip/dependencies route delegates to get_dependencies()."""
@@ -261,12 +267,12 @@ class TestDependenciesRouteDelegation:
         ):
             with patch(
                 "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
-                new_callable=AsyncMock,
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.get_dependencies.return_value
                 )
-                response = await get_dependencies(
+                # Sync call - no await needed
+                response = get_dependencies(
                     request=mock_request,
                     symbol="UserService",
                     depth=2,
@@ -288,10 +294,12 @@ class TestDependenciesRouteDelegation:
 
 
 class TestDependentsRouteDelegation:
-    """Tests for /scip/dependents route delegation to SCIPQueryService."""
+    """Tests for /scip/dependents route delegation to SCIPQueryService.
 
-    @pytest.mark.asyncio
-    async def test_dependents_route_calls_service_get_dependents(
+    Story #50: Tests converted from async to sync since route handlers are now sync.
+    """
+
+    def test_dependents_route_calls_service_get_dependents(
         self, mock_user, mock_scip_service
     ):
         """AC: /scip/dependents route delegates to SCIPQueryService.get_dependents()."""
@@ -319,12 +327,12 @@ class TestDependentsRouteDelegation:
         ):
             with patch(
                 "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
-                new_callable=AsyncMock,
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.get_dependents.return_value
                 )
-                response = await get_dependents(
+                # Sync call - no await needed
+                response = get_dependents(
                     request=mock_request,
                     symbol="UserService",
                     depth=1,

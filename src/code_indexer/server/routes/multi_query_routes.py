@@ -23,10 +23,12 @@ from ..multi import (
 logger = logging.getLogger(__name__)
 
 
-async def _apply_multi_truncation(
+def _apply_multi_truncation(
     grouped_results: Dict[str, List[Dict[str, Any]]], search_type: str
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Apply payload truncation to multi-repo grouped search results (Story #683).
+
+    Story #50: Converted from async to sync since underlying handlers are sync.
 
     Args:
         grouped_results: Dict mapping repo_id to list of result dicts
@@ -43,12 +45,12 @@ async def _apply_multi_truncation(
 
     for repo_id, results in grouped_results.items():
         if search_type == "fts":
-            grouped_results[repo_id] = await _apply_fts_payload_truncation(results)
+            grouped_results[repo_id] = _apply_fts_payload_truncation(results)
         elif search_type == "temporal":
-            grouped_results[repo_id] = await _apply_temporal_payload_truncation(results)
+            grouped_results[repo_id] = _apply_temporal_payload_truncation(results)
         else:
             # Default to semantic truncation (handles both content and code_snippet)
-            grouped_results[repo_id] = await _apply_payload_truncation(results)
+            grouped_results[repo_id] = _apply_payload_truncation(results)
 
     return grouped_results
 
@@ -80,7 +82,7 @@ def get_multi_search_service() -> MultiSearchService:
 
 
 @router.post("/multi", response_model=MultiSearchResponse)
-async def multi_repository_query(
+def multi_repository_query(
     request: MultiSearchRequest,
     user: User = Depends(get_current_user),
 ) -> MultiSearchResponse:
@@ -184,7 +186,8 @@ async def multi_repository_query(
         response = service.search(request)
 
         # Story #683: Apply payload truncation to results
-        response.results = await _apply_multi_truncation(
+        # Story #50: Now sync call (underlying handlers are sync)
+        response.results = _apply_multi_truncation(
             response.results, request.search_type
         )
 

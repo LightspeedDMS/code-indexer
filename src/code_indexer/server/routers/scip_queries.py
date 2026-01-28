@@ -95,12 +95,15 @@ def _get_scip_query_service(request: Request) -> SCIPQueryService:
     )
 
 
-async def _apply_scip_payload_truncation(
+def _apply_scip_payload_truncation(
     results: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Apply payload truncation to SCIP results.
 
     Delegates to the MCP handlers truncation function for consistency.
+
+    Story #50: Converted from async to sync - the delegate function is sync,
+    and awaiting a sync function causes TypeError at runtime.
 
     Args:
         results: List of SCIP result dictionaries
@@ -110,11 +113,11 @@ async def _apply_scip_payload_truncation(
     """
     from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation as mcp_truncate
 
-    return await mcp_truncate(results)
+    return mcp_truncate(results)
 
 
 @router.get("/definition")
-async def get_definition(
+def get_definition(
     request: Request,
     symbol: str = Query(..., description="Symbol name to search for"),
     exact: bool = Query(False, description="If True, match exact symbol name"),
@@ -123,6 +126,9 @@ async def get_definition(
 ) -> Dict[str, Any]:
     """
     Find definition locations for a symbol across all indexed projects.
+
+    Story #50: Converted from async to sync - underlying service is sync,
+    FastAPI runs sync handlers in threadpool which is the correct pattern.
 
     Args:
         symbol: Symbol name to search for (e.g., "UserService", "authenticate")
@@ -143,7 +149,7 @@ async def get_definition(
         )
 
         # Apply SCIP payload truncation for consistency
-        results = await _apply_scip_payload_truncation(results)
+        results = _apply_scip_payload_truncation(results)
 
         return {
             "success": True,
@@ -160,7 +166,7 @@ async def get_definition(
 
 
 @router.get("/references")
-async def get_references(
+def get_references(
     request: Request,
     symbol: str = Query(..., description="Symbol name to search for"),
     limit: int = Query(100, description="Maximum number of results to return"),
@@ -170,6 +176,9 @@ async def get_references(
 ) -> Dict[str, Any]:
     """
     Find all references to a symbol across all indexed projects.
+
+    Story #50: Converted from async to sync - underlying service is sync,
+    FastAPI runs sync handlers in threadpool which is the correct pattern.
 
     Args:
         symbol: Symbol name to search for
@@ -192,7 +201,7 @@ async def get_references(
         )
 
         # Apply SCIP payload truncation for consistency
-        results = await _apply_scip_payload_truncation(results)
+        results = _apply_scip_payload_truncation(results)
 
         return {
             "success": True,
@@ -209,7 +218,7 @@ async def get_references(
 
 
 @router.get("/dependencies")
-async def get_dependencies(
+def get_dependencies(
     request: Request,
     symbol: str = Query(..., description="Symbol name to analyze"),
     depth: int = Query(1, description="Depth of transitive dependencies"),
@@ -219,6 +228,9 @@ async def get_dependencies(
 ) -> Dict[str, Any]:
     """
     Get symbols that the target symbol depends on.
+
+    Story #50: Converted from async to sync - underlying service is sync,
+    FastAPI runs sync handlers in threadpool which is the correct pattern.
 
     Args:
         symbol: Symbol name to analyze
@@ -241,7 +253,7 @@ async def get_dependencies(
         )
 
         # Apply SCIP payload truncation for consistency
-        results = await _apply_scip_payload_truncation(results)
+        results = _apply_scip_payload_truncation(results)
 
         return {
             "success": True,
@@ -258,7 +270,7 @@ async def get_dependencies(
 
 
 @router.get("/dependents")
-async def get_dependents(
+def get_dependents(
     request: Request,
     symbol: str = Query(..., description="Symbol name to analyze"),
     depth: int = Query(1, description="Depth of transitive dependents"),
@@ -268,6 +280,9 @@ async def get_dependents(
 ) -> Dict[str, Any]:
     """
     Get symbols that depend on the target symbol.
+
+    Story #50: Converted from async to sync - underlying service is sync,
+    FastAPI runs sync handlers in threadpool which is the correct pattern.
 
     Args:
         symbol: Symbol name to analyze
@@ -290,7 +305,7 @@ async def get_dependents(
         )
 
         # Apply SCIP payload truncation for consistency
-        results = await _apply_scip_payload_truncation(results)
+        results = _apply_scip_payload_truncation(results)
 
         return {
             "success": True,

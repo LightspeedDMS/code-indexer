@@ -18,6 +18,16 @@ from .password_strength_validator import PasswordStrengthValidator
 from ..utils.datetime_parser import DateTimeParser
 
 
+class SSOPasswordChangeError(Exception):
+    """Raised when attempting to change password for SSO user.
+
+    SSO users authenticate via their identity provider (OIDC), so password
+    changes must be managed through that provider, not locally.
+    """
+
+    pass
+
+
 class UserRole(str, Enum):
     """User roles with different permission levels."""
 
@@ -502,7 +512,16 @@ class UserManager:
 
         Raises:
             ValueError: If password does not meet security requirements
+            SSOPasswordChangeError: If user is an SSO user (has OIDC identity)
         """
+        # Bug #68: Check if SSO user - REJECT password change
+        # SSO users must manage passwords through their identity provider
+        if self.is_sso_user(username):
+            raise SSOPasswordChangeError(
+                "Cannot change password for SSO users. "
+                "Authentication is managed by the identity provider."
+            )
+
         # Validate password strength (applies to both backends)
         is_valid, validation_result = self.password_strength_validator.validate(
             new_password, username
@@ -1101,6 +1120,34 @@ class UserManager:
                 )
 
         return None
+
+    def is_sso_user(self, username: str) -> bool:
+        """Check if user is an SSO user (has OIDC identity).
+
+        SSO users authenticate via their identity provider and should not have
+        their passwords changed locally.
+
+        Args:
+            username: Username to check
+
+        Returns:
+            True if user has OIDC identity (is SSO user), False otherwise
+        """
+        if self._use_sqlite and self._sqlite_backend is not None:
+            # SQLite backend
+            user_data = self._sqlite_backend.get_user(username)
+            if user_data is None:
+                return False
+            oidc_identity = user_data.get("oidc_identity")
+            return bool(oidc_identity)
+        else:
+            # JSON file storage
+            users_data = self._load_users()
+            if username not in users_data:
+                return False
+            user_data = users_data[username]
+            oidc_identity = user_data.get("oidc_identity")
+            return bool(oidc_identity)
 
     def set_oidc_identity(self, username: str, identity: Dict[str, Any]) -> bool:
         """Set OIDC identity for user.

@@ -34,9 +34,11 @@ def create_mock_id_token(claims):
 class TestUsernameClaimExtraction:
     """Test username extraction from OIDC userinfo using username_claim."""
 
-    @pytest.mark.asyncio
-    async def test_extracts_username_using_default_claim(self, monkeypatch):
-        """Test that username is extracted using default username_claim (preferred_username)."""
+    def test_extracts_username_using_default_claim(self, monkeypatch):
+        """Test that username is extracted using default username_claim (preferred_username).
+
+        NOTE: get_user_info is a sync function (no async I/O - just JWT parsing).
+        """
         from code_indexer.server.auth.oidc.oidc_provider import (
             OIDCProvider,
             OIDCMetadata,
@@ -65,14 +67,13 @@ class TestUsernameClaimExtraction:
         }
         id_token = create_mock_id_token(claims)
 
-        user_info = await provider.get_user_info("test-access-token", id_token)
+        user_info = provider.get_user_info("test-access-token", id_token)
 
         assert user_info.subject == "oidc-user-12345"
         assert user_info.email == "user@example.com"
         assert user_info.username == "jdoe"
 
-    @pytest.mark.asyncio
-    async def test_extracts_username_using_custom_claim(self, monkeypatch):
+    def test_extracts_username_using_custom_claim(self, monkeypatch):
         """Test that username is extracted using custom username_claim."""
         from code_indexer.server.auth.oidc.oidc_provider import (
             OIDCProvider,
@@ -102,12 +103,11 @@ class TestUsernameClaimExtraction:
         }
         id_token = create_mock_id_token(claims)
 
-        user_info = await provider.get_user_info("test-access-token", id_token)
+        user_info = provider.get_user_info("test-access-token", id_token)
 
         assert user_info.username == "custom_user"
 
-    @pytest.mark.asyncio
-    async def test_username_is_none_when_claim_not_present(self, monkeypatch):
+    def test_username_is_none_when_claim_not_present(self, monkeypatch):
         """Test that username is None when username_claim is not in ID token."""
         from code_indexer.server.auth.oidc.oidc_provider import (
             OIDCProvider,
@@ -136,7 +136,7 @@ class TestUsernameClaimExtraction:
         }
         id_token = create_mock_id_token(claims)
 
-        user_info = await provider.get_user_info("test-access-token", id_token)
+        user_info = provider.get_user_info("test-access-token", id_token)
 
         assert user_info.username is None
 

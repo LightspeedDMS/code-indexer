@@ -111,11 +111,14 @@ class OIDCProvider:
 
         return tokens
 
-    async def get_user_info(self, access_token, id_token):
+    def get_user_info(self, access_token, id_token):
         """Parse ID token to extract user information and claims.
 
         ID token contains all necessary user claims including groups.
         This approach works universally with Entra, Keycloak, and other OIDC providers.
+
+        NOTE: This is intentionally a sync function (not async) because it performs
+        no I/O operations - only in-memory JWT parsing (base64 decode + JSON parse).
 
         Args:
             access_token: OAuth access token (kept for backward compatibility)

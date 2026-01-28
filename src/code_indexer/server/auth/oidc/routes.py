@@ -60,7 +60,7 @@ async def sso_callback(code: str, state: str, request: Request):
     if "id_token" not in tokens:
         raise HTTPException(status_code=500, detail="ID token not returned by provider")
 
-    user_info = await oidc_manager.provider.get_user_info(
+    user_info = oidc_manager.provider.get_user_info(
         tokens["access_token"],
         tokens["id_token"]
     )

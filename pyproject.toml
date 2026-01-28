@@ -212,6 +212,7 @@ markers = [
     "real_api: Tests that make real API calls",
     "slow: Tests that take longer to run",
     "integration: Integration tests requiring multiple services",
+    "performance: Performance benchmark tests",
     "unit: Unit tests with mocked dependencies",
     "full_automation: Tests that should only be run in full automation pipeline",
     "requires_ssh: Tests requiring SSH access to external repositories (skipped when CIDX_SKIP_SSH_TESTS=1)",

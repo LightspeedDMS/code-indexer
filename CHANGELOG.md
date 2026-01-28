@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Orphan node detection (elements with no inbound connections)
   - Foundation for upcoming HNSW Index Health Check epic across CLI, REST, MCP, and Web UI interfaces
 
+### Changed
+
+- **OIDC get_user_info() Converted to Sync** - Changed `get_user_info()` from async to sync function since it only performs CPU-bound JWT parsing (base64 decode + JSON parse), not I/O. This improves uvicorn concurrency by leveraging the threadpool for CPU work instead of blocking the single event loop.
+
+### Fixed
+
+- **Pydantic V2 Deprecation Warnings** - Migrated 3 models from deprecated `class Config` with `json_encoders` to `@field_serializer` decorators:
+  - `ActivatedRepository` - datetime and Path field serializers
+  - `CompositeRepositoryDetails` - datetime field serializers
+  - `FileInfo` - datetime field serializer
+  - Eliminates 8 Pydantic deprecation warnings from test output
+
+- **Pytest performance Marker Warning** - Registered `performance` pytest marker in pyproject.toml to eliminate PytestUnknownMarkWarning
+
 ---
 
 ## [8.7.0] - 2026-01-26

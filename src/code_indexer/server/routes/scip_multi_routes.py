@@ -60,10 +60,13 @@ def get_scip_multi_service() -> SCIPMultiService:
     return _scip_multi_service
 
 
-async def _apply_multi_scip_truncation(
+def _apply_multi_scip_truncation(
     response: SCIPMultiResponse,
 ) -> Dict[str, Any]:
     """Apply SCIP payload truncation to multi-repo response results (Story #685).
+
+    Story #50: Converted from async to sync because _apply_scip_payload_truncation
+    in handlers.py is a sync function. FastAPI can run sync handlers in threadpool.
 
     Converts SCIPMultiResponse to dict and applies truncation to each
     repository's results list, handling the context field truncation.
@@ -83,20 +86,22 @@ async def _apply_multi_scip_truncation(
     # Apply truncation to each repository's results
     for repo_id, results_list in response_dict["results"].items():
         if results_list:
-            # Apply truncation (converts SCIPResult dicts with context field)
-            truncated_results = await _apply_scip_payload_truncation(results_list)
+            # Apply truncation (sync call - _apply_scip_payload_truncation is sync)
+            truncated_results = _apply_scip_payload_truncation(results_list)
             response_dict["results"][repo_id] = truncated_results
 
     return response_dict
 
 
 @router.post("/definition", response_model=SCIPMultiResponse)
-async def multi_repository_definition(
+def multi_repository_definition(
     request: SCIPMultiRequest,
     user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
     Find symbol definition across multiple repositories (AC1: Multi-Repository Definition Lookup).
+
+    Story #50: Converted from async to sync. FastAPI runs sync handlers in threadpool.
 
     Performs parallel definition lookup across specified repositories with:
     - Authentication enforcement (JWT token required)
@@ -188,8 +193,8 @@ async def multi_repository_definition(
             f"in {response.metadata.execution_time_ms}ms"
         )
 
-        # Story #685: Apply SCIP payload truncation to context fields
-        return await _apply_multi_scip_truncation(response)
+        # Story #685: Apply SCIP payload truncation to context fields (sync call)
+        return _apply_multi_scip_truncation(response)
 
     except ValueError as e:
         # Validation error from service
@@ -205,12 +210,14 @@ async def multi_repository_definition(
 
 
 @router.post("/references", response_model=SCIPMultiResponse)
-async def multi_repository_references(
+def multi_repository_references(
     request: SCIPMultiRequest,
     user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
     Find symbol references across multiple repositories (AC2: Multi-Repository Reference Lookup).
+
+    Story #50: Converted from async to sync. FastAPI runs sync handlers in threadpool.
 
     Performs parallel references lookup across specified repositories with:
     - Authentication enforcement (JWT token required)
@@ -264,8 +271,8 @@ async def multi_repository_references(
             f"in {response.metadata.execution_time_ms}ms"
         )
 
-        # Story #685: Apply SCIP payload truncation to context fields
-        return await _apply_multi_scip_truncation(response)
+        # Story #685: Apply SCIP payload truncation to context fields (sync call)
+        return _apply_multi_scip_truncation(response)
 
     except ValueError as e:
         # Validation error from service
@@ -281,12 +288,14 @@ async def multi_repository_references(
 
 
 @router.post("/dependencies", response_model=SCIPMultiResponse)
-async def multi_repository_dependencies(
+def multi_repository_dependencies(
     request: SCIPMultiRequest,
     user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
     Analyze symbol dependencies across multiple repositories (AC3: Multi-Repository Dependency Analysis).
+
+    Story #50: Converted from async to sync. FastAPI runs sync handlers in threadpool.
 
     Performs parallel dependency analysis across specified repositories with:
     - Authentication enforcement (JWT token required)
@@ -340,8 +349,8 @@ async def multi_repository_dependencies(
             f"in {response.metadata.execution_time_ms}ms"
         )
 
-        # Story #685: Apply SCIP payload truncation to context fields
-        return await _apply_multi_scip_truncation(response)
+        # Story #685: Apply SCIP payload truncation to context fields (sync call)
+        return _apply_multi_scip_truncation(response)
 
     except ValueError as e:
         # Validation error from service
@@ -357,12 +366,14 @@ async def multi_repository_dependencies(
 
 
 @router.post("/dependents", response_model=SCIPMultiResponse)
-async def multi_repository_dependents(
+def multi_repository_dependents(
     request: SCIPMultiRequest,
     user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
     Analyze symbol dependents across multiple repositories (AC4: Multi-Repository Dependents Analysis).
+
+    Story #50: Converted from async to sync. FastAPI runs sync handlers in threadpool.
 
     Performs parallel dependents analysis across specified repositories with:
     - Authentication enforcement (JWT token required)
@@ -416,8 +427,8 @@ async def multi_repository_dependents(
             f"in {response.metadata.execution_time_ms}ms"
         )
 
-        # Story #685: Apply SCIP payload truncation to context fields
-        return await _apply_multi_scip_truncation(response)
+        # Story #685: Apply SCIP payload truncation to context fields (sync call)
+        return _apply_multi_scip_truncation(response)
 
     except ValueError as e:
         # Validation error from service
@@ -433,12 +444,14 @@ async def multi_repository_dependents(
 
 
 @router.post("/callchain", response_model=SCIPMultiResponse)
-async def multi_repository_callchain(
+def multi_repository_callchain(
     request: SCIPMultiRequest,
     user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
     Trace call chains across multiple repositories (AC5: Per-Repository Call Chain Tracing).
+
+    Story #50: Converted from async to sync. FastAPI runs sync handlers in threadpool.
 
     Performs parallel call chain tracing across specified repositories with:
     - Authentication enforcement (JWT token required)
@@ -495,8 +508,8 @@ async def multi_repository_callchain(
             f"in {response.metadata.execution_time_ms}ms"
         )
 
-        # Story #685: Apply SCIP payload truncation to context fields
-        return await _apply_multi_scip_truncation(response)
+        # Story #685: Apply SCIP payload truncation to context fields (sync call)
+        return _apply_multi_scip_truncation(response)
 
     except ValueError as e:
         # Validation error from service

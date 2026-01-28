@@ -76,9 +76,11 @@ class TestOIDCProviderHttpCalls:
             mock_response.json.assert_called_once()
             assert tokens["access_token"] == "test-access-token"
 
-    @pytest.mark.asyncio
-    async def test_get_user_info_parses_id_token(self):
-        """Test that get_user_info parses ID token correctly."""
+    def test_get_user_info_parses_id_token(self):
+        """Test that get_user_info parses ID token correctly.
+
+        NOTE: get_user_info is a sync function (no async I/O - just JWT parsing).
+        """
         config = OIDCProviderConfig(
             enabled=True,
             issuer_url="http://localhost:8180/realms/test",
@@ -95,13 +97,12 @@ class TestOIDCProviderHttpCalls:
         }
         id_token = create_mock_id_token(claims)
 
-        user_info = await provider.get_user_info("test-access-token", id_token)
+        user_info = provider.get_user_info("test-access-token", id_token)
 
         assert user_info.subject == "test-user-id"
         assert user_info.email == "test@example.com"
 
-    @pytest.mark.asyncio
-    async def test_get_user_info_extracts_groups_from_claim(self):
+    def test_get_user_info_extracts_groups_from_claim(self):
         """Test that get_user_info extracts groups from the configured groups_claim."""
         config = OIDCProviderConfig(
             enabled=True,
@@ -121,7 +122,7 @@ class TestOIDCProviderHttpCalls:
         }
         id_token = create_mock_id_token(claims)
 
-        user_info = await provider.get_user_info("test-access-token", id_token)
+        user_info = provider.get_user_info("test-access-token", id_token)
 
         # Verify groups were extracted
         assert user_info.groups is not None
@@ -129,8 +130,7 @@ class TestOIDCProviderHttpCalls:
         assert "SSOAdmins" in user_info.groups
         assert "SSODevelopers" in user_info.groups
 
-    @pytest.mark.asyncio
-    async def test_get_user_info_handles_missing_groups_claim(self):
+    def test_get_user_info_handles_missing_groups_claim(self):
         """Test that get_user_info handles missing groups claim gracefully."""
         config = OIDCProviderConfig(
             enabled=True,
@@ -150,13 +150,12 @@ class TestOIDCProviderHttpCalls:
         }
         id_token = create_mock_id_token(claims)
 
-        user_info = await provider.get_user_info("test-access-token", id_token)
+        user_info = provider.get_user_info("test-access-token", id_token)
 
         # Groups should be None (not an empty list, as per implementation)
         assert user_info.groups is None
 
-    @pytest.mark.asyncio
-    async def test_get_user_info_handles_non_list_groups_claim(self):
+    def test_get_user_info_handles_non_list_groups_claim(self):
         """Test that get_user_info handles non-list groups claim gracefully."""
         config = OIDCProviderConfig(
             enabled=True,
@@ -176,13 +175,12 @@ class TestOIDCProviderHttpCalls:
         }
         id_token = create_mock_id_token(claims)
 
-        user_info = await provider.get_user_info("test-access-token", id_token)
+        user_info = provider.get_user_info("test-access-token", id_token)
 
         # Groups should be None when claim value is not a list
         assert user_info.groups is None
 
-    @pytest.mark.asyncio
-    async def test_get_user_info_custom_groups_claim(self):
+    def test_get_user_info_custom_groups_claim(self):
         """Test that get_user_info uses custom groups_claim setting."""
         config = OIDCProviderConfig(
             enabled=True,
@@ -202,7 +200,7 @@ class TestOIDCProviderHttpCalls:
         }
         id_token = create_mock_id_token(claims)
 
-        user_info = await provider.get_user_info("test-access-token", id_token)
+        user_info = provider.get_user_info("test-access-token", id_token)
 
         # Verify groups were extracted from custom "roles" claim
         assert user_info.groups is not None

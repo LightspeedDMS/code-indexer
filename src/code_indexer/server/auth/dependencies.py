@@ -542,30 +542,26 @@ def _hybrid_auth_impl(
             f"role={session.role if session else None}"
         )
 
-        # Check admin requirement for session auth
+        # Bug #67 fix: Always fetch user from database to get current role
+        # Session role may be stale if admin changed it after login
         if session:
-            if require_admin and session.role != "admin":
-                logger.debug(f"Hybrid auth ({auth_type}): Session valid but not admin")
-            else:
-                # Create User object from session
-                if not user_manager:
-                    logger.error(
-                        f"Hybrid auth ({auth_type}): user_manager not initialized"
-                    )
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail="User manager not initialized",
-                    )
-                user = user_manager.get_user(session.username)
-                logger.debug(
-                    f"Hybrid auth ({auth_type}): user lookup for {session.username}: {user is not None}"
+            if not user_manager:
+                logger.error(
+                    f"Hybrid auth ({auth_type}): user_manager not initialized"
                 )
-                if user:
-                    logger.info(
-                        f"Hybrid auth ({auth_type}): Session auth SUCCESS for {session.username}"
-                    )
-                    return user
-                # Session is valid but user not found - this shouldn't happen
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="User manager not initialized",
+                )
+
+            # Fetch user from database to get CURRENT role (not cached session role)
+            user = user_manager.get_user(session.username)
+            logger.debug(
+                f"Hybrid auth ({auth_type}): user lookup for {session.username}: {user is not None}"
+            )
+
+            if not user:
+                # Session is valid but user not found - user was deleted
                 logger.error(
                     f"Hybrid auth ({auth_type}): User {session.username} not found in database"
                 )
@@ -573,6 +569,22 @@ def _hybrid_auth_impl(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"User '{session.username}' not found in user database",
                 )
+
+            # Check admin requirement using DATABASE role, not session role
+            if require_admin and not user.has_permission("manage_users"):
+                logger.debug(
+                    f"Hybrid auth ({auth_type}): Session valid but user lacks admin permission "
+                    f"(session_role={session.role}, db_role={user.role.value})"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Admin access required",
+                )
+
+            logger.info(
+                f"Hybrid auth ({auth_type}): Session auth SUCCESS for {session.username}"
+            )
+            return user
         else:
             logger.debug(f"Hybrid auth ({auth_type}): Session invalid")
 

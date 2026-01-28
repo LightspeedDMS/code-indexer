@@ -307,27 +307,21 @@ venv/
 # Use RealComponentTestInfrastructure from tests.fixtures.test_infrastructure instead
 
 
-@pytest.fixture(autouse=True)
-def initialize_api_metrics_service(tmp_path):
-    """Initialize api_metrics_service with a temp database for each test.
+@pytest.fixture(scope="session", autouse=True)
+def initialize_api_metrics_service(tmp_path_factory):
+    """Initialize api_metrics_service ONCE for entire test session.
 
-    This ensures the global singleton works with the database-backed implementation
-    in tests, providing backward compatibility with existing tests.
+    Most tests don't use metrics - they just need the singleton initialized
+    to avoid crashes if something touches it incidentally.
 
-    Note: We initialize both import paths (src.code_indexer and code_indexer)
-    since different tests may use different import patterns.
+    PERFORMANCE: Changed from function-scope (per-test) to session-scope.
+    Per-test initialization was adding ~665ms overhead × 865 tests = 9.6 minutes!
+    Session-scope reduces this to ~0.7 seconds total.
 
-    Note: The database is placed in a hidden subdirectory (.test_internal/) to
-    prevent pollution of tests that enumerate files in tmp_path (e.g., directory
-    explorer tests that count files).
+    Tests that need isolated metrics state should use the `fresh_api_metrics` fixture.
     """
-    import logging
-
-    # Isolate database in hidden subdirectory to avoid polluting tmp_path
-    db_dir = tmp_path / ".test_internal"
-    db_dir.mkdir(exist_ok=True)
+    db_dir = tmp_path_factory.mktemp("metrics")
     db_path = db_dir / "test_api_metrics.db"
-    services_initialized = []
 
     # Initialize via src.code_indexer path (used by most unit tests)
     try:
@@ -335,8 +329,6 @@ def initialize_api_metrics_service(tmp_path):
             api_metrics_service as src_service,
         )
         src_service.initialize(str(db_path))
-        src_service.reset()
-        services_initialized.append(src_service)
     except ImportError:
         pass
 
@@ -345,22 +337,38 @@ def initialize_api_metrics_service(tmp_path):
         from code_indexer.server.services.api_metrics_service import (
             api_metrics_service as pkg_service,
         )
-        # Only initialize if it's a different instance (not the same object)
-        if not services_initialized or pkg_service is not services_initialized[0]:
-            pkg_service.initialize(str(db_path))
-            pkg_service.reset()
-            services_initialized.append(pkg_service)
+        pkg_service.initialize(str(db_path))
     except ImportError:
         pass
 
     yield
 
-    # Cleanup: reset after test
-    for service in services_initialized:
-        try:
-            service.reset()
-        except Exception as e:
-            logging.debug(f"Failed to reset api_metrics_service during cleanup: {e}")
+
+@pytest.fixture
+def fresh_api_metrics():
+    """Opt-in fixture for tests that need isolated metrics state.
+
+    Use this fixture when your test needs to:
+    - Assert on specific metric counts
+    - Verify metrics are recorded correctly
+    - Test metrics-related functionality
+
+    Example:
+        def test_semantic_search_increments_counter(fresh_api_metrics):
+            # Metrics are reset at start
+            assert fresh_api_metrics.get_metrics()["semantic_searches"] == 0
+            # ... do something that should increment ...
+            assert fresh_api_metrics.get_metrics()["semantic_searches"] == 1
+    """
+    try:
+        from src.code_indexer.server.services.api_metrics_service import (
+            api_metrics_service,
+        )
+        api_metrics_service.reset()
+        yield api_metrics_service
+        api_metrics_service.reset()
+    except ImportError:
+        yield None
 
 
 @pytest.fixture(autouse=True)

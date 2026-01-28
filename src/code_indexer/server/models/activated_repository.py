@@ -8,7 +8,7 @@ and composite repository configurations.
 from typing import List
 from datetime import datetime
 from pathlib import Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 
 
 class ActivatedRepository(BaseModel):
@@ -47,10 +47,15 @@ class ActivatedRepository(BaseModel):
         description="List of discovered repository paths (composite only)",
     )
 
-    class Config:
-        """Pydantic configuration."""
+    @field_serializer("activated_at", "last_accessed")
+    def serialize_datetime(self, value: datetime) -> str:
+        """Serialize datetime to ISO format."""
+        return value.isoformat()
 
-        json_encoders = {datetime: lambda v: v.isoformat(), Path: lambda v: str(v)}
+    @field_serializer("path")
+    def serialize_path(self, value: Path) -> str:
+        """Serialize Path to string."""
+        return str(value)
 
     def to_dict(self) -> dict:
         """

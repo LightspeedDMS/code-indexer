@@ -1,12 +1,13 @@
 """Unit tests for SCIP REST API router.
 
 Story #41: Updated tests to use SCIPQueryService delegation pattern.
+Story #50: Updated tests to use sync mocks since route handlers are now sync.
 """
 
 import pytest
 from datetime import datetime, timezone
 from fastapi.testclient import TestClient
-from unittest.mock import Mock, patch, AsyncMock
+from unittest.mock import Mock, patch
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.auth.dependencies import get_current_user
@@ -72,9 +73,9 @@ class TestDefinitionEndpoint:
             "code_indexer.server.routers.scip_queries._get_scip_query_service",
             return_value=mock_scip_service,
         ):
+            # Story #50: Use regular patch since function is now sync
             with patch(
                 "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
-                new_callable=AsyncMock,
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.find_definition.return_value
@@ -122,9 +123,9 @@ class TestReferencesEndpoint:
             "code_indexer.server.routers.scip_queries._get_scip_query_service",
             return_value=mock_scip_service,
         ):
+            # Story #50: Use regular patch since function is now sync
             with patch(
                 "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
-                new_callable=AsyncMock,
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.find_references.return_value
@@ -167,9 +168,9 @@ class TestDependenciesEndpoint:
             "code_indexer.server.routers.scip_queries._get_scip_query_service",
             return_value=mock_scip_service,
         ):
+            # Story #50: Use regular patch since function is now sync
             with patch(
                 "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
-                new_callable=AsyncMock,
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.get_dependencies.return_value
@@ -210,9 +211,9 @@ class TestDependentsEndpoint:
             "code_indexer.server.routers.scip_queries._get_scip_query_service",
             return_value=mock_scip_service,
         ):
+            # Story #50: Use regular patch since function is now sync
             with patch(
                 "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
-                new_callable=AsyncMock,
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.get_dependents.return_value

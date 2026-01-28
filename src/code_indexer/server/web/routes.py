@@ -19,7 +19,7 @@ from fastapi import APIRouter, Request, Response, Form, HTTPException, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from ..auth.user_manager import UserRole
+from ..auth.user_manager import UserRole, SSOPasswordChangeError
 from ..auth import dependencies
 from .auth import (
     get_session_manager,
@@ -620,6 +620,13 @@ def change_user_password(
             request,
             session,
             success_message=f"Password for '{username}' changed successfully",
+        )
+    except SSOPasswordChangeError:
+        # Bug #68: SSO users cannot change passwords locally
+        return _create_users_page_response(
+            request,
+            session,
+            error_message="Cannot change password for SSO users. Authentication is managed by the identity provider.",
         )
     except ValueError as e:
         return _create_users_page_response(request, session, error_message=str(e))

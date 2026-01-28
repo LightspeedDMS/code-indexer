@@ -99,9 +99,9 @@ class TestRemoteStatusRealServerChecking:
         project_root = mock_running_server["project_root"]
 
         # Patch httpx to detect if HTTP calls are made
-        with patch("httpx.AsyncClient") as mock_client:
+        with patch("httpx.Client") as mock_client:
             # Set up the mock to allow the calls but track them
-            mock_client.return_value.__aenter__.return_value.get.return_value.status_code = (
+            mock_client.return_value.__enter__.return_value.get.return_value.status_code = (
                 200
             )
 
@@ -153,7 +153,7 @@ class TestRemoteStatusRealServerChecking:
         credentials = remote_config.get_decrypted_credentials()
 
         # Test that we can make real API client calls (even if auth fails due to test setup)
-        async with CIDXRemoteAPIClient(
+        with CIDXRemoteAPIClient(
             server_url=server_url,
             credentials={
                 "username": credentials.username,
@@ -163,7 +163,7 @@ class TestRemoteStatusRealServerChecking:
         ) as client:
             # Even if authentication fails, we can verify the client is making real calls
             try:
-                response = await client.get("/health")
+                response = client.get("/health")
                 # If this succeeds, great! If not, that's okay for test environment
                 assert response.status_code in [
                     200,

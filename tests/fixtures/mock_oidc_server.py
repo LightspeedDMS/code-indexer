@@ -1,11 +1,27 @@
 """Lightweight mock OIDC server for integration testing."""
 
 import asyncio
+import base64
+import json
 import threading
 from typing import Optional
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+
+
+def _create_mock_id_token(claims: dict) -> str:
+    """Create a mock JWT ID token for testing.
+
+    Creates a properly formatted JWT with header.payload.signature structure.
+    The signature is fake (not cryptographically valid) but the structure
+    allows the token to be parsed by get_user_info().
+    """
+    header = {"alg": "RS256", "typ": "JWT"}
+    header_b64 = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip("=")
+    payload_b64 = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    signature = "mock_signature"
+    return f"{header_b64}.{payload_b64}.{signature}"
 
 
 class MockOIDCServer:
@@ -34,13 +50,19 @@ class MockOIDCServer:
             "preferred_username": "testuser",  # Default username
         }
 
+        # Generate initial id_token from userinfo
+        self._update_token_response()
+
+        self._setup_routes()
+
+    def _update_token_response(self):
+        """Update token_response with current userinfo as id_token."""
         self.token_response = {
             "access_token": "mock-access-token-12345",
             "token_type": "Bearer",
             "expires_in": 3600,
+            "id_token": _create_mock_id_token(self.userinfo_response),
         }
-
-        self._setup_routes()
 
     def _setup_routes(self):
         """Setup OIDC endpoint routes."""
@@ -143,7 +165,10 @@ class MockOIDCServer:
         email_verified: bool = False,
         preferred_username: Optional[str] = None,
     ):
-        """Configure userinfo response for testing."""
+        """Configure userinfo response for testing.
+
+        Also updates the id_token in token_response to match.
+        """
         self.userinfo_response = {
             "sub": sub,
             "email": email,
@@ -156,6 +181,9 @@ class MockOIDCServer:
         elif email:
             # Default: use email prefix as username
             self.userinfo_response["preferred_username"] = email.split("@")[0]
+
+        # Regenerate token_response with updated id_token
+        self._update_token_response()
 
     def set_token(self, access_token: str):
         """Configure token response for testing."""

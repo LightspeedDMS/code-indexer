@@ -90,7 +90,7 @@ class TestOIDCRoutes:
                 "id_token": "test-id-token",
             }
         )
-        oidc_mgr.provider.get_user_info = AsyncMock(
+        oidc_mgr.provider.get_user_info = Mock(
             return_value=OIDCUserInfo(
                 subject="test-subject-123",
                 email="test@example.com",
@@ -176,7 +176,7 @@ class TestOIDCRoutes:
                 "id_token": "test-id-token",
             }
         )
-        oidc_mgr.provider.get_user_info = AsyncMock(
+        oidc_mgr.provider.get_user_info = Mock(
             return_value=OIDCUserInfo(
                 subject="test-subject-123",
                 email="test@example.com",
@@ -247,7 +247,7 @@ class TestOIDCRoutes:
                 "id_token": "test-id-token",
             }
         )
-        oidc_mgr.provider.get_user_info = AsyncMock(
+        oidc_mgr.provider.get_user_info = Mock(
             return_value=OIDCUserInfo(
                 subject="test-subject-123",
                 email="test@example.com",
@@ -337,7 +337,7 @@ class TestOIDCRoutes:
                 "id_token": "test-id-token",
             }
         )
-        oidc_mgr.provider.get_user_info = AsyncMock(
+        oidc_mgr.provider.get_user_info = Mock(
             return_value=OIDCUserInfo(
                 subject="test-subject-123",
                 email="test@example.com",

@@ -5,10 +5,14 @@ Story #41: Refactor REST SCIP Routes to Use SCIPQueryService
 
 Tests for backward compatibility, duplicate function removal, and error handling.
 Following TDD methodology - these tests are written FIRST before implementation.
+
+Story #50: Route handlers converted from async to sync for proper FastAPI threadpool execution.
+The underlying service methods are sync, so using async handlers that await sync functions
+causes TypeError. Sync handlers let FastAPI/uvicorn run them in the threadpool correctly.
 """
 
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone
 
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -104,10 +108,12 @@ class TestDuplicateFunctionsRemoved:
 
 
 class TestBackwardCompatibility:
-    """Tests for REST response backward compatibility."""
+    """Tests for REST response backward compatibility.
 
-    @pytest.mark.asyncio
-    async def test_definition_response_structure_unchanged(
+    Story #50: Tests converted from async to sync since route handlers are now sync.
+    """
+
+    def test_definition_response_structure_unchanged(
         self, mock_user, mock_scip_service
     ):
         """AC: Verify /scip/definition response structure is unchanged."""
@@ -135,12 +141,12 @@ class TestBackwardCompatibility:
         ):
             with patch(
                 "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
-                new_callable=AsyncMock,
             ) as mock_truncate:
                 mock_truncate.return_value = (
                     mock_scip_service.find_definition.return_value
                 )
-                response = await get_definition(
+                # Sync call - no await needed
+                response = get_definition(
                     request=mock_request,
                     symbol="UserService",
                     exact=False,
@@ -165,8 +171,7 @@ class TestBackwardCompatibility:
                     assert "column" in result
                     assert "kind" in result
 
-    @pytest.mark.asyncio
-    async def test_references_response_structure_unchanged(
+    def test_references_response_structure_unchanged(
         self, mock_user, mock_scip_service
     ):
         """AC: Verify /scip/references response structure is unchanged."""
@@ -183,10 +188,10 @@ class TestBackwardCompatibility:
         ):
             with patch(
                 "code_indexer.server.routers.scip_queries._apply_scip_payload_truncation",
-                new_callable=AsyncMock,
             ) as mock_truncate:
                 mock_truncate.return_value = []
-                response = await get_references(
+                # Sync call - no await needed
+                response = get_references(
                     request=mock_request,
                     symbol="UserService",
                     limit=100,
@@ -200,8 +205,7 @@ class TestBackwardCompatibility:
                 assert "total_results" in response
                 assert "results" in response
 
-    @pytest.mark.asyncio
-    async def test_impact_response_structure_unchanged(
+    def test_impact_response_structure_unchanged(
         self, mock_user, mock_scip_service
     ):
         """AC: Verify /scip/impact response structure is unchanged."""
@@ -240,8 +244,7 @@ class TestBackwardCompatibility:
             assert "affected_symbols" in response
             assert "affected_files" in response
 
-    @pytest.mark.asyncio
-    async def test_callchain_response_structure_unchanged(
+    def test_callchain_response_structure_unchanged(
         self, mock_user, mock_scip_service
     ):
         """AC: Verify /scip/callchain response structure is unchanged."""
@@ -272,8 +275,7 @@ class TestBackwardCompatibility:
             assert "total_chains_found" in response
             assert "chains" in response
 
-    @pytest.mark.asyncio
-    async def test_context_response_structure_unchanged(
+    def test_context_response_structure_unchanged(
         self, mock_user, mock_scip_service
     ):
         """AC: Verify /scip/context response structure is unchanged."""
@@ -315,10 +317,12 @@ class TestBackwardCompatibility:
 
 
 class TestErrorHandling:
-    """Tests for error handling in refactored routes."""
+    """Tests for error handling in refactored routes.
 
-    @pytest.mark.asyncio
-    async def test_definition_catches_service_exception(
+    Story #50: Tests converted from async to sync since route handlers are now sync.
+    """
+
+    def test_definition_catches_service_exception(
         self, mock_user, mock_scip_service
     ):
         """Verify route catches and returns errors when service raises exception."""
@@ -332,7 +336,8 @@ class TestErrorHandling:
             "code_indexer.server.routers.scip_queries._get_scip_query_service",
             return_value=mock_scip_service,
         ):
-            response = await get_definition(
+            # Sync call - no await needed
+            response = get_definition(
                 request=mock_request,
                 symbol="Test",
                 exact=False,
@@ -343,8 +348,7 @@ class TestErrorHandling:
             assert response["success"] is False
             assert "error" in response
 
-    @pytest.mark.asyncio
-    async def test_references_catches_service_exception(
+    def test_references_catches_service_exception(
         self, mock_user, mock_scip_service
     ):
         """Verify references route catches and returns errors."""
@@ -358,7 +362,8 @@ class TestErrorHandling:
             "code_indexer.server.routers.scip_queries._get_scip_query_service",
             return_value=mock_scip_service,
         ):
-            response = await get_references(
+            # Sync call - no await needed
+            response = get_references(
                 request=mock_request,
                 symbol="Test",
                 limit=100,
@@ -370,8 +375,7 @@ class TestErrorHandling:
             assert response["success"] is False
             assert "error" in response
 
-    @pytest.mark.asyncio
-    async def test_impact_catches_service_exception(
+    def test_impact_catches_service_exception(
         self, mock_user, mock_scip_service
     ):
         """Verify impact route catches and returns errors."""
@@ -396,8 +400,7 @@ class TestErrorHandling:
             assert response["success"] is False
             assert "error" in response
 
-    @pytest.mark.asyncio
-    async def test_callchain_catches_service_exception(
+    def test_callchain_catches_service_exception(
         self, mock_user, mock_scip_service
     ):
         """Verify callchain route catches and returns errors."""
@@ -423,8 +426,7 @@ class TestErrorHandling:
             assert response["success"] is False
             assert "error" in response
 
-    @pytest.mark.asyncio
-    async def test_context_catches_service_exception(
+    def test_context_catches_service_exception(
         self, mock_user, mock_scip_service
     ):
         """Verify context route catches and returns errors."""

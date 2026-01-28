@@ -6,7 +6,7 @@ The MCP handlers apply truncation but the REST endpoint does not.
 These tests verify that:
 1. Multi-repo search results have truncation applied via helper function
 
-TDD methodology: Tests written BEFORE the fix is implemented.
+Story #50: Converted from async to sync since underlying handlers are sync.
 """
 
 import pytest
@@ -16,8 +16,11 @@ class TestMultiQueryTruncation:
     """Tests for REST API multi-query truncation helper."""
 
     @pytest.fixture
-    async def cache_100_chars(self, tmp_path):
-        """Create PayloadCache with 100 char preview for easy testing."""
+    def cache_100_chars(self, tmp_path):
+        """Create PayloadCache with 100 char preview for easy testing.
+
+        Story #50: Converted to sync fixture since PayloadCache.initialize() is sync.
+        """
         from code_indexer.server.cache.payload_cache import (
             PayloadCache,
             PayloadCacheConfig,
@@ -25,13 +28,15 @@ class TestMultiQueryTruncation:
 
         config = PayloadCacheConfig(preview_size_chars=100, max_fetch_size_chars=200)
         cache = PayloadCache(db_path=tmp_path / "test_cache.db", config=config)
-        await cache.initialize()
+        cache.initialize()
         yield cache
-        await cache.close()
+        cache.close()
 
-    @pytest.mark.asyncio
-    async def test_multi_repo_results_truncated(self, cache_100_chars):
-        """Multi-repo grouped results have truncation applied to each result."""
+    def test_multi_repo_results_truncated(self, cache_100_chars):
+        """Multi-repo grouped results have truncation applied to each result.
+
+        Story #50: Converted to sync test since _apply_multi_truncation is now sync.
+        """
         from code_indexer.server.routes.multi_query_routes import (
             _apply_multi_truncation,
         )
@@ -59,7 +64,8 @@ class TestMultiQueryTruncation:
                 ],
             }
 
-            truncated = await _apply_multi_truncation(grouped_results, "semantic")
+            # Now sync call (no await)
+            truncated = _apply_multi_truncation(grouped_results, "semantic")
 
             # Verify repo-alpha result is truncated
             assert len(truncated["repo-alpha"]) == 1

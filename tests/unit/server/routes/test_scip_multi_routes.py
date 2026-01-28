@@ -13,10 +13,104 @@ This file will be built incrementally:
 7. Error handling and edge cases
 
 Verifies AC1-AC8 from Story #677.
+
+Story #50: Added tests to verify async/await bug fix - all route handlers
+and _apply_multi_scip_truncation must be sync functions.
 """
 
+import inspect
 import pytest
 from unittest.mock import Mock, patch
+
+
+class TestAsyncAwaitBugFix:
+    """Story #50: Tests to verify async/await mismatch bug is fixed.
+
+    The bug: _apply_scip_payload_truncation in handlers.py is a sync function,
+    but scip_multi_routes.py was using async functions that tried to await it,
+    causing "object list can't be used in 'await' expression" TypeError.
+
+    The fix: Convert all functions in scip_multi_routes.py to sync.
+    """
+
+    def test_apply_multi_scip_truncation_is_sync_function(self):
+        """Verify _apply_multi_scip_truncation is NOT an async function."""
+        from code_indexer.server.routes.scip_multi_routes import (
+            _apply_multi_scip_truncation,
+        )
+
+        assert not inspect.iscoroutinefunction(_apply_multi_scip_truncation), (
+            "_apply_multi_scip_truncation must be a sync function, not async. "
+            "It calls _apply_scip_payload_truncation which is sync in handlers.py."
+        )
+
+    def test_multi_repository_definition_is_sync_function(self):
+        """Verify multi_repository_definition route handler is sync."""
+        from code_indexer.server.routes.scip_multi_routes import (
+            multi_repository_definition,
+        )
+
+        assert not inspect.iscoroutinefunction(multi_repository_definition), (
+            "multi_repository_definition must be a sync function. "
+            "FastAPI can run sync handlers in its threadpool."
+        )
+
+    def test_multi_repository_references_is_sync_function(self):
+        """Verify multi_repository_references route handler is sync."""
+        from code_indexer.server.routes.scip_multi_routes import (
+            multi_repository_references,
+        )
+
+        assert not inspect.iscoroutinefunction(multi_repository_references), (
+            "multi_repository_references must be a sync function. "
+            "FastAPI can run sync handlers in its threadpool."
+        )
+
+    def test_multi_repository_dependencies_is_sync_function(self):
+        """Verify multi_repository_dependencies route handler is sync."""
+        from code_indexer.server.routes.scip_multi_routes import (
+            multi_repository_dependencies,
+        )
+
+        assert not inspect.iscoroutinefunction(multi_repository_dependencies), (
+            "multi_repository_dependencies must be a sync function. "
+            "FastAPI can run sync handlers in its threadpool."
+        )
+
+    def test_multi_repository_dependents_is_sync_function(self):
+        """Verify multi_repository_dependents route handler is sync."""
+        from code_indexer.server.routes.scip_multi_routes import (
+            multi_repository_dependents,
+        )
+
+        assert not inspect.iscoroutinefunction(multi_repository_dependents), (
+            "multi_repository_dependents must be a sync function. "
+            "FastAPI can run sync handlers in its threadpool."
+        )
+
+    def test_multi_repository_callchain_is_sync_function(self):
+        """Verify multi_repository_callchain route handler is sync."""
+        from code_indexer.server.routes.scip_multi_routes import (
+            multi_repository_callchain,
+        )
+
+        assert not inspect.iscoroutinefunction(multi_repository_callchain), (
+            "multi_repository_callchain must be a sync function. "
+            "FastAPI can run sync handlers in its threadpool."
+        )
+
+    def test_underlying_apply_scip_payload_truncation_is_sync(self):
+        """Verify the underlying _apply_scip_payload_truncation in handlers.py is sync.
+
+        This is the root cause check - if this function changes to async,
+        the route handlers would need to change too.
+        """
+        from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
+
+        assert not inspect.iscoroutinefunction(_apply_scip_payload_truncation), (
+            "_apply_scip_payload_truncation in handlers.py must remain sync. "
+            "If this changes to async, scip_multi_routes.py must be updated."
+        )
 
 
 @pytest.fixture

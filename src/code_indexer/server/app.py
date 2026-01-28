@@ -19,7 +19,7 @@ from fastapi import (
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 from typing import Dict, Any, Optional, List, Callable, Literal, Union
 import os
 import json
@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 from .auth.jwt_manager import JWTManager
-from .auth.user_manager import UserManager, UserRole
+from .auth.user_manager import UserManager, UserRole, SSOPasswordChangeError
 from .auth import dependencies
 from .auth.password_validator import (
     validate_password_complexity,
@@ -1201,10 +1201,10 @@ class CompositeRepositoryDetails(BaseModel):
     total_files: int
     total_size_mb: float
 
-    class Config:
-        """Pydantic configuration."""
-
-        json_encoders = {datetime: lambda v: v.isoformat()}
+    @field_serializer("activated_at", "last_accessed")
+    def serialize_datetime(self, value: datetime) -> str:
+        """Serialize datetime to ISO format."""
+        return value.isoformat()
 
 
 class RepositorySyncRequest(BaseModel):
@@ -4319,6 +4319,13 @@ def create_app() -> FastAPI:
             # Re-raise HTTP exceptions (they're already properly formatted)
             raise
 
+        except SSOPasswordChangeError as e:
+            # Bug #68: SSO users cannot change passwords locally
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=str(e),
+            )
+
         except Exception as e:
             # Log unexpected errors
             password_audit_logger.log_password_change_failure(
@@ -4356,16 +4363,24 @@ def create_app() -> FastAPI:
         Raises:
             HTTPException: If user not found
         """
-        success = user_manager.change_password(username, password_data.new_password)
-        if not success:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User not found: {username}",
+        try:
+            success = user_manager.change_password(username, password_data.new_password)
+            if not success:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"User not found: {username}",
+                )
+
+            return MessageResponse(
+                message=f"Password changed successfully for user '{username}'"
             )
 
-        return MessageResponse(
-            message=f"Password changed successfully for user '{username}'"
-        )
+        except SSOPasswordChangeError as e:
+            # Bug #68: SSO users cannot change passwords locally
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=str(e),
+            )
 
     @app.get("/api/admin/golden-repos")
     def list_golden_repos(

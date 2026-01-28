@@ -312,9 +312,11 @@ class TestOIDCProvider:
         assert tokens["token_type"] == "Bearer"
         assert tokens["id_token"] == "test-id-token"
 
-    @pytest.mark.asyncio
-    async def test_get_user_info_extracts_user_info(self, monkeypatch):
-        """Test that get_user_info extracts user information from ID token."""
+    def test_get_user_info_extracts_user_info(self, monkeypatch):
+        """Test that get_user_info extracts user information from ID token.
+
+        NOTE: get_user_info is a sync function (no async I/O - just JWT parsing).
+        """
         from code_indexer.server.auth.oidc.oidc_provider import (
             OIDCProvider,
             OIDCMetadata,
@@ -344,7 +346,7 @@ class TestOIDCProvider:
         id_token = create_mock_id_token(claims)
 
         access_token = "test-access-token"
-        user_info = await provider.get_user_info(access_token, id_token)
+        user_info = provider.get_user_info(access_token, id_token)
 
         assert user_info.subject == "oidc-user-12345"
         assert user_info.email == "user@example.com"

@@ -82,9 +82,10 @@ class TestOIDCIntegration:
 
         assert "access_token" in tokens
         assert tokens["access_token"] == "mock-access-token-12345"
+        assert "id_token" in tokens  # Mock server now returns id_token
 
-        # 3. Get user info from access token
-        user_info = await oidc_manager.provider.get_user_info(tokens["access_token"])
+        # 3. Get user info from ID token (sync function - parses JWT, no HTTP call)
+        user_info = oidc_manager.provider.get_user_info(tokens["access_token"], tokens["id_token"])
 
         assert user_info.subject == "new-user-12345"
         assert user_info.email == "newuser@example.com"
@@ -142,7 +143,8 @@ class TestOIDCIntegration:
             code_verifier="test-verifier",
             redirect_uri="http://localhost/callback",
         )
-        user_info = await oidc_manager.provider.get_user_info(tokens["access_token"])
+        # get_user_info is sync (parses JWT id_token, no HTTP call)
+        user_info = oidc_manager.provider.get_user_info(tokens["access_token"], tokens["id_token"])
 
         # 4. Match or create user (should link to existing user)
         matched_user = await oidc_manager.match_or_create_user(user_info)
@@ -177,7 +179,7 @@ class TestOIDCIntegration:
             code_verifier="test-verifier",
             redirect_uri="http://localhost/callback",
         )
-        user_info = await oidc_manager.provider.get_user_info(tokens["access_token"])
+        user_info = oidc_manager.provider.get_user_info(tokens["access_token"], tokens["id_token"])
         first_login_user = await oidc_manager.match_or_create_user(user_info)
 
         # 2. Second login - same subject, should return same user
@@ -186,7 +188,7 @@ class TestOIDCIntegration:
             code_verifier="test-verifier-2",
             redirect_uri="http://localhost/callback",
         )
-        user_info2 = await oidc_manager.provider.get_user_info(tokens2["access_token"])
+        user_info2 = oidc_manager.provider.get_user_info(tokens2["access_token"], tokens2["id_token"])
         second_login_user = await oidc_manager.match_or_create_user(user_info2)
 
         # Should be the same user
@@ -221,7 +223,7 @@ class TestOIDCIntegration:
             code_verifier="test-verifier",
             redirect_uri="http://localhost/callback",
         )
-        user_info = await oidc_manager.provider.get_user_info(tokens["access_token"])
+        user_info = oidc_manager.provider.get_user_info(tokens["access_token"], tokens["id_token"])
         user = await oidc_manager.match_or_create_user(user_info)
 
         # Create JWT session
@@ -272,7 +274,7 @@ class TestOIDCIntegration:
             code_verifier="test-verifier",
             redirect_uri="http://localhost/callback",
         )
-        user_info = await manager.provider.get_user_info(tokens["access_token"])
+        user_info = manager.provider.get_user_info(tokens["access_token"], tokens["id_token"])
 
         # Should return None (no user created, no match found)
         user = await manager.match_or_create_user(user_info)
@@ -318,7 +320,7 @@ class TestOIDCIntegration:
             code_verifier="test-verifier",
             redirect_uri="http://localhost/callback",
         )
-        user_info = await manager.provider.get_user_info(tokens["access_token"])
+        user_info = manager.provider.get_user_info(tokens["access_token"], tokens["id_token"])
 
         # Should return None (email not verified and verification required)
         user = await manager.match_or_create_user(user_info)
@@ -364,7 +366,7 @@ class TestOIDCIntegration:
             code_verifier="test-verifier",
             redirect_uri="http://localhost/callback",
         )
-        user_info = await manager.provider.get_user_info(tokens["access_token"])
+        user_info = manager.provider.get_user_info(tokens["access_token"], tokens["id_token"])
 
         # Should create user even though email is not verified
         user = await manager.match_or_create_user(user_info)

@@ -134,9 +134,12 @@ class TestOIDCProviderErrorHandling:
             error_msg = str(exc_info.value).lower()
             assert "400" in error_msg or "invalid" in error_msg or "token" in error_msg
 
-    @pytest.mark.asyncio
-    async def test_get_user_info_handles_invalid_token(self):
-        """Test that get_user_info handles invalid access token."""
+    def test_get_user_info_handles_invalid_id_token_format(self):
+        """Test that get_user_info handles invalid/malformed ID token.
+
+        NOTE: get_user_info is now a sync function that parses JWT tokens directly
+        (no HTTP calls). It should raise an exception for malformed tokens.
+        """
         from code_indexer.server.auth.oidc.oidc_provider import (
             OIDCProvider,
             OIDCMetadata,
@@ -158,31 +161,13 @@ class TestOIDCProviderErrorHandling:
             userinfo_endpoint="https://example.com/userinfo",
         )
 
-        # Mock HTTP client to return 401 unauthorized
-        mock_response = Mock()
-        mock_response.status_code = 401
-        mock_response.text = "Unauthorized"
-        mock_response.raise_for_status = Mock(
-            side_effect=httpx.HTTPStatusError(
-                "401 Unauthorized", request=Mock(), response=mock_response
-            )
-        )
+        # Test with malformed ID token (not a valid JWT - should have 3 parts)
+        with pytest.raises(Exception) as exc_info:
+            provider.get_user_info("access_token", "invalid-token-not-jwt")
 
-        async def mock_get(*args, **kwargs):
-            return mock_response
-
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_instance = mock_client.return_value.__aenter__.return_value
-            mock_instance.get = mock_get
-
-            with pytest.raises(Exception) as exc_info:
-                await provider.get_user_info("invalid_token")
-
-            # Should raise exception about invalid token
-            error_msg = str(exc_info.value).lower()
-            assert (
-                "401" in error_msg or "unauthorized" in error_msg or "user" in error_msg
-            )
+        # Should raise exception about invalid token format
+        error_msg = str(exc_info.value).lower()
+        assert "id token" in error_msg or "invalid" in error_msg or "parse" in error_msg
 
     @pytest.mark.asyncio
     async def test_exchange_code_validates_token_response(self):
@@ -235,9 +220,15 @@ class TestOIDCProviderErrorHandling:
                 or "missing" in error_msg
             )
 
-    @pytest.mark.asyncio
-    async def test_get_user_info_validates_userinfo_response(self):
-        """Test that get_user_info validates userinfo response has required sub claim."""
+    def test_get_user_info_validates_id_token_has_sub_claim(self):
+        """Test that get_user_info validates ID token has required sub claim.
+
+        NOTE: get_user_info is now a sync function that parses JWT tokens directly.
+        It should raise an exception when the 'sub' (subject) claim is missing.
+        """
+        import base64
+        import json
+
         from code_indexer.server.auth.oidc.oidc_provider import (
             OIDCProvider,
             OIDCMetadata,
@@ -259,29 +250,24 @@ class TestOIDCProviderErrorHandling:
             userinfo_endpoint="https://example.com/userinfo",
         )
 
-        # Mock HTTP client to return userinfo response without sub claim
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json = Mock(
-            return_value={"email": "user@example.com"}
-        )  # Missing sub
-        mock_response.raise_for_status = Mock()
+        # Create a mock ID token WITHOUT 'sub' claim
+        header = base64.urlsafe_b64encode(json.dumps({"alg": "RS256"}).encode()).decode().rstrip("=")
+        payload = base64.urlsafe_b64encode(json.dumps({
+            "email": "user@example.com",
+            "email_verified": True,
+            # Missing 'sub' claim
+        }).encode()).decode().rstrip("=")
+        signature = "fake_signature"
+        id_token_without_sub = f"{header}.{payload}.{signature}"
 
-        async def mock_get(*args, **kwargs):
-            return mock_response
+        with pytest.raises(Exception) as exc_info:
+            provider.get_user_info("valid_access_token", id_token_without_sub)
 
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_instance = mock_client.return_value.__aenter__.return_value
-            mock_instance.get = mock_get
-
-            with pytest.raises(Exception) as exc_info:
-                await provider.get_user_info("valid_token")
-
-            # Should raise exception about missing sub claim
-            error_msg = str(exc_info.value).lower()
-            assert (
-                "sub" in error_msg
-                or "subject" in error_msg
-                or "missing" in error_msg
-                or "invalid" in error_msg
-            )
+        # Should raise exception about missing sub claim
+        error_msg = str(exc_info.value).lower()
+        assert (
+            "sub" in error_msg
+            or "subject" in error_msg
+            or "missing" in error_msg
+            or "invalid" in error_msg
+        )

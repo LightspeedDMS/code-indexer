@@ -6,7 +6,7 @@ supporting Story 3.3 of the Server Composite Repository Activation epic.
 """
 
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 
 
 class FileInfo(BaseModel):
@@ -29,7 +29,7 @@ class FileInfo(BaseModel):
         ..., description="Which component repository this file belongs to"
     )
 
-    class Config:
-        """Pydantic configuration."""
-
-        json_encoders = {datetime: lambda v: v.isoformat()}
+    @field_serializer("modified")
+    def serialize_datetime(self, value: datetime) -> str:
+        """Serialize datetime to ISO format."""
+        return value.isoformat()
