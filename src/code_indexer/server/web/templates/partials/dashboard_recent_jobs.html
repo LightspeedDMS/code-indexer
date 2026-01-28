@@ -1,0 +1,19 @@
+<!-- Story #69: Granular partial for recent jobs table body ONLY -->
+{% if recent_jobs and recent_jobs|length > 0 %}
+    {% for job in recent_jobs %}
+    <tr>
+        <td>
+            <a href="/admin/jobs?job_id={{ job.job_id }}">{{ job.repo_name }}</a>
+        </td>
+        <td>{{ job.job_type }}</td>
+        <td>{{ job.completion_time[:19] if job.completion_time else 'N/A' }}</td>
+        <td>
+            <span class="job-status status-{{ job.status }}">{{ job.status | capitalize }}</span>
+        </td>
+    </tr>
+    {% endfor %}
+{% else %}
+    <tr>
+        <td colspan="4" style="text-align: center;">No recent activity to display.</td>
+    </tr>
+{% endif %}

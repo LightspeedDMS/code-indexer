@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.7.3] - 2026-01-28
+
+### Fixed
+
+- **Dashboard Auto-Update Dropdown Disruption** (Story #69) - Fixed visual glitch where dashboard auto-refresh (2-second interval) would close dropdown menus mid-selection:
+  - Implemented surgical DOM updates with granular HTMX targets
+  - Dropdowns (Time Window, Recent Activity, API Filter) now positioned outside refresh targets
+  - Added 3 new partial endpoints for data-only updates: `/admin/partials/dashboard-job-counts`, `/admin/partials/dashboard-recent-jobs`, `/admin/partials/dashboard-api-metrics`
+  - Auto-refresh continues seamlessly without interrupting user interaction
+
+---
+
 ## [8.7.2] - 2026-01-28
 
 ### Added

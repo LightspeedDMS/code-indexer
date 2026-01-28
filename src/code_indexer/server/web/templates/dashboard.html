@@ -42,7 +42,9 @@
 let autoRefreshInterval = null;
 
 function refreshAll() {
-    // Trigger htmx refresh for both sections
+    // Story #69: Surgical DOM updates - refresh ONLY data sections, not dropdowns
+
+    // Refresh health section (unchanged)
     htmx.ajax('GET', '/admin/partials/dashboard-health', {target: '#health-section', swap: 'innerHTML'});
 
     // Preserve current filter selections during auto-refresh
@@ -51,8 +53,19 @@ function refreshAll() {
     const recentFilter = document.getElementById('recent-filter')?.value || '24h';
     const apiFilter = document.getElementById('api-filter')?.value || '60';
 
-    htmx.ajax('GET', `/admin/partials/dashboard-stats?time_filter=${timeFilter}&recent_filter=${recentFilter}&api_filter=${apiFilter}`, {
-        target: '#stats-section',
+    // Story #69: Granular refresh targets - dropdowns stay untouched
+    htmx.ajax('GET', `/admin/partials/dashboard-job-counts?time_filter=${timeFilter}`, {
+        target: '#job-counts-data',
+        swap: 'innerHTML'
+    });
+
+    htmx.ajax('GET', `/admin/partials/dashboard-recent-jobs?recent_filter=${recentFilter}`, {
+        target: '#recent-jobs-tbody',
+        swap: 'innerHTML'
+    });
+
+    htmx.ajax('GET', `/admin/partials/dashboard-api-metrics?api_filter=${apiFilter}`, {
+        target: '#api-metrics-data',
         swap: 'innerHTML'
     });
 }

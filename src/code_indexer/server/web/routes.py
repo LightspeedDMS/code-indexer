@@ -365,6 +365,127 @@ def dashboard_stats_partial(
     )
 
 
+@web_router.get("/partials/dashboard-job-counts", response_class=HTMLResponse)
+def dashboard_job_counts_partial(
+    request: Request,
+    time_filter: str = "24h",
+):
+    """
+    Story #69: Granular partial endpoint for job counts data ONLY.
+
+    Returns HTML fragment containing only job statistics cards,
+    excluding dropdown controls to prevent disruption during auto-refresh.
+
+    Args:
+        request: HTTP request
+        time_filter: Time filter for job stats ("24h", "7d", "30d")
+
+    Returns HTML fragment for htmx partial updates.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+
+    dashboard_service = _get_dashboard_service()
+    stats_data = dashboard_service.get_stats_partial(
+        session.username,
+        time_filter=time_filter,
+        recent_filter="24h",  # Not used for job counts
+        user_role=session.role,
+        api_window=60,  # Not used for job counts
+    )
+
+    return templates.TemplateResponse(
+        "partials/dashboard_job_counts.html",
+        {
+            "request": request,
+            "job_counts": stats_data["job_counts"],
+            "time_filter": time_filter,
+        },
+    )
+
+
+@web_router.get("/partials/dashboard-recent-jobs", response_class=HTMLResponse)
+def dashboard_recent_jobs_partial(
+    request: Request,
+    recent_filter: str = "30d",
+):
+    """
+    Story #69: Granular partial endpoint for recent jobs table body ONLY.
+
+    Returns HTML fragment containing only table rows for recent jobs,
+    excluding table structure and dropdown controls to prevent disruption during auto-refresh.
+
+    Args:
+        request: HTTP request
+        recent_filter: Time filter for recent activity ("24h", "7d", "30d")
+
+    Returns HTML fragment for htmx partial updates.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+
+    dashboard_service = _get_dashboard_service()
+    stats_data = dashboard_service.get_stats_partial(
+        session.username,
+        time_filter="24h",  # Not used for recent jobs
+        recent_filter=recent_filter,
+        user_role=session.role,
+        api_window=60,  # Not used for recent jobs
+    )
+
+    return templates.TemplateResponse(
+        "partials/dashboard_recent_jobs.html",
+        {
+            "request": request,
+            "recent_jobs": stats_data["recent_jobs"],
+            "recent_filter": recent_filter,
+        },
+    )
+
+
+@web_router.get("/partials/dashboard-api-metrics", response_class=HTMLResponse)
+def dashboard_api_metrics_partial(
+    request: Request,
+    api_filter: int = 60,
+):
+    """
+    Story #69: Granular partial endpoint for API metrics data ONLY.
+
+    Returns HTML fragment containing only API activity statistics cards,
+    excluding dropdown controls to prevent disruption during auto-refresh.
+
+    Args:
+        request: HTTP request
+        api_filter: Time window in seconds for API metrics (default 60).
+            Common values: 60 (1 min), 900 (15 min), 3600 (1 hour), 86400 (24 hours)
+
+    Returns HTML fragment for htmx partial updates.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+
+    dashboard_service = _get_dashboard_service()
+    stats_data = dashboard_service.get_stats_partial(
+        session.username,
+        time_filter="24h",  # Not used for API metrics
+        recent_filter="24h",  # Not used for API metrics
+        user_role=session.role,
+        api_window=api_filter,
+    )
+
+    return templates.TemplateResponse(
+        "partials/dashboard_api_metrics.html",
+        {
+            "request": request,
+            "api_metrics": stats_data.get("api_metrics", {}),
+            "api_filter": api_filter,
+        },
+    )
+
+
 # Placeholder routes for other admin pages
 # These will redirect to login if not authenticated
 

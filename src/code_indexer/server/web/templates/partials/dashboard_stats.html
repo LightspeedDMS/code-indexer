@@ -1,6 +1,7 @@
 <!-- Job Statistics Section -->
 <div style="display: flex; justify-content: space-between; align-items: center;">
     <h2>Jobs</h2>
+    <!-- Story #69: Dropdown OUTSIDE refresh target to prevent disruption -->
     <div>
         <label for="time-filter" style="margin-right: 0.5rem;">Time Range:</label>
         <select id="time-filter" onchange="updateJobStats()" style="padding: 0.25rem 0.5rem;">
@@ -11,7 +12,8 @@
     </div>
 </div>
 
-<div class="stats-grid">
+<!-- Story #69: Granular refresh target for job counts data ONLY -->
+<div id="job-counts-data" class="stats-grid">
     <article class="stat-card">
         <header>
             <h3>Running</h3>
@@ -93,6 +95,7 @@
 <!-- API Activity Section (Story #4 AC3) - Rolling Window -->
 <div style="display: flex; justify-content: space-between; align-items: center;">
     <h2>API Activity</h2>
+    <!-- Story #69: Dropdown OUTSIDE refresh target to prevent disruption -->
     <div>
         <label for="api-filter" style="margin-right: 0.5rem;">Time Window:</label>
         <select id="api-filter" onchange="updateApiActivity()" style="padding: 0.25rem 0.5rem;">
@@ -104,7 +107,8 @@
     </div>
 </div>
 
-<div class="stats-grid">
+<!-- Story #69: Granular refresh target for API metrics data ONLY -->
+<div id="api-metrics-data" class="stats-grid">
     <article class="stat-card">
         <header>
             <h3>Semantic Searches</h3>
@@ -149,6 +153,7 @@
 <!-- Recent Activity Section -->
 <div style="display: flex; justify-content: space-between; align-items: center;">
     <h2>Recent Activity</h2>
+    <!-- Story #69: Dropdown OUTSIDE refresh target to prevent disruption -->
     <div>
         <label for="recent-filter" style="margin-right: 0.5rem;">Time Range:</label>
         <select id="recent-filter" onchange="updateRecentActivity()" style="padding: 0.25rem 0.5rem;">
@@ -170,7 +175,8 @@
                 <th>Status</th>
             </tr>
         </thead>
-        <tbody>
+        <!-- Story #69: Granular refresh target for table body ONLY -->
+        <tbody id="recent-jobs-tbody">
             {% for job in recent_jobs %}
             <tr>
                 <td>
@@ -186,37 +192,33 @@
         </tbody>
     </table>
     {% else %}
-    <p class="no-activity">No recent activity to display.</p>
+    <!-- Story #69: When no jobs, refresh target is the entire recent-activity div -->
+    <p id="recent-jobs-tbody" class="no-activity">No recent activity to display.</p>
     {% endif %}
 </div>
 
 <script>
+// Story #69: Surgical DOM updates for dropdown changes
 function updateJobStats() {
     const timeFilter = document.getElementById('time-filter').value;
-    const recentFilter = document.getElementById('recent-filter').value;
-    const apiFilter = document.getElementById('api-filter').value;
-    htmx.ajax('GET', `/admin/partials/dashboard-stats?time_filter=${timeFilter}&recent_filter=${recentFilter}&api_filter=${apiFilter}`, {
-        target: '#stats-section',
+    htmx.ajax('GET', `/admin/partials/dashboard-job-counts?time_filter=${timeFilter}`, {
+        target: '#job-counts-data',
         swap: 'innerHTML'
     });
 }
 
 function updateRecentActivity() {
-    const timeFilter = document.getElementById('time-filter').value;
     const recentFilter = document.getElementById('recent-filter').value;
-    const apiFilter = document.getElementById('api-filter').value;
-    htmx.ajax('GET', `/admin/partials/dashboard-stats?time_filter=${timeFilter}&recent_filter=${recentFilter}&api_filter=${apiFilter}`, {
-        target: '#stats-section',
+    htmx.ajax('GET', `/admin/partials/dashboard-recent-jobs?recent_filter=${recentFilter}`, {
+        target: '#recent-jobs-tbody',
         swap: 'innerHTML'
     });
 }
 
 function updateApiActivity() {
-    const timeFilter = document.getElementById('time-filter').value;
-    const recentFilter = document.getElementById('recent-filter').value;
     const apiFilter = document.getElementById('api-filter').value;
-    htmx.ajax('GET', `/admin/partials/dashboard-stats?time_filter=${timeFilter}&recent_filter=${recentFilter}&api_filter=${apiFilter}`, {
-        target: '#stats-section',
+    htmx.ajax('GET', `/admin/partials/dashboard-api-metrics?api_filter=${apiFilter}`, {
+        target: '#api-metrics-data',
         swap: 'innerHTML'
     });
 }

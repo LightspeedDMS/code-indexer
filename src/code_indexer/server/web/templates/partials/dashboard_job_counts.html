@@ -1,0 +1,48 @@
+<!-- Story #69: Granular partial for job counts data ONLY -->
+<article class="stat-card">
+    <header>
+        <h3>Running</h3>
+    </header>
+    <div class="stat-value">
+        <a href="/admin/jobs?status=running">{{ job_counts.running if job_counts else 0 }}</a>
+    </div>
+    <footer>
+        <small>Currently executing</small>
+    </footer>
+</article>
+
+<article class="stat-card">
+    <header>
+        <h3>Queued</h3>
+    </header>
+    <div class="stat-value">
+        <a href="/admin/jobs?status=pending">{{ job_counts.queued if job_counts else 0 }}</a>
+    </div>
+    <footer>
+        <small>Waiting to run</small>
+    </footer>
+</article>
+
+<article class="stat-card stat-success">
+    <header>
+        <h3>Completed ({{ time_filter or '24h' }})</h3>
+    </header>
+    <div class="stat-value">
+        <a href="/admin/jobs?status=completed">{{ job_counts.completed_24h if job_counts else 0 }}</a>
+    </div>
+    <footer>
+        <small>Last {{ time_filter or '24h' }}</small>
+    </footer>
+</article>
+
+<article class="stat-card stat-danger">
+    <header>
+        <h3>Failed ({{ time_filter or '24h' }})</h3>
+    </header>
+    <div class="stat-value">
+        <a href="/admin/jobs?status=failed">{{ job_counts.failed_24h if job_counts else 0 }}</a>
+    </div>
+    <footer>
+        <small>Last {{ time_filter or '24h' }}</small>
+    </footer>
+</article>

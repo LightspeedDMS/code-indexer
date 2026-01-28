@@ -298,7 +298,7 @@ CIDX can index and semantically search entire git commit history:
 
 **Initialize Handshake** (CRITICAL for Claude Code connection):
 - Method: `initialize` - MUST be first client-server interaction
-- Server Response: `{ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} }, "serverInfo": { "name": "Neo", "version": "8.7.1" } }`
+- Server Response: `{ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} }, "serverInfo": { "name": "Neo", "version": "8.7.3" } }`
 - Required for OAuth flow completion - Claude Code calls `initialize` after authentication
 
 **Version Notes**:
