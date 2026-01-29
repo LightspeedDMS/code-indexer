@@ -1015,12 +1015,21 @@ def _execute_semantic_search(
         from .services.generic_query_service import GenericQueryService
         from .services.language_validator import LanguageValidator
         from .services.language_mapper import LanguageMapper
+        from .services.multi_index_query_service import MultiIndexQueryService
 
         embedding_provider = EmbeddingProviderFactory.create(config, console)
         backend = BackendFactory.create(
             config=config, project_root=Path(config.codebase_dir)
         )
         vector_store_client = backend.get_vector_store_client()
+
+        # Initialize MultiIndexQueryService for unified query interface
+        # This handles both single-index (code only) and multi-index (code + multimodal) queries
+        multi_index_service = MultiIndexQueryService(
+            project_root=project_root,
+            vector_store=vector_store_client,
+            embedding_provider=embedding_provider,
+        )
 
         # Health checks
         if not embedding_provider.health_check():
@@ -1045,7 +1054,7 @@ def _execute_semantic_search(
         vector_store_client.ensure_payload_indexes(collection_name, context="query")
 
         # Initialize timing dictionary for telemetry
-        timing_info = {}
+        timing_info: Dict[str, Any] = {}
 
         # Build filter conditions
         filter_conditions: Dict[str, Any] = {}
@@ -1154,9 +1163,6 @@ def _execute_semantic_search(
             # Use generic query service for non-git projects
             use_branch_aware_query = False
 
-        # Get current embedding model for filtering
-        current_model = embedding_provider.get_current_model()
-
         # Use appropriate search method based on project type
         if use_branch_aware_query:
             # Build filter conditions (NO git_branch filter - let post-filtering handle it)
@@ -1207,45 +1213,16 @@ def _execute_semantic_search(
             if filter_conditions.get("must_not"):
                 query_filter_conditions["must_not"] = filter_conditions["must_not"]
 
-            # Query vector store
-            from .storage.filesystem_vector_store import (
-                FilesystemVectorStore,
+            # Query using MultiIndexQueryService (handles both code and multimodal indexes)
+            raw_results = multi_index_service.query(
+                query_text=query,
+                limit=limit * 2,
+                collection_name=collection_name,
+                filter_conditions=query_filter_conditions,
             )
 
-            if isinstance(vector_store_client, FilesystemVectorStore):
-                # Parallel execution: embedding generation + index loading happen concurrently
-                raw_results, search_timing = vector_store_client.search(
-                    query=query,
-                    embedding_provider=embedding_provider,
-                    filter_conditions=query_filter_conditions,
-                    limit=limit * 2,
-                    collection_name=collection_name,
-                    return_timing=True,
-                )
-            else:
-                # FilesystemVectorStore: pre-compute embedding
-                query_embedding = embedding_provider.get_embedding(query)
-                raw_results_list = vector_store_client.search(
-                    query_vector=query_embedding,
-                    filter_conditions=query_filter_conditions,
-                    limit=limit * 2,
-                    collection_name=collection_name,
-                )
-                raw_results = raw_results_list
-                search_timing = {}
-            timing_info.update(search_timing)
-
-            # Calculate vector_search_ms
-            breakdown_keys = [
-                "matrix_load_ms",
-                "index_load_ms",
-                "hnsw_search_ms",
-                "id_index_load_ms",
-                "staleness_detection_ms",
-            ]
-            timing_info["vector_search_ms"] = sum(
-                search_timing.get(k, 0) for k in breakdown_keys
-            )
+            # Note: MultiIndexQueryService doesn't return timing breakdown yet
+            timing_info["vector_search_ms"] = 0
 
             # Apply git-aware post-filtering
             git_filter_start = time.time()
@@ -1263,37 +1240,21 @@ def _execute_semantic_search(
                         filtered_results.append(result)
                 git_results = filtered_results
         else:
-            # Use model-specific search for non-git projects
-            from .storage.filesystem_vector_store import (
-                FilesystemVectorStore,
+            # Use MultiIndexQueryService for non-git projects
+            # Note: min_score filtering will be applied after query returns
+            raw_results = multi_index_service.query(
+                query_text=query,
+                limit=limit * 2,
+                collection_name=collection_name,
+                filter_conditions=filter_conditions if filter_conditions else None,
             )
 
-            if isinstance(vector_store_client, FilesystemVectorStore):
-                # Filesystem backend: parallel execution
-                raw_results, search_timing = vector_store_client.search(
-                    query=query,
-                    embedding_provider=embedding_provider,
-                    filter_conditions=filter_conditions if filter_conditions else None,
-                    limit=limit * 2,
-                    score_threshold=min_score,
-                    collection_name=collection_name,
-                    return_timing=True,
-                )
-                timing_info.update(search_timing)
-            else:
-                # Filesystem backend: pre-compute embedding
-                search_start = time.time()
-                query_embedding = embedding_provider.get_embedding(query)
-                raw_results_list = vector_store_client.search_with_model_filter(
-                    query_vector=query_embedding,
-                    embedding_model=current_model,
-                    limit=limit * 2,
-                    score_threshold=min_score,
-                    additional_filters=filter_conditions,
-                    accuracy=accuracy,
-                )
-                raw_results = raw_results_list
-                timing_info["vector_search_ms"] = (time.time() - search_start) * 1000
+            # Apply minimum score filtering if specified
+            if min_score:
+                raw_results = [r for r in raw_results if r.get("score", 0) >= min_score]
+
+            # Note: MultiIndexQueryService doesn't return timing yet
+            timing_info["vector_search_ms"] = 0
 
             # Apply git-aware filtering
             git_filter_start = time.time()
@@ -5529,6 +5490,16 @@ def query(
         )
         vector_store_client = backend.get_vector_store_client()
 
+        # Initialize MultiIndexQueryService for unified query interface
+        # This handles both single-index (code only) and multi-index (code + multimodal) queries
+        from .services.multi_index_query_service import MultiIndexQueryService
+
+        multi_index_service = MultiIndexQueryService(
+            project_root=project_root,
+            vector_store=vector_store_client,
+            embedding_provider=embedding_provider,
+        )
+
         # Health checks
         if not embedding_provider.health_check():
             console.print(
@@ -5551,7 +5522,7 @@ def query(
         vector_store_client.ensure_payload_indexes(collection_name, context="query")
 
         # Initialize timing dictionary for telemetry
-        timing_info = {}
+        timing_info: Dict[str, Any] = {}
 
         # NOTE: Embedding generation now happens in parallel with index loading
         # inside vector_store_client.search() - do NOT pre-compute embedding here
@@ -5844,15 +5815,15 @@ def query(
             )
 
             if isinstance(vector_store_client, FilesystemVectorStore):
-                # Parallel execution: embedding generation + index loading happen concurrently
-                raw_results, search_timing = vector_store_client.search(
-                    query=query,  # Pass query text for parallel embedding
-                    embedding_provider=embedding_provider,  # Provider for parallel execution
-                    filter_conditions=query_filter_conditions,
+                # Use MultiIndexQueryService for unified query interface (supports multimodal)
+                raw_results = multi_index_service.query(
+                    query_text=query,
                     limit=limit * 2,  # Get more to account for post-filtering
                     collection_name=collection_name,
-                    return_timing=True,
+                    filter_conditions=query_filter_conditions,
                 )
+                # Note: MultiIndexQueryService doesn't return timing breakdown yet
+                search_timing: Dict[str, Any] = {}
             else:
                 # FilesystemVectorStore: pre-compute embedding (no parallel support yet)
                 query_embedding = embedding_provider.get_embedding(query)
@@ -5902,16 +5873,15 @@ def query(
             )
 
             if isinstance(vector_store_client, FilesystemVectorStore):
-                # Filesystem backend: parallel execution
-                raw_results, search_timing = vector_store_client.search(
-                    query=query,
-                    embedding_provider=embedding_provider,
-                    filter_conditions=filter_conditions if filter_conditions else None,
+                # Use MultiIndexQueryService for unified query interface (supports multimodal)
+                raw_results = multi_index_service.query(
+                    query_text=query,
                     limit=limit * 2,
-                    score_threshold=min_score,
                     collection_name=collection_name,
-                    return_timing=True,
+                    filter_conditions=filter_conditions if filter_conditions else None,
                 )
+                # Note: MultiIndexQueryService doesn't return timing breakdown yet
+                search_timing = {}
                 timing_info.update(search_timing)
             else:
                 # Filesystem backend: pre-compute embedding

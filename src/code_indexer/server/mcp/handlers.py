@@ -2585,7 +2585,7 @@ def handle_get_golden_repo_indexes(
         )
 
 
-def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handle omni-regex search across multiple repositories."""
     import json as json_module
     import time
@@ -2618,7 +2618,7 @@ def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             single_args = dict(args)
             single_args["repository_alias"] = repo_alias
 
-            single_result = handle_regex_search(single_args, user)
+            single_result = await handle_regex_search(single_args, user)
 
             content = single_result.get("content", [])
             if content and content[0].get("type") == "text":
@@ -2659,7 +2659,7 @@ def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     return _mcp_response(formatted)
 
 
-def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for regex_search tool - pattern matching with timeout protection."""
     from pathlib import Path
     from code_indexer.global_repos.regex_search import RegexSearchService
@@ -2676,7 +2676,7 @@ def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     # Route to omni-search when repository_alias is an array
     if isinstance(repository_alias, list):
-        return _omni_regex_search(args, user)
+        return await _omni_regex_search(args, user)
 
     pattern = args.get("pattern")
 
@@ -2713,7 +2713,7 @@ def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         service = RegexSearchService(
             repo_path, subprocess_max_workers=subprocess_max_workers
         )
-        result = service.search(
+        result = await service.search(
             pattern=pattern,
             path=args.get("path"),
             include_patterns=args.get("include_patterns"),

@@ -5,6 +5,8 @@ from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 
 from ..config import IndexingConfig
+from .image_extractor import ImageExtractorFactory
+from ..logging import AdaptiveLogger
 
 
 class TextChunker:
@@ -14,6 +16,7 @@ class TextChunker:
         self.config = config
         self.chunk_size = config.chunk_size
         self.chunk_overlap = config.chunk_overlap
+        self._adaptive_logger = AdaptiveLogger()
 
     def _get_language_splitters(self, file_extension: str) -> List[str]:
         """Get appropriate text splitters based on file type."""
@@ -931,9 +934,18 @@ class TextChunker:
         return chunks
 
     def chunk_text(
-        self, text: str, file_path: Optional[Path] = None
+        self, text: str, file_path: Optional[Path] = None, repo_root: Optional[Path] = None
     ) -> List[Dict[str, Any]]:
-        """Split text into chunks with metadata including line numbers."""
+        """Split text into chunks with metadata including line numbers and images.
+
+        Args:
+            text: Text content to chunk
+            file_path: Path to the source file (for image extraction)
+            repo_root: Repository root directory (for validating image paths)
+
+        Returns:
+            List of chunk dictionaries with metadata including images[] field
+        """
         if not text or not text.strip():
             return []
 
@@ -941,6 +953,19 @@ class TextChunker:
         file_extension = ""
         if file_path:
             file_extension = file_path.suffix.lstrip(".")
+
+        # Extract images from supported file types (markdown, HTML, HTMX)
+        extracted_images: List[str] = []
+        if file_path and repo_root:
+            # Get appropriate extractor for file type
+            image_extractor = ImageExtractorFactory.get_extractor(f".{file_extension}")
+            if image_extractor:
+                extracted_images = image_extractor.extract_images(text, file_path, repo_root)
+                # Filter images by validation
+                extracted_images = [
+                    img for img in extracted_images
+                    if image_extractor.validate_image(img, repo_root)
+                ]
 
         # Split text into lines for line tracking
         text_lines = text.splitlines()
@@ -1003,7 +1028,7 @@ class TextChunker:
             else:
                 filtered_chunk_data.append(chunk_info)
 
-        # Create chunk metadata with line numbers
+        # Create chunk metadata with line numbers and images
         result = []
         for i, chunk_info in enumerate(filtered_chunk_data):
             chunk_text = chunk_info["text"]
@@ -1020,10 +1045,77 @@ class TextChunker:
                     "file_extension": file_extension,
                     "line_start": chunk_info["line_start"],
                     "line_end": chunk_info["line_end"],
+                    "images": extracted_images,  # Add images field to chunk metadata
                 }
             )
 
         return result
+
+    def chunk_text_with_logging(
+        self,
+        text: str,
+        file_path: Optional[Path] = None,
+        repo_root: Optional[Path] = None,
+        verbose: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Split text into chunks with validation logging - Story #64 AC7.
+
+        Thin wrapper around chunk_text() that adds image validation logging.
+        Uses extract_images_with_validation() to get detailed skip reasons
+        and logs all skipped images using AdaptiveLogger.
+
+        Args:
+            text: Text content to chunk
+            file_path: Path to the source file (for image extraction)
+            repo_root: Repository root directory (for validating image paths)
+            verbose: Enable verbose logging in CLI mode (ignored in server mode)
+
+        Returns:
+            List of chunk dictionaries with metadata including images[] field
+        """
+        # Extract and validate images with detailed skip reasons
+        extracted_images: List[str] = []
+        if file_path and repo_root:
+            file_extension = file_path.suffix.lstrip(".")
+            image_extractor = ImageExtractorFactory.get_extractor(f".{file_extension}")
+
+            if image_extractor:
+                # Use extract_images_with_validation() for skip reasons
+                valid_images, all_results = image_extractor.extract_images_with_validation(
+                    text, file_path, repo_root
+                )
+                extracted_images = valid_images
+
+                # Log all skipped images with human-readable reasons
+                for result in all_results:
+                    if not result.is_valid:
+                        reason_messages = {
+                            "missing": "File not found",
+                            "remote_url": "Remote URL (not local file)",
+                            "oversized": "File exceeds size limit (10MB)",
+                            "unsupported_format": "Unsupported image format",
+                            "data_uri": "Data URI (not a file path)"
+                        }
+                        reason_message = reason_messages.get(
+                            result.skip_reason,
+                            f"Invalid: {result.skip_reason}"
+                        )
+
+                        self._adaptive_logger.warn_image_skipped(
+                            file_path=str(file_path),
+                            image_ref=result.path,
+                            reason=reason_message,
+                            verbose=verbose
+                        )
+
+        # Delegate to existing chunk_text() for chunking logic
+        chunks = self.chunk_text(text, file_path, repo_root)
+
+        # Override images in chunks with our validated list (with logging)
+        for chunk in chunks:
+            chunk["images"] = extracted_images
+
+        return chunks
 
     def _is_fragment(self, text: str) -> bool:
         """Check if text is likely a meaningless fragment that should be dropped."""
@@ -1060,8 +1152,16 @@ class TextChunker:
 
         return False
 
-    def chunk_file(self, file_path: Path) -> List[Dict[str, Any]]:
-        """Read and chunk a file."""
+    def chunk_file(self, file_path: Path, repo_root: Optional[Path] = None) -> List[Dict[str, Any]]:
+        """Read and chunk a file.
+
+        Args:
+            file_path: Path to the file to chunk
+            repo_root: Repository root directory (for image extraction in markdown files)
+
+        Returns:
+            List of chunk dictionaries with metadata including images[] field
+        """
         # Debug logging
         import os
         import datetime
@@ -1095,7 +1195,7 @@ class TextChunker:
                 )
                 f.flush()
 
-            return self.chunk_text(text, file_path)
+            return self.chunk_text(text, file_path, repo_root=repo_root)
 
         except Exception as e:
             raise ValueError(f"Failed to process file {file_path}: {e}")

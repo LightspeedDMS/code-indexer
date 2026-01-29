@@ -62,6 +62,7 @@ class FileChunkingManager:
         slot_tracker: CleanSlotTracker,
         codebase_dir: Path,  # CRITICAL FOR COW CLONING: Needed for path normalization
         fts_manager=None,  # Optional FTS index manager
+        multimodal_client=None,  # Optional VoyageMultimodalClient for multimodal embeddings
     ):
         """
         Initialize FileChunkingManager with complete functionality.
@@ -73,6 +74,8 @@ class FileChunkingManager:
             thread_count: Number of worker threads (thread_count + 2 per specs)
             slot_tracker: CleanSlotTracker for progress tracking and slot management
             codebase_dir: Repository root directory for path normalization
+            fts_manager: Optional FTS index manager
+            multimodal_client: Optional VoyageMultimodalClient for multimodal embeddings
 
         Raises:
             ValueError: If thread_count is invalid or dependencies are None
@@ -97,6 +100,7 @@ class FileChunkingManager:
         self.slot_tracker = slot_tracker
         self.codebase_dir = codebase_dir
         self.fts_manager = fts_manager
+        self.multimodal_client = multimodal_client
 
         # CRITICAL FIX: Single cancellation event shared with VectorCalculationManager
         self._cancellation_requested = False
@@ -362,6 +366,10 @@ class FileChunkingManager:
 
         # UNIVERSAL TIMESTAMP COLLECTION: Timestamp fields are now handled by GitAwareMetadataSchema
 
+        # Add images field to payload for multimodal chunks
+        if "images" in chunk and chunk["images"]:
+            payload["images"] = chunk["images"]
+
         # Create point ID using hash of file and chunk (ensuring uniqueness)
         point_id_data = (
             f"{metadata['project_id']}_{metadata['file_hash']}_{chunk['chunk_index']}"
@@ -449,6 +457,25 @@ class FileChunkingManager:
 
             logger.debug(f"Generated {len(chunks)} chunks for {file_path}")
 
+            # MULTIMODAL ROUTING: Separate chunks into regular (code-only) and multimodal (with images)
+            regular_chunks = []
+            multimodal_chunks = []
+
+            for chunk in chunks:
+                if chunk.get("images") and len(chunk["images"]) > 0:
+                    multimodal_chunks.append(chunk)
+                    logger.debug(
+                        f"Chunk {chunk.get('chunk_index')} has {len(chunk['images'])} images - "
+                        "routing to multimodal embedding path"
+                    )
+                else:
+                    regular_chunks.append(chunk)
+
+            logger.debug(
+                f"Separated {len(regular_chunks)} regular chunks and "
+                f"{len(multimodal_chunks)} multimodal chunks for {file_path}"
+            )
+
             # Update status after chunking
             slot_tracker.update_slot(slot_id, FileStatus.VECTORIZING)
 
@@ -469,7 +496,8 @@ class FileChunkingManager:
             current_tokens = 0
             batch_futures = []
 
-            for chunk in chunks:
+            # Process ONLY regular chunks (no images) via code embedding path
+            for chunk in regular_chunks:
                 chunk_text = chunk["text"]
                 chunk_tokens = self._count_tokens(chunk_text)
 
@@ -527,7 +555,116 @@ class FileChunkingManager:
                         )
                     raise
 
-            if not batch_futures:
+            # MULTIMODAL PROCESSING: Handle chunks with images
+            if multimodal_chunks and hasattr(self, 'multimodal_client') and self.multimodal_client:
+                logger.debug(f"Processing {len(multimodal_chunks)} multimodal chunks for {file_path}")
+
+                # Ensure multimodal collection exists using model name as collection name
+                # This creates .code-indexer/index/voyage-multimodal-3/ (NOT subdirectory)
+                multimodal_collection_name = self.multimodal_client.config.model
+                if not self.vector_store_client.collection_exists(multimodal_collection_name):
+                    # voyage-multimodal-3 produces 1024-dimensional embeddings
+                    self.vector_store_client.create_collection(
+                        collection_name=multimodal_collection_name,
+                        vector_size=1024
+                    )
+                    logger.info(
+                        f"Created multimodal collection '{multimodal_collection_name}' at same level as code embeddings"
+                    )
+
+                for chunk in multimodal_chunks:
+                    # Resolve image paths relative to source file's directory
+                    image_paths = []
+                    for img_ref in chunk.get('images', []):
+                        # img_ref can be either:
+                        # - string (relative path) from TextChunker
+                        # - dict with 'path' key from FixedSizeChunker
+                        if isinstance(img_ref, dict):
+                            img_ref_path = img_ref['path']
+                        else:
+                            img_ref_path = img_ref
+
+                        # Skip remote URLs (http://, https://)
+                        if img_ref_path.startswith(('http://', 'https://')):
+                            logger.debug(f"Skipping remote image URL: {img_ref_path}")
+                            continue
+
+                        # Resolve path relative to source file's directory
+                        # e.g., docs/guide.md + ../images/schema.png -> images/schema.png
+                        file_dir = file_path.parent
+                        img_path = (file_dir / img_ref_path).resolve()
+
+                        # Validate image is within codebase (security check)
+                        try:
+                            img_path.relative_to(self.codebase_dir)
+                        except ValueError:
+                            logger.warning(f"Image outside codebase: {img_path} - skipping")
+                            continue
+
+                        if not img_path.exists():
+                            logger.debug(f"Image not found: {img_path} - skipping")
+                            continue
+                        image_paths.append(img_path)
+
+                    if not image_paths:
+                        logger.warning(f"No valid images for chunk {chunk.get('chunk_index')} - skipping")
+                        continue
+
+                    try:
+                        # Get multimodal embedding (client handles base64 encoding)
+                        embedding = self.multimodal_client.get_multimodal_embedding(
+                            text=chunk['text'],
+                            image_paths=image_paths
+                        )
+
+                        logger.debug(
+                            f"Generated multimodal embedding (dim={len(embedding)}) "
+                            f"for chunk {chunk.get('chunk_index')} with {len(image_paths)} images"
+                        )
+
+                        # Create properly formatted vector point using existing helper
+                        chunk_data = {
+                            "text": chunk["text"],
+                            "chunk_index": chunk.get("chunk_index", 0),
+                            "total_chunks": 1,  # Multimodal chunks stored individually
+                            "line_start": chunk.get("line_start"),
+                            "line_end": chunk.get("line_end"),
+                            "file_extension": file_path.suffix.lstrip(".") or "txt",
+                            "images": chunk.get("images", []),  # Preserve images metadata
+                        }
+
+                        vector_point = self._create_vector_point(
+                            chunk_data, embedding, metadata, file_path
+                        )
+
+                        # Store in voyage-multimodal-3 collection (NOT subdirectory - same level as voyage-code-3)
+                        multimodal_collection_name = self.multimodal_client.config.model
+                        if not multimodal_collection_name:
+                            logger.warning(
+                                f"No model name in multimodal client config, skipping storage for chunk "
+                                f"{chunk.get('chunk_index')} from {file_path}"
+                            )
+                            continue
+
+                        success = self.vector_store_client.upsert_points(
+                            points=[vector_point],
+                            collection_name=multimodal_collection_name
+                        )
+
+                        if not success:
+                            raise RuntimeError(f"Failed to store multimodal vector point")
+
+                        logger.debug(
+                            f"Stored multimodal embedding for chunk {chunk.get('chunk_index')} "
+                            f"in {multimodal_collection_name} collection"
+                        )
+
+                    except Exception as e:
+                        logger.error(f"Failed to generate or store multimodal embedding: {e}")
+                        # Continue processing other chunks rather than failing entire file
+                        continue
+
+            if not batch_futures and not multimodal_chunks:
                 logger.warning(f"No batches created for {file_path}")
                 return FileProcessingResult(
                     success=False,
@@ -580,10 +717,11 @@ class FileChunkingManager:
                             error=f"Batch processing failed: {error_msg}",
                         )
 
-                # CRITICAL: Validate total embedding count matches chunks
-                if len(all_embeddings) != len(chunks):
+                # CRITICAL: Validate total embedding count matches REGULAR chunks only
+                # (multimodal chunks are processed separately and not included in all_embeddings)
+                if len(all_embeddings) != len(regular_chunks):
                     logger.error(
-                        f"Total embedding count mismatch: {len(all_embeddings)} embeddings for {len(chunks)} chunks in {file_path}"
+                        f"Total embedding count mismatch: {len(all_embeddings)} embeddings for {len(regular_chunks)} regular chunks in {file_path}"
                     )
                     return FileProcessingResult(
                         success=False,
@@ -593,8 +731,8 @@ class FileChunkingManager:
                         error="Total embedding count mismatch",
                     )
 
-                # Create points with preserved order: chunks[i] → embeddings[i] → points[i]
-                for i, (chunk, embedding) in enumerate(zip(chunks, all_embeddings)):
+                # Create points with preserved order: regular_chunks[i] → embeddings[i] → points[i]
+                for i, (chunk, embedding) in enumerate(zip(regular_chunks, all_embeddings)):
                     if embedding:  # Validate individual embedding
                         file_points.append(
                             {

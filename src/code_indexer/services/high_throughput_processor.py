@@ -288,6 +288,16 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         # Initialize file processing rate tracking for files/s metric
         self._initialize_file_rate_tracking()
 
+        # Create multimodal client for image+text embedding support
+        from ..config import VoyageAIConfig
+        from .voyage_multimodal import VoyageMultimodalClient
+
+        voyage_config = VoyageAIConfig(
+            model="voyage-multimodal-3",
+            api_endpoint="https://api.voyageai.com/v1/multimodalembeddings",
+        )
+        multimodal_client = VoyageMultimodalClient(voyage_config)
+
         # PARALLEL FILE PROCESSING: Replace sequential chunking with parallel submission
         with VectorCalculationManager(
             self.embedding_provider, vector_thread_count
@@ -300,6 +310,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 slot_tracker=local_slot_tracker,
                 codebase_dir=self.config.codebase_dir,
                 fts_manager=fts_manager,
+                multimodal_client=multimodal_client,
             ) as file_manager:
                 # PARALLEL HASH CALCULATION - eliminate serial bottleneck
                 file_futures = []

@@ -208,17 +208,44 @@ class FilesystemVectorStore:
         self._temporal_metadata_store: Optional[TemporalMetadataStore] = None
         self._temporal_metadata_lock = threading.Lock()
 
-    def create_collection(self, collection_name: str, vector_size: int) -> bool:
+        # Multimodal support: Track active subdirectory for each collection during indexing
+        # Structure: {collection_name: subdirectory_or_none}
+        self._active_subdirectories: Dict[str, Optional[str]] = {}
+
+    def _get_collection_path(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> Path:
+        """Get the path to a collection, optionally within a subdirectory.
+
+        Args:
+            collection_name: Name of the collection
+            subdirectory: Optional subdirectory (e.g., "multimodal_index")
+
+        Returns:
+            Path to the collection directory
+
+        Example:
+            _get_collection_path("my_coll") -> base_path/my_coll
+            _get_collection_path("my_coll", "multimodal_index") -> base_path/multimodal_index/my_coll
+        """
+        if subdirectory:
+            return self.base_path / subdirectory / collection_name
+        return self.base_path / collection_name
+
+    def create_collection(
+        self, collection_name: str, vector_size: int, subdirectory: Optional[str] = None
+    ) -> bool:
         """Create a new collection with projection matrix.
 
         Args:
             collection_name: Name of the collection
             vector_size: Size of input vectors (e.g., 1536)
+            subdirectory: Optional subdirectory path (e.g., "multimodal_index")
 
         Returns:
             True if created successfully
         """
-        collection_path = self.base_path / collection_name
+        collection_path = self._get_collection_path(collection_name, subdirectory)
         collection_path.mkdir(parents=True, exist_ok=True)
 
         # Story #726: Removed _ensure_gitignore() call.
@@ -253,6 +280,10 @@ class FilesystemVectorStore:
             },
         }
 
+        # Store subdirectory in metadata if provided
+        if subdirectory:
+            metadata["subdirectory"] = subdirectory
+
         metadata_path = collection_path / "collection_meta.json"
         with open(metadata_path, "w") as f:
             json.dump(metadata, f, indent=2)
@@ -263,16 +294,19 @@ class FilesystemVectorStore:
 
         return True
 
-    def collection_exists(self, collection_name: str) -> bool:
+    def collection_exists(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> bool:
         """Check if collection exists.
 
         Args:
             collection_name: Name of the collection
+            subdirectory: Optional subdirectory path (e.g., "multimodal_index")
 
         Returns:
             True if collection exists
         """
-        collection_path = self.base_path / collection_name
+        collection_path = self._get_collection_path(collection_name, subdirectory)
         metadata_path = collection_path / "collection_meta.json"
         return metadata_path.exists()
 
@@ -290,7 +324,9 @@ class FilesystemVectorStore:
                     collections.append(path.name)
         return collections
 
-    def begin_indexing(self, collection_name: str) -> None:
+    def begin_indexing(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> None:
         """Prepare for batch indexing operations.
 
         Called ONCE before indexing session starts. Clears file path cache to ensure
@@ -298,6 +334,7 @@ class FilesystemVectorStore:
 
         Args:
             collection_name: Name of the collection to begin indexing
+            subdirectory: Optional subdirectory path (e.g., "multimodal_index")
 
         Note:
             This is part of the storage provider lifecycle interface that enables O(n)
@@ -308,7 +345,11 @@ class FilesystemVectorStore:
         """
         self.logger.info(
             f"Beginning indexing session for collection '{collection_name}'"
+            + (f" in subdirectory '{subdirectory}'" if subdirectory else "")
         )
+
+        # Store active subdirectory for this collection
+        self._active_subdirectories[collection_name] = subdirectory
 
         # Clear file path cache for this collection
         with self._id_index_lock:
@@ -336,6 +377,7 @@ class FilesystemVectorStore:
         collection_name: str,
         progress_callback: Optional[Any] = None,
         skip_hnsw_rebuild: bool = False,
+        subdirectory: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Finalize indexing by rebuilding HNSW and ID indexes.
 
@@ -348,6 +390,7 @@ class FilesystemVectorStore:
             progress_callback: Optional callback for progress reporting
             skip_hnsw_rebuild: If True, skip HNSW rebuild and mark index as stale
                              (watch mode optimization - defer rebuild to query time)
+            subdirectory: Optional subdirectory path (e.g., "multimodal_index")
 
         Returns:
             Status dictionary with rebuild results and hnsw_skipped flag
@@ -363,9 +406,9 @@ class FilesystemVectorStore:
             deferred to query time via staleness marking. This prevents watch mode
             from spending 5-10 seconds rebuilding HNSW after every batch of file changes.
         """
-        collection_path = self.base_path / collection_name
+        collection_path = self._get_collection_path(collection_name, subdirectory)
 
-        if not self.collection_exists(collection_name):
+        if not self.collection_exists(collection_name, subdirectory):
             raise ValueError(f"Collection '{collection_name}' does not exist")
 
         self.logger.info(f"Finalizing indexes for collection '{collection_name}'...")
@@ -473,6 +516,10 @@ class FilesystemVectorStore:
         if incremental_update_result is not None:
             result["hnsw_update"] = "incremental"
 
+        # Clean up active subdirectory tracking
+        if collection_name in self._active_subdirectories:
+            del self._active_subdirectories[collection_name]
+
         return result
 
     def _get_vector_size(self, collection_name: str) -> int:
@@ -498,7 +545,8 @@ class FilesystemVectorStore:
         with self._metadata_lock:
             if collection_name not in self._vector_size_cache:
                 # Load metadata ONCE
-                collection_path = self.base_path / collection_name
+                subdirectory = self._active_subdirectories.get(collection_name)
+                collection_path = self._get_collection_path(collection_name, subdirectory)
                 meta_file = collection_path / "collection_meta.json"
 
                 if not meta_file.exists():
@@ -595,6 +643,7 @@ class FilesystemVectorStore:
         points: List[Dict[str, Any]],
         progress_callback: Optional[Any] = None,
         watch_mode: bool = False,
+        subdirectory: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Store vectors in filesystem with git-aware optimization.
 
@@ -603,6 +652,7 @@ class FilesystemVectorStore:
             points: List of point dictionaries with id, vector, payload
             progress_callback: Optional callback(current, total, Path, info) for progress reporting
             watch_mode: If True, triggers immediate real-time HNSW updates (HNSW-001)
+            subdirectory: Optional subdirectory path (e.g., "multimodal_index")
 
         Returns:
             Status dictionary with operation result
@@ -630,9 +680,13 @@ class FilesystemVectorStore:
                     f"Available collections: {', '.join(available_collections)}"
                 )
 
-        collection_path = self.base_path / collection_name
+        # Use subdirectory from active tracking if not provided
+        if subdirectory is None:
+            subdirectory = self._active_subdirectories.get(collection_name)
 
-        if not self.collection_exists(collection_name):
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+
+        if not self.collection_exists(collection_name, subdirectory):
             raise ValueError(f"Collection '{collection_name}' does not exist")
 
         # Load projection matrix (singleton-cached in ProjectionMatrixManager)
@@ -1239,7 +1293,8 @@ class FilesystemVectorStore:
         Note:
             Story #540: Prevents duplicate chunks by tracking all point_ids per file.
         """
-        collection_path = self.base_path / collection_name
+        subdirectory = self._active_subdirectories.get(collection_name)
+        collection_path = self._get_collection_path(collection_name, subdirectory)
         path_index_file = collection_path / "path_index.bin"
 
         # Load from disk or return empty if file doesn't exist
@@ -1258,7 +1313,8 @@ class FilesystemVectorStore:
         Note:
             Story #540: Persists path index for duplicate prevention across sessions.
         """
-        collection_path = self.base_path / collection_name
+        subdirectory = self._active_subdirectories.get(collection_name)
+        collection_path = self._get_collection_path(collection_name, subdirectory)
         path_index_file = collection_path / "path_index.bin"
 
         path_index.save(path_index_file)
@@ -1808,6 +1864,7 @@ class FilesystemVectorStore:
         lazy_load: bool = False,
         prefetch_limit: Optional[int] = None,
         ef: int = 50,
+        subdirectory: Optional[str] = None,
     ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, Any]]]:
         """Search for similar vectors using parallel execution of index loading and embedding generation.
 
@@ -1829,6 +1886,7 @@ class FilesystemVectorStore:
             return_timing: If True, return tuple of (results, timing_dict)
             lazy_load: If True, load payloads on-demand with early exit (optimization for restrictive filters)
             prefetch_limit: How many candidate IDs to fetch from HNSW (default: limit * 2 or limit * 15 for lazy_load)
+            subdirectory: Optional subdirectory path (e.g., "multimodal_index")
 
         Returns:
             List of results with id, score, payload (including content), and staleness
@@ -1843,9 +1901,9 @@ class FilesystemVectorStore:
 
         timing: Dict[str, Any] = {}
 
-        collection_path = self.base_path / collection_name
+        collection_path = self._get_collection_path(collection_name, subdirectory)
 
-        if not self.collection_exists(collection_name):
+        if not self.collection_exists(collection_name, subdirectory):
             return ([], timing) if return_timing else []
 
         # Load metadata to get vector size

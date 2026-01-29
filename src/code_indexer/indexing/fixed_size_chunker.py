@@ -5,8 +5,10 @@ This module implements model-aware fixed-size chunking algorithm:
 - Fixed overlap: 15% of chunk size between adjacent chunks
 - Pure arithmetic: no parsing, no regex, no string analysis
 - Pattern: next_start = current_start + (chunk_size - overlap_size)
+- Markdown image detection: extracts ![alt text](image.png) for multimodal embeddings
 """
 
+import re
 from typing import List, Dict, Any, Optional, Union
 from pathlib import Path
 
@@ -22,6 +24,7 @@ class FixedSizeChunker:
     3. Simple math: next_start = current_start + step_size
     4. No boundary detection - cuts at exact character positions
     5. No parsing - pure arithmetic operations
+    6. Markdown image detection - extracts image references for multimodal embeddings
 
     Model-specific chunk sizes (VoyageAI only in v8.0+):
     - voyage-code-3: 4096 characters (1024 tokens, research optimal)
@@ -71,6 +74,32 @@ class FixedSizeChunker:
         # Calculate derived values
         self.overlap_size = int(self.chunk_size * self.OVERLAP_PERCENTAGE)
         self.step_size = self.chunk_size - self.overlap_size
+
+    def _extract_markdown_images(self, text: str) -> List[Dict[str, str]]:
+        """Extract markdown image references from text.
+
+        Detects markdown image syntax: ![alt text](image_path)
+
+        Args:
+            text: Text to search for image references
+
+        Returns:
+            List of dictionaries with 'alt_text' and 'path' keys for each image found
+        """
+        # Regex pattern to match markdown images: ![alt text](path)
+        # Group 1: alt text (anything except ])
+        # Group 2: path (anything except ))
+        pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
+        matches = re.findall(pattern, text)
+
+        images = []
+        for alt_text, path in matches:
+            images.append({
+                "alt_text": alt_text,
+                "path": path
+            })
+
+        return images
 
     def _calculate_line_numbers(
         self, text: str, start_pos: int, end_pos: int
@@ -139,6 +168,11 @@ class FixedSizeChunker:
                 text, current_start, current_start + len(chunk_text)
             )
 
+            # Extract markdown images if this is a markdown file
+            images = []
+            if file_extension == "md":
+                images = self._extract_markdown_images(chunk_text)
+
             # Create chunk metadata
             chunk = {
                 "text": chunk_text,
@@ -149,6 +183,7 @@ class FixedSizeChunker:
                 "file_extension": file_extension,
                 "line_start": line_start,
                 "line_end": line_end,
+                "images": images,  # Populated for markdown files with image references
             }
             chunks.append(chunk)
 
