@@ -1,3 +1,6 @@
 [submodule "third_party/hnswlib"]
 	path = third_party/hnswlib
 	url = https://github.com/LightspeedDMS/hnswlib.git
+[submodule "test-fixtures/multimodal-mock-repo"]
+	path = test-fixtures/multimodal-mock-repo
+	url = https://github.com/LightspeedDMS/code-indexer-mock-test-repo.git
