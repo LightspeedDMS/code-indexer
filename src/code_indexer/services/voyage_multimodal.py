@@ -321,3 +321,25 @@ class VoyageMultimodalClient:
             embeddings.append(embedding)
 
         return embeddings
+
+    def get_embedding(self, text: str) -> List[float]:
+        """Generate text-only embedding for query purposes.
+
+        This method enables VoyageMultimodalClient to be used as a standard
+        embedding provider compatible with vector_store.search().
+
+        Uses the multimodal API with text-only input and input_type="query"
+        to generate embeddings in the same vector space as documents indexed
+        with voyage-multimodal-3.
+
+        Args:
+            text: Query text to embed
+
+        Returns:
+            1024-dimensional embedding vector as list of floats
+        """
+        return self.get_multimodal_embedding(
+            text=text,
+            image_paths=[],
+            input_type="query"
+        )

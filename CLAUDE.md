@@ -911,7 +911,99 @@ Full tool description here.
 
 ---
 
-## 12. Where to Find More
+## 12. CIDX Server E2E Testing Workflow
+
+When testing against the local CIDX server (localhost:8000), follow this workflow:
+
+### Prerequisites
+
+1. Server running: `PYTHONPATH=./src python3 -m uvicorn code_indexer.server.app:app --host 0.0.0.0 --port 8000`
+2. Admin credentials: `admin` / `admin` (local dev - see CLAUDE.md "ADMIN PASSWORD" section)
+
+### Step 1: Login and Get Token
+
+```bash
+# Login with JSON content type (NOT form-urlencoded)
+curl -s -X POST http://localhost:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin"}' > /tmp/login.json
+
+# Extract token
+cat /tmp/login.json | jq -r '.access_token' > /tmp/token.txt
+TOKEN=$(cat /tmp/token.txt)
+```
+
+### Step 2: List Existing Repositories
+
+```bash
+# Via MCP endpoint (recommended)
+curl -s -X POST http://localhost:8000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_repositories","arguments":{}}}' | jq '.'
+```
+
+### Step 3: Add Golden Repository (if needed)
+
+```bash
+# Via admin endpoint with form-urlencoded
+curl -s -X POST http://localhost:8000/admin/golden-repos/add \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "url=git@github.com:org/repo.git&alias=my-repo&description=Description"
+```
+
+### Step 4: Run MCP Query
+
+```bash
+# Query via MCP endpoint
+# IMPORTANT: Use "query_text" NOT "query" as the argument name
+curl -s -X POST http://localhost:8000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "search_code",
+      "arguments": {
+        "query_text": "your search query",
+        "repository_alias": "repo-alias-global",
+        "limit": 5
+      }
+    }
+  }' | jq '.'
+```
+
+### Key Notes
+
+- **Auth endpoint**: `/auth/login` with JSON body (NOT `/admin/login`)
+- **Query argument**: Use `query_text` not `query` for search_code tool
+- **Repository alias**: Global repos have `-global` suffix (e.g., `code-indexer-python-global`)
+- **Timing display**: CLI-only feature, not included in MCP/REST API responses
+- **Token expiry**: Tokens expire after 10 minutes, re-login if needed
+
+### Quick Test Script
+
+Save to `/tmp/test_cidx_server.sh`:
+```bash
+#!/bin/bash
+TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin"}' | jq -r '.access_token')
+
+curl -s -X POST http://localhost:8000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_code","arguments":{"query_text":"vector store","repository_alias":"code-indexer-python-global","limit":3}}}'
+```
+
+**RECORDED**: 2026-01-29 - Documented after manual E2E testing workflow for Story #78.
+
+---
+
+## 13. Where to Find More
 
 **Detailed Architecture**: `/docs/v5.0.0-architecture-summary.md`, `/docs/v7.2.0-architecture-incremental-updates.md`
 

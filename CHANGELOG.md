@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.0] - 2026-01-29
+
+### Added
+
+- **Multimodal Image Vectorization** (Epic #61) - Search documentation with embedded diagrams, screenshots, and visual content. CIDX automatically detects markdown files with images and makes them semantically searchable:
+
+  **User Experience**:
+  - Automatic detection during `cidx index` - no configuration needed
+  - Query output shows `Using: voyage-code-3, voyage-multimodal-3` when multimodal content exists
+  - Timing breakdown displays parallel search performance across both indexes
+  - Seamless result merging - best matches from both indexes, deduplicated by file
+
+  **Technical Implementation**:
+  - **Dual Model Architecture**: Code uses `voyage-code-3` (1024-dim), images use `voyage-multimodal-3` (1024-dim)
+  - **Separate Collections**: `.code-indexer/index/voyage-code-3/` and `.code-indexer/index/voyage-multimodal-3/`
+  - **Image Extraction**: Parses markdown `![alt](path)` and HTML/HTMX `<img src="path">` syntax, validates files exist, filters unsupported formats
+  - **Parallel Query Execution**: Both indexes searched concurrently via ThreadPoolExecutor
+  - **Result Merging**: Deduplicates by (file_path, chunk_offset), keeps highest score, sorts descending
+
+  **Supported File Types**: Markdown (`.md`), HTML (`.html`), HTMX (`.htmx`)
+  **Supported Image Formats**: PNG, JPG/JPEG, WebP, GIF
+
+  **Stories Completed**:
+  - Story #62: VoyageMultimodalClient for voyage-multimodal-3 API integration
+  - Story #63: Multimodal-aware file chunking with image extraction and validation
+  - Story #64: Dual-index storage architecture
+  - Story #65: MultiIndexQueryService for parallel queries with result merging
+  - Story #77: CLI integration displaying multimodal collection status
+  - Story #78: Accurate wall-clock timing display for parallel queries
+
+### Fixed
+
+- **Multi-Index Query Timing Accuracy** (Story #78) - Fixed timing display where individual index times incorrectly exceeded parallel wall-clock time (e.g., showing 1.85s + 1.40s = 931ms total):
+  - Root cause: Summing internal breakdown values (embedding_ms + hnsw_search_ms) instead of measuring actual elapsed time
+  - Solution: Added wall-clock `elapsed_ms` measurement in each query method
+  - Invariant now holds: `parallel_time >= max(code_index_ms, multimodal_index_ms)`
+
+---
+
 ## [8.7.3] - 2026-01-28
 
 ### Fixed

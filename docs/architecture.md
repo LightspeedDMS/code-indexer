@@ -87,6 +87,12 @@ Container-free vector storage using filesystem + HNSW indexing:
         └── vector_<uuid>.json  # Individual vector + payload
 ```
 
+**Collection Names** (v8.8+):
+- `voyage-code-3`: Source code and plain text (default, always present)
+- `voyage-multimodal-3`: Markdown with embedded images (created when multimodal content exists)
+
+See [Dual Model Architecture](#dual-model-architecture-v88) for details on multi-collection storage.
+
 **Key Features:**
 - **Path-as-Vector Quantization**: 64-dim projection → 4-level directory depth
 - **Git-Aware Storage**:
@@ -128,6 +134,134 @@ Query Pipeline:
 
 **Typical Savings:** 175-265ms per query
 **Threading Overhead:** 7-16% (transparently reported)
+
+## Dual Model Architecture (v8.8+)
+
+CIDX v8.8 introduces **multimodal indexing** for markdown files with embedded images, using a dual-model architecture that maintains separate collections for code and multimodal content.
+
+### Model Selection
+
+**voyage-code-3** (Code Collection):
+- **Purpose**: Source code, configuration files, plain text documentation
+- **Dimensions**: 1024
+- **Strengths**: Optimized for code semantics, function/class relationships, programming patterns
+- **Collection**: `.code-indexer/index/voyage-code-3/`
+
+**voyage-multimodal-3** (Multimodal Collection):
+- **Purpose**: Markdown files containing embedded images (diagrams, screenshots, schemas)
+- **Dimensions**: 1024
+- **Strengths**: Combined text+image understanding, visual content semantics
+- **Collection**: `.code-indexer/index/voyage-multimodal-3/`
+
+### Storage Structure (Dual Collections)
+
+```
+.code-indexer/
+├── config.json                           # Project configuration
+└── index/
+    ├── voyage-code-3/                    # Code collection (always present)
+    │   ├── hnsw_index.bin
+    │   ├── id_index.bin
+    │   ├── collection_meta.json
+    │   └── vectors/
+    │       └── <quantized-path>/vector_<uuid>.json
+    │
+    └── voyage-multimodal-3/              # Multimodal collection (when images exist)
+        ├── hnsw_index.bin
+        ├── id_index.bin
+        ├── collection_meta.json
+        └── vectors/
+            └── <quantized-path>/vector_<uuid>.json
+```
+
+### Indexing Pipeline
+
+**Automatic Detection**: During `cidx index`, each file is analyzed:
+
+```
+File Processing:
+┌─────────────────────────────────────────┐
+│  1. File Discovery                      │
+│     - Scan codebase for indexable files │
+└─────────────────────────────────────────┘
+           ⬇
+┌─────────────────────────────────────────┐
+│  2. Content Analysis                    │
+│     - Is it markdown (.md)?             │
+│       → Parse ![alt](path) syntax       │
+│     - Is it HTML/HTMX (.html, .htmx)?   │
+│       → Parse <img src="path"> tags     │
+│     - Contains image references?        │
+└─────────────────────────────────────────┘
+           ⬇
+┌─────────────────────────────────────────┐
+│  3. Image Validation                    │
+│     - File exists on disk?              │
+│     - Supported format (PNG/JPG/WebP/GIF)?│
+│     - Not a remote URL (http://)?       │
+└─────────────────────────────────────────┘
+           ⬇
+┌─────────────────────────────────────────┐
+│  4. Model Selection                     │
+│     - Has valid images → voyage-multimodal-3│
+│     - Code/text only → voyage-code-3    │
+└─────────────────────────────────────────┘
+           ⬇
+┌─────────────────────────────────────────┐
+│  5. Embedding & Storage                 │
+│     - Generate embedding with selected model│
+│     - Store in corresponding collection │
+└─────────────────────────────────────────┘
+```
+
+**Supported Image Formats**: PNG, JPG/JPEG, WebP, GIF
+**Skipped**: Remote URLs (http://, https://), missing files, unsupported formats (.bmp, .svg)
+
+### Parallel Multi-Index Query
+
+When both collections exist, queries search them **concurrently** using ThreadPoolExecutor:
+
+```
+Multi-Index Query Pipeline:
+┌─────────────────────────────────────────────────────────────┐
+│  Check: Does voyage-multimodal-3 collection exist?          │
+│  - Yes → Parallel dual-index query                          │
+│  - No  → Single-index query (voyage-code-3 only)            │
+└─────────────────────────────────────────────────────────────┘
+           ⬇ (if multimodal exists)
+┌──────────────────────────┐     ┌──────────────────────────┐
+│  Thread 1: Code Index    │     │  Thread 2: Multimodal    │
+│  - voyage-code-3 query   │     │  - voyage-multimodal-3   │
+│  - HNSW search           │     │  - HNSW search           │
+│  - Return top N*2        │     │  - Return top N*2        │
+└──────────────────────────┘     └──────────────────────────┘
+           ⬇ Parallel Execution (wall-clock = max of both) ⬇
+┌─────────────────────────────────────────────────────────────┐
+│  Result Merging                                             │
+│  1. Combine results from both indexes                       │
+│  2. Deduplicate by (file_path, chunk_offset)                │
+│     - Keep highest score when duplicates exist              │
+│  3. Sort by score descending                                │
+│  4. Apply limit to final results                            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Timing Semantics**:
+- `parallel_multi_index_ms`: Wall-clock time for both queries (= max of individual times)
+- `code_index_ms`: Wall-clock time for voyage-code-3 query
+- `multimodal_index_ms`: Wall-clock time for voyage-multimodal-3 query
+- `merge_deduplicate_ms`: Time to merge and deduplicate results
+
+**Invariant**: `parallel_multi_index_ms >= max(code_index_ms, multimodal_index_ms)`
+
+**Timeout Handling**: Each index has independent 30-second timeout. If one times out, partial results from the successful index are still returned.
+
+### Backward Compatibility
+
+- **No multimodal content**: System operates exactly as before (single voyage-code-3 collection)
+- **Existing indexes**: Multimodal collection only created when markdown files with valid images are indexed
+- **Query interface**: Same `cidx query` command works transparently
+- **CLI feedback**: Shows `Using: voyage-code-3, voyage-multimodal-3` when both active
 
 ### Search Strategy Evolution
 
@@ -298,7 +432,7 @@ CIDX can index and semantically search entire git commit history:
 
 **Initialize Handshake** (CRITICAL for Claude Code connection):
 - Method: `initialize` - MUST be first client-server interaction
-- Server Response: `{ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} }, "serverInfo": { "name": "Neo", "version": "8.7.3" } }`
+- Server Response: `{ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} }, "serverInfo": { "name": "Neo", "version": "8.8.0" } }`
 - Required for OAuth flow completion - Claude Code calls `initialize` after authentication
 
 **Version Notes**:

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable, TYPE_CHECKING
 from dataclasses import dataclass
 
-from ..config import Config
+from ..config import Config, VOYAGE_MULTIMODAL_MODEL
 from ..services.embedding_provider import EmbeddingProvider
 from ..indexing.processor import ProcessingStats
 from .progressive_metadata import ProgressiveMetadata
@@ -813,6 +813,19 @@ class SmartIndexer(HighThroughputProcessor):
                 f"Index finalization complete: {end_result.get('vectors_indexed', 0)} vectors indexed"
             )
 
+            # CRITICAL: Also finalize multimodal collection if it exists
+            # Multimodal embeddings are stored in voyage-multimodal-3 collection
+            # Without this, multimodal HNSW index is never built and queries fail
+            multimodal_collection = "voyage-multimodal-3"
+            if self.vector_store_client.collection_exists(multimodal_collection):
+                multimodal_result = self.vector_store_client.end_indexing(
+                    multimodal_collection, progress_callback
+                )
+                logger.info(
+                    f"Multimodal index finalization complete: "
+                    f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
+                )
+
         # Update metadata with actual processing results
         if progress_callback:
             progress_callback(0, 0, Path(""), info="Updating progress metadata...")
@@ -1127,6 +1140,18 @@ class SmartIndexer(HighThroughputProcessor):
             logger.info(
                 f"Incremental index finalization complete: {end_result.get('vectors_indexed', 0)} vectors indexed"
             )
+
+            # CRITICAL: Also finalize multimodal collection if it exists
+            # Multimodal embeddings are stored in voyage-multimodal-3 collection
+            # Without this, multimodal HNSW index is never built and queries fail
+            if self.vector_store_client.collection_exists(VOYAGE_MULTIMODAL_MODEL):
+                multimodal_result = self.vector_store_client.end_indexing(
+                    VOYAGE_MULTIMODAL_MODEL, progress_callback
+                )
+                logger.info(
+                    f"Multimodal index finalization complete: "
+                    f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
+                )
 
         # Update metadata with actual processing results
         if progress_callback:
@@ -1573,6 +1598,18 @@ class SmartIndexer(HighThroughputProcessor):
                 f"Index finalization complete: {end_result.get('vectors_indexed', 0)} vectors indexed"
             )
 
+            # CRITICAL: Also finalize multimodal collection if it exists
+            # Multimodal embeddings are stored in voyage-multimodal-3 collection
+            # Without this, multimodal HNSW index is never built and queries fail
+            if self.vector_store_client.collection_exists(VOYAGE_MULTIMODAL_MODEL):
+                multimodal_result = self.vector_store_client.end_indexing(
+                    VOYAGE_MULTIMODAL_MODEL, progress_callback
+                )
+                logger.info(
+                    f"Multimodal index finalization complete: "
+                    f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
+                )
+
         # Update metadata with actual processing results
         if progress_callback:
             progress_callback(
@@ -1708,6 +1745,18 @@ class SmartIndexer(HighThroughputProcessor):
             logger.info(
                 f"Index finalization complete: {end_result.get('vectors_indexed', 0)} vectors indexed"
             )
+
+            # CRITICAL: Also finalize multimodal collection if it exists
+            # Multimodal embeddings are stored in voyage-multimodal-3 collection
+            # Without this, multimodal HNSW index is never built and queries fail
+            if self.vector_store_client.collection_exists(VOYAGE_MULTIMODAL_MODEL):
+                multimodal_result = self.vector_store_client.end_indexing(
+                    VOYAGE_MULTIMODAL_MODEL, progress_callback
+                )
+                logger.info(
+                    f"Multimodal index finalization complete: "
+                    f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
+                )
 
         # Update metadata with actual processing results
         if progress_callback:

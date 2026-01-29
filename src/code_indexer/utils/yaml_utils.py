@@ -26,7 +26,7 @@ DEFAULT_LANGUAGE_MAPPINGS = {
     "scala": ["scala"],
     "dart": ["dart"],
     # Web technologies
-    "html": ["html", "htm"],
+    "html": ["html", "htm", "htmx"],
     "css": ["css"],
     "vue": ["vue"],
     # Markup and documentation

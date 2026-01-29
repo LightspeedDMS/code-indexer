@@ -364,6 +364,7 @@ class VoyageAIClient(EmbeddingProvider):
         # VoyageAI model dimensions (as of API documentation)
         model_dimensions = {
             "voyage-code-3": 1024,
+            "voyage-multimodal-3": 1024,
             "voyage-large-2": 1536,
             "voyage-2": 1024,
             "voyage-code-2": 1536,

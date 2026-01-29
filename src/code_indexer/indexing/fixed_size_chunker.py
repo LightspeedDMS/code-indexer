@@ -5,7 +5,7 @@ This module implements model-aware fixed-size chunking algorithm:
 - Fixed overlap: 15% of chunk size between adjacent chunks
 - Pure arithmetic: no parsing, no regex, no string analysis
 - Pattern: next_start = current_start + (chunk_size - overlap_size)
-- Markdown image detection: extracts ![alt text](image.png) for multimodal embeddings
+- Multimodal image detection: extracts images from .md, .html, .htm, .htmx files for multimodal embeddings
 """
 
 import re
@@ -13,6 +13,7 @@ from typing import List, Dict, Any, Optional, Union
 from pathlib import Path
 
 from ..config import IndexingConfig, Config
+from .image_extractor import ImageExtractorFactory
 
 
 class FixedSizeChunker:
@@ -75,27 +76,48 @@ class FixedSizeChunker:
         self.overlap_size = int(self.chunk_size * self.OVERLAP_PERCENTAGE)
         self.step_size = self.chunk_size - self.overlap_size
 
-    def _extract_markdown_images(self, text: str) -> List[Dict[str, str]]:
-        """Extract markdown image references from text.
+    def _extract_images(
+        self, text: str, file_path: Path, repo_root: Optional[Path] = None
+    ) -> List[Dict[str, str]]:
+        """Extract image references from text using appropriate extractor.
 
-        Detects markdown image syntax: ![alt text](image_path)
+        Uses ImageExtractorFactory to select the correct extractor based on file extension.
+        Supports: .md, .html, .htm, .htmx
 
         Args:
             text: Text to search for image references
+            file_path: Path to the file being chunked
+            repo_root: Repository root directory (for image path resolution and validation)
 
         Returns:
-            List of dictionaries with 'alt_text' and 'path' keys for each image found
+            List of dictionaries with 'alt_text' and 'path' keys for each image found.
+            Returns empty list if:
+            - File extension not supported for image extraction
+            - repo_root not provided (can't validate images)
+            - No images found
         """
-        # Regex pattern to match markdown images: ![alt text](path)
-        # Group 1: alt text (anything except ])
-        # Group 2: path (anything except ))
-        pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
-        matches = re.findall(pattern, text)
+        # Can't extract images without repo_root (needed for validation)
+        if not repo_root:
+            return []
 
+        # Get file extension
+        file_extension = file_path.suffix.lower() if file_path.suffix else ""
+
+        # Get appropriate extractor from factory
+        extractor = ImageExtractorFactory.get_extractor(file_extension)
+        if not extractor:
+            # File type not supported for image extraction
+            return []
+
+        # Extract images (extractor returns list of relative paths as strings)
+        image_paths = extractor.extract_images(text, file_path, repo_root)
+
+        # Convert to dict format for backward compatibility with existing code
+        # HtmlImageExtractor returns list[str], MarkdownImageExtractor returns list[str]
         images = []
-        for alt_text, path in matches:
+        for path in image_paths:
             images.append({
-                "alt_text": alt_text,
+                "alt_text": "",  # HTML extractor doesn't extract alt text
                 "path": path
             })
 
@@ -127,13 +149,14 @@ class FixedSizeChunker:
         return line_start, line_end
 
     def chunk_text(
-        self, text: str, file_path: Optional[Path] = None
+        self, text: str, file_path: Optional[Path] = None, repo_root: Optional[Path] = None
     ) -> List[Dict[str, Any]]:
         """Split text into fixed-size chunks using ultra-simple algorithm.
 
         Args:
             text: Text to chunk
-            file_path: Path to the file (for metadata)
+            file_path: Path to the file (for metadata and image extraction)
+            repo_root: Repository root directory (for image path resolution and validation)
 
         Returns:
             List of chunk dictionaries with metadata
@@ -168,10 +191,10 @@ class FixedSizeChunker:
                 text, current_start, current_start + len(chunk_text)
             )
 
-            # Extract markdown images if this is a markdown file
+            # Extract images from supported file types (.md, .html, .htm, .htmx)
             images = []
-            if file_extension == "md":
-                images = self._extract_markdown_images(chunk_text)
+            if file_path and repo_root:
+                images = self._extract_images(chunk_text, file_path, repo_root)
 
             # Create chunk metadata
             chunk = {
@@ -203,11 +226,12 @@ class FixedSizeChunker:
 
         return chunks
 
-    def chunk_file(self, file_path: Path) -> List[Dict[str, Any]]:
+    def chunk_file(self, file_path: Path, repo_root: Optional[Path] = None) -> List[Dict[str, Any]]:
         """Read and chunk a file using fixed-size algorithm.
 
         Args:
             file_path: Path to file to chunk
+            repo_root: Repository root directory (for image path resolution and validation)
 
         Returns:
             List of chunk dictionaries with metadata
@@ -216,11 +240,11 @@ class FixedSizeChunker:
             ValueError: If file cannot be read or processed
         """
         try:
-            return self._chunk_file_standard(file_path)
+            return self._chunk_file_standard(file_path, repo_root)
         except Exception as e:
             raise ValueError(f"Failed to process file {file_path}: {e}")
 
-    def _chunk_file_standard(self, file_path: Path) -> List[Dict[str, Any]]:
+    def _chunk_file_standard(self, file_path: Path, repo_root: Optional[Path] = None) -> List[Dict[str, Any]]:
         """Standard file chunking - reads entire file into memory."""
         # Try different encodings
         encodings = ["utf-8", "utf-8-sig", "latin-1", "cp1252"]
@@ -237,7 +261,7 @@ class FixedSizeChunker:
         if text is None:
             raise ValueError(f"Could not decode file {file_path}")
 
-        return self.chunk_text(text, file_path)
+        return self.chunk_text(text, file_path, repo_root)
 
     def estimate_chunks(self, text: str) -> int:
         """Estimate number of chunks for given text using fixed-size algorithm.

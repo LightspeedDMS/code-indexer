@@ -467,6 +467,7 @@ class ImageExtractorFactory:
     EXTRACTORS = {
         '.md': MarkdownImageExtractor,
         '.html': HtmlImageExtractor,
+        '.htm': HtmlImageExtractor,
         '.htmx': HtmlImageExtractor,
     }
 

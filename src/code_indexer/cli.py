@@ -541,9 +541,21 @@ def _display_query_timing(console: Console, timing_info: Dict[str, Any]) -> None
     console.print("\n⏱️  Query Timing:")
     console.print("-" * 60)
 
+    # Check if this is a multi-index query (code + multimodal)
+    has_multi_index = (
+        timing_info.get("has_multimodal", False)
+        and "parallel_multi_index_ms" in timing_info
+    )
+
     # Calculate total time from high-level steps only (not breakdown components)
-    # For parallel execution, use parallel_load_ms instead of embedding_ms + index_load_ms
-    if "parallel_load_ms" in timing_info:
+    # For parallel multi-index execution, use parallel_multi_index_ms
+    if has_multi_index:
+        # Multi-index parallel execution path
+        high_level_steps = {
+            "parallel_multi_index_ms": "Parallel multi-index query",
+            "git_filter_ms": "Git-aware filtering",
+        }
+    elif "parallel_load_ms" in timing_info:
         # Parallel execution path (FilesystemVectorStore)
         high_level_steps = {
             "parallel_load_ms": "Parallel load (embedding + index)",
@@ -560,7 +572,19 @@ def _display_query_timing(console: Console, timing_info: Dict[str, Any]) -> None
 
     total_ms = sum(timing_info.get(key, 0) for key in high_level_steps.keys())
 
-    # Prepare breakdown keys and labels (shown under parallel_load_ms or vector_search_ms)
+    # Prepare breakdown keys and labels (shown under parallel_load_ms, vector_search_ms, or parallel_multi_index_ms)
+    multi_index_breakdown_keys = [
+        "code_index_ms",  # voyage-code-3 index (parallel)
+        "multimodal_index_ms",  # voyage-multimodal-3 index (parallel)
+        "merge_deduplicate_ms",  # Merge and deduplication
+    ]
+
+    multi_index_breakdown_labels = {
+        "code_index_ms": "    ├─ voyage-code-3 index",
+        "multimodal_index_ms": "    ├─ voyage-multimodal-3 index",
+        "merge_deduplicate_ms": "    └─ Merge & deduplicate",
+    }
+
     parallel_breakdown_keys = [
         "embedding_ms",  # Concurrent with index loading
         "index_load_ms",  # Concurrent with embedding
@@ -610,8 +634,50 @@ def _display_query_timing(console: Console, timing_info: Dict[str, Any]) -> None
 
             console.print(f"  • {label:<30} {time_str:>10} ({percentage:>5.1f}%)")
 
+            # Insert multi-index breakdown immediately after parallel_multi_index_ms
+            if key == "parallel_multi_index_ms" and has_multi_index:
+                console.print("")
+                for breakdown_key in multi_index_breakdown_keys:
+                    if breakdown_key in timing_info and timing_info[breakdown_key] >= 0:
+                        breakdown_ms = timing_info[breakdown_key]
+
+                        # Format time
+                        if breakdown_ms < 1:
+                            breakdown_time_str = f"{breakdown_ms:.2f}ms"
+                        elif breakdown_ms < 1000:
+                            breakdown_time_str = f"{breakdown_ms:.0f}ms"
+                        else:
+                            breakdown_time_str = f"{breakdown_ms/1000:.2f}s"
+
+                        breakdown_label = multi_index_breakdown_labels.get(
+                            breakdown_key, breakdown_key
+                        )
+
+                        # Add (parallel) marker for index timings to show they ran concurrently
+                        # Also add TIMEOUT indicator if the index timed out
+                        if breakdown_key in ["code_index_ms", "multimodal_index_ms"]:
+                            # Check for timeout flag
+                            timeout_flag = (
+                                "code_timed_out"
+                                if breakdown_key == "code_index_ms"
+                                else "multimodal_timed_out"
+                            )
+                            timed_out = timing_info.get(timeout_flag, False)
+                            timeout_indicator = " TIMEOUT" if timed_out else ""
+                            breakdown_label_with_marker = (
+                                breakdown_label + " (parallel)"
+                            )
+                            console.print(
+                                f"  {breakdown_label_with_marker:<30} {breakdown_time_str:>10}{timeout_indicator}"
+                            )
+                        else:
+                            console.print(
+                                f"  {breakdown_label:<30} {breakdown_time_str:>10}"
+                            )
+                console.print("")
+
             # Insert parallel breakdown immediately after parallel_load_ms
-            if key == "parallel_load_ms" and has_parallel_breakdown:
+            elif key == "parallel_load_ms" and has_parallel_breakdown:
                 console.print("")
                 for breakdown_key in parallel_breakdown_keys:
                     if breakdown_key in timing_info and timing_info[breakdown_key] > 0:
@@ -1214,15 +1280,15 @@ def _execute_semantic_search(
                 query_filter_conditions["must_not"] = filter_conditions["must_not"]
 
             # Query using MultiIndexQueryService (handles both code and multimodal indexes)
-            raw_results = multi_index_service.query(
+            raw_results, multi_index_timing = multi_index_service.query(
                 query_text=query,
                 limit=limit * 2,
                 collection_name=collection_name,
                 filter_conditions=query_filter_conditions,
             )
 
-            # Note: MultiIndexQueryService doesn't return timing breakdown yet
-            timing_info["vector_search_ms"] = 0
+            # Merge multi-index timing into timing_info
+            timing_info.update(multi_index_timing)
 
             # Apply git-aware post-filtering
             git_filter_start = time.time()
@@ -1242,7 +1308,7 @@ def _execute_semantic_search(
         else:
             # Use MultiIndexQueryService for non-git projects
             # Note: min_score filtering will be applied after query returns
-            raw_results = multi_index_service.query(
+            raw_results, multi_index_timing = multi_index_service.query(
                 query_text=query,
                 limit=limit * 2,
                 collection_name=collection_name,
@@ -1253,8 +1319,8 @@ def _execute_semantic_search(
             if min_score:
                 raw_results = [r for r in raw_results if r.get("score", 0) >= min_score]
 
-            # Note: MultiIndexQueryService doesn't return timing yet
-            timing_info["vector_search_ms"] = 0
+            # Merge multi-index timing into timing_info
+            timing_info.update(multi_index_timing)
 
             # Apply git-aware filtering
             git_filter_start = time.time()
@@ -1661,7 +1727,7 @@ def cli(
       • exclude_dirs: Folders to skip (e.g., ["node_modules", "dist"])
       • file_extensions: File types to index (e.g., ["py", "js", "ts"])
       • max_file_size: Maximum file size in bytes (default: 1MB)
-      • chunking: Model-aware chunk sizes (voyage-code-3: 4096, nomic-embed-text: 2048)
+      • chunking: Model-aware chunk sizes (voyage-code-3: 4096, voyage-multimodal-3: 4096)
 
       Exclusions also respect .gitignore patterns automatically.
 
@@ -1933,7 +1999,7 @@ def init(
       • Exclude directories: Edit exclude_dirs in config.json
       • File types: Modify file_extensions array
       • Size limits: Use --max-file-size or edit config.json
-      • Chunking: Model-aware sizing (voyage-code-3: 4096, nomic-embed-text: 2048)
+      • Chunking: Model-aware sizing (voyage-code-3: 4096, voyage-multimodal-3: 4096)
 
     \b
     DEFAULT EXCLUSIONS:
@@ -2303,15 +2369,15 @@ def init(
         console.print(f"📁 Codebase directory: {config.codebase_dir}")
         console.print(f"📏 Max file size: {config.indexing.max_file_size:,} bytes")
         console.print(
-            "📦 Chunking: Model-aware sizing (voyage-code-3: 4096, nomic-embed-text: 2048)"
+            "📦 Chunking: Model-aware sizing (voyage-code-3: 4096, voyage-multimodal-3: 4096)"
         )
 
-        # Show configured embedding provider
+        # Show configured embedding provider and models
         provider_name = config.embedding_provider
         if provider_name == "voyage-ai":
-            console.print(
-                f"🤖 Embedding provider: VoyageAI (model: {config.voyage_ai.model})"
-            )
+            from .config import VOYAGE_MULTIMODAL_MODEL
+
+            console.print(f"Using: {config.voyage_ai.model}, {VOYAGE_MULTIMODAL_MODEL}")
             if not os.getenv("VOYAGE_API_KEY"):
                 console.print(
                     "⚠️  Remember to set VOYAGE_API_KEY environment variable!",
@@ -5690,9 +5756,14 @@ def query(
         # Apply embedding provider's model filtering when searching
         provider_info = embedding_provider.get_model_info()
         if not quiet:
-            console.print(
-                f"🤖 Using {embedding_provider.get_provider_name()} with model: {provider_info.get('name', 'unknown')}"
-            )
+            # Check if multimodal index exists to show appropriate models
+            code_model = provider_info.get("name", "unknown")
+            if multi_index_service.has_multimodal_index():
+                from .config import VOYAGE_MULTIMODAL_MODEL
+
+                console.print(f"Using: {code_model}, {VOYAGE_MULTIMODAL_MODEL}")
+            else:
+                console.print(f"Using: {code_model}")
 
             # Get current branch context for git-aware filtering
             if is_git_aware:
@@ -5749,8 +5820,6 @@ def query(
 
         # Get current embedding model for filtering
         current_model = embedding_provider.get_current_model()
-        if not quiet:
-            console.print(f"🤖 Filtering by model: {current_model}")
 
         # Use appropriate search method based on project type
         if use_branch_aware_query:
@@ -5816,14 +5885,14 @@ def query(
 
             if isinstance(vector_store_client, FilesystemVectorStore):
                 # Use MultiIndexQueryService for unified query interface (supports multimodal)
-                raw_results = multi_index_service.query(
+                raw_results, multi_index_timing = multi_index_service.query(
                     query_text=query,
                     limit=limit * 2,  # Get more to account for post-filtering
                     collection_name=collection_name,
                     filter_conditions=query_filter_conditions,
                 )
-                # Note: MultiIndexQueryService doesn't return timing breakdown yet
-                search_timing: Dict[str, Any] = {}
+                # Use multi-index timing from service
+                search_timing: Dict[str, Any] = multi_index_timing
             else:
                 # FilesystemVectorStore: pre-compute embedding (no parallel support yet)
                 query_embedding = embedding_provider.get_embedding(query)
@@ -5874,14 +5943,14 @@ def query(
 
             if isinstance(vector_store_client, FilesystemVectorStore):
                 # Use MultiIndexQueryService for unified query interface (supports multimodal)
-                raw_results = multi_index_service.query(
+                raw_results, multi_index_timing = multi_index_service.query(
                     query_text=query,
                     limit=limit * 2,
                     collection_name=collection_name,
                     filter_conditions=filter_conditions if filter_conditions else None,
                 )
-                # Note: MultiIndexQueryService doesn't return timing breakdown yet
-                search_timing = {}
+                # Use multi-index timing from service
+                search_timing = multi_index_timing
                 timing_info.update(search_timing)
             else:
                 # Filesystem backend: pre-compute embedding
@@ -6543,7 +6612,10 @@ def _status_impl(ctx):
             provider_status = "✅ Ready" if provider_ok else "❌ Not Available"
 
             if provider_ok:
-                provider_details = f"Model: {embedding_provider.get_current_model()}"
+                from .config import VOYAGE_MULTIMODAL_MODEL
+
+                current_model = embedding_provider.get_current_model()
+                provider_details = f"Models: {current_model}, {VOYAGE_MULTIMODAL_MODEL}"
             else:
                 provider_details = "Service unreachable"
 
@@ -6793,6 +6865,95 @@ def _status_impl(ctx):
                 # Add index files status if available
                 if fs_index_files_display:
                     table.add_row("Index Files", "", fs_index_files_display)
+
+                # Check for multimodal collection and display if exists
+                try:
+                    from .config import VOYAGE_MULTIMODAL_MODEL
+
+                    multimodal_collection = index_path / VOYAGE_MULTIMODAL_MODEL
+
+                    if (
+                        multimodal_collection.exists()
+                        and multimodal_collection.is_dir()
+                    ):
+                        # Get multimodal collection stats
+                        multimodal_vector_count = fs_store.count_points(
+                            VOYAGE_MULTIMODAL_MODEL
+                        )
+                        multimodal_file_count = fs_store.get_indexed_file_count_fast(
+                            VOYAGE_MULTIMODAL_MODEL
+                        )
+
+                        # Validate dimensions for multimodal model (1024)
+                        multimodal_dims = 1024
+                        multimodal_dims_ok = fs_store.validate_embedding_dimensions(
+                            VOYAGE_MULTIMODAL_MODEL, multimodal_dims
+                        )
+                        multimodal_dims_status = "✅" if multimodal_dims_ok else "⚠️"
+
+                        multimodal_details = f"Collection: {VOYAGE_MULTIMODAL_MODEL}\nVectors: {multimodal_vector_count:,} | Files: {multimodal_file_count} | Dims: {multimodal_dims_status}{multimodal_dims}"
+
+                        # Check multimodal index files
+                        multimodal_proj_matrix = (
+                            multimodal_collection / "projection_matrix.npy"
+                        )
+                        multimodal_hnsw_index = multimodal_collection / "hnsw_index.bin"
+                        multimodal_id_index = multimodal_collection / "id_index.bin"
+
+                        multimodal_index_files_status = []
+
+                        # Projection matrix
+                        if multimodal_proj_matrix.exists():
+                            size_kb = multimodal_proj_matrix.stat().st_size / 1024
+                            if size_kb < 1024:
+                                multimodal_index_files_status.append(
+                                    f"Projection Matrix: ✅ {size_kb:.0f} KB"
+                                )
+                            else:
+                                size_mb = size_kb / 1024
+                                multimodal_index_files_status.append(
+                                    f"Projection Matrix: ✅ {size_mb:.1f} MB"
+                                )
+                        else:
+                            multimodal_index_files_status.append(
+                                "Projection Matrix: ❌ MISSING"
+                            )
+
+                        # HNSW index
+                        if multimodal_hnsw_index.exists():
+                            size_mb = multimodal_hnsw_index.stat().st_size / (
+                                1024 * 1024
+                            )
+                            multimodal_index_files_status.append(
+                                f"HNSW Index: ✅ {size_mb:.0f} MB"
+                            )
+                        else:
+                            multimodal_index_files_status.append(
+                                "HNSW Index: ⚠️ Missing"
+                            )
+
+                        # ID index
+                        if multimodal_id_index.exists():
+                            size_kb = multimodal_id_index.stat().st_size / 1024
+                            multimodal_index_files_status.append(
+                                f"ID Index: ✅ {size_kb:.0f} KB"
+                            )
+                        else:
+                            multimodal_index_files_status.append("ID Index: ⚠️ Missing")
+
+                        multimodal_index_files_display = "\n".join(
+                            multimodal_index_files_status
+                        )
+
+                        table.add_row(
+                            "Multimodal Storage", "✅ Ready", multimodal_details
+                        )
+                        table.add_row(
+                            "Multimodal Index Files", "", multimodal_index_files_display
+                        )
+                except Exception as e:
+                    # Multimodal collection doesn't exist or error checking - skip silently
+                    logger.debug(f"Multimodal collection check: {e}")
 
                 # Check for temporal index and display if exists
                 try:

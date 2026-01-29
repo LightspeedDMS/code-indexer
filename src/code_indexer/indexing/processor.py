@@ -65,7 +65,7 @@ class DocumentProcessor:
         """Process a single file using parallel vector calculation."""
         try:
             # Step 1: File reading & chunking (main thread)
-            chunks = self.fixed_size_chunker.chunk_file(file_path)
+            chunks = self.fixed_size_chunker.chunk_file(file_path, repo_root=self.config.codebase_dir)
 
             if not chunks:
                 return []

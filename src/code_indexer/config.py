@@ -78,6 +78,11 @@ def _validate_no_legacy_config(data: Dict[str, Any]) -> None:
             )
 
 
+# VoyageAI model constants
+VOYAGE_CODE_MODEL = "voyage-code-3"
+VOYAGE_MULTIMODAL_MODEL = "voyage-multimodal-3"
+
+
 class VoyageAIConfig(BaseModel):
     """Configuration for VoyageAI embedding service.
 
@@ -91,7 +96,7 @@ class VoyageAIConfig(BaseModel):
         description="VoyageAI API endpoint URL",
     )
     model: str = Field(
-        default="voyage-code-3",
+        default=VOYAGE_CODE_MODEL,
         description="VoyageAI embedding model name (e.g., voyage-code-3, voyage-large-2, voyage-2)",
     )
     timeout: int = Field(default=30, description="Request timeout in seconds")
@@ -409,6 +414,8 @@ class Config(BaseModel):
             "sh",
             "bash",
             "html",
+            "htm",
+            "htmx",
             "css",
             "md",
             "json",
@@ -708,7 +715,7 @@ Uses VoyageAI API for high-quality code embeddings:
   "parallel_requests": 8,
   "tokens_per_minute": 1000000  // Set to avoid rate limiting
 }
-// VoyageAI models use 1024 dimensions (voyage-code-3) or 1536 dimensions (voyage-large-2)
+// VoyageAI models use 1024 dimensions (voyage-code-3, voyage-multimodal-3) or 1536 dimensions (voyage-large-2)
 ```
 
 **VoyageAI Setup**:

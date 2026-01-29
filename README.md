@@ -2,13 +2,18 @@
 
 AI-powered semantic code search for your codebase. Find code by meaning, not just keywords.
 
-**Version 8.7.3** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
+**Version 8.8.0** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
 
 ## Quick Navigation
 
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Key Features](#key-features)
+  - [Semantic Search](#semantic-search)
+  - [Multimodal Search](#multimodal-search-v88) (NEW in v8.8)
+  - [Full-Text Search](#full-text-search-fts)
+  - [SCIP Code Intelligence](#scip-code-intelligence)
+  - [Git History Search](#git-history-search-temporal)
 - [Operating Modes](#operating-modes)
 - [Common Commands](#common-commands)
 - [Documentation](#documentation)
@@ -74,6 +79,42 @@ cidx query "database connection setup" --language python
 ```
 
 See: [Query Guide](docs/query-guide.md)
+
+### Multimodal Search (v8.8+)
+
+Search documentation that includes diagrams, screenshots, and visual content. CIDX automatically detects markdown, HTML, and HTMX files with embedded images and indexes them using multimodal embeddings, making visual content semantically searchable.
+
+**How it works:**
+1. **Automatic detection**: During indexing, CIDX identifies files containing images (PNG, JPG, WebP, GIF):
+   - Markdown (`.md`): Parses `![alt](path)` syntax
+   - HTML/HTMX (`.html`, `.htmx`): Parses `<img src="path">` tags
+2. **Dual indexing**: Text goes to `voyage-code-3`, image+text content goes to `voyage-multimodal-3`
+3. **Parallel search**: Queries search both indexes simultaneously, merging results by relevance
+4. **Transparent experience**: No special flags needed - multimodal search happens automatically when multimodal content exists
+
+```bash
+# Index your project (multimodal detection is automatic)
+cidx index
+
+# Query searches both code AND visual documentation
+cidx query "database schema diagram"
+cidx query "API authentication flow"
+```
+
+**Query output shows dual-index status:**
+```
+Using: voyage-code-3, voyage-multimodal-3    # Both indexes active
+
+Query Timing:
+  Parallel multi-index query          1.09s
+      voyage-code-3 index (parallel)      1.09s
+      voyage-multimodal-3 index (parallel)      470ms
+      Merge & deduplicate         0.06ms
+```
+
+**Supported image formats**: PNG, JPG/JPEG, WebP, GIF (embedded in markdown via `![alt](path)` syntax)
+
+See: [Architecture Guide](docs/architecture.md#dual-model-architecture-v88)
 
 ### Full-Text Search (FTS)
 

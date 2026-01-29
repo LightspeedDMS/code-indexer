@@ -427,7 +427,7 @@ class FileChunkingManager:
 
             # Phase 1: Chunk the file
             logger.debug(f"Starting chunking for {file_path}")
-            chunks = self.chunker.chunk_file(file_path)
+            chunks = self.chunker.chunk_file(file_path, repo_root=self.codebase_dir)
 
             if not chunks:
                 # Empty files are valid but don't need indexing
@@ -573,37 +573,42 @@ class FileChunkingManager:
                     )
 
                 for chunk in multimodal_chunks:
-                    # Resolve image paths relative to source file's directory
+                    # Image paths from ImageExtractorFactory are already relative to codebase_dir
+                    # and have been validated (existence, format, size checks)
                     image_paths = []
                     for img_ref in chunk.get('images', []):
                         # img_ref can be either:
-                        # - string (relative path) from TextChunker
-                        # - dict with 'path' key from FixedSizeChunker
+                        # - string (relative path) from TextChunker (legacy)
+                        # - dict with 'path' key from FixedSizeChunker with ImageExtractorFactory
                         if isinstance(img_ref, dict):
                             img_ref_path = img_ref['path']
                         else:
                             img_ref_path = img_ref
 
-                        # Skip remote URLs (http://, https://)
+                        # Skip remote URLs (http://, https://) - shouldn't happen with ImageExtractorFactory
                         if img_ref_path.startswith(('http://', 'https://')):
                             logger.debug(f"Skipping remote image URL: {img_ref_path}")
                             continue
 
-                        # Resolve path relative to source file's directory
-                        # e.g., docs/guide.md + ../images/schema.png -> images/schema.png
-                        file_dir = file_path.parent
-                        img_path = (file_dir / img_ref_path).resolve()
+                        # Image paths from ImageExtractorFactory are already:
+                        # 1. Relative to codebase_dir (repo_root)
+                        # 2. Validated for existence, format, and size
+                        # 3. Security-checked (no directory traversal)
+                        # Just resolve against codebase_dir to get absolute path
+                        img_path = (self.codebase_dir / img_ref_path).resolve()
 
-                        # Validate image is within codebase (security check)
+                        # Double-check the path is valid (defense in depth)
+                        if not img_path.exists():
+                            logger.debug(f"Image not found: {img_path} - skipping")
+                            continue
+
+                        # Validate image is within codebase (security check - redundant but safe)
                         try:
                             img_path.relative_to(self.codebase_dir)
                         except ValueError:
                             logger.warning(f"Image outside codebase: {img_path} - skipping")
                             continue
 
-                        if not img_path.exists():
-                            logger.debug(f"Image not found: {img_path} - skipping")
-                            continue
                         image_paths.append(img_path)
 
                     if not image_paths:

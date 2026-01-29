@@ -289,11 +289,11 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         self._initialize_file_rate_tracking()
 
         # Create multimodal client for image+text embedding support
-        from ..config import VoyageAIConfig
+        from ..config import VoyageAIConfig, VOYAGE_MULTIMODAL_MODEL
         from .voyage_multimodal import VoyageMultimodalClient
 
         voyage_config = VoyageAIConfig(
-            model="voyage-multimodal-3",
+            model=VOYAGE_MULTIMODAL_MODEL,
             api_endpoint="https://api.voyageai.com/v1/multimodalembeddings",
         )
         multimodal_client = VoyageMultimodalClient(voyage_config)
@@ -1018,6 +1018,19 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             else:
                 logger.info(
                     f"Index finalization complete: {end_result.get('vectors_indexed', 0)} vectors indexed"
+                )
+
+            # CRITICAL: Also finalize multimodal collection if it exists
+            # Multimodal embeddings are stored in voyage-multimodal-3 collection
+            # Without this, multimodal HNSW index is never built and queries fail
+            multimodal_collection = VOYAGE_MULTIMODAL_MODEL
+            if self.vector_store_client.collection_exists(multimodal_collection):
+                multimodal_result = self.vector_store_client.end_indexing(
+                    multimodal_collection, progress_callback, skip_hnsw_rebuild=watch_mode
+                )
+                logger.info(
+                    f"Multimodal index finalization complete: "
+                    f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
                 )
 
     # =============================================================================

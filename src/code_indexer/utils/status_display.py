@@ -23,7 +23,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Union, Callable
 
-from rich.console import Console, Status
+from rich.console import Console
+from rich.status import Status
 from rich.progress import (
     Progress,
     TextColumn,
