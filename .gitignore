@@ -177,7 +177,6 @@ code-indexer-temporal/
 
 # SCIP test fixtures (local directories, not submodules)
 test-fixtures/scip-java-mock/
-test-fixtures/scip-python-mock/
 test-fixtures/scip-typescript-mock/
 
 # TDD Guard runtime data

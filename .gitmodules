@@ -4,3 +4,6 @@
 [submodule "test-fixtures/multimodal-mock-repo"]
 	path = test-fixtures/multimodal-mock-repo
 	url = https://github.com/LightspeedDMS/code-indexer-mock-test-repo.git
+[submodule "test-fixtures/scip-python-mock"]
+	path = test-fixtures/scip-python-mock
+	url = git@github.com:LightspeedDMS/scip-python-mock.git
