@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.4] - 2026-01-30
+
+### Fixed
+
+- **Self-Monitoring Manual Trigger Missing Bug #87 Fix** - The "Run Now" button in the self-monitoring web UI was failing because the manual trigger route was missing the auto-detection logic added in Bug #87:
+  - Added auto-detection of `repo_root` by walking up from `__file__` to find `.git`
+  - Added auto-detection of `github_repo` from git remote origin URL
+  - Now passes `repo_root` to `SelfMonitoringService` (was missing entirely)
+  - Removed reliance on `GITHUB_REPOSITORY` environment variable
+  - Manual trigger route now has feature parity with automatic startup initialization
+
+---
+
 ## [8.8.3] - 2026-01-30
 
 ### Fixed

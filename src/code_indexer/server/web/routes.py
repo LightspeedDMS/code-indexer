@@ -7628,9 +7628,47 @@ async def trigger_manual_scan(
     if log_db_path:
         log_db_path = str(log_db_path)
 
-    # Get GitHub repository from environment variable
-    # This should be set to the repository where self-monitoring issues are created
-    github_repo = os.environ.get("GITHUB_REPOSITORY", None)
+    # Auto-detect repo_root and github_repo from git (Bug #87 fix)
+    repo_root = None
+    github_repo = None
+
+    # Find repo root by walking up from this file until we find .git
+    current = Path(__file__).resolve().parent
+    while current != current.parent:
+        if (current / '.git').exists():
+            repo_root = current
+            break
+        current = current.parent
+
+    if repo_root:
+        # Extract github_repo from git remote
+        # Inline imports follow existing pattern in this file (see line 1617)
+        import re
+        import subprocess
+        try:
+            # 5 second timeout: sufficient for local git command, prevents hanging on network issues
+            git_result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if git_result.returncode == 0:
+                url = git_result.stdout.strip()
+                # Extract owner/repo from SSH or HTTPS URL
+                match = re.search(r'[:/]([^/]+/[^/]+?)(?:\.git)?$', url)
+                if match:
+                    github_repo = match.group(1)
+                    logger.info(
+                        f"Self-monitoring: Auto-detected GitHub repo '{github_repo}' from git remote",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+        except Exception as e:
+            logger.warning(
+                f"Self-monitoring: Failed to detect GitHub repo from git remote: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
 
     # Create service instance with current configuration (Bug #87)
     service = SelfMonitoringService(
@@ -7641,7 +7679,8 @@ async def trigger_manual_scan(
         log_db_path=log_db_path,
         github_repo=github_repo,
         prompt_template=config.self_monitoring_config.prompt_template,
-        model=config.self_monitoring_config.model
+        model=config.self_monitoring_config.model,
+        repo_root=str(repo_root) if repo_root else None
     )
 
     # Trigger the scan
