@@ -78,6 +78,20 @@
 <!-- Configuration Section (AC3) -->
 <section class="configuration-section">
     <h2>Configuration</h2>
+
+    <!-- Success/Error Messages -->
+    {% if success_message %}
+    <article class="message-success">
+        <p>{{ success_message }}</p>
+    </article>
+    {% endif %}
+
+    {% if error_message %}
+    <article class="message-error">
+        <p>{{ error_message }}</p>
+    </article>
+    {% endif %}
+
     <form id="config-form" method="post" action="/admin/self-monitoring">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 

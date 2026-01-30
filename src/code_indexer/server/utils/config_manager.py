@@ -532,7 +532,6 @@ class ContentLimitsConfig:
 
 
 @dataclass
-@dataclass
 class SelfMonitoringConfig:
     """
     Self-monitoring configuration (Story #72 - Epic #71).

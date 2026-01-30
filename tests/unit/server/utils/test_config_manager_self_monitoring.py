@@ -121,3 +121,34 @@ class TestSelfMonitoringConfig:
         assert config.self_monitoring_config.model == "sonnet"
         assert config.self_monitoring_config.prompt_template == "Test"
         assert config.self_monitoring_config.prompt_user_modified is True
+
+    def test_all_self_monitoring_fields_roundtrip(self, tmp_path):
+        """Test that ALL SelfMonitoringConfig fields persist through save/load cycle.
+
+        This comprehensive test verifies that changing the model field and all other
+        fields are correctly serialized and deserialized. Catches any dataclass
+        issues like duplicate decorators.
+        """
+        config_manager = ServerConfigManager(str(tmp_path))
+        config = config_manager.create_default_config()
+
+        # Customize ALL fields in self_monitoring_config
+        assert config.self_monitoring_config is not None
+        config.self_monitoring_config.enabled = True
+        config.self_monitoring_config.cadence_minutes = 45
+        config.self_monitoring_config.model = "sonnet"
+        config.self_monitoring_config.prompt_template = "Custom prompt for testing"
+        config.self_monitoring_config.prompt_user_modified = True
+
+        # Save and reload
+        config_manager.save_config(config)
+        loaded_config = config_manager.load_config()
+
+        # Verify ALL fields persisted correctly
+        assert loaded_config is not None
+        assert loaded_config.self_monitoring_config is not None
+        assert loaded_config.self_monitoring_config.enabled is True
+        assert loaded_config.self_monitoring_config.cadence_minutes == 45
+        assert loaded_config.self_monitoring_config.model == "sonnet"
+        assert loaded_config.self_monitoring_config.prompt_template == "Custom prompt for testing"
+        assert loaded_config.self_monitoring_config.prompt_user_modified is True
