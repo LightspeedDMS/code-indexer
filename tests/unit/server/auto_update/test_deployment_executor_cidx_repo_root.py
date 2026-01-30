@@ -148,9 +148,10 @@ WorkingDirectory=/home/user
 ExecStart=/usr/bin/python3 -m uvicorn app:app
 """
 
+        # Should use WorkingDirectory value from service file, not self.repo_path
         expected_content = """[Service]
 WorkingDirectory=/home/user
-Environment="CIDX_REPO_ROOT=/home/user/code-indexer"
+Environment="CIDX_REPO_ROOT=/home/user"
 ExecStart=/usr/bin/python3 -m uvicorn app:app
 """
 
@@ -189,3 +190,67 @@ WorkingDirectory=/home/user
         warning_call = mock_logger.warning.call_args[0][0]
         assert "DEPLOY-GENERAL-023" in warning_call
         assert "Could not find insertion point for CIDX_REPO_ROOT" in warning_call
+
+    def test_ensure_cidx_repo_root_uses_working_directory_when_present(self):
+        """Should use WorkingDirectory from service file instead of self.repo_path."""
+        executor = DeploymentExecutor(
+            repo_path=Path("/wrong/path"),  # This should be ignored
+            service_name="cidx-server",
+        )
+
+        service_content = """[Service]
+WorkingDirectory=/correct/repo/path
+Environment="VOYAGE_API_KEY=test-key"
+ExecStart=/usr/bin/python3 -m uvicorn app:app
+"""
+
+        expected_content = """[Service]
+WorkingDirectory=/correct/repo/path
+Environment="VOYAGE_API_KEY=test-key"
+Environment="CIDX_REPO_ROOT=/correct/repo/path"
+ExecStart=/usr/bin/python3 -m uvicorn app:app
+"""
+
+        with patch.object(Path, "exists", return_value=True):
+            with patch.object(Path, "read_text", return_value=service_content):
+                with patch("subprocess.run") as mock_run:
+                    mock_run.return_value = MagicMock(returncode=0)
+
+                    result = executor._ensure_cidx_repo_root()
+
+        assert result is True
+        # Verify the correct path from WorkingDirectory was used
+        tee_call = mock_run.call_args_list[0]
+        assert tee_call[1]["input"] == expected_content
+
+    def test_ensure_cidx_repo_root_falls_back_to_repo_path_when_no_working_directory(
+        self,
+    ):
+        """Should fall back to self.repo_path when WorkingDirectory not found in service file."""
+        executor = DeploymentExecutor(
+            repo_path=Path("/home/user/code-indexer"),
+            service_name="cidx-server",
+        )
+
+        service_content = """[Service]
+Environment="VOYAGE_API_KEY=test-key"
+ExecStart=/usr/bin/python3 -m uvicorn app:app
+"""
+
+        expected_content = """[Service]
+Environment="VOYAGE_API_KEY=test-key"
+Environment="CIDX_REPO_ROOT=/home/user/code-indexer"
+ExecStart=/usr/bin/python3 -m uvicorn app:app
+"""
+
+        with patch.object(Path, "exists", return_value=True):
+            with patch.object(Path, "read_text", return_value=service_content):
+                with patch("subprocess.run") as mock_run:
+                    mock_run.return_value = MagicMock(returncode=0)
+
+                    result = executor._ensure_cidx_repo_root()
+
+        assert result is True
+        # Verify fallback to self.repo_path was used
+        tee_call = mock_run.call_args_list[0]
+        assert tee_call[1]["input"] == expected_content

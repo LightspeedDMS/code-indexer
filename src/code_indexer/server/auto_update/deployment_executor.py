@@ -471,7 +471,15 @@ class DeploymentExecutor:
 
             # Find insertion point and add CIDX_REPO_ROOT
             lines = content.split("\n")
-            new_env_line = f'Environment="CIDX_REPO_ROOT={self.repo_path}"'
+
+            # Extract WorkingDirectory from service file - this is the canonical repo path
+            repo_root = self.repo_path  # Default to self.repo_path
+            for line in lines:
+                if line.strip().startswith("WorkingDirectory="):
+                    repo_root = Path(line.split("=", 1)[1].strip())
+                    break
+
+            new_env_line = f'Environment="CIDX_REPO_ROOT={repo_root}"'
 
             # First pass: find the index of the last Environment= line
             last_env_index = -1
