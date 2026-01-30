@@ -10,7 +10,6 @@ These tests follow TDD methodology - written BEFORE implementation.
 Note: Uses `cache` fixture from conftest.py in this directory.
 """
 
-import pytest
 import uuid
 from unittest.mock import patch
 

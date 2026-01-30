@@ -32,7 +32,7 @@ from cachetools import TTLCache
 
 from code_indexer.server.utils.config_manager import ServerConfigManager
 from code_indexer.utils.git_runner import run_git_command
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 # Module logger
 logger = logging.getLogger(__name__)

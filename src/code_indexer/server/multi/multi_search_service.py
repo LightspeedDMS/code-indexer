@@ -23,7 +23,7 @@ from typing import Dict, List, Any
 from .multi_search_config import MultiSearchConfig
 from .multi_result_aggregator import MultiResultAggregator
 from .models import MultiSearchRequest, MultiSearchResponse, MultiSearchMetadata
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

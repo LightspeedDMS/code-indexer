@@ -18,7 +18,7 @@ import pytest
 import tempfile
 import json
 from pathlib import Path
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch
 from datetime import datetime, timezone
 
 from code_indexer.server.mcp.tools import TOOL_REGISTRY

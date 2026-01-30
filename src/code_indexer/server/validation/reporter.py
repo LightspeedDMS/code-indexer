@@ -13,7 +13,7 @@ from typing import List, Dict, Any
 import textwrap
 
 from .models import ValidationResult
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

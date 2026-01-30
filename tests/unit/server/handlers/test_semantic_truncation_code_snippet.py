@@ -12,7 +12,6 @@ These tests verify that:
 TDD methodology: Tests written BEFORE the fix is implemented.
 """
 
-import pytest
 
 
 class TestCodeSnippetTruncation:

@@ -7,7 +7,6 @@ Tests: AC4 - Mixed Result Handling
 These tests follow TDD methodology - written BEFORE verification.
 """
 
-import pytest
 from unittest.mock import patch
 
 

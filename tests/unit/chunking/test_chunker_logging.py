@@ -8,7 +8,6 @@ import tempfile
 import shutil
 from unittest.mock import patch
 
-import pytest
 
 from src.code_indexer.indexing.chunker import TextChunker
 from src.code_indexer.config import IndexingConfig

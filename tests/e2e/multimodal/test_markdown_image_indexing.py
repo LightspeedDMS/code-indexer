@@ -1,7 +1,6 @@
 """E2E tests for Markdown image extraction - Story #66 AC2."""
 
 import pytest
-from pathlib import Path
 
 from src.code_indexer.indexing.image_extractor import (
     MarkdownImageExtractor,

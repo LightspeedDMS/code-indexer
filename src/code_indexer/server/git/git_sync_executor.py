@@ -33,7 +33,7 @@ from ...utils.git_runner import (
 )
 from ..services.git_state_manager import GitStateManager
 from ..utils.config_manager import ServerConfigManager
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 
 # Configure logging

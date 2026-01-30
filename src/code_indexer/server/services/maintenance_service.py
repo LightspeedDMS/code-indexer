@@ -10,7 +10,7 @@ import logging
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

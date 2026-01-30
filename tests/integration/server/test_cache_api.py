@@ -8,8 +8,6 @@ NO MOCKS - following MESSI Anti-Mock rule.
 """
 
 import pytest
-import tempfile
-from pathlib import Path
 from httpx import AsyncClient, ASGITransport
 
 from code_indexer.server.cache.payload_cache import (

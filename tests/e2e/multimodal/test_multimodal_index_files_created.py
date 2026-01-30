@@ -75,7 +75,7 @@ class TestMultimodalIndexFilesCreated:
 
         # Verify id_index.bin has actual content (size > 0)
         assert multimodal_id_index.stat().st_size > 0, (
-            f"voyage-multimodal-3 id_index.bin is empty - no vectors indexed"
+            "voyage-multimodal-3 id_index.bin is empty - no vectors indexed"
         )
 
     def test_multimodal_hnsw_has_vectors(self, multimodal_repo_path):

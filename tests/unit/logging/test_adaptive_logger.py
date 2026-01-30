@@ -3,9 +3,8 @@
 import json
 import logging
 from io import StringIO
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-import pytest
 
 from src.code_indexer.logging.adaptive_logger import AdaptiveLogger
 

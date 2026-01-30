@@ -8,8 +8,6 @@ Tests scheduled task behavior:
 - Proper start/stop lifecycle
 """
 
-import time
-import pytest
 from unittest.mock import Mock
 
 

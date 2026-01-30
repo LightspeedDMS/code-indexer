@@ -7,7 +7,6 @@ Tests: AC5 (Independent Field Caching), AC6 (Cache Retrieval)
 These tests follow TDD methodology - written BEFORE verification.
 """
 
-import pytest
 import uuid
 from unittest.mock import patch
 

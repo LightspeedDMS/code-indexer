@@ -6,7 +6,6 @@ that contain inputSchema in their YAML frontmatter.
 """
 
 import pytest
-from typing import Dict, Any
 
 
 @pytest.fixture

@@ -1,7 +1,6 @@
 """E2E tests for HTMX image extraction - Story #66 AC4."""
 
 import pytest
-from pathlib import Path
 
 from src.code_indexer.indexing.image_extractor import (
     HtmlImageExtractor,

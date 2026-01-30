@@ -8,7 +8,6 @@ These tests verify the actual handler code path applies truncation correctly,
 not just the truncation functions in isolation.
 """
 
-import pytest
 from unittest.mock import patch
 
 

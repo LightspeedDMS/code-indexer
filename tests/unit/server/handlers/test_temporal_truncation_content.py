@@ -10,7 +10,6 @@ AC1: Temporal Content Truncation
                               content_has_more=false
 """
 
-import pytest
 import uuid
 from unittest.mock import patch
 

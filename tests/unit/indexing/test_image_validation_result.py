@@ -1,6 +1,5 @@
 """Unit tests for ImageValidationResult dataclass - Story #64 AC1-AC4."""
 
-import pytest
 from src.code_indexer.indexing.image_extractor import ImageValidationResult
 
 

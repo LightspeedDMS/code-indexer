@@ -657,7 +657,7 @@ class FileChunkingManager:
                         )
 
                         if not success:
-                            raise RuntimeError(f"Failed to store multimodal vector point")
+                            raise RuntimeError("Failed to store multimodal vector point")
 
                         logger.debug(
                             f"Stored multimodal embedding for chunk {chunk.get('chunk_index')} "

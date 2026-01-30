@@ -8,7 +8,6 @@ Tests self-monitoring configuration including:
 """
 
 import json
-import pytest
 from code_indexer.server.utils.config_manager import (
     ServerConfigManager,
     ServerConfig,

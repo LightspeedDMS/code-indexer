@@ -14,7 +14,7 @@ import logging
 import sqlite3
 from pathlib import Path
 from typing import Optional
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

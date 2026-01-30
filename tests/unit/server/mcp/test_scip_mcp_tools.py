@@ -5,7 +5,6 @@ from unittest.mock import Mock, patch
 import json
 from datetime import datetime, timezone
 
-from code_indexer.scip.query.primitives import QueryResult
 from code_indexer.server.auth.user_manager import User, UserRole
 
 

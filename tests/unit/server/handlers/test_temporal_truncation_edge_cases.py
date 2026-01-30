@@ -12,7 +12,6 @@ Edge cases:
 - Preserving other temporal_context fields
 """
 
-import pytest
 from unittest.mock import patch
 
 

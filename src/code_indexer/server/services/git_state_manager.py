@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Optional, Any, List, Union, cast
 
 from code_indexer.utils.git_runner import run_git_command
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

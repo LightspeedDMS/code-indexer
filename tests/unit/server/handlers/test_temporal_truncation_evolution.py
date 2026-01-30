@@ -8,7 +8,6 @@ AC3: Evolution Entry Diff Truncation
 AC4: Multiple Evolution Entries (independent handles)
 """
 
-import pytest
 import uuid
 from unittest.mock import patch
 

@@ -6,7 +6,6 @@ Story #719: Execute Delegation Function with Async Job
 Tests follow TDD methodology - tests written FIRST before implementation.
 """
 
-import pytest
 
 
 class TestPromptTemplateProcessorRender:

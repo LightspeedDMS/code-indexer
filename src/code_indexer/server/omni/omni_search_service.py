@@ -14,7 +14,7 @@ from .repo_pattern_matcher import RepoPatternMatcher
 from .result_aggregator import ResultAggregator
 from .omni_cache import OmniCache
 from ..utils.config_manager import MultiSearchLimitsConfig
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

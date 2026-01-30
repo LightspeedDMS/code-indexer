@@ -9,13 +9,11 @@ Tests cover:
 Story #20: API Key Management for Claude CLI and VoyageAI
 """
 
-import json
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
 
 
 class TestApiKeyStartupSeeding:

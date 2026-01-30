@@ -5,7 +5,6 @@ Tests AC1 (Server Maintenance Mode API) - Basic operations.
 """
 
 import pytest
-import threading
 from unittest.mock import MagicMock
 
 

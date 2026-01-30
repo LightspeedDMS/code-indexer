@@ -14,7 +14,7 @@ import base64
 
 from .jwt_manager import JWTManager, TokenExpiredError, InvalidTokenError
 from .user_manager import UserManager, User
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 if TYPE_CHECKING:
     from .oauth.oauth_manager import OAuthManager

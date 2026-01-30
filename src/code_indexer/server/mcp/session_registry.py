@@ -42,7 +42,7 @@ from typing import Dict, Optional
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.auth.mcp_session_state import MCPSessionState
 from code_indexer.server.services.config_service import get_config_service
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 
 logger = logging.getLogger(__name__)

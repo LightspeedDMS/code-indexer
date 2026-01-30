@@ -7,7 +7,7 @@ These tests follow TDD methodology - written BEFORE implementation.
 """
 
 import pytest
-from unittest.mock import Mock, AsyncMock, patch
+from unittest.mock import Mock, patch
 from code_indexer.server.auth.user_manager import User, UserRole
 
 

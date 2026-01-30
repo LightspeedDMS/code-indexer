@@ -7,7 +7,6 @@ Tests: Core integration, AC1, AC2, AC3
 These tests follow TDD methodology - written BEFORE verification.
 """
 
-import pytest
 import uuid
 from unittest.mock import patch
 

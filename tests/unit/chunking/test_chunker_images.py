@@ -1,6 +1,5 @@
 """Unit tests for TextChunker images[] integration - TDD Story #62 AC1."""
 
-import pytest
 from pathlib import Path
 import tempfile
 import shutil

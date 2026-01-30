@@ -5,7 +5,6 @@ Tests Story #713 fix: Factory function for creating properly configured
 GlobalRegistry instances with SQLite backend in server mode.
 """
 
-import pytest
 from pathlib import Path
 
 

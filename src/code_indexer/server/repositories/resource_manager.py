@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Set, List, Any, Optional, Callable, Union, TextIO, BinaryIO
 import psutil
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 
 # Configure logging

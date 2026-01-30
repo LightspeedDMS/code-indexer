@@ -289,7 +289,6 @@ class TestGetCidxCallbackBaseUrl:
         manager.save_config(config)
 
         # Mock the config service to use our temp directory
-        import pytest
         with pytest.MonkeyPatch.context() as mp:
             mock_service = ConfigService(server_dir_path=str(tmp_path))
             mp.setattr(
@@ -306,7 +305,6 @@ class TestGetCidxCallbackBaseUrl:
         from code_indexer.server.mcp.handlers import _get_cidx_callback_base_url
         from code_indexer.server.services.config_service import ConfigService
 
-        import pytest
         with pytest.MonkeyPatch.context() as mp:
             mock_service = ConfigService(server_dir_path=str(tmp_path))
             mp.setattr(
@@ -463,7 +461,6 @@ class TestErrorMessageSanitization:
 
     def test_error_message_does_not_contain_password(self, tmp_path, httpx_mock):
         """Test that password is not leaked in any error scenario."""
-        import httpx
 
         from code_indexer.server.config.delegation_config import ClaudeDelegationManager
 

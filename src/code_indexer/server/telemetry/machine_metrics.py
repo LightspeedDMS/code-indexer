@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import socket
 from typing import TYPE_CHECKING, Dict, Iterable, Optional, Tuple, Any
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 if TYPE_CHECKING:
     from code_indexer.server.telemetry.manager import TelemetryManager

@@ -41,7 +41,7 @@ from .error_formatters import (
     create_generic_error_response,
     create_json_response,
 )
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 # Configure logger for this module
 logger = logging.getLogger(__name__)

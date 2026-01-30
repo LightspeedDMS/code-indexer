@@ -11,7 +11,6 @@ import subprocess
 from pathlib import Path
 from typing import List
 
-import pytest
 
 from code_indexer.global_repos.git_operations import GitOperationsService
 

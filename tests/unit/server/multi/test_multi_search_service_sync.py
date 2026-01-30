@@ -9,7 +9,7 @@ Written following TDD methodology - tests first, implementation second.
 
 import importlib
 import pytest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 from code_indexer.server.multi.multi_search_config import MultiSearchConfig
 from code_indexer.server.multi.models import (
     MultiSearchRequest,

@@ -8,7 +8,6 @@ TDD: Tests written BEFORE implementation.
 """
 
 import inspect
-import pytest
 
 
 class TestHandlersTruncationFunctionsSyncMethods:

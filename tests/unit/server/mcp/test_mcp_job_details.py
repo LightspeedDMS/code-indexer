@@ -1,6 +1,5 @@
 """Tests for get_job_details MCP tool."""
 
-import pytest
 from code_indexer.server.mcp import handlers, tools
 
 

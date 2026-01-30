@@ -5,7 +5,7 @@ Tests the GraphQL multiplex pattern for building queries and parsing responses.
 """
 
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime
 from unittest.mock import Mock
 
 from src.code_indexer.server.services.repository_providers.gitlab_provider import (

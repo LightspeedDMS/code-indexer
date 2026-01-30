@@ -12,7 +12,6 @@ import time
 import threading
 from pathlib import Path
 
-import pytest
 
 from src.code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,

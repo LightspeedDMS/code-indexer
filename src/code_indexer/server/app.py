@@ -19,7 +19,13 @@ from fastapi import (
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 from typing import Dict, Any, Optional, List, Callable, Literal, Union
 import os
 import json
@@ -48,7 +54,7 @@ from .auth.concurrency_protection import (
     ConcurrencyConflictError,
 )
 from .auth.auth_error_handler import auth_error_handler, AuthErrorType
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 from .utils.jwt_secret_manager import JWTSecretManager
 from .middleware.error_handler import GlobalErrorHandler
 from .repositories.golden_repo_manager import (
@@ -93,6 +99,7 @@ from .routers.groups import (
 )
 from .routes.multi_query_routes import router as multi_query_router
 from .routes.scip_multi_routes import router as scip_multi_router
+
 # TEMP: Commented for testing bug #751 - cicd has circular import
 # from .routes.cicd import router as cicd_router
 from .models.branch_models import BranchListResponse
@@ -155,7 +162,7 @@ def _detect_repo_root(start_from_file: bool = True) -> Optional[Path]:
     if start_from_file:
         current = Path(__file__).resolve().parent
         while current != current.parent:
-            if (current / '.git').exists():
+            if (current / ".git").exists():
                 repo_root = current
                 break
             current = current.parent
@@ -166,7 +173,7 @@ def _detect_repo_root(start_from_file: bool = True) -> Optional[Path]:
         cwd = Path.cwd()
         current = cwd
         while current != current.parent:
-            if (current / '.git').exists():
+            if (current / ".git").exists():
                 repo_root = current
                 logger.info(
                     f"Self-monitoring: Detected repo root from cwd: {repo_root}",
@@ -562,7 +569,8 @@ class AddIndexRequest(BaseModel):
         None, description="Single index type: semantic, fts, temporal, or scip"
     )
     index_types: Optional[List[str]] = Field(
-        None, description="Array of index types for multi-select: semantic, fts, temporal, scip"
+        None,
+        description="Array of index types for multi-select: semantic, fts, temporal, scip",
     )
 
     @model_validator(mode="after")
@@ -1501,11 +1509,13 @@ def _apply_rest_semantic_truncation(
                 result_dict["cache_handle"] = None
                 result_dict["has_more"] = False
         except Exception as e:
-            logger.warning(format_error_log(
-                "APP-GENERAL-001",
-                f"Failed to truncate code_snippet in REST API: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-001",
+                    f"Failed to truncate code_snippet in REST API: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             result_dict["cache_handle"] = None
             result_dict["has_more"] = False
 
@@ -1552,11 +1562,13 @@ def _apply_rest_fts_truncation(
                     result_dict["snippet_cache_handle"] = None
                     result_dict["snippet_has_more"] = False
             except Exception as e:
-                logger.warning(format_error_log(
-                    "APP-GENERAL-002",
-                    f"Failed to truncate FTS snippet in REST API: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "APP-GENERAL-002",
+                        f"Failed to truncate FTS snippet in REST API: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 result_dict["snippet_cache_handle"] = None
                 result_dict["snippet_has_more"] = False
 
@@ -1577,11 +1589,13 @@ def _apply_rest_fts_truncation(
                     result_dict["match_text_cache_handle"] = None
                     result_dict["match_text_has_more"] = False
             except Exception as e:
-                logger.warning(format_error_log(
-                    "APP-GENERAL-003",
-                    f"Failed to truncate FTS match_text in REST API: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "APP-GENERAL-003",
+                        f"Failed to truncate FTS match_text in REST API: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 result_dict["match_text_cache_handle"] = None
                 result_dict["match_text_has_more"] = False
 
@@ -1939,18 +1953,22 @@ def bootstrap_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None:
                     extra={"correlation_id": get_correlation_id()},
                 )
             except subprocess.CalledProcessError as e:
-                logger.error(format_error_log(
-                    "APP-GENERAL-004",
-                    f"Failed to initialize cidx-meta: {e.stderr if e.stderr else str(e)}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-004",
+                        f"Failed to initialize cidx-meta: {e.stderr if e.stderr else str(e)}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 # Continue with registration even if init fails - don't break server startup
             except Exception as e:
-                logger.error(format_error_log(
-                    "APP-GENERAL-005",
-                    f"Unexpected error during cidx-meta initialization: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-005",
+                        f"Unexpected error during cidx-meta initialization: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 # Continue with registration even if init fails - don't break server startup
 
         # Register directly in metadata without background job (startup hasn't initialized background_job_manager yet)
@@ -2004,18 +2022,22 @@ def bootstrap_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None:
                 extra={"correlation_id": get_correlation_id()},
             )
         except subprocess.CalledProcessError as e:
-            logger.error(format_error_log(
-                "APP-GENERAL-006",
-                f"Failed to index cidx-meta: {e.stderr if e.stderr else str(e)}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-006",
+                    f"Failed to index cidx-meta: {e.stderr if e.stderr else str(e)}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             # Don't break server startup if indexing fails - cidx-meta can be indexed later
         except Exception as e:
-            logger.error(format_error_log(
-                "APP-GENERAL-007",
-                f"Unexpected error during cidx-meta indexing: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-007",
+                    f"Unexpected error during cidx-meta indexing: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             # Don't break server startup if indexing fails - cidx-meta can be indexed later
 
 
@@ -2117,12 +2139,14 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             # Log error but don't block server startup
-            logger.error(format_error_log(
-                "APP-GENERAL-008",
-                f"Failed to initialize SQLite log handler: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-008",
+                    f"Failed to initialize SQLite log handler: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Startup: Initialize SQLite database schema and run migrations (Story #702)
         logger.info(
@@ -2192,12 +2216,14 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             # Log error but don't block server startup
-            logger.error(format_error_log(
-                "APP-GENERAL-009",
-                f"Failed to initialize SQLite database or run migrations: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-009",
+                    f"Failed to initialize SQLite database or run migrations: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Startup: Initialize ApiMetricsService with database for multi-worker support
         logger.info(
@@ -2219,12 +2245,14 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             # Log error but don't block server startup
-            logger.error(format_error_log(
-                "APP-GENERAL-010",
-                f"Failed to initialize ApiMetricsService: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-010",
+                    f"Failed to initialize ApiMetricsService: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Startup: Migrate legacy cidx-meta and bootstrap if needed
         logger.info(
@@ -2256,12 +2284,14 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             # Log error but don't block server startup
-            logger.error(format_error_log(
-                "APP-GENERAL-011",
-                f"Failed to migrate/bootstrap cidx-meta on startup: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-011",
+                    f"Failed to migrate/bootstrap cidx-meta on startup: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Startup: Run SSH key migration (first-time auto-discovery)
         logger.info(
@@ -2296,12 +2326,14 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             # Log error but don't block server startup
-            logger.error(format_error_log(
-                "APP-GENERAL-012",
-                f"Failed to run SSH key migration on startup: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-012",
+                    f"Failed to run SSH key migration on startup: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             app.state.ssh_migration_result = None
 
         # Startup: Initialize GroupAccessManager for group-based access control
@@ -2363,11 +2395,13 @@ def create_app() -> FastAPI:
                             extra={"correlation_id": get_correlation_id()},
                         )
                 except Exception as seed_error:
-                    logger.warning(format_error_log(
-                        "APP-GENERAL-013",
-                        f"Failed to seed existing golden repos or admin users: {seed_error}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "APP-GENERAL-013",
+                            f"Failed to seed existing golden repos or admin users: {seed_error}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
 
             # Initialize AccessFilteringService for query-time access filtering (Story #707)
             from code_indexer.server.services.access_filtering_service import (
@@ -2383,12 +2417,14 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             # Log error but don't block server startup
-            logger.error(format_error_log(
-                "APP-GENERAL-014",
-                f"Failed to initialize GroupAccessManager: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-014",
+                    f"Failed to initialize GroupAccessManager: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Startup: Initialize and start global repos background services
         logger.info(
@@ -2425,12 +2461,14 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             # Log error but don't block server startup
-            logger.error(format_error_log(
-                "APP-GENERAL-015",
-                f"Failed to start global repos background services: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-015",
+                    f"Failed to start global repos background services: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Startup: Initialize PayloadCache for semantic search result truncation (Story #679)
         payload_cache = None
@@ -2469,12 +2507,14 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             # Log error but don't block server startup
-            logger.error(format_error_log(
-                "APP-GENERAL-016",
-                f"Failed to initialize PayloadCache: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-016",
+                    f"Failed to initialize PayloadCache: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             # Set payload_cache to None so handlers know it's unavailable
             app.state.payload_cache = None
 
@@ -2505,11 +2545,13 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             # Log error but don't block server startup
-            logger.warning(format_error_log(
-                "APP-GENERAL-017",
-                f"Failed to auto-seed API keys on startup: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-017",
+                    f"Failed to auto-seed API keys on startup: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Startup: Initialize ClaudeCliManager singleton (Story #23)
         logger.info(
@@ -2535,19 +2577,23 @@ def create_app() -> FastAPI:
                     extra={"correlation_id": get_correlation_id()},
                 )
             else:
-                logger.warning(format_error_log(
-                    "APP-GENERAL-018",
-                    "ClaudeCliManager initialization failed (smart descriptions may be unavailable)",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "APP-GENERAL-018",
+                        "ClaudeCliManager initialization failed (smart descriptions may be unavailable)",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
 
         except Exception as e:
             # Log error but don't block server startup
-            logger.warning(format_error_log(
-                "APP-GENERAL-019",
-                f"Failed to initialize ClaudeCliManager on startup: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-019",
+                    f"Failed to initialize ClaudeCliManager on startup: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Startup: Initialize Scheduled Catch-Up Service (Story #23, AC6)
         scheduled_catchup_service = None
@@ -2585,11 +2631,13 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             # Log error but don't block server startup
-            logger.warning(format_error_log(
-                "APP-GENERAL-020",
-                f"Failed to initialize scheduled catch-up service: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-020",
+                    f"Failed to initialize scheduled catch-up service: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Startup: Initialize and start SelfMonitoringService (Epic #71)
         self_monitoring_service = None
@@ -2598,7 +2646,9 @@ def create_app() -> FastAPI:
             extra={"correlation_id": get_correlation_id()},
         )
         try:
-            from code_indexer.server.self_monitoring.service import SelfMonitoringService
+            from code_indexer.server.self_monitoring.service import (
+                SelfMonitoringService,
+            )
             from code_indexer.server.services.config_service import get_config_service
 
             # Get configuration
@@ -2622,18 +2672,19 @@ def create_app() -> FastAPI:
                 # Extract github_repo from git remote
                 import re
                 import subprocess
+
                 try:
                     git_result = subprocess.run(
                         ["git", "remote", "get-url", "origin"],
                         cwd=str(repo_root),
                         capture_output=True,
                         text=True,
-                        timeout=5
+                        timeout=5,
                     )
                     if git_result.returncode == 0:
                         url = git_result.stdout.strip()
                         # Extract owner/repo from SSH or HTTPS URL
-                        match = re.search(r'[:/]([^/]+/[^/]+?)(?:\.git)?$', url)
+                        match = re.search(r"[:/]([^/]+/[^/]+?)(?:\.git)?$", url)
                         if match:
                             github_repo = match.group(1)
                             logger.info(
@@ -2648,11 +2699,13 @@ def create_app() -> FastAPI:
 
             if sm_config.enabled:
                 if not github_repo or not repo_root:
-                    logger.warning(format_error_log(
-                        "MONITOR-GENERAL-010",
-                        "Self-monitoring enabled but could not detect GitHub repo from git remote - service disabled",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "MONITOR-GENERAL-010",
+                            "Self-monitoring enabled but could not detect GitHub repo from git remote - service disabled",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                     app.state.self_monitoring_service = None
                     app.state.self_monitoring_repo_root = None
                     app.state.self_monitoring_github_repo = None
@@ -2666,12 +2719,14 @@ def create_app() -> FastAPI:
                         github_repo=github_repo,
                         prompt_template=sm_config.prompt_template,
                         model=sm_config.model,
-                        repo_root=str(repo_root)  # For Claude to run in repo context
+                        repo_root=str(repo_root),  # For Claude to run in repo context
                     )
                     self_monitoring_service.start()
                     app.state.self_monitoring_service = self_monitoring_service
                     # Store repo_root and github_repo for manual trigger route access (Bug #87)
-                    app.state.self_monitoring_repo_root = str(repo_root) if repo_root else None
+                    app.state.self_monitoring_repo_root = (
+                        str(repo_root) if repo_root else None
+                    )
                     app.state.self_monitoring_github_repo = github_repo
                     logger.info(
                         f"Self-monitoring service started (cadence: {sm_config.cadence_minutes} minutes)",
@@ -2683,19 +2738,33 @@ def create_app() -> FastAPI:
                     extra={"correlation_id": get_correlation_id()},
                 )
                 app.state.self_monitoring_service = None
-                app.state.self_monitoring_repo_root = None
-                app.state.self_monitoring_github_repo = None
+                # Store auto-detected values even when disabled (for manual trigger - Bug #87)
+                app.state.self_monitoring_repo_root = (
+                    str(repo_root) if repo_root else None
+                )
+                app.state.self_monitoring_github_repo = github_repo
 
         except Exception as e:
             # Log error but don't block server startup
-            logger.error(format_error_log(
-                "MONITOR-GENERAL-011",
-                f"Failed to start self-monitoring service: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "MONITOR-GENERAL-011",
+                    f"Failed to start self-monitoring service: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             app.state.self_monitoring_service = None
-            app.state.self_monitoring_repo_root = None
-            app.state.self_monitoring_github_repo = None
+            # Store auto-detected values even on failure (for manual trigger - Bug #87)
+            # Note: repo_root and github_repo may not be in scope if exception occurred early
+            try:
+                app.state.self_monitoring_repo_root = (
+                    str(repo_root) if repo_root else None
+                )
+                app.state.self_monitoring_github_repo = github_repo
+            except NameError:
+                # Exception occurred before repo_root/github_repo were defined
+                app.state.self_monitoring_repo_root = None
+                app.state.self_monitoring_github_repo = None
 
         # Startup: Initialize MCP Session cleanup (Story #731)
         session_registry = None
@@ -2718,12 +2787,14 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             # Log error but don't block server startup
-            logger.error(format_error_log(
-                "APP-GENERAL-021",
-                f"Failed to initialize MCP Session cleanup: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-021",
+                    f"Failed to initialize MCP Session cleanup: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Startup: Initialize TelemetryManager for OTEL (Story #695)
         telemetry_manager = None
@@ -2814,12 +2885,14 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             # Log error but don't block server startup
-            logger.error(format_error_log(
-                "APP-GENERAL-022",
-                f"Failed to initialize TelemetryManager: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-022",
+                    f"Failed to initialize TelemetryManager: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             app.state.telemetry_manager = None
             app.state.machine_metrics_exporter = None
 
@@ -2889,12 +2962,14 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             # Log error but don't block server startup
-            logger.error(format_error_log(
-                "APP-GENERAL-023",
-                f"Failed to initialize OIDC: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-023",
+                    f"Failed to initialize OIDC: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             logger.info(
                 "OIDC routes registered but manager not initialized - SSO login will return 404 until configured",
                 extra={"correlation_id": get_correlation_id()},
@@ -2915,12 +2990,14 @@ def create_app() -> FastAPI:
                     extra={"correlation_id": get_correlation_id()},
                 )
             except Exception as e:
-                logger.error(format_error_log(
-                    "APP-GENERAL-024",
-                    f"Error stopping global repos background services: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-024",
+                        f"Error stopping global repos background services: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
 
         # Shutdown: Stop PayloadCache background cleanup (Story #679)
         if payload_cache is not None:
@@ -2931,12 +3008,14 @@ def create_app() -> FastAPI:
                     extra={"correlation_id": get_correlation_id()},
                 )
             except Exception as e:
-                logger.error(format_error_log(
-                    "APP-GENERAL-025",
-                    f"Error stopping PayloadCache: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-025",
+                        f"Error stopping PayloadCache: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
 
         # Shutdown: Stop MCP Session cleanup (Story #731)
         if session_registry is not None:
@@ -2947,12 +3026,14 @@ def create_app() -> FastAPI:
                     extra={"correlation_id": get_correlation_id()},
                 )
             except Exception as e:
-                logger.error(format_error_log(
-                    "APP-GENERAL-026",
-                    f"Error stopping MCP Session cleanup: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-026",
+                        f"Error stopping MCP Session cleanup: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
 
         # Shutdown: Stop self-monitoring service (Epic #71)
         if self_monitoring_service is not None:
@@ -2963,12 +3044,14 @@ def create_app() -> FastAPI:
                     extra={"correlation_id": get_correlation_id()},
                 )
             except Exception as e:
-                logger.error(format_error_log(
-                    "APP-GENERAL-028",
-                    f"Error stopping self-monitoring service: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-028",
+                        f"Error stopping self-monitoring service: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
 
         # Shutdown: Stop TelemetryManager and flush pending telemetry (Story #695)
         if telemetry_manager is not None:
@@ -2979,12 +3062,14 @@ def create_app() -> FastAPI:
                     extra={"correlation_id": get_correlation_id()},
                 )
             except Exception as e:
-                logger.error(format_error_log(
-                    "APP-GENERAL-027",
-                    f"Error stopping TelemetryManager: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-027",
+                        f"Error stopping TelemetryManager: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
 
         # Shutdown: Clean up other resources
         logger.info(
@@ -3030,14 +3115,13 @@ def create_app() -> FastAPI:
 
     # Add exception handlers for validation errors that FastAPI catches before middleware
     @app.exception_handler(RequestValidationError)
-    def validation_exception_handler(
-        request: Request, exc: RequestValidationError
-    ):
+    def validation_exception_handler(request: Request, exc: RequestValidationError):
         error_data = global_error_handler.handle_validation_error(exc, request)
         return global_error_handler._create_error_response(error_data)
 
     # Bug #83 Fix: Load config to use jwt_expiration_minutes and password_security
     from code_indexer.server.services.config_service import get_config_service
+
     config_service = get_config_service()
     server_config = config_service.get_config()
 
@@ -3048,7 +3132,7 @@ def create_app() -> FastAPI:
     jwt_manager = JWTManager(
         secret_key=secret_key,
         token_expiration_minutes=server_config.jwt_expiration_minutes,
-        algorithm="HS256"
+        algorithm="HS256",
     )
 
     # Initialize UserManager with server data directory support
@@ -3094,11 +3178,13 @@ def create_app() -> FastAPI:
             extra={"correlation_id": get_correlation_id()},
         )
     else:
-        logger.warning(format_error_log(
-            "APP-GENERAL-028",
-            "SCIP audit database initialization failed (non-blocking)",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "APP-GENERAL-028",
+                "SCIP audit database initialization failed (non-blocking)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
 
     # Load server configuration for resource limits and timeouts
     from .utils.config_manager import ServerConfigManager
@@ -3361,12 +3447,14 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             # Log error but don't expose internal details
-            logger.error(format_error_log(
-                "APP-GENERAL-029",
-                f"Error retrieving cache statistics: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-029",
+                    f"Error retrieving cache statistics: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to retrieve cache statistics",
@@ -4324,12 +4412,14 @@ def create_app() -> FastAPI:
             }
 
         except Exception as e:
-            logger.error(format_error_log(
-                "APP-GENERAL-030",
-                f"SCIP workspace cleanup failed: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-030",
+                    f"SCIP workspace cleanup failed: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Workspace cleanup failed: {str(e)}",
@@ -4360,12 +4450,14 @@ def create_app() -> FastAPI:
             return status_info
 
         except Exception as e:
-            logger.error(format_error_log(
-                "APP-GENERAL-031",
-                f"Failed to get SCIP cleanup status: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-031",
+                    f"Failed to get SCIP cleanup status: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to get cleanup status: {str(e)}",
@@ -6351,11 +6443,13 @@ def create_app() -> FastAPI:
 
                 if request.search_mode == "hybrid" and not fts_available:
                     # Graceful degradation for hybrid mode
-                    logger.warning(format_error_log(
-                        "APP-GENERAL-032",
-                        f"FTS index not available for user {current_user.username}, degrading hybrid to semantic-only",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "APP-GENERAL-032",
+                            f"FTS index not available for user {current_user.username}, degrading hybrid to semantic-only",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                     search_mode_actual = "semantic"
 
                 # Execute FTS or hybrid search
@@ -6423,11 +6517,13 @@ def create_app() -> FastAPI:
                             )
 
                     except Exception as e:
-                        logger.error(format_error_log(
-                            "APP-GENERAL-033",
-                            f"FTS search failed: {e}",
-                            extra={"correlation_id": get_correlation_id()},
-                        ))
+                        logger.error(
+                            format_error_log(
+                                "APP-GENERAL-033",
+                                f"FTS search failed: {e}",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
                         if request.search_mode == "fts":
                             raise HTTPException(
                                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -6468,11 +6564,13 @@ def create_app() -> FastAPI:
                         ]
                     except ValueError as e:
                         # Surface validation errors as HTTP 400
-                        logger.warning(format_error_log(
-                            "APP-GENERAL-034",
-                            f"Validation error in query: {e}",
-                            extra={"correlation_id": get_correlation_id()},
-                        ))
+                        logger.warning(
+                            format_error_log(
+                                "APP-GENERAL-034",
+                                f"Validation error in query: {e}",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
                         raise HTTPException(
                             status_code=status.HTTP_400_BAD_REQUEST,
                             detail={
@@ -6481,11 +6579,13 @@ def create_app() -> FastAPI:
                             },
                         )
                     except Exception as e:
-                        logger.error(format_error_log(
-                            "APP-GENERAL-035",
-                            f"Semantic search failed: {e}",
-                            extra={"correlation_id": get_correlation_id()},
-                        ))
+                        logger.error(
+                            format_error_log(
+                                "APP-GENERAL-035",
+                                f"Semantic search failed: {e}",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
                         if search_mode_actual == "semantic":
                             raise
 
@@ -6513,9 +6613,7 @@ def create_app() -> FastAPI:
 
                 # Apply payload truncation for consistency with MCP handlers
                 truncated_fts = _apply_rest_fts_truncation(fts_dicts)
-                truncated_semantic = _apply_rest_semantic_truncation(
-                    semantic_dicts
-                )
+                truncated_semantic = _apply_rest_semantic_truncation(semantic_dicts)
 
                 # Return as JSONResponse to support truncated fields
                 from fastapi.responses import JSONResponse
@@ -6576,9 +6674,7 @@ def create_app() -> FastAPI:
                 results["total_results"] = len(results["results"])
 
             # Apply payload truncation for consistency with MCP handlers
-            truncated_results = _apply_rest_semantic_truncation(
-                results["results"]
-            )
+            truncated_results = _apply_rest_semantic_truncation(results["results"])
 
             # Return as JSONResponse to support truncated fields
             from fastapi.responses import JSONResponse
@@ -6598,11 +6694,13 @@ def create_app() -> FastAPI:
 
         except ValueError as e:
             # Surface validation errors from backend as HTTP 400
-            logger.warning(format_error_log(
-                "APP-GENERAL-036",
-                f"Validation error in query: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-036",
+                    f"Validation error in query: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"error": "Invalid query parameters", "message": str(e)},
@@ -6627,12 +6725,14 @@ def create_app() -> FastAPI:
             )
 
         except Exception as e:
-            logger.error(format_error_log(
-                "APP-GENERAL-037",
-                f"Unexpected error in unified search: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-037",
+                    f"Unexpected error in unified search: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal search error: {str(e)}",

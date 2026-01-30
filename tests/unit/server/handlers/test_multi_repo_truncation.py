@@ -12,7 +12,6 @@ These tests verify that:
 TDD methodology: Tests written BEFORE any implementation changes.
 """
 
-import pytest
 
 
 class TestMultiRepoContentTruncation:

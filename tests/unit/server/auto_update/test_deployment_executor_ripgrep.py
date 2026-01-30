@@ -6,7 +6,6 @@ RipgrepInstaller utility class. The actual ripgrep installation logic is
 comprehensively tested in tests/unit/server/utils/test_ripgrep_installer.py.
 """
 
-from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest

@@ -8,7 +8,6 @@ TDD: These tests are written BEFORE implementation to define expected behavior.
 """
 
 import json
-import pytest
 
 from code_indexer.server.utils.config_manager import (
     ServerConfigManager,

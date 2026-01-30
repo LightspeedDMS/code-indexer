@@ -13,9 +13,7 @@ from typing import Optional
 
 from code_indexer.server.services.claude_cli_manager import (
     get_claude_cli_manager,
-    ClaudeCliManager,
 )
-from code_indexer.server.services.config_service import get_config_service
 
 logger = logging.getLogger(__name__)
 

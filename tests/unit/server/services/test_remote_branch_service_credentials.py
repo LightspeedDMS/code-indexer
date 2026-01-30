@@ -11,7 +11,6 @@ Tests cover:
 3. HTTPS URL credential insertion for both platforms
 """
 
-import pytest
 
 
 class TestBuildEffectiveUrl:

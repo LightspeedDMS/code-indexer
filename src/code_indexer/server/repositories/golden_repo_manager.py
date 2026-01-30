@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from code_indexer.server.services.group_access_manager import GroupAccessManager
 
 from pydantic import BaseModel
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 
 class GoldenRepoError(Exception):

@@ -15,7 +15,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from ..services.delegation_job_tracker import DelegationJobTracker, JobResult
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

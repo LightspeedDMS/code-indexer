@@ -19,7 +19,6 @@ Following TDD methodology: Write failing tests FIRST, then implement.
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from src.code_indexer.server.services.dashboard_service import DashboardService
 

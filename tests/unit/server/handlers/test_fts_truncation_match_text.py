@@ -7,7 +7,6 @@ AC2: FTS Match Text Truncation (match_text field)
 These tests follow TDD methodology - written BEFORE implementation.
 """
 
-import pytest
 import uuid
 from unittest.mock import patch
 

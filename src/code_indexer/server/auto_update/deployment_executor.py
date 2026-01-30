@@ -3,15 +3,12 @@
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.utils.ripgrep_installer import RipgrepInstaller
 from pathlib import Path
-import platform
-import shutil
-import stat
 import subprocess
 import logging
 import time
 
 import requests
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

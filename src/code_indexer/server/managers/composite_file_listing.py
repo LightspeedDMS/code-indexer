@@ -15,7 +15,7 @@ from typing import List
 from ..models.activated_repository import ActivatedRepository
 from ..models.composite_file_models import FileInfo
 from ...proxy.config_manager import ProxyConfigManager
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

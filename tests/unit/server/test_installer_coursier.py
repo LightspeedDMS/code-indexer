@@ -6,7 +6,6 @@ Coursier is available for Java/Kotlin SCIP indexing.
 """
 
 import subprocess
-from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest

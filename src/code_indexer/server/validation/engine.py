@@ -24,7 +24,7 @@ from .health_checker import IndexHealthChecker
 from ...config import Config
 from ...indexing.file_finder import FileFinder
 from ...storage.filesystem_vector_store import FilesystemVectorStore
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

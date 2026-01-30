@@ -10,7 +10,6 @@ where concurrent GlobalRegistry instances would overwrite each other's changes.
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import pytest
 
 
 class TestConcurrentGlobalRepoWrites:

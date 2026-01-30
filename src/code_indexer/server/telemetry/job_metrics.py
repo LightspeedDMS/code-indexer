@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 if TYPE_CHECKING:
     from src.code_indexer.server.telemetry.manager import TelemetryManager

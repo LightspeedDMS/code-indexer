@@ -2,11 +2,8 @@
 
 import base64
 import os
-from pathlib import Path
-from typing import Dict, Any
 from unittest.mock import Mock, patch, MagicMock
 import pytest
-import httpx
 
 from src.code_indexer.services.voyage_multimodal import VoyageMultimodalClient
 from src.code_indexer.config import VoyageAIConfig

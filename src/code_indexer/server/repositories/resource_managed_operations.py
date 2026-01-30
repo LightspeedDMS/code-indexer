@@ -26,7 +26,7 @@ from .resource_manager import create_server_resource_manager
 from .golden_repo_manager import GoldenRepoManager, GitOperationError
 from .activated_repo_manager import ActivatedRepoManager
 from .background_jobs import BackgroundJobManager
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

@@ -11,7 +11,6 @@ These tests are written FIRST (TDD) to demonstrate the bug before implementing t
 """
 
 import inspect
-import pytest
 
 
 class TestSemanticSearchIncludesSourceContent:

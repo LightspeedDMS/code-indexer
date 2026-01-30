@@ -4,8 +4,6 @@ Unit tests for self-monitoring prompt templates (Bug #87).
 Tests the get_default_prompt() function that loads the default analysis prompt.
 """
 
-import pytest
-from pathlib import Path
 
 
 class TestGetDefaultPrompt:

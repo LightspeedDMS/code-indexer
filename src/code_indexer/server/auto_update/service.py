@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from .change_detector import ChangeDetector
     from .deployment_lock import DeploymentLock
     from .deployment_executor import DeploymentExecutor
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

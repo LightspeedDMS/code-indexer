@@ -4,7 +4,6 @@ These tests verify that FixedSizeChunker properly extracts images from HTML and 
 using the ImageExtractorFactory, not just from markdown files.
 """
 
-import pytest
 from pathlib import Path
 import tempfile
 import shutil

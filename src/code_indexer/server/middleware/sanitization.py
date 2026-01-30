@@ -13,7 +13,7 @@ from typing import Dict, Any, Optional
 from fastapi import Request
 
 from ..models.error_models import ErrorHandlerConfiguration
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 # Configure logger for this module
 logger = logging.getLogger(__name__)

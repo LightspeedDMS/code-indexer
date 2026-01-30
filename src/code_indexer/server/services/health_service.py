@@ -29,7 +29,7 @@ from .database_health_service import (
     get_database_health_service,
 )
 from .config_service import get_config_service
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

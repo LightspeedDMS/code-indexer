@@ -8,7 +8,6 @@ This module implements model-aware fixed-size chunking algorithm:
 - Multimodal image detection: extracts images from .md, .html, .htm, .htmx files for multimodal embeddings
 """
 
-import re
 from typing import List, Dict, Any, Optional, Union
 from pathlib import Path
 

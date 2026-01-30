@@ -10,9 +10,8 @@ Story #23 AC6: Scheduled Timer-Based Gap Scanning and Catch-Up
 
 import logging
 import threading
-import time
 from typing import Optional
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

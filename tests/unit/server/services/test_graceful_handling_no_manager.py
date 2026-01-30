@@ -10,10 +10,8 @@ This module tests:
 
 import logging
 from pathlib import Path
-from typing import Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
 
 
 class TestGracefulHandlingWhenManagerNotInitialized:

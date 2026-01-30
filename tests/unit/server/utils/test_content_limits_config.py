@@ -393,7 +393,6 @@ class TestContentLimitsConfigPersistence:
 
         from code_indexer.server.utils.config_manager import (
             ContentLimitsConfig,
-            ServerConfig,
             ServerConfigManager,
         )
 

@@ -8,7 +8,6 @@ TDD: These tests are written BEFORE implementation to define expected behavior.
 
 import pytest
 import tempfile
-from pathlib import Path
 
 from code_indexer.server.services.config_service import ConfigService
 

@@ -18,7 +18,7 @@ from ...models.auto_discovery import (
     RepositoryDiscoveryResult,
 )
 from ..git_url_normalizer import GitUrlNormalizer, GitUrlNormalizationError
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 if TYPE_CHECKING:
     from ..ci_token_manager import CITokenManager

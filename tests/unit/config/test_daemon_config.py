@@ -7,7 +7,7 @@ Tests follow TDD methodology - written before implementation.
 import json
 import pytest
 from pathlib import Path
-from code_indexer.config import ConfigManager, Config
+from code_indexer.config import ConfigManager
 
 
 class TestDaemonDefaults:

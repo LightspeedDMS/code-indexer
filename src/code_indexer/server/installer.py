@@ -9,7 +9,6 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 import getpass
 import gzip
 import logging
-import os
 import platform
 import shutil
 import socket
@@ -24,7 +23,7 @@ from .auth.user_manager import UserManager
 from .utils.config_manager import ServerConfigManager
 from .utils.jwt_secret_manager import JWTSecretManager
 from .utils.ripgrep_installer import RipgrepInstaller
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 
@@ -327,7 +326,6 @@ WantedBy=multi-user.target
         if not self.server_dir.exists():
             return False
 
-        import shutil
 
         shutil.rmtree(self.server_dir)
         return True

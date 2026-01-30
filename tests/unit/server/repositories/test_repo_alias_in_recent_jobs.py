@@ -17,7 +17,6 @@ import tempfile
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-import pytest
 
 from src.code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,

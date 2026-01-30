@@ -2,12 +2,10 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import patch
 
-import pytest
 
-from code_indexer.config import ConfigManager, DaemonConfig
-from code_indexer.daemon.socket_helper import generate_repo_hash
+from code_indexer.config import ConfigManager
 
 
 class TestConfigManagerSocketPath:

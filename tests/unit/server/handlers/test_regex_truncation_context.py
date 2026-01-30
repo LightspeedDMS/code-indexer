@@ -7,7 +7,6 @@ AC2: Regex Context Truncation (context_before, context_after fields)
 These tests follow TDD methodology - written BEFORE implementation.
 """
 
-import pytest
 import uuid
 from unittest.mock import patch
 

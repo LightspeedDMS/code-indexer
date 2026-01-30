@@ -1,7 +1,6 @@
 """E2E tests for mixed valid/invalid images - Story #66 AC9."""
 
 import pytest
-from pathlib import Path
 
 from src.code_indexer.indexing.image_extractor import MarkdownImageExtractor
 

@@ -9,11 +9,8 @@ Tests cover:
 Story #20: API Key Management for Claude CLI and VoyageAI
 """
 
-import json
 import tempfile
-from pathlib import Path
 
-import pytest
 
 from code_indexer.server.utils.config_manager import (
     ClaudeIntegrationConfig,

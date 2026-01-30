@@ -10,7 +10,6 @@ These tests define expected behavior before implementation.
 """
 
 import pytest
-from pathlib import Path
 
 
 @pytest.fixture

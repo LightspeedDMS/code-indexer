@@ -5,7 +5,6 @@ Provides real file listing operations following CLAUDE.md Foundation #1: No mock
 All operations use real file system operations with proper pagination and filtering.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 import os

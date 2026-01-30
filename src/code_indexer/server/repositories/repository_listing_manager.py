@@ -5,7 +5,6 @@ Provides repository listing functionality with search, filtering, and statistics
 Handles both golden repositories and user activated repositories.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 import os
@@ -185,7 +184,7 @@ class RepositoryListingManager:
         # Add branches list if we can get it
         try:
             details["branches_list"] = self.get_available_branches(alias)
-        except Exception as e:
+        except Exception:
             logger.warning(
                 format_error_log("REPO-MIGRATE-001", "Could not get branches for {alias}: {e}"),
                 extra=get_log_extra("REPO-MIGRATE-001")
@@ -198,7 +197,7 @@ class RepositoryListingManager:
             details["file_count"] = stats["file_count"]
             details["index_size"] = stats["index_size"]
             details["last_updated"] = stats["last_updated"]
-        except Exception as e:
+        except Exception:
             logger.warning(
                 format_error_log("REPO-MIGRATE-002", "Could not get statistics for {alias}: {e}"),
                 extra=get_log_extra("REPO-MIGRATE-002")
@@ -274,7 +273,7 @@ class RepositoryListingManager:
                 extra=get_log_extra("REPO-MIGRATE-003")
             )
             return [golden_repo["default_branch"]]
-        except Exception as e:
+        except Exception:
             logger.warning(
                 format_error_log("REPO-MIGRATE-004", "Failed to get branches for repository {alias}: {e}"),
                 extra=get_log_extra("REPO-MIGRATE-004")
@@ -403,7 +402,7 @@ class RepositoryListingManager:
                 if ".git" in root:
                     continue
                 file_count += len(files)
-        except Exception as e:
+        except Exception:
             logger.warning(
                 format_error_log("REPO-MIGRATE-005", "Failed to count files in {repo_path}: {e}"),
                 extra=get_log_extra("REPO-MIGRATE-005")
@@ -431,7 +430,7 @@ class RepositoryListingManager:
                     except OSError:
                         # Skip files we can't access
                         pass
-        except Exception as e:
+        except Exception:
             logger.warning(
                 format_error_log("REPO-MIGRATE-006", "Failed to calculate size for {repo_path}: {e}"),
                 extra=get_log_extra("REPO-MIGRATE-006")
@@ -471,7 +470,7 @@ class RepositoryListingManager:
             else:
                 return datetime.now(timezone.utc).isoformat()
 
-        except Exception as e:
+        except Exception:
             logger.warning(
                 format_error_log("REPO-MIGRATE-007", "Failed to get last modified time for {repo_path}: {e}"),
                 extra=get_log_extra("REPO-MIGRATE-007")

@@ -11,7 +11,6 @@ Following TDD methodology: Write failing tests FIRST, then implement.
 """
 
 import concurrent.futures
-import pytest
 
 
 class TestApiMetricsService:

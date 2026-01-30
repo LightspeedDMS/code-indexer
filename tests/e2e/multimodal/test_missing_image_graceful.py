@@ -1,7 +1,6 @@
 """E2E tests for graceful handling of missing images - Story #66 AC5."""
 
 import pytest
-from pathlib import Path
 
 from src.code_indexer.indexing.image_extractor import MarkdownImageExtractor
 

@@ -7,7 +7,6 @@ AC1: FTS Snippet Truncation (code_snippet field)
 These tests follow TDD methodology - written BEFORE implementation.
 """
 
-import pytest
 import uuid
 from unittest.mock import patch
 

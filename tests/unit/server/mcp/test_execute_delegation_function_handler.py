@@ -12,7 +12,6 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 

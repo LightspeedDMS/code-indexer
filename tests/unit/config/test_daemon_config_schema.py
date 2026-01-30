@@ -1,6 +1,5 @@
 """Unit tests for DaemonConfig schema updates."""
 
-from typing import get_args
 
 import pytest
 from pydantic import ValidationError

@@ -10,7 +10,6 @@ Tests verify:
 2. Input schema validation for each tool
 """
 
-import pytest
 
 from code_indexer.server.mcp.tools import TOOL_REGISTRY
 

@@ -1,6 +1,5 @@
 """Unit tests for Image Extractors - Stories #62 and #63."""
 
-import pytest
 from pathlib import Path
 import tempfile
 import shutil

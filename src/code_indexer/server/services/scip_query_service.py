@@ -29,7 +29,7 @@ SERVER-ONLY SCOPE:
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Union, TYPE_CHECKING
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 if TYPE_CHECKING:
     from .access_filtering_service import AccessFilteringService

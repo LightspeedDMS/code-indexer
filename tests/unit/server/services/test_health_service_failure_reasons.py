@@ -47,7 +47,6 @@ class TestFailureReasonsField:
     def test_failure_reasons_defaults_to_empty_list(self):
         """failure_reasons should default to empty list."""
         from code_indexer.server.models.api_models import HealthCheckResponse
-        from pydantic import Field
 
         field_info = HealthCheckResponse.model_fields.get("failure_reasons")
         assert field_info is not None

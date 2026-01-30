@@ -559,7 +559,7 @@ class ActivatedRepoIndexManager:
                 "index_size_mb": index_size_mb,
                 "status": "up_to_date",
             }
-        except Exception as e:
+        except Exception:
             logger.warning(
                 format_error_log("SVC-MIGRATE-005", "Failed to read semantic index metadata: {e}"),
                 extra=get_log_extra("SVC-MIGRATE-005")
@@ -597,7 +597,7 @@ class ActivatedRepoIndexManager:
                 "index_health": "healthy",
                 "status": "up_to_date",
             }
-        except Exception as e:
+        except Exception:
             logger.warning(
                 format_error_log("SVC-MIGRATE-006", "Failed to read FTS index status: {e}"),
                 extra=get_log_extra("SVC-MIGRATE-006")
@@ -636,7 +636,7 @@ class ActivatedRepoIndexManager:
                 "date_range": metadata.get("date_range"),
                 "status": status,
             }
-        except Exception as e:
+        except Exception:
             logger.warning(
                 format_error_log("SVC-MIGRATE-007", "Failed to read temporal index metadata: {e}"),
                 extra=get_log_extra("SVC-MIGRATE-007")

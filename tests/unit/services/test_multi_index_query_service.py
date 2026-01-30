@@ -11,9 +11,7 @@ Tests the parallel multi-index query functionality that:
 """
 
 import pytest
-from pathlib import Path
-from unittest.mock import Mock, MagicMock, patch
-from typing import List, Dict, Any
+from unittest.mock import Mock
 import time
 
 # Will create this module

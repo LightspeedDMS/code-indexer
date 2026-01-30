@@ -20,8 +20,8 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, List, Tuple, TYPE_CHECKING
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from typing import Callable, Optional, List, Tuple
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

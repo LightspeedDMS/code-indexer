@@ -5,10 +5,9 @@ propagated to the CLI rather than silently swallowed.
 """
 
 import pytest
-from unittest.mock import patch, Mock, MagicMock
+from unittest.mock import patch
 from io import StringIO
 
-from code_indexer.daemon.cache import CacheEntry
 
 
 class TestExecuteSemanticSearchErrorPropagation:

@@ -1,7 +1,6 @@
 """E2E tests for parser robustness - Story #66 AC8."""
 
 import pytest
-from pathlib import Path
 
 from src.code_indexer.indexing.image_extractor import (
     MarkdownImageExtractor,

@@ -23,7 +23,7 @@ from ..models.api_models import (
 )
 from ...config import ConfigManager
 from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

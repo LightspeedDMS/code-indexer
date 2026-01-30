@@ -256,7 +256,6 @@ class TestIndexExistsMethodSeparateTypes:
 
     def test_index_exists_does_not_use_semantic_fts(self):
         """Test that _index_exists doesn't require 'semantic_fts' internally."""
-        from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
 
         # If the implementation requires semantic_fts, that's a bug
         # Valid types should be: semantic, fts, temporal, scip

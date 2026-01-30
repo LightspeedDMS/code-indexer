@@ -11,10 +11,7 @@ This module tests:
 
 import threading
 from pathlib import Path
-from typing import Optional
-from unittest.mock import patch
 
-import pytest
 
 
 class TestClaudeCliManagerSingleton:

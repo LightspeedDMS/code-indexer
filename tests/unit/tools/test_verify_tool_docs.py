@@ -6,7 +6,6 @@ AC4: CI Gate Validation - Verify all 128 tools have valid documentation.
 """
 
 import pytest
-from pathlib import Path
 
 
 @pytest.fixture

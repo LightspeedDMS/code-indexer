@@ -9,12 +9,10 @@ Tests verify that:
 TDD: These tests are written BEFORE implementation to define expected behavior.
 """
 
-import pytest
 from unittest.mock import patch, MagicMock
 
 from code_indexer.server.routes.multi_query_routes import (
     get_multi_search_service,
-    _multi_search_service,
 )
 from code_indexer.server.multi import MultiSearchConfig
 
@@ -78,7 +76,6 @@ class TestGetMultiSearchServiceConfig:
     def test_get_multi_search_service_uses_config_values(self, tmp_path):
         """get_multi_search_service should use values from ConfigService."""
         from code_indexer.server.services.config_service import (
-            ConfigService,
             reset_config_service,
         )
         from code_indexer.server.routes import multi_query_routes

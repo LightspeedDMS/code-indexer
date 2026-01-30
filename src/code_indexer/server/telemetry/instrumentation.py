@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, List
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 if TYPE_CHECKING:
     from fastapi import FastAPI

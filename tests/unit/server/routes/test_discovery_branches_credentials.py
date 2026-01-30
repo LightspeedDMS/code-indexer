@@ -11,8 +11,7 @@ Tests verify that the fetch_discovery_branches route:
 3. Uses correct credentials based on platform (github/gitlab)
 """
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 
 

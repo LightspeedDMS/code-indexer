@@ -12,7 +12,7 @@ Tests that:
 
 import pytest
 from datetime import datetime, timezone
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch
 
 
 class TestSessionImpersonationProtocolIntegration:

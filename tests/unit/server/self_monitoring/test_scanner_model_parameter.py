@@ -5,10 +5,8 @@ Verifies that LogScanner passes --model parameter to Claude CLI
 based on SelfMonitoringConfig.model setting.
 """
 
-import json
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from code_indexer.server.self_monitoring.scanner import LogScanner
 

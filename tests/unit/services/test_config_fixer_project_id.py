@@ -7,7 +7,6 @@ project_id mismatch for versioned directories (CoW clones).
 """
 
 import subprocess
-from pathlib import Path
 import pytest
 
 from code_indexer.services.config_fixer import ConfigurationValidator

@@ -7,7 +7,6 @@ Story #50: Updated truncation function mocks to sync (truncation helpers are now
 TDD methodology: Tests written BEFORE the fix is implemented.
 """
 
-import json
 import pytest
 from unittest.mock import patch, Mock, AsyncMock
 

@@ -17,7 +17,6 @@ import os
 import tempfile
 from pathlib import Path
 
-import pytest
 
 from code_indexer.server.services.api_key_management import (
     ApiKeySyncService,

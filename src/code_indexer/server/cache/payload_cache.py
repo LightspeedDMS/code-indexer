@@ -18,7 +18,7 @@ from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import CacheConfig
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

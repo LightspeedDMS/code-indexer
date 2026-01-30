@@ -15,7 +15,6 @@ import json
 import pytest
 import tempfile
 from pathlib import Path
-from typing import Dict, Any, List
 
 
 class TestAC1_MCPMultiRepoSearchUsesMultiSearchService:

@@ -1,7 +1,6 @@
 """E2E tests for remote URL filtering - Story #66 AC6."""
 
 import pytest
-from pathlib import Path
 
 from src.code_indexer.indexing.image_extractor import MarkdownImageExtractor
 

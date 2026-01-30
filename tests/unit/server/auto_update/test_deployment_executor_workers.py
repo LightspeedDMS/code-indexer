@@ -6,11 +6,9 @@ Tests for DeploymentExecutor._ensure_workers_config() method that adds
 Single worker maintains in-memory cache coherency (HNSW, FTS, OmniCache).
 """
 
-import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-import pytest
 
 from code_indexer.server.auto_update.deployment_executor import DeploymentExecutor
 

@@ -9,7 +9,6 @@ Note: The `cache` fixture is provided by conftest.py in this directory.
 These tests follow TDD methodology - written BEFORE verification.
 """
 
-import pytest
 from unittest.mock import patch
 
 

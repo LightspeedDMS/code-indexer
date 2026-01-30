@@ -5,7 +5,6 @@ Verifies that GoldenReposConfig dataclass includes analysis_model field
 with correct default value and persistence behavior.
 """
 
-import pytest
 from src.code_indexer.server.utils.config_manager import GoldenReposConfig
 
 

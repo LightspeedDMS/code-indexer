@@ -6,7 +6,6 @@ should be immediately queryable via GlobalRegistry when using the
 factory function (SQLite backend consistency).
 """
 
-import pytest
 
 
 def _initialize_db_schema(db_path: str) -> None:

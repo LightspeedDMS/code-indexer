@@ -15,7 +15,7 @@ from typing import Dict, Any, List, Optional
 
 from .health_service import health_service
 from ..models.api_models import HealthCheckResponse, HealthStatus
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 

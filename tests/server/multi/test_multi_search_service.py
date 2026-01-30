@@ -11,14 +11,11 @@ AC5: Partial Failure Handling (some repos succeed, others fail)
 AC7: Actionable Error Messages (timeout recommendations)
 """
 
-import asyncio
 import pytest
-from pathlib import Path
-from unittest.mock import Mock, patch, AsyncMock
+from unittest.mock import Mock, patch
 from code_indexer.server.multi.multi_search_config import MultiSearchConfig
 from code_indexer.server.multi.models import (
     MultiSearchRequest,
-    MultiSearchResponse,
 )
 
 

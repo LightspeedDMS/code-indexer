@@ -6,9 +6,7 @@ to the main config.json. Tests the new dataclasses: SearchLimitsConfig, FileCont
 and GoldenReposConfig.
 """
 
-import json
 import pytest
-from pathlib import Path
 
 from code_indexer.server.utils.config_manager import (
     ServerConfigManager,

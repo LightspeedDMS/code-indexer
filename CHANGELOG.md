@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.8] - 2026-01-30
+
+### Fixed
+
+- **Self-Monitoring 400 Error After Enabling** - Fixed "GitHub repository not configured" error when enabling self-monitoring after server startup:
+  - Root cause: When self-monitoring was disabled at startup, auto-detected `repo_root` and `github_repo` were discarded (set to None)
+  - When user later enabled self-monitoring and clicked "Run Now", the manual trigger read None from app.state
+  - Solution: Always preserve auto-detected values in app.state regardless of whether self-monitoring is enabled
+  - Only `self_monitoring_service` is None when disabled; detection values are always available
+
+---
+
 ## [8.8.7] - 2026-01-30
 
 ### Fixed

@@ -15,7 +15,6 @@ import shutil
 import subprocess
 from pathlib import Path
 
-import pytest
 
 from code_indexer.server.services.git_operations_service import GitOperationsService
 
