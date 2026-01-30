@@ -2553,8 +2553,10 @@ def create_app() -> FastAPI:
         )
         try:
             from code_indexer.server.self_monitoring.service import SelfMonitoringService
+            from code_indexer.server.services.config_service import get_config_service
 
             # Get configuration
+            config_service = get_config_service()
             server_config = config_service.get_config()
             sm_config = server_config.self_monitoring_config
 
@@ -2609,6 +2611,9 @@ def create_app() -> FastAPI:
                         "Self-monitoring enabled but could not detect GitHub repo from git remote - service disabled",
                         extra={"correlation_id": get_correlation_id()},
                     ))
+                    app.state.self_monitoring_service = None
+                    app.state.self_monitoring_repo_root = None
+                    app.state.self_monitoring_github_repo = None
                 else:
                     self_monitoring_service = SelfMonitoringService(
                         enabled=sm_config.enabled,
@@ -2623,6 +2628,9 @@ def create_app() -> FastAPI:
                     )
                     self_monitoring_service.start()
                     app.state.self_monitoring_service = self_monitoring_service
+                    # Store repo_root and github_repo for manual trigger route access (Bug #87)
+                    app.state.self_monitoring_repo_root = str(repo_root) if repo_root else None
+                    app.state.self_monitoring_github_repo = github_repo
                     logger.info(
                         f"Self-monitoring service started (cadence: {sm_config.cadence_minutes} minutes)",
                         extra={"correlation_id": get_correlation_id()},
@@ -2633,6 +2641,8 @@ def create_app() -> FastAPI:
                     extra={"correlation_id": get_correlation_id()},
                 )
                 app.state.self_monitoring_service = None
+                app.state.self_monitoring_repo_root = None
+                app.state.self_monitoring_github_repo = None
 
         except Exception as e:
             # Log error but don't block server startup
@@ -2642,6 +2652,8 @@ def create_app() -> FastAPI:
                 extra={"correlation_id": get_correlation_id()},
             ))
             app.state.self_monitoring_service = None
+            app.state.self_monitoring_repo_root = None
+            app.state.self_monitoring_github_repo = None
 
         # Startup: Initialize MCP Session cleanup (Story #731)
         session_registry = None
@@ -8038,6 +8050,12 @@ def create_app() -> FastAPI:
         from fastapi.responses import RedirectResponse
 
         return RedirectResponse(url="/admin/static/favicon.svg", status_code=302)
+
+    # Initialize self-monitoring app.state attributes to None (Bug #87 fix)
+    # These will be updated during lifespan startup if self-monitoring is enabled
+    # Ensures manual trigger route can always access these attributes
+    app.state.self_monitoring_repo_root = None
+    app.state.self_monitoring_github_repo = None
 
     return app
 

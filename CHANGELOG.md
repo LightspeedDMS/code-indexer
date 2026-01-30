@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.5] - 2026-01-30
+
+### Fixed
+
+- **Self-Monitoring Manual Trigger Fails on Installed Packages** - Fixed MONITOR-GENERAL-011 error when using "Run Now" on production servers where CIDX is installed as a package:
+  - Root cause: Manual trigger tried to detect `repo_root`/`github_repo` from `__file__`, but installed packages have no `.git` directory
+  - Solution: Store `repo_root` and `github_repo` in `app.state` during server startup
+  - Manual trigger now reads from `app.state` instead of re-detecting
+  - Detection happens once at startup (when running from repo directory), works everywhere after
+
+---
+
 ## [8.8.4] - 2026-01-30
 
 ### Fixed
