@@ -7457,7 +7457,7 @@ def _create_self_monitoring_page_response(
             "error_message": error_message,
         },
     )
-    set_csrf_cookie(response, csrf_token, path="/admin")
+    set_csrf_cookie(response, csrf_token, path="/")
     return response
 
 

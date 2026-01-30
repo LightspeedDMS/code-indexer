@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.6] - 2026-01-30
+
+### Fixed
+
+- **Self-Monitoring Run Now Button 403 CSRF Error** - Fixed CSRF token validation failure when clicking "Run Now":
+  - Root cause: Self-monitoring page set CSRF cookie with `path="/admin"` while all other admin pages use `path="/"`
+  - This caused browser to have two `_csrf` cookies with different paths, leading to unpredictable validation failures
+  - Solution: Changed to `path="/"` for consistency with all other admin pages
+
+---
+
 ## [8.8.5] - 2026-01-30
 
 ### Fixed
