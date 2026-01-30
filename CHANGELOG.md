@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.10] - 2026-01-30
+
+### Fixed
+
+- **Auto-Updater Idempotent Service File Updates** - Ensures CIDX_REPO_ROOT gets added to existing servers:
+  - Added `_ensure_cidx_repo_root()` to DeploymentExecutor (auto-updater)
+  - Idempotently adds `Environment="CIDX_REPO_ROOT={repo_path}"` to systemd service file
+  - Runs during every auto-update deployment cycle
+  - Existing production servers now get the env var automatically without manual intervention
+  - Documented mandatory auto-updater approach in CLAUDE.md
+
+---
+
 ## [8.8.9] - 2026-01-30
 
 ### Fixed
