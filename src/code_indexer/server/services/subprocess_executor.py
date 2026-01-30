@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import List, Optional
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -107,10 +108,11 @@ class SubprocessExecutor:
 
         except asyncio.TimeoutError:
             # Asyncio timeout exceeded (should not happen if subprocess timeout works)
-            logger.warning(
+            logger.warning(format_error_log(
+                "MCP-GENERAL-183",
                 f"Asyncio timeout exceeded for command: {' '.join(command)}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return SearchExecutionResult(
                 status=ExecutionStatus.TIMEOUT,
                 output_file=output_file_path,
@@ -120,11 +122,12 @@ class SubprocessExecutor:
             )
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "MCP-GENERAL-184",
                 f"Unexpected error executing command: {e}",
                 exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return SearchExecutionResult(
                 status=ExecutionStatus.ERROR,
                 output_file=output_file_path,
@@ -188,20 +191,22 @@ class SubprocessExecutor:
 
                 except subprocess.TimeoutExpired:
                     # Timeout exceeded - terminate process
-                    logger.warning(
+                    logger.warning(format_error_log(
+                        "MCP-GENERAL-185",
                         f"Command timed out after {timeout_seconds}s: {' '.join(command)}",
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ))
 
                     # Terminate process
                     process.kill()
                     try:
                         process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
-                        logger.error(
+                        logger.error(format_error_log(
+                            "MCP-GENERAL-186",
                             "Failed to kill timed out process",
                             extra={"correlation_id": get_correlation_id()},
-                        )
+                        ))
 
                     # Partial output already written to file
                     return SearchExecutionResult(
@@ -220,11 +225,12 @@ class SubprocessExecutor:
             )
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "MCP-GENERAL-187",
                 f"Error running subprocess: {e}",
                 exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return SearchExecutionResult(
                 status=ExecutionStatus.ERROR,
                 output_file=output_file_path,

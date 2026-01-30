@@ -20,6 +20,7 @@ from ..models.api_models import (
 from ...config import ConfigManager
 from ...backends.backend_factory import BackendFactory
 from ...services.embedding_factory import EmbeddingProviderFactory
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -257,10 +258,11 @@ class SemanticSearchService:
             return formatted_results
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "MCP-GENERAL-170",
                 f"Semantic search failed for repo {repo_path}: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             raise RuntimeError(f"Semantic search failed: {e}")
 
     def _detect_language_from_path(self, file_path: str) -> Optional[str]:

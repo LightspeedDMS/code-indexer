@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.scip_query_service import SCIPQueryService
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 
 logger = logging.getLogger(__name__)
@@ -158,10 +159,11 @@ def get_definition(
             "results": results,
         }
     except Exception as e:
-        logger.warning(
+        logger.warning(format_error_log(
+            "WEB-GENERAL-022",
             f"Definition query failed: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return {"success": False, "error": str(e)}
 
 
@@ -210,10 +212,11 @@ def get_references(
             "results": results,
         }
     except Exception as e:
-        logger.warning(
+        logger.warning(format_error_log(
+            "WEB-GENERAL-023",
             f"References query failed: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return {"success": False, "error": str(e)}
 
 
@@ -262,10 +265,11 @@ def get_dependencies(
             "results": results,
         }
     except Exception as e:
-        logger.warning(
+        logger.warning(format_error_log(
+            "WEB-GENERAL-024",
             f"Dependencies query failed: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return {"success": False, "error": str(e)}
 
 
@@ -314,10 +318,11 @@ def get_dependents(
             "results": results,
         }
     except Exception as e:
-        logger.warning(
+        logger.warning(format_error_log(
+            "WEB-GENERAL-025",
             f"Dependents query failed: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return {"success": False, "error": str(e)}
 
 
@@ -362,10 +367,11 @@ def get_impact(
             "affected_files": result["affected_files"],
         }
     except Exception as e:
-        logger.warning(
+        logger.warning(format_error_log(
+            "WEB-GENERAL-026",
             f"Impact analysis failed: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return {"success": False, "error": str(e)}
 
 
@@ -411,10 +417,11 @@ def get_callchain(
             "chains": chains,
         }
     except Exception as e:
-        logger.warning(
+        logger.warning(format_error_log(
+            "WEB-GENERAL-027",
             f"Call chain tracing failed: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return {"success": False, "error": str(e)}
 
 
@@ -467,8 +474,9 @@ def get_context(
             "files": result["files"],
         }
     except Exception as e:
-        logger.warning(
+        logger.warning(format_error_log(
+            "WEB-GENERAL-028",
             f"Smart context query failed: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return {"success": False, "error": str(e)}

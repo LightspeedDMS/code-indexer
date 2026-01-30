@@ -6,6 +6,7 @@ Implements automatic email discovery with fallback to default email.
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 import logging
 from pathlib import Path
@@ -92,9 +93,10 @@ class CommitterResolutionService:
         # Step 1: Extract hostname from golden repo's push remote URL
         hostname = self.remote_discovery_service.extract_hostname(golden_repo_url)
         if hostname is None:
-            self.logger.warning(
-                f"Cannot extract hostname from URL '{golden_repo_url}', using default email",
-                extra={"correlation_id": get_correlation_id()},
+            logger.warning(
+                format_error_log("SVC-MIGRATE-001", "Cannot extract hostname from URL, using default email",
+                                 golden_repo_url=golden_repo_url),
+                extra=get_log_extra("SVC-MIGRATE-001")
             )
             return default_email, None
 
@@ -108,9 +110,9 @@ class CommitterResolutionService:
         managed_keys = key_list_result.managed
 
         if not managed_keys:
-            self.logger.warning(
-                "No managed SSH keys found, using default email",
-                extra={"correlation_id": get_correlation_id()},
+            logger.warning(
+                format_error_log("SVC-MIGRATE-002", "No managed SSH keys found, using default email"),
+                extra=get_log_extra("SVC-MIGRATE-002")
             )
             return default_email, None
 
@@ -141,16 +143,17 @@ class CommitterResolutionService:
                     )
                     return key_metadata.email, key_metadata.name
                 else:
-                    self.logger.warning(
-                        f"Working key '{key_metadata.name}' has no email configured, "
-                        f"using default email",
-                        extra={"correlation_id": get_correlation_id()},
+                    logger.warning(
+                        format_error_log("SVC-MIGRATE-003", "Working key has no email configured, using default email",
+                                         key_name=key_metadata.name),
+                        extra=get_log_extra("SVC-MIGRATE-003")
                     )
                     return default_email, key_metadata.name
 
         # Step 4: No key worked, use default
-        self.logger.warning(
-            f"No SSH key authenticated to {hostname}, using default email '{default_email}'",
-            extra={"correlation_id": get_correlation_id()},
+        logger.warning(
+            format_error_log("SVC-MIGRATE-004", "No SSH key authenticated to hostname, using default email",
+                             hostname=hostname, default_email=default_email),
+            extra=get_log_extra("SVC-MIGRATE-004")
         )
         return default_email, None

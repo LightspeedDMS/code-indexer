@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from .migration_orchestrator import MigrationOrchestrator, MigrationResult
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 
 logger = logging.getLogger(__name__)
@@ -90,24 +91,27 @@ def run_ssh_migration_on_startup(
                 extra={"correlation_id": get_correlation_id()},
             )
             if result.failed_hosts:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "MCP-GENERAL-171",
                     f"SSH key migration: {len(result.failed_hosts)} hosts failed "
                     f"during key testing (timeouts or connection failures)",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
         else:
-            logger.warning(
+            logger.warning(format_error_log(
+                "MCP-GENERAL-172",
                 f"SSH key migration: Completed with issues - {result.reason}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
 
         return result
 
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "MCP-GENERAL-173",
             f"SSH key migration: Failed with error - {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         # Return a failed result but don't crash server startup
         return MigrationResult(
             completed=False,

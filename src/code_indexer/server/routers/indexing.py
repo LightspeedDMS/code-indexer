@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -104,23 +105,26 @@ def trigger_reindex(
         )
         return TriggerReindexResponse(**result)
     except FileNotFoundError as e:
-        logger.warning(
+        logger.warning(format_error_log(
+            "WEB-GENERAL-015",
             f"Repository not found: {alias}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except ValueError as e:
-        logger.warning(
+        logger.warning(format_error_log(
+            "WEB-GENERAL-016",
             f"Invalid request for {alias}: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "WEB-GENERAL-017",
             f"Trigger reindex failed for {alias}: {e}",
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -204,17 +208,19 @@ def get_index_status(
             scip=transform_index_status(result["scip"]),
         )
     except FileNotFoundError as e:
-        logger.warning(
+        logger.warning(format_error_log(
+            "WEB-GENERAL-018",
             f"Repository not found: {alias}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "WEB-GENERAL-019",
             f"Get index status failed for {alias}: {e}",
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -255,17 +261,19 @@ def get_temporal_status(
         )
         return cast(Dict[str, Any], result)
     except FileNotFoundError as e:
-        logger.warning(
+        logger.warning(format_error_log(
+            "WEB-GENERAL-020",
             f"Repository not found: {alias}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "WEB-GENERAL-021",
             f"Get temporal status failed for {alias}: {e}",
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",

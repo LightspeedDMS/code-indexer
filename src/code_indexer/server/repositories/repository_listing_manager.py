@@ -6,6 +6,7 @@ Handles both golden repositories and user activated repositories.
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 import os
 import subprocess
@@ -185,9 +186,9 @@ class RepositoryListingManager:
         try:
             details["branches_list"] = self.get_available_branches(alias)
         except Exception as e:
-            self.logger.warning(
-                f"Could not get branches for {alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
+            logger.warning(
+                format_error_log("REPO-MIGRATE-001", "Could not get branches for {alias}: {e}"),
+                extra=get_log_extra("REPO-MIGRATE-001")
             )
             details["branches_list"] = [golden_repo["default_branch"]]
 
@@ -198,9 +199,9 @@ class RepositoryListingManager:
             details["index_size"] = stats["index_size"]
             details["last_updated"] = stats["last_updated"]
         except Exception as e:
-            self.logger.warning(
-                f"Could not get statistics for {alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
+            logger.warning(
+                format_error_log("REPO-MIGRATE-002", "Could not get statistics for {alias}: {e}"),
+                extra=get_log_extra("REPO-MIGRATE-002")
             )
             details["file_count"] = 0
             details["index_size"] = 0
@@ -268,15 +269,15 @@ class RepositoryListingManager:
             return branches or [golden_repo["default_branch"]]
 
         except subprocess.TimeoutExpired:
-            self.logger.warning(
-                f"Git ls-remote timed out for repository {alias}",
-                extra={"correlation_id": get_correlation_id()},
+            logger.warning(
+                format_error_log("REPO-MIGRATE-003", "Git ls-remote timed out for repository {alias}"),
+                extra=get_log_extra("REPO-MIGRATE-003")
             )
             return [golden_repo["default_branch"]]
         except Exception as e:
-            self.logger.warning(
-                f"Failed to get branches for repository {alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
+            logger.warning(
+                format_error_log("REPO-MIGRATE-004", "Failed to get branches for repository {alias}: {e}"),
+                extra=get_log_extra("REPO-MIGRATE-004")
             )
             return [golden_repo["default_branch"]]
 
@@ -403,9 +404,9 @@ class RepositoryListingManager:
                     continue
                 file_count += len(files)
         except Exception as e:
-            self.logger.warning(
-                f"Failed to count files in {repo_path}: {e}",
-                extra={"correlation_id": get_correlation_id()},
+            logger.warning(
+                format_error_log("REPO-MIGRATE-005", "Failed to count files in {repo_path}: {e}"),
+                extra=get_log_extra("REPO-MIGRATE-005")
             )
 
         return file_count
@@ -431,9 +432,9 @@ class RepositoryListingManager:
                         # Skip files we can't access
                         pass
         except Exception as e:
-            self.logger.warning(
-                f"Failed to calculate size for {repo_path}: {e}",
-                extra={"correlation_id": get_correlation_id()},
+            logger.warning(
+                format_error_log("REPO-MIGRATE-006", "Failed to calculate size for {repo_path}: {e}"),
+                extra=get_log_extra("REPO-MIGRATE-006")
             )
 
         return total_size
@@ -471,8 +472,8 @@ class RepositoryListingManager:
                 return datetime.now(timezone.utc).isoformat()
 
         except Exception as e:
-            self.logger.warning(
-                f"Failed to get last modified time for {repo_path}: {e}",
-                extra={"correlation_id": get_correlation_id()},
+            logger.warning(
+                format_error_log("REPO-MIGRATE-007", "Failed to get last modified time for {repo_path}: {e}"),
+                extra=get_log_extra("REPO-MIGRATE-007")
             )
             return datetime.now(timezone.utc).isoformat()

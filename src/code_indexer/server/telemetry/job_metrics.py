@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 if TYPE_CHECKING:
     from src.code_indexer.server.telemetry.manager import TelemetryManager
@@ -151,7 +152,10 @@ class JobMetrics:
             logger.info("JobMetrics initialized: 9 metrics registered")
 
         except Exception as e:
-            logger.warning(f"Failed to register job metrics: {e}")
+            logger.warning(format_error_log(
+                "QUERY-GENERAL-017",
+                f"Failed to register job metrics: {e}"
+            ))
             self._is_active = False
 
     def _observe_active_jobs(self, options: Any) -> Any:

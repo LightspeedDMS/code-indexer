@@ -40,6 +40,7 @@ def initialize_claude_manager_on_startup(
         get_claude_cli_manager,
     )
     from code_indexer.server.middleware.correlation import get_correlation_id
+    from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
     try:
         # Check if already initialized (idempotent)
@@ -90,9 +91,11 @@ def initialize_claude_manager_on_startup(
 
     except Exception as e:
         # Log error but don't block server startup
-        logger.error(
-            f"Failed to initialize ClaudeCliManager during server startup: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
+        logger.error(format_error_log(
+            "MCP-GENERAL-195",
+            "Failed to initialize ClaudeCliManager during server startup",
+            error=str(e)),
+            extra=get_log_extra("MCP-GENERAL-195"),
+            exc_info=True
         )
         return False

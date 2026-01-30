@@ -11,6 +11,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from typing import Optional, Dict, List, Any
 
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
+
 from ..auth.dependencies import get_current_user
 from ..auth.user_manager import User
 from ..multi import (
@@ -202,12 +204,23 @@ def multi_repository_query(
 
     except ValueError as e:
         # Validation error from service
-        logger.error(f"Multi-repo search validation error: {e}")
+        logger.error(format_error_log(
+            "WEB-GENERAL-029",
+            "Multi-repo search validation error",
+            error=str(e)),
+            extra=get_log_extra("WEB-GENERAL-029")
+        )
         raise HTTPException(status_code=422, detail=str(e))
 
     except Exception as e:
         # Unexpected error
-        logger.error(f"Multi-repo search failed: {e}", exc_info=True)
+        logger.error(format_error_log(
+            "WEB-GENERAL-030",
+            "Multi-repo search failed",
+            error=str(e)),
+            extra=get_log_extra("WEB-GENERAL-030"),
+            exc_info=True
+        )
         raise HTTPException(
             status_code=500, detail=f"Multi-repository search failed: {str(e)}"
         )

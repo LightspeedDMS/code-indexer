@@ -28,6 +28,7 @@ from .scip_models import (
     SCIPMultiMetadata,
 )
 from ...scip.query.primitives import SCIPQueryEngine, QueryResult
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,10 @@ class SCIPMultiService:
             engine = SCIPQueryEngine(scip_file)
             return engine.find_definition(request.symbol, exact=False)
         except Exception as e:
-            logger.error(f"Definition query failed for repo {repo_id}: {e}")
+            logger.error(format_error_log(
+                "REPO-GENERAL-030",
+                f"Definition query failed for repo {repo_id}: {e}"
+            ))
             raise
 
     def references(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
@@ -176,7 +180,10 @@ class SCIPMultiService:
             )
             return engine.find_references(request.symbol, limit=limit, exact=False)
         except Exception as e:
-            logger.error(f"References query failed for repo {repo_id}: {e}")
+            logger.error(format_error_log(
+                "REPO-GENERAL-031",
+                f"References query failed for repo {repo_id}: {e}"
+            ))
             raise
 
     def dependencies(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
@@ -220,7 +227,10 @@ class SCIPMultiService:
             )
             return engine.get_dependencies(request.symbol, depth=depth, exact=False)
         except Exception as e:
-            logger.error(f"Dependencies query failed for repo {repo_id}: {e}")
+            logger.error(format_error_log(
+                "REPO-GENERAL-032",
+                f"Dependencies query failed for repo {repo_id}: {e}"
+            ))
             raise
 
     def dependents(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
@@ -264,7 +274,10 @@ class SCIPMultiService:
             )
             return engine.get_dependents(request.symbol, depth=depth, exact=False)
         except Exception as e:
-            logger.error(f"Dependents query failed for repo {repo_id}: {e}")
+            logger.error(format_error_log(
+                "REPO-GENERAL-033",
+                f"Dependents query failed for repo {repo_id}: {e}"
+            ))
             raise
 
     def callchain(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
@@ -339,7 +352,10 @@ class SCIPMultiService:
                 )
             return results
         except Exception as e:
-            logger.error(f"Callchain tracing failed for repo {repo_id}: {e}")
+            logger.error(format_error_log(
+                "REPO-GENERAL-034",
+                f"Callchain tracing failed for repo {repo_id}: {e}"
+            ))
             raise
 
     def _execute_parallel_operation(
@@ -408,12 +424,16 @@ class SCIPMultiService:
                     f"Consider reducing the number of repositories or increasing timeout."
                 )
                 errors[repo_id] = error_msg
-                logger.warning(
+                logger.warning(format_error_log(
+                    "REPO-GENERAL-035",
                     f"SCIP {operation_name} timeout for repo {repo_id} after {timeout_seconds}s"
-                )
+                ))
             except Exception as e:
                 errors[repo_id] = f"SCIP {operation_name} failed: {str(e)}"
-                logger.error(f"SCIP {operation_name} error for repo {repo_id}: {e}")
+                logger.error(format_error_log(
+                    "REPO-GENERAL-036",
+                    f"SCIP {operation_name} error for repo {repo_id}: {e}"
+                ))
 
         # Calculate metadata
         total_results = sum(len(results) for results in repo_results.values())
@@ -463,7 +483,10 @@ class SCIPMultiService:
             # ("not found in global repositories") reaches the user
             raise
         except Exception as e:
-            logger.warning(f"Failed to get SCIP path for repo {repo_id}: {e}")
+            logger.warning(format_error_log(
+                "REPO-GENERAL-037",
+                f"Failed to get SCIP path for repo {repo_id}: {e}"
+            ))
             return None
 
     def _get_repository_path(self, repo_id: str) -> str:

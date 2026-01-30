@@ -10,6 +10,7 @@ import logging
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +103,10 @@ class MaintenanceState:
             try:
                 total += tracker.get_running_jobs_count()
             except Exception as e:
-                logger.warning(f"Failed to get running jobs from tracker: {e}")
+                logger.warning(format_error_log(
+                    "GIT-GENERAL-049",
+                    f"Failed to get running jobs from tracker: {e}"
+                ))
         return total
 
     def _get_queued_jobs_count(self) -> int:
@@ -112,7 +116,10 @@ class MaintenanceState:
             try:
                 total += tracker.get_queued_jobs_count()
             except Exception as e:
-                logger.warning(f"Failed to get queued jobs from tracker: {e}")
+                logger.warning(format_error_log(
+                    "GIT-GENERAL-050",
+                    f"Failed to get queued jobs from tracker: {e}"
+                ))
         return total
 
     def register_job_tracker(self, tracker: Any) -> None:
@@ -192,5 +199,8 @@ class MaintenanceState:
                 if hasattr(tracker, "get_running_jobs_details"):
                     jobs.extend(tracker.get_running_jobs_details())
             except Exception as e:
-                logger.warning(f"Failed to get job details from tracker: {e}")
+                logger.warning(format_error_log(
+                    "GIT-GENERAL-051",
+                    f"Failed to get job details from tracker: {e}"
+                ))
         return jobs

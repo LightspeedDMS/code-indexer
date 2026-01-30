@@ -42,6 +42,7 @@ from typing import Dict, Optional
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.auth.mcp_session_state import MCPSessionState
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 
 logger = logging.getLogger(__name__)
@@ -210,7 +211,10 @@ class SessionRegistry:
                 try:
                     self.cleanup_stale_sessions()
                 except Exception as e:
-                    logger.error(f"Session cleanup error: {e}")
+                    logger.error(format_error_log(
+                        "REPO-GENERAL-015",
+                        f"Session cleanup error: {e}"
+                    ))
         except asyncio.CancelledError:
             # Normal shutdown, don't log as error
             pass
@@ -245,7 +249,10 @@ class SessionRegistry:
                             config.mcp_session_config.cleanup_interval_seconds
                         )
             except Exception as e:
-                logger.warning(f"Could not read config, using defaults: {e}")
+                logger.warning(format_error_log(
+                    "REPO-GENERAL-016",
+                    f"Could not read config, using defaults: {e}"
+                ))
 
         # Fall back to module-level defaults if still None
         if ttl_seconds is None:

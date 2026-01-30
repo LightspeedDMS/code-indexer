@@ -10,8 +10,9 @@ import json
 import logging
 import os
 import secrets
+import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 from urllib.parse import quote
 
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
@@ -26,9 +27,15 @@ from .auth import (
     SessionData,
 )
 from ..services.ci_token_manager import CITokenManager, TokenValidationError
+from ..services.config_service import get_config_service
 from code_indexer import __version__ as cidx_version
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
+
+# Self-Monitoring constants (Story #74)
+SCAN_HISTORY_LIMIT = 50
+ISSUES_HISTORY_LIMIT = 100
 
 
 def _get_token_manager() -> CITokenManager:
@@ -642,7 +649,10 @@ def create_user(
                     f"Auto-assigned new user '{new_username}' to '{target_group.name}' group"
                 )
         except Exception as e:
-            logger.warning(f"Failed to auto-assign user '{new_username}' to group: {e}")
+            logger.warning(format_error_log(
+                "SCIP-GENERAL-040",
+                f"Failed to auto-assign user '{new_username}' to group: {e}"
+            ))
 
         return _create_users_page_response(
             request,
@@ -848,7 +858,10 @@ async def delete_user(
                 logger.info(f"Cleaned up group membership for deleted user: {username}")
         except RuntimeError:
             # group_manager not available - skip cleanup
-            logger.warning(f"group_manager not available, skipped group cleanup for: {username}")
+            logger.warning(format_error_log(
+                "SCIP-GENERAL-041",
+                f"group_manager not available, skipped group cleanup for: {username}"
+            ))
 
         return _create_users_page_response(
             request, session, success_message=f"User '{username}' deleted successfully"
@@ -1486,7 +1499,10 @@ def grant_repo_access(
                 success_message=f"'{group.name}' already has access to '{repo_name}'",
             )
     except Exception as e:
-        logger.error("Failed to grant repo access: %s", e)
+        logger.error(format_error_log(
+            "SCIP-GENERAL-042",
+            "Failed to grant repo access: %s", e
+        ))
         return _create_groups_page_response(
             request, session, active_tab="repos", error_message=str(e)
         )
@@ -1559,7 +1575,10 @@ def revoke_repo_access(
             error_message="cidx-meta access cannot be revoked",
         )
     except Exception as e:
-        logger.error("Failed to revoke repo access: %s", e)
+        logger.error(format_error_log(
+            "SCIP-GENERAL-043",
+            "Failed to revoke repo access: %s", e
+        ))
         return _create_groups_page_response(
             request, session, active_tab="repos", error_message=str(e)
         )
@@ -1710,11 +1729,12 @@ def _get_golden_repos_list():
             registry = get_server_global_registry(str(golden_repos_dir))
             global_repos = {r["repo_name"]: r for r in registry.list_global_repos()}
         except Exception as e:
-            logger.warning(
+            logger.warning(format_error_log(
+                "SCIP-GENERAL-044",
                 "Could not load global registry: %s",
                 e,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             global_repos = {}
 
         # Get alias info for version and target path
@@ -1758,12 +1778,13 @@ def _get_golden_repos_list():
                             else None
                         )
                     except Exception as e:
-                        logger.warning(
+                        logger.warning(format_error_log(
+                            "SCIP-GENERAL-045",
                             "Could not read alias file %s: %s",
                             alias_file,
                             e,
                             extra={"correlation_id": get_correlation_id()},
-                        )
+                        ))
                         repo["version"] = None
                         repo["last_refresh"] = None
                 else:
@@ -1790,12 +1811,13 @@ def _get_golden_repos_list():
                     )
                     repo["temporal_status"] = temporal_status
                 except Exception as e:
-                    logger.warning(
+                    logger.warning(format_error_log(
+                        "SCIP-GENERAL-046",
                         "Failed to get temporal status for %s: %s",
                         repo.get("alias"),
                         e,
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ))
                     repo["temporal_status"] = {"format": "error", "message": str(e)}
             else:
                 repo["temporal_status"] = {"format": "none"}
@@ -1850,12 +1872,13 @@ def _get_golden_repos_list():
 
         return sorted(repos, key=lambda r: r.get("alias", "").lower())
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "SCIP-GENERAL-047",
             "Failed to get golden repos list: %s",
             e,
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return []
 
 
@@ -2180,13 +2203,14 @@ def golden_repo_details(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "STORE-GENERAL-026",
             "Failed to get golden repo details for '%s': %s",
             alias,
             e,
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         raise HTTPException(status_code=404, detail=f"Repository '{alias}' not found")
 
 
@@ -2278,14 +2302,15 @@ def _get_all_activated_repos() -> list:
                         repo["temporal_status"] = temporal_status
                     except Exception as e:
                         # Honest error handling - indicate failure clearly
-                        logger.error(
+                        logger.error(format_error_log(
+                            "STORE-GENERAL-027",
                             "Failed to get temporal status for repo %s/%s: %s",
                             username,
                             repo.get("user_alias", "unknown"),
                             e,
                             exc_info=True,
                             extra={"correlation_id": get_correlation_id()},
-                        )
+                        ))
                         # Provide error temporal_status with honest error format
                         repo["temporal_status"] = {
                             "error": str(e),
@@ -2302,12 +2327,13 @@ def _get_all_activated_repos() -> list:
         return all_repos
 
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "STORE-GENERAL-028",
             "Failed to get activated repos: %s",
             e,
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return []
 
 
@@ -2609,12 +2635,13 @@ def _get_background_job_manager():
 
         return background_job_manager
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "STORE-GENERAL-029",
             "Failed to get background job manager: %s",
             e,
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return None
 
 
@@ -3026,11 +3053,12 @@ def _get_all_activated_repos_for_query() -> list:
                 }
             )
     except Exception as e:
-        logger.warning(
+        logger.warning(format_error_log(
+            "STORE-GENERAL-030",
             "Could not load global repos for query: %s",
             e,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
 
     # Add user-activated repos
     user_repos = _get_all_activated_repos()
@@ -3279,10 +3307,11 @@ def query_submit(
                         if global_repo_meta:
                             repo_path = global_repo_meta.get("index_path")
                     except Exception as e:
-                        logger.warning(
+                        logger.warning(format_error_log(
+                            "STORE-GENERAL-031",
                             f"Failed to resolve global repo path for '{user_alias}': {e}",
                             extra={"correlation_id": get_correlation_id()},
-                        )
+                        ))
 
                 if not repo_path:
                     error_message = f"Repository '{user_alias}' path not found"
@@ -3427,20 +3456,22 @@ def query_submit(
                                     }
                                 )
                         except FileNotFoundError as e:
-                            logger.error(
+                            logger.error(format_error_log(
+                                "STORE-GENERAL-032",
                                 "SCIP query failed - file not found: %s",
                                 e,
                                 exc_info=True,
                                 extra={"correlation_id": get_correlation_id()},
-                            )
+                            ))
                             error_message = f"SCIP index not found or corrupted for repository '{user_alias}'. Generate an index with: `cidx scip generate`"
                         except Exception as e:
-                            logger.error(
+                            logger.error(format_error_log(
+                                "STORE-GENERAL-033",
                                 "SCIP query execution failed: %s",
                                 e,
                                 exc_info=True,
                                 extra={"correlation_id": get_correlation_id()},
-                            )
+                            ))
                             error_message = f"SCIP query failed for repository '{user_alias}': {str(e)}. Try regenerating the index with: `cidx scip generate`"
 
         else:
@@ -3514,12 +3545,13 @@ def query_submit(
                                 }
                             )
                     except Exception as e:
-                        logger.error(
+                        logger.error(format_error_log(
+                            "STORE-GENERAL-034",
                             "Global repo query failed: %s",
                             e,
                             exc_info=True,
                             extra={"correlation_id": get_correlation_id()},
-                        )
+                        ))
                         error_message = f"Query failed: {str(e)}"
             else:
                 repo_username = target_repo.get("username", session.username)
@@ -3562,12 +3594,13 @@ def query_submit(
                     )
 
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "STORE-GENERAL-035",
             "Query execution failed: %s",
             e,
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         error_message = f"Query failed: {str(e)}"
 
     return _create_query_page_response(
@@ -3629,12 +3662,13 @@ def _get_semantic_query_manager():
 
         return semantic_query_manager
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "STORE-GENERAL-036",
             "Failed to get semantic query manager: %s",
             e,
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return None
 
 
@@ -3676,10 +3710,11 @@ def _execute_scip_query(
             if global_repo_meta:
                 repo_path = global_repo_meta.get("index_path")
         except Exception as e:
-            logger.warning(
+            logger.warning(format_error_log(
+                "STORE-GENERAL-037",
                 f"Failed to resolve global repo path for '{user_alias}': {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
 
     if not repo_path:
         return results, f"Repository '{user_alias}' path not found"
@@ -3793,23 +3828,25 @@ def _execute_scip_query(
                 }
             )
     except FileNotFoundError as e:
-        logger.error(
+        logger.error(format_error_log(
+            "STORE-GENERAL-038",
             "SCIP query failed - file not found: %s",
             e,
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return (
             results,
             f"SCIP index not found or corrupted for repository '{user_alias}'. Generate an index with: `cidx scip generate`",
         )
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "STORE-GENERAL-039",
             "SCIP query execution failed: %s",
             e,
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return (
             results,
             f"SCIP query failed for repository '{user_alias}': {str(e)}. Try regenerating the index with: `cidx scip generate`",
@@ -3987,12 +4024,13 @@ def query_results_partial_post(
                                 }
                             )
                     except Exception as e:
-                        logger.error(
+                        logger.error(format_error_log(
+                            "STORE-GENERAL-040",
                             "Global repo query failed: %s",
                             e,
                             exc_info=True,
                             extra={"correlation_id": get_correlation_id()},
-                        )
+                        ))
                         error_message = f"Query failed: {str(e)}"
             else:
                 # Execute query for user-activated repositories
@@ -4035,12 +4073,13 @@ def query_results_partial_post(
                     )
 
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "STORE-GENERAL-041",
             "Query execution failed: %s",
             e,
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         error_message = f"Query failed: {str(e)}"
 
     csrf_token_new = generate_csrf_token()
@@ -4603,6 +4642,12 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Refresh Interval must be at least 60 seconds"
             except (ValueError, TypeError):
                 return "Refresh Interval must be a valid number"
+
+        # Validate analysis_model (must be opus or sonnet)
+        analysis_model = data.get("analysis_model")
+        if analysis_model is not None:
+            if analysis_model not in ("opus", "sonnet"):
+                return "Analysis Model must be 'opus' or 'sonnet'"
 
     elif section == "mcp_session":
         # Story #3 Phase 2 AC2-AC3: MCP Session configuration
@@ -5376,10 +5421,11 @@ def gitlab_repos_partial(
             search_term=search_term,
         )
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "STORE-GENERAL-042",
             f"Unexpected error in GitLab discovery: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return _build_gitlab_repos_response(
             request,
             page=page,
@@ -5441,10 +5487,11 @@ def github_repos_partial(
             search_term=search_term,
         )
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "STORE-GENERAL-043",
             f"Unexpected error in GitHub discovery: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return _build_github_repos_response(
             request,
             page=page,
@@ -5563,11 +5610,12 @@ async def fetch_discovery_branches(request: Request):
             content={"error": "Invalid JSON in request body"},
         )
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "STORE-GENERAL-044",
             f"Error fetching discovery branches: {e}",
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return JSONResponse(
             status_code=500,
             content={"error": f"Internal server error: {str(e)}"},
@@ -5677,11 +5725,12 @@ def reset_config(
             success_message="Configuration reset to defaults successfully",
         )
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "STORE-GENERAL-045",
             "Failed to reset config: %s",
             e,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return _create_config_page_response(
             request,
             session,
@@ -5763,10 +5812,11 @@ async def update_config_section(
     # via SyncJobConfig which returns hardcoded defaults. Dynamic updates would require
     # extending SyncJobConfig with persistence support.
     if section == "job_queue":
-        logger.warning(
+        logger.warning(format_error_log(
+            "STORE-GENERAL-046",
             "Job queue configuration save attempted but settings are read-only defaults from SyncJobConfig.",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return _create_config_page_response(
             request,
             session,
@@ -5796,11 +5846,12 @@ async def update_config_section(
                 )
             except Exception as e:
                 # Reload failed - reload original config from file to restore working state
-                logger.error(
+                logger.error(format_error_log(
+                    "STORE-GENERAL-047",
                     f"Failed to reload OIDC configuration: {e}",
                     exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 config_service.load_config()  # Reload from file to undo in-memory changes
                 return _create_config_page_response(
                     request,
@@ -5827,12 +5878,13 @@ async def update_config_section(
             error_message=f"Failed to save configuration: {str(e)}",
         )
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "STORE-GENERAL-048",
             "Failed to save config section %s: %s",
             section,
             e,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return _create_config_page_response(
             request,
             session,
@@ -5872,11 +5924,12 @@ def reset_config(
             success_message="Configuration reset to defaults successfully",
         )
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "STORE-GENERAL-049",
             "Failed to reset config: %s",
             e,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return _create_config_page_response(
             request,
             session,
@@ -5982,12 +6035,13 @@ def save_api_key(
             validation_errors={"api_keys": str(e)},
         )
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "STORE-GENERAL-050",
             "Failed to save %s API key: %s",
             platform,
             e,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return _create_config_page_response(
             request,
             session,
@@ -6039,12 +6093,13 @@ def delete_api_key(
             status_code=200,
         )
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "SVC-GENERAL-015",
             "Failed to delete %s API key: %s",
             platform,
             e,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete API key: {str(e)}",
@@ -6201,11 +6256,12 @@ def update_file_content_limits(
             success_message="File content limits updated successfully",
         )
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "SVC-GENERAL-016",
             "Failed to update file content limits: %s",
             e,
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return _create_file_content_limits_response(
             request,
             session,
@@ -6550,10 +6606,11 @@ def ssh_keys_page(request: Request):
         managed_keys = key_list.managed
         unmanaged_keys = key_list.unmanaged
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "SVC-GENERAL-017",
             f"Failed to list SSH keys: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
 
     response = templates.TemplateResponse(
         request,
@@ -6595,10 +6652,11 @@ def _create_ssh_keys_page_response(
         managed_keys = key_list.managed
         unmanaged_keys = key_list.unmanaged
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "SVC-GENERAL-018",
             f"Failed to list SSH keys: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
 
     response = templates.TemplateResponse(
         request,
@@ -6670,10 +6728,11 @@ def create_ssh_key(
             request, session, error_message=f"Key already exists: {e}"
         )
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "SVC-GENERAL-019",
             f"Failed to create SSH key: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return _create_ssh_keys_page_response(
             request, session, error_message=f"Failed to create key: {e}"
         )
@@ -6706,10 +6765,11 @@ def delete_ssh_key(
             success_message=f"SSH key '{key_name}' deleted successfully.",
         )
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "SVC-GENERAL-020",
             f"Failed to delete SSH key: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return _create_ssh_keys_page_response(
             request, session, error_message=f"Failed to delete key: {e}"
         )
@@ -6749,10 +6809,11 @@ def assign_host_to_key(
             request, session, error_message=f"Host conflict: {e}"
         )
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "SVC-GENERAL-021",
             f"Failed to assign host to SSH key: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return _create_ssh_keys_page_response(
             request, session, error_message=f"Failed to assign host: {e}"
         )
@@ -7204,10 +7265,11 @@ async def unified_login_sso(
     try:
         await oidc_routes.oidc_manager.ensure_provider_initialized()
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "SVC-GENERAL-022",
             f"Failed to initialize OIDC provider: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="SSO provider is currently unavailable",
@@ -7267,6 +7329,335 @@ async def unified_login_sso(
     )
 
     return RedirectResponse(url=oidc_auth_url)
+
+
+# ==============================================================================
+# Self-Monitoring Routes (Story #74 - Epic #71)
+# ==============================================================================
+
+
+def _load_self_monitoring_data(db_path: Path, session: SessionData) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Load self-monitoring scans and issues from database (Story #74 AC4, AC5).
+
+    Args:
+        db_path: Path to SQLite database
+        session: Current user session (for logging)
+
+    Returns:
+        Tuple of (scans, issues) as lists of dicts
+    """
+    scans = []
+    issues = []
+
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            # Load scans (most recent first)
+            cursor.execute(
+                """
+                SELECT scan_id, started_at, completed_at, status,
+                       log_id_start, log_id_end, issues_created, error_message
+                FROM self_monitoring_scans
+                ORDER BY started_at DESC
+                LIMIT ?
+                """,
+                (SCAN_HISTORY_LIMIT,),
+            )
+            scans = [dict(row) for row in cursor.fetchall()]
+
+            # Load issues (most recent first)
+            cursor.execute(
+                """
+                SELECT id, scan_id, github_issue_number, github_issue_url,
+                       classification, title, fingerprint,
+                       source_log_ids, source_files, created_at
+                FROM self_monitoring_issues
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (ISSUES_HISTORY_LIMIT,),
+            )
+            issues = [dict(row) for row in cursor.fetchall()]
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "WEB-SELF-MONITORING-001",
+                f"Failed to load self-monitoring data: {e}",
+            ),
+            extra=get_log_extra("WEB-SELF-MONITORING-001"),
+        )
+
+    return scans, issues
+
+
+def _load_default_prompt() -> str:
+    """
+    Load default self-monitoring prompt template (Story #74).
+
+    Returns:
+        Default prompt text, or empty string if file not found
+    """
+    default_prompt_path = (
+        Path(__file__).parent.parent
+        / "self_monitoring"
+        / "prompts"
+        / "default_analysis_prompt.md"
+    )
+    if default_prompt_path.exists():
+        return default_prompt_path.read_text()
+    return ""
+
+
+def _create_self_monitoring_page_response(
+    request: Request,
+    session: SessionData,
+    self_monitoring_config,
+    default_prompt: str,
+    current_prompt: str,
+    scans: List[Dict],
+    issues: List[Dict],
+    success_message: Optional[str] = None,
+    error_message: Optional[str] = None,
+):
+    """
+    Build self-monitoring page response with template context (Story #74).
+
+    Args:
+        request: FastAPI request
+        session: Current user session
+        self_monitoring_config: SelfMonitoringConfig instance
+        default_prompt: Default prompt template text
+        current_prompt: Current prompt (config or default)
+        scans: Scan history list
+        issues: Issues history list
+        success_message: Optional success message to display
+        error_message: Optional error message to display
+
+    Returns:
+        TemplateResponse with CSRF cookie set
+    """
+    csrf_token = generate_csrf_token()
+    response = templates.TemplateResponse(
+        "self_monitoring.html",
+        {
+            "request": request,
+            "username": session.username,
+            "current_page": "self-monitoring",
+            "show_nav": True,
+            "csrf_token": csrf_token,
+            "config": self_monitoring_config,
+            "default_prompt": default_prompt,
+            "current_prompt": current_prompt,
+            "scans": scans,
+            "issues": issues,
+            "success_message": success_message,
+            "error_message": error_message,
+        },
+    )
+    set_csrf_cookie(response, csrf_token, path="/admin")
+    return response
+
+
+@web_router.get("/self-monitoring", response_class=HTMLResponse)
+def self_monitoring_page(request: Request):
+    """
+    Self-Monitoring configuration and monitoring page (Story #74).
+
+    Displays:
+    - AC2: Status section (enabled/disabled, last scan, next scan)
+    - AC3: Configuration section (enable toggle, cadence, model, prompt editor)
+    - AC4: Scan history from self_monitoring_scans table
+    - AC5: Created issues from self_monitoring_issues table
+
+    Requires authenticated admin session.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+
+    # Get configuration
+    config_service = get_config_service()
+    config = config_service.get_config()
+    self_monitoring_config = config.self_monitoring_config
+
+    # Load default prompt template
+    default_prompt = _load_default_prompt()
+
+    # Get current prompt (use default if empty)
+    current_prompt = self_monitoring_config.prompt_template or default_prompt
+
+    # Load scan history and issues from database
+    server_dir = config_service.config_manager.server_dir
+    db_path = server_dir / "data" / "cidx_server.db"
+    scans, issues = _load_self_monitoring_data(db_path, session)
+
+    return _create_self_monitoring_page_response(
+        request, session, self_monitoring_config, default_prompt,
+        current_prompt, scans, issues
+    )
+
+
+@web_router.post("/self-monitoring", response_class=HTMLResponse)
+async def save_self_monitoring_config(
+    request: Request,
+    csrf_token: Optional[str] = Form(None),
+):
+    """
+    Save self-monitoring configuration (Story #74 AC6).
+
+    Updates SelfMonitoringConfig from form data including enable/disable,
+    cadence, model, and prompt template. Sets prompt_user_modified flag
+    when prompt differs from default.
+
+    Requires authenticated admin session and valid CSRF token.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+
+    config_service = get_config_service()
+    config = config_service.get_config()
+    default_prompt = _load_default_prompt()
+
+    # Validate CSRF token
+    if not validate_login_csrf_token(request, csrf_token):
+        server_dir = config_service.config_manager.server_dir
+        db_path = server_dir / "data" / "cidx_server.db"
+        scans, issues = _load_self_monitoring_data(db_path, session)
+        current_prompt = config.self_monitoring_config.prompt_template or default_prompt
+        return _create_self_monitoring_page_response(
+            request, session, config.self_monitoring_config, default_prompt,
+            current_prompt, scans, issues, error_message="Invalid CSRF token"
+        )
+
+    # Parse form data
+    form_data = await request.form()
+
+    enabled = form_data.get("enabled") == "on"
+
+    try:
+        cadence_minutes = int(form_data.get("cadence_minutes", "60"))
+    except ValueError:
+        logger.debug("Invalid cadence_minutes value in form, defaulting to 60")
+        cadence_minutes = 60
+
+    model = form_data.get("model", "opus").strip()
+    prompt_template = form_data.get("prompt_template", "").strip()
+
+    # Determine if prompt was user-modified
+    prompt_user_modified = config.self_monitoring_config.prompt_user_modified
+    if prompt_template and prompt_template != default_prompt:
+        prompt_user_modified = True
+
+    # Update configuration
+    config.self_monitoring_config.enabled = enabled
+    config.self_monitoring_config.cadence_minutes = cadence_minutes
+    config.self_monitoring_config.model = model
+    config.self_monitoring_config.prompt_template = prompt_template
+    config.self_monitoring_config.prompt_user_modified = prompt_user_modified
+
+    # Save configuration
+    config_service.config_manager.save_config(config)
+
+    # Re-render page with success message
+    current_prompt = prompt_template or default_prompt
+    server_dir = config_service.config_manager.server_dir
+    db_path = server_dir / "data" / "cidx_server.db"
+    scans, issues = _load_self_monitoring_data(db_path, session)
+
+    return _create_self_monitoring_page_response(
+        request, session, config.self_monitoring_config, default_prompt,
+        current_prompt, scans, issues,
+        success_message="Self-monitoring configuration saved successfully"
+    )
+
+
+@web_router.post("/self-monitoring/run-now", response_class=JSONResponse)
+async def trigger_manual_scan(
+    request: Request,
+    csrf_token: Optional[str] = Form(None),
+):
+    """
+    Manually trigger a self-monitoring scan (Story #75 AC1, AC2).
+
+    Submits a scan job to the background job queue. Returns immediately with
+    queued status - scan executes asynchronously.
+
+    Returns:
+        JSON response with status and scan_id:
+        - Success: {"status": "queued", "scan_id": "..."}
+        - Error: {"status": "error", "error": "..."}
+
+    Requires authenticated admin session and valid CSRF token.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+
+    # Validate CSRF token
+    if not validate_login_csrf_token(request, csrf_token):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid CSRF token"
+        )
+
+    # Get self-monitoring service from app state
+    # The service is initialized in app.py during startup
+    from code_indexer.server.self_monitoring.service import SelfMonitoringService
+    import os
+    from pathlib import Path
+
+    config_service = get_config_service()
+    config = config_service.get_config()
+
+    # Get background job manager from app state
+    job_manager = getattr(request.app.state, "background_job_manager", None)
+
+    # Get database paths from app state and config (Bug #87)
+    server_data_dir = os.environ.get(
+        "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
+    )
+    db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")
+    log_db_path = getattr(request.app.state, "log_db_path", None)
+    if log_db_path:
+        log_db_path = str(log_db_path)
+
+    # Get GitHub repository from environment variable
+    # This should be set to the repository where self-monitoring issues are created
+    github_repo = os.environ.get("GITHUB_REPOSITORY", None)
+
+    # Create service instance with current configuration (Bug #87)
+    service = SelfMonitoringService(
+        enabled=config.self_monitoring_config.enabled,
+        cadence_minutes=config.self_monitoring_config.cadence_minutes,
+        job_manager=job_manager,
+        db_path=db_path,
+        log_db_path=log_db_path,
+        github_repo=github_repo,
+        prompt_template=config.self_monitoring_config.prompt_template,
+        model=config.self_monitoring_config.model
+    )
+
+    # Trigger the scan
+    result = service.trigger_scan()
+
+    # Return JSON response
+    if result["status"] == "error":
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=result
+        )
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content=result
+    )
 
 
 # ==============================================================================

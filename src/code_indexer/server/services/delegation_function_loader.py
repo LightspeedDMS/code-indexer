@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Any
 
 import yaml
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,10 @@ class DelegationFunctionLoader:
         functions: List[DelegationFunction] = []
 
         if not repo_path.exists() or not repo_path.is_dir():
-            logger.warning(f"Function repository path does not exist: {repo_path}")
+            logger.warning(format_error_log(
+                "AUTH-GENERAL-024",
+                f"Function repository path does not exist: {repo_path}"
+            ))
             return functions
 
         for file_path in repo_path.glob("*.md"):
@@ -63,9 +67,15 @@ class DelegationFunctionLoader:
                 func = self.parse_function_file(file_path)
                 functions.append(func)
             except ValueError as e:
-                logger.warning(f"Skipping invalid function file {file_path}: {e}")
+                logger.warning(format_error_log(
+                    "AUTH-GENERAL-025",
+                    f"Skipping invalid function file {file_path}: {e}"
+                ))
             except Exception as e:
-                logger.warning(f"Error parsing function file {file_path}: {e}")
+                logger.warning(format_error_log(
+                    "AUTH-GENERAL-026",
+                    f"Error parsing function file {file_path}: {e}"
+                ))
 
         return functions
 
@@ -140,7 +150,10 @@ class DelegationFunctionLoader:
                 return None, content
             return frontmatter, body
         except yaml.YAMLError as e:
-            logger.warning(f"Failed to parse YAML frontmatter: {e}")
+            logger.warning(format_error_log(
+                "AUTH-GENERAL-027",
+                f"Failed to parse YAML frontmatter: {e}"
+            ))
             return None, content
 
     def filter_by_groups(

@@ -6,6 +6,7 @@ by git URL with proper authentication and access control.
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 import logging
 from typing import List, Optional
@@ -151,7 +152,11 @@ class RepositoryDiscoveryService:
             raise
         except Exception as e:
             error_msg = f"Unexpected error during repository discovery: {str(e)}"
-            logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
+            logger.error(format_error_log(
+                "GIT-GENERAL-055",
+                error_msg),
+                extra=get_log_extra("GIT-GENERAL-055")
+            )
             raise RepositoryDiscoveryError(error_msg) from e
 
     def _convert_match_result_to_repository_match(
@@ -203,7 +208,11 @@ class RepositoryDiscoveryService:
             raise
         except Exception as e:
             error_msg = f"Failed to validate repository access: {str(e)}"
-            logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
+            logger.error(format_error_log(
+                "GIT-GENERAL-056",
+                error_msg),
+                extra=get_log_extra("GIT-GENERAL-056")
+            )
             raise RepositoryDiscoveryError(error_msg) from e
 
     def get_repository_suggestions(
@@ -249,5 +258,9 @@ class RepositoryDiscoveryService:
             raise
         except Exception as e:
             error_msg = f"Failed to get repository suggestions: {str(e)}"
-            logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
+            logger.error(format_error_log(
+                "GIT-GENERAL-057",
+                error_msg),
+                extra=get_log_extra("GIT-GENERAL-057")
+            )
             raise RepositoryDiscoveryError(error_msg) from e

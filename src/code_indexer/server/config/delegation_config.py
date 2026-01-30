@@ -17,6 +17,7 @@ from typing import Literal, Optional
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import padding
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +133,10 @@ class ClaudeDelegationManager:
         try:
             combined = base64.b64decode(encrypted_credential.encode("utf-8"))
             if len(combined) < AES_BLOCK_SIZE + 1:
-                logger.warning("Encrypted credential too short, returning empty")
+                logger.warning(format_error_log(
+                    "GIT-GENERAL-020",
+                    "Encrypted credential too short, returning empty"
+                ))
                 return ""
 
             iv = combined[:AES_BLOCK_SIZE]
@@ -150,7 +154,10 @@ class ClaudeDelegationManager:
             data = unpadder.update(padded_data) + unpadder.finalize()
             return data.decode("utf-8")
         except Exception as e:
-            logger.warning(f"Failed to decrypt credential: {e}")
+            logger.warning(format_error_log(
+                "GIT-GENERAL-021",
+                f"Failed to decrypt credential: {e}"
+            ))
             return ""
 
     def save_config(self, config: ClaudeDelegationConfig) -> None:
@@ -176,10 +183,11 @@ class ClaudeDelegationManager:
         # Check file permissions - warn if not 0600
         file_mode = self.config_file.stat().st_mode & 0o777
         if file_mode != 0o600:
-            logger.warning(
+            logger.warning(format_error_log(
+                "GIT-GENERAL-022",
                 f"Insecure file permissions on {self.config_file}: "
                 f"found {oct(file_mode)}, expected 0o600"
-            )
+            ))
 
         with open(self.config_file, "r") as f:
             config_dict = json.load(f)
@@ -247,7 +255,10 @@ class ClaudeDelegationManager:
                     )
         except httpx.ConnectError as e:
             # Log detailed error for debugging, return generic message to user
-            logger.warning(f"Connection error to {url}: {e}")
+            logger.warning(format_error_log(
+                "GIT-GENERAL-023",
+                f"Connection error to {url}: {e}"
+            ))
             return ConnectivityResult(
                 success=False,
                 error_message="Connection failed: Unable to connect to server",
@@ -260,7 +271,10 @@ class ClaudeDelegationManager:
         except Exception as e:
             # Log detailed error for debugging, return generic message to user
             # This prevents potential credential exposure in error messages
-            logger.warning(f"Validation error for {url}: {e}")
+            logger.warning(format_error_log(
+                "GIT-GENERAL-024",
+                f"Validation error for {url}: {e}"
+            ))
             return ConnectivityResult(
                 success=False,
                 error_message="Validation failed: An unexpected error occurred",

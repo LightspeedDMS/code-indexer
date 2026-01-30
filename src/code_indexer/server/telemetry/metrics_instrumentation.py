@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from src.code_indexer.server.telemetry.manager import TelemetryManager
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +147,10 @@ class ApplicationMetrics:
             logger.info("ApplicationMetrics initialized: 9 metrics registered")
 
         except Exception as e:
-            logger.warning(f"Failed to register application metrics: {e}")
+            logger.warning(format_error_log(
+                "REPO-GENERAL-044",
+                f"Failed to register application metrics: {e}"
+            ))
             self._is_active = False
 
     def record_search_request(

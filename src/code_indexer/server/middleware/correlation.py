@@ -31,7 +31,10 @@ def get_correlation_id() -> Optional[str]:
     Example:
         >>> correlation_id = get_correlation_id()
         >>> if correlation_id:
-        ...     logger.error("Error occurred", extra={"correlation_id": correlation_id})
+        logger.error(
+            format_error_log("APP-MIGRATE-001", "Error occurred", extra={"correlation_id": correlation_id}),
+            extra=get_log_extra("APP-MIGRATE-001")
+        )
     """
     return _correlation_id.get()
 

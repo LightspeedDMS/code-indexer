@@ -32,6 +32,7 @@ from cachetools import TTLCache
 
 from code_indexer.server.utils.config_manager import ServerConfigManager
 from code_indexer.utils.git_runner import run_git_command
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 # Module logger
 logger = logging.getLogger(__name__)
@@ -158,10 +159,11 @@ class GitOperationsService:
             metadata_file = user_dir / f"{repo_alias}_metadata.json"
 
             if not metadata_file.exists():
-                logger.warning(
+                logger.warning(format_error_log(
+                    "CACHE-GENERAL-016",
                     f"Cannot trigger migration: metadata file not found for {username}/{repo_alias}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return
 
             with open(metadata_file, "r") as f:
@@ -169,10 +171,11 @@ class GitOperationsService:
 
             golden_repo_alias = repo_data.get("golden_repo_alias")
             if not golden_repo_alias:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "CACHE-GENERAL-017",
                     f"Cannot trigger migration: golden_repo_alias not found in metadata for {username}/{repo_alias}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return
 
             # Get golden repo path from golden repo manager
@@ -180,10 +183,11 @@ class GitOperationsService:
                 golden_repo_alias
                 not in self.activated_repo_manager.golden_repo_manager.golden_repos
             ):
-                logger.warning(
+                logger.warning(format_error_log(
+                    "CACHE-GENERAL-018",
                     f"Cannot trigger migration: golden repo '{golden_repo_alias}' not found for {username}/{repo_alias}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return
 
             self.activated_repo_manager.golden_repo_manager.golden_repos[
@@ -210,10 +214,11 @@ class GitOperationsService:
 
         except Exception as e:
             # Don't fail the git operation if migration check fails
-            logger.warning(
+            logger.warning(format_error_log(
+                "CACHE-GENERAL-019",
                 f"Failed to check/trigger migration for {username}/{repo_alias}: {str(e)}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
 
     def get_status(self, repo_alias: str, username: str) -> Dict[str, Any]:
         """

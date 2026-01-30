@@ -1,0 +1,66 @@
+{
+  "description": "Expected query results for E2E test validation",
+  "queries": [
+    {
+      "query": "database schema",
+      "expected_files": ["docs/database-guide.md"],
+      "expected_images": ["images/database-schema.png"],
+      "searchable_content_in_image": ["user_id", "username", "email", "created_at", "password_hash", "VARCHAR", "INTEGER", "TIMESTAMP"]
+    },
+    {
+      "query": "authentication flow JWT token",
+      "expected_files": ["docs/api-reference.md"],
+      "expected_images": ["images/api-flow.jpg"],
+      "searchable_content_in_image": ["Auth Endpoint", "Token Validation", "Protected Resource", "Login Request", "Verify JWT", "Authorization header"]
+    },
+    {
+      "query": "server configuration port",
+      "expected_files": ["docs/configuration.html"],
+      "expected_images": ["images/config-options.webp"],
+      "searchable_content_in_image": ["server.port", "8000", "database.url", "cache.ttl", "logging.level", "rate_limit"]
+    },
+    {
+      "query": "HTTP error codes 429",
+      "expected_files": ["docs/troubleshooting.htmx"],
+      "expected_images": ["images/error-codes.gif"],
+      "searchable_content_in_image": ["400", "401", "403", "404", "429", "500", "502", "503", "Too Many Requests", "Unauthorized", "Forbidden"]
+    }
+  ],
+  "edge_case_expectations": [
+    {
+      "file": "docs/edge-cases/missing-image.md",
+      "valid_images": 0,
+      "skipped_images": 1,
+      "expected_warnings": ["network-diagram-missing.png"],
+      "text_should_be_indexed": true
+    },
+    {
+      "file": "docs/edge-cases/remote-url.md",
+      "valid_images": 1,
+      "skipped_images": 2,
+      "expected_warnings": ["https://example.com", "https://cdn.example.org"],
+      "text_should_be_indexed": true
+    },
+    {
+      "file": "docs/edge-cases/unsupported-format.md",
+      "valid_images": 1,
+      "skipped_images": 1,
+      "expected_warnings": ["unsupported.bmp"],
+      "text_should_be_indexed": true
+    },
+    {
+      "file": "docs/edge-cases/text-looks-like-image.md",
+      "valid_images": 1,
+      "skipped_images": 0,
+      "expected_warnings": [],
+      "notes": "Plain text paths should NOT be extracted as images"
+    },
+    {
+      "file": "docs/edge-cases/mixed-valid-invalid.md",
+      "valid_images": 4,
+      "skipped_images": 3,
+      "expected_warnings": ["does-not-exist.png", "https://example.com", "unsupported.bmp"],
+      "text_should_be_indexed": true
+    }
+  ]
+}

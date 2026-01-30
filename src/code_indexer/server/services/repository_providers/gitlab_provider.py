@@ -17,6 +17,7 @@ from ...models.auto_discovery import (
     RepositoryDiscoveryResult,
 )
 from ..git_url_normalizer import GitUrlNormalizer, GitUrlNormalizationError
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 if TYPE_CHECKING:
     from ..ci_token_manager import CITokenManager
@@ -343,9 +344,10 @@ class GitLabProvider(RepositoryProviderBase):
 
                 # Log error response body for debugging before raising
                 if response.status_code >= 400:
-                    logger.error(
+                    logger.error(format_error_log(
+                        "GIT-GENERAL-067",
                         f"GitLab GraphQL error {response.status_code}: {response.text}"
-                    )
+                    ))
                 response.raise_for_status()
 
                 # Parse response and update repositories
@@ -360,7 +362,10 @@ class GitLabProvider(RepositoryProviderBase):
 
         except Exception as e:
             # Graceful degradation: Log warning but don't fail discovery
-            logger.warning(f"Failed to enrich repositories with commit info: {e}")
+            logger.warning(format_error_log(
+                "GIT-GENERAL-068",
+                f"Failed to enrich repositories with commit info: {e}"
+            ))
 
         return repositories
 

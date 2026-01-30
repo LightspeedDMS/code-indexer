@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 from ..middleware.correlation import get_correlation_id
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -321,10 +322,11 @@ class RemoteBranchService:
 
             if result.returncode != 0:
                 error_msg = result.stderr.strip() if result.stderr else "Unknown error"
-                logger.warning(
+                logger.warning(format_error_log(
+                    "GIT-GENERAL-052",
                     f"git ls-remote failed for {clone_url}: {error_msg}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return BranchFetchResult(
                     success=False,
                     branches=[],
@@ -352,10 +354,11 @@ class RemoteBranchService:
 
         except subprocess.TimeoutExpired:
             error_msg = f"Timeout fetching branches (>{self.timeout}s)"
-            logger.warning(
+            logger.warning(format_error_log(
+                "GIT-GENERAL-053",
                 f"git ls-remote timeout for {clone_url}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return BranchFetchResult(
                 success=False,
                 branches=[],
@@ -366,10 +369,11 @@ class RemoteBranchService:
             error_msg = str(e)
             # SECURITY: Do not use exc_info=True here - stack traces could expose
             # effective_url which may contain embedded credentials
-            logger.error(
+            logger.error(format_error_log(
+                "GIT-GENERAL-054",
                 f"Error fetching branches for {clone_url}: {error_msg}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return BranchFetchResult(
                 success=False,
                 branches=[],

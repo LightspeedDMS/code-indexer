@@ -25,6 +25,7 @@ from .constants import DEFAULT_GROUP_USERS
 
 if TYPE_CHECKING:
     from .group_access_manager import GroupAccessManager
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -143,9 +144,10 @@ class SSOProvisioningHook:
             # If target group doesn't exist, fallback to default users group
             if target_group is None:
                 if target_group_name != DEFAULT_GROUP_USERS:
-                    logger.warning(
+                    logger.warning(format_error_log(
+                        "MCP-GENERAL-174",
                         f"Configured group '{target_group_name}' not found, falling back to '{DEFAULT_GROUP_USERS}' group for user '{user_id}'"
-                    )
+                    ))
                     target_group_name = DEFAULT_GROUP_USERS
                     target_group = self.group_manager.get_group_by_name(target_group_name)
 
@@ -191,10 +193,11 @@ class SSOProvisioningHook:
             raise
         except Exception as e:
             # AC6: Log RUNTIME errors but do not block authentication
-            logger.error(
+            logger.error(format_error_log(
+                "MCP-GENERAL-175",
                 f"SSO provisioning failed for user '{user_id}': {e}. "
                 f"User will have fallback cidx-meta-only access."
-            )
+            ))
             return False
 
 

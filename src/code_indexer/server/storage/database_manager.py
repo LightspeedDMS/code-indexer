@@ -193,6 +193,47 @@ class DatabaseSchema:
         )
     """
 
+    # Story #72: Self-Monitoring tables (Epic #71)
+    CREATE_SELF_MONITORING_SCANS_TABLE = """
+        CREATE TABLE IF NOT EXISTS self_monitoring_scans (
+            scan_id TEXT PRIMARY KEY NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            status TEXT NOT NULL,
+            log_id_start INTEGER NOT NULL,
+            log_id_end INTEGER,
+            issues_created INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT
+        )
+    """
+
+    CREATE_SELF_MONITORING_ISSUES_TABLE = """
+        CREATE TABLE IF NOT EXISTS self_monitoring_issues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_id TEXT NOT NULL REFERENCES self_monitoring_scans(scan_id) ON DELETE CASCADE,
+            github_issue_number INTEGER,
+            github_issue_url TEXT,
+            classification TEXT NOT NULL,
+            title TEXT NOT NULL,
+            error_codes TEXT,
+            fingerprint TEXT NOT NULL,
+            source_log_ids TEXT NOT NULL,
+            source_files TEXT,
+            created_at TEXT NOT NULL
+        )
+    """
+
+    # Indexes for self-monitoring tables
+    CREATE_SELF_MONITORING_SCANS_STARTED_AT_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_self_monitoring_scans_started_at
+        ON self_monitoring_scans(started_at)
+    """
+
+    CREATE_SELF_MONITORING_ISSUES_SCAN_ID_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_self_monitoring_issues_scan_id
+        ON self_monitoring_issues(scan_id)
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -249,12 +290,65 @@ class DatabaseSchema:
             conn.execute(self.CREATE_SSH_KEY_HOSTS_TABLE)
             conn.execute(self.CREATE_GOLDEN_REPOS_METADATA_TABLE)
             conn.execute(self.CREATE_BACKGROUND_JOBS_TABLE)
+            # Story #72: Self-monitoring tables
+            conn.execute(self.CREATE_SELF_MONITORING_SCANS_TABLE)
+            conn.execute(self.CREATE_SELF_MONITORING_ISSUES_TABLE)
+            # Story #72: Self-monitoring indexes
+            conn.execute(self.CREATE_SELF_MONITORING_SCANS_STARTED_AT_INDEX)
+            conn.execute(self.CREATE_SELF_MONITORING_ISSUES_SCAN_ID_INDEX)
 
             conn.commit()
+
+            # Run schema migrations for existing databases
+            self._migrate_self_monitoring_issues_schema(conn)
+
             logger.info(f"Database initialized at {db_path}")
 
         finally:
             conn.close()
+
+    def _migrate_self_monitoring_issues_schema(self, conn: sqlite3.Connection) -> None:
+        """
+        Migrate self_monitoring_issues table schema for existing databases.
+
+        Adds columns that were added after the initial table creation:
+        - error_codes: Error codes found in logs
+        - fingerprint: Deduplication fingerprint
+        - source_files: Source files involved
+
+        This is safe to run multiple times - it only adds missing columns.
+        """
+        # Get existing columns
+        cursor = conn.execute("PRAGMA table_info(self_monitoring_issues)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        migrations_applied = []
+
+        # Add missing columns (order matters for NOT NULL with DEFAULT)
+        if "error_codes" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE self_monitoring_issues ADD COLUMN error_codes TEXT"
+            )
+            migrations_applied.append("error_codes")
+
+        if "fingerprint" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE self_monitoring_issues "
+                "ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''"
+            )
+            migrations_applied.append("fingerprint")
+
+        if "source_files" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE self_monitoring_issues ADD COLUMN source_files TEXT"
+            )
+            migrations_applied.append("source_files")
+
+        if migrations_applied:
+            conn.commit()
+            logger.info(
+                f"Migrated self_monitoring_issues schema: added {migrations_applied}"
+            )
 
 
 class DatabaseConnectionManager:

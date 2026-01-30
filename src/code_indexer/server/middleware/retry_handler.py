@@ -17,6 +17,7 @@ from ..models.error_models import (
     DatabaseRetryableError,
     DatabasePermanentError,
 )
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 # Configure logger for this module
 logger = logging.getLogger(__name__)
@@ -130,10 +131,11 @@ class DatabaseRetryHandler:
                     attempt <= self.config.max_attempts
                 ):  # Don't delay after final attempt
                     delay = self.calculate_delay(attempt)
-                    logger.warning(
+                    logger.warning(format_error_log(
+                        "REPO-GENERAL-020",
                         f"Database operation failed on attempt {attempt}, retrying in {delay:.2f}s: {e}",
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ))
                     time.sleep(delay)
 
         # This should not be reached, but provide fallback

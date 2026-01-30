@@ -14,6 +14,7 @@ from pathlib import Path
 import json
 
 from .models import ValidationResult, ValidationMetrics, ValidationHistoryEntry
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -97,10 +98,11 @@ class ValidationMetricsCollector:
             )
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "SCIP-GENERAL-025",
                 f"Failed to add validation result to metrics: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
 
     def get_aggregated_metrics(self, days_back: int = 30) -> ValidationMetrics:
         """
@@ -199,10 +201,11 @@ class ValidationMetricsCollector:
             )
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "SCIP-GENERAL-026",
                 f"Failed to calculate aggregated metrics: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             # Return minimal metrics on error
             return ValidationMetrics(
                 current_health_score=0.0,
@@ -254,10 +257,11 @@ class ValidationMetricsCollector:
             return trend_analysis
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "SCIP-GENERAL-027",
                 f"Failed to analyze trends: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return {
                 "health_declining": False,
                 "performance_degrading": False,
@@ -311,10 +315,11 @@ class ValidationMetricsCollector:
             return entries_removed
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "SCIP-GENERAL-028",
                 f"Failed to cleanup old metrics: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return 0
 
     def _calculate_health_trend(
@@ -344,10 +349,11 @@ class ValidationMetricsCollector:
             return last_score - first_score
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "SCIP-GENERAL-029",
                 f"Failed to calculate health trend: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return 0.0
 
     def _load_history(self) -> None:
@@ -373,10 +379,11 @@ class ValidationMetricsCollector:
                     )
                     self._history_entries.append(entry)
                 except (KeyError, ValueError) as e:
-                    logger.warning(
+                    logger.warning(format_error_log(
+                        "SCIP-GENERAL-030",
                         f"Skipping invalid history entry: {e}",
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ))
                     continue
 
             logger.info(
@@ -385,10 +392,11 @@ class ValidationMetricsCollector:
             )
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "SCIP-GENERAL-031",
                 f"Failed to load validation history: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
 
     def _save_history(self) -> None:
         """Save validation history to persistent storage."""
@@ -421,10 +429,11 @@ class ValidationMetricsCollector:
             temp_file.replace(self.history_file)
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "SCIP-GENERAL-032",
                 f"Failed to save validation history: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
 
     def get_summary_stats(self) -> Dict[str, Any]:
         """
@@ -476,8 +485,9 @@ class ValidationMetricsCollector:
             }
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "SCIP-GENERAL-033",
                 f"Failed to get summary stats: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return {"error": str(e)}

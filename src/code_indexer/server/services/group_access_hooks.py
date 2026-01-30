@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .group_access_manager import GroupAccessManager
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +36,11 @@ def on_repo_added(repo_name: str, group_manager: "GroupAccessManager") -> None:
         )
     except Exception as e:
         # Log error but don't fail the golden repo registration
-        logger.error(
+        logger.error(format_error_log(
+            "DEPLOY-GENERAL-029",
             f"Failed to auto-assign golden repo '{repo_name}' to groups: {e}. "
             f"Repository is registered but may not be accessible to all expected groups."
-        )
+        ))
 
 
 def on_repo_removed(repo_name: str, group_manager: "GroupAccessManager") -> None:
@@ -62,15 +64,17 @@ def on_repo_removed(repo_name: str, group_manager: "GroupAccessManager") -> None
                     f"Revoked access to '{repo_name}' from group '{group.name}'"
                 )
             except Exception as e:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "DEPLOY-GENERAL-030",
                     f"Failed to revoke access to '{repo_name}' from group '{group.name}': {e}"
-                )
+                ))
 
         logger.info(f"Revoked golden repo '{repo_name}' access from all groups")
 
     except Exception as e:
         # Log error but don't fail the golden repo removal
-        logger.error(
+        logger.error(format_error_log(
+            "DEPLOY-GENERAL-031",
             f"Failed to revoke golden repo '{repo_name}' access from groups: {e}. "
             f"Repository is removed but access records may remain."
-        )
+        ))

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -132,10 +133,11 @@ class RipgrepInstaller:
 
         # Check architecture
         if platform.machine() != "x86_64":
-            logger.warning(
+            logger.warning(format_error_log(
+                "REPO-GENERAL-045",
                 f"Ripgrep binary only available for x86_64, found {platform.machine()}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return False
 
         try:
@@ -189,19 +191,21 @@ class RipgrepInstaller:
                 )
                 return True
             else:
-                logger.error(
+                logger.error(format_error_log(
+                    "REPO-GENERAL-046",
                     "Ripgrep installation verification failed",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return False
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "REPO-GENERAL-047",
                 f"Ripgrep installation failed: {e}",
                 extra={
                     "correlation_id": get_correlation_id(),
                     "error": str(e),
                     "manual_install_url": f"https://github.com/BurntSushi/ripgrep/releases/tag/{self.RIPGREP_VERSION}",
                 },
-            )
+            ))
             return False

@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from threading import RLock
 from typing import Any, Callable, Dict, Optional, Tuple
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -315,10 +316,11 @@ class FTSIndexCache:
                             entry.tantivy_index.reload()
                             self._reload_count += 1
                         except Exception as e:
-                            logger.warning(
+                            logger.warning(format_error_log(
+                                "GIT-GENERAL-009",
                                 f"FTS index reload failed: {e}",
                                 extra={"correlation_id": get_correlation_id()},
-                            )
+                            ))
 
                     logger.debug(
                         f"FTS Cache HIT for {index_dir} (access_count={entry.access_count})",
@@ -464,10 +466,11 @@ class FTSIndexCache:
         Thread periodically checks for expired entries and evicts them.
         """
         if self._cleanup_thread and self._cleanup_thread.is_alive():
-            logger.warning(
+            logger.warning(format_error_log(
+                "GIT-GENERAL-010",
                 "FTS background cleanup thread already running",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return
 
         self._cleanup_stop_event.clear()
@@ -478,10 +481,11 @@ class FTSIndexCache:
                 try:
                     self._cleanup_expired_entries()
                 except Exception as e:
-                    logger.error(
+                    logger.error(format_error_log(
+                        "GIT-GENERAL-011",
                         f"Error in FTS background cleanup: {e}",
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ))
 
                 # Wait for cleanup interval or stop event
                 self._cleanup_stop_event.wait(

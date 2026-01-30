@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -139,11 +140,12 @@ class LogAggregatorService:
 
         except sqlite3.Error as e:
             # Log error for debugging but return graceful empty response
-            logger.error(
+            logger.error(format_error_log(
+                "GIT-GENERAL-046",
                 f"Database error querying logs: {e}",
                 exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return self._empty_response(page, page_size)
 
     def query_all(
@@ -192,11 +194,12 @@ class LogAggregatorService:
 
         except sqlite3.Error as e:
             # Log error for debugging but return empty list
-            logger.error(
+            logger.error(format_error_log(
+                "GIT-GENERAL-047",
                 f"Database error querying all logs: {e}",
                 exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return []
 
     def count(self) -> int:
@@ -219,11 +222,12 @@ class LogAggregatorService:
 
         except sqlite3.Error as e:
             # Log error for debugging but return 0
-            logger.error(
+            logger.error(format_error_log(
+                "GIT-GENERAL-048",
                 f"Database error counting logs: {e}",
                 exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return 0
 
     def close(self) -> None:

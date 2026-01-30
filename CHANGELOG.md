@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.2] - 2026-01-30
+
+### Fixed
+
+- **Self-Monitoring Prompt Bloat Causing Claude Timeouts** (Bug #87) - Fixed critical bug where self-monitoring scans failed due to massive prompts causing Claude CLI timeouts:
+  - Root cause: Prompt embedded 1000+ log entries (548KB), exceeding Claude's practical processing limits
+  - Solution: Claude now queries the log database directly via sqlite3 (prompt reduced to 5KB)
+  - Added `--allowedTools Bash` to Claude CLI invocation for database access
+  - Auto-detect `github_repo` from git remote (no more `GITHUB_REPOSITORY` env var required)
+  - Pass `repo_root` to scanner so Claude runs in correct working directory
+  - Updated prompt to focus on actionable development bugs, filtering out configuration noise
+  - Issues now correctly created in `LightspeedDMS/code-indexer` (auto-detected from git remote)
+
+- **Config Fixer Destroys Indexing Progress** (Bug #96) - Fixed bug where `cidx fix-config --force` unconditionally overwrote indexing progress metadata with zeros, causing subsequent `cidx index` to perform full reindex instead of incremental:
+  - Root cause: `_apply_metadata_fixes()` created a placeholder with `files_processed=0`, `chunks_indexed=0`, `status="needs_indexing"` when `collection_analyzer` was None (filesystem backend), then spread it over existing metadata
+  - Solution: Removed destructive `collection_stats` placeholder creation and spread operator; config_fixer now only updates configuration fields (project_id, git state, embedding_provider) while preserving all runtime state
+  - Also removed `invalid_file_paths` validation check - `files_to_index` is runtime state for resuming interrupted operations, not configuration
+  - CoW clone refresh workflow now correctly preserves indexing progress
+
+---
+
 ## [8.8.1] - 2026-01-29
 
 ### Fixed

@@ -11,6 +11,7 @@ import logging
 import os
 from dataclasses import dataclass
 from typing import Optional
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +152,8 @@ class SearchResultFileManager:
                     extra={"correlation_id": get_correlation_id()},
                 )
         except Exception as e:
-            logger.warning(
+            logger.warning(format_error_log(
+                "MCP-GENERAL-169",
                 f"Failed to cleanup temp file {file_path}: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))

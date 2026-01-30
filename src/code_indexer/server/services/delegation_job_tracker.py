@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Dict, Optional
 
 if TYPE_CHECKING:
     from code_indexer.server.cache.payload_cache import PayloadCache
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -125,15 +126,17 @@ class DelegationJobTracker:
         async with self._lock:
             future = self._pending_jobs.get(result.job_id)
             if future is None:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "AUTH-GENERAL-028",
                     f"complete_job called for unknown job: {result.job_id}"
-                )
+                ))
                 return False
 
             if future.done():
-                logger.warning(
+                logger.warning(format_error_log(
+                    "AUTH-GENERAL-029",
                     f"complete_job called for already completed job: {result.job_id}"
-                )
+                ))
                 return False
 
             future.set_result(result)
@@ -148,7 +151,10 @@ class DelegationJobTracker:
                 logger.debug(f"Cached result for job: {result.job_id}")
             except Exception as e:
                 # Log but don't fail - caching is optional optimization
-                logger.warning(f"Failed to cache result for job {result.job_id}: {e}")
+                logger.warning(format_error_log(
+                    "CACHE-GENERAL-004",
+                    f"Failed to cache result for job {result.job_id}: {e}"
+                ))
 
         return True
 
@@ -195,7 +201,10 @@ class DelegationJobTracker:
             future = self._pending_jobs.get(job_id)
 
         if future is None:
-            logger.warning(f"wait_for_job called for unknown job: {job_id}")
+            logger.warning(format_error_log(
+                "CACHE-GENERAL-005",
+                f"wait_for_job called for unknown job: {job_id}"
+            ))
             return None
 
         try:

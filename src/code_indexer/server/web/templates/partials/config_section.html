@@ -852,6 +852,11 @@
                         <td class="config-value">{{ config.golden_repos.refresh_interval_seconds }}</td>
                         <td class="config-note"><small>Interval for auto-refreshing golden repositories</small></td>
                     </tr>
+                    <tr>
+                        <td class="config-label">Analysis Model</td>
+                        <td class="config-value">{{ config.golden_repos.analysis_model }}</td>
+                        <td class="config-note"><small>Claude model used for repository analysis jobs</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -869,6 +874,14 @@
                     Refresh Interval (seconds)
                     <input type="number" id="golden-repos-refresh-interval" name="refresh_interval_seconds" value="{{ config.golden_repos.refresh_interval_seconds }}" min="60">
                     <small>Minimum 60 seconds</small>
+                </label>
+                <label for="golden-repos-analysis-model">
+                    Analysis Model
+                    <select id="golden-repos-analysis-model" name="analysis_model">
+                        <option value="opus" {% if config.golden_repos.analysis_model == "opus" %}selected{% endif %}>Opus</option>
+                        <option value="sonnet" {% if config.golden_repos.analysis_model == "sonnet" %}selected{% endif %}>Sonnet</option>
+                    </select>
+                    <small>Claude model for repository analysis (Opus: highest quality, Sonnet: faster)</small>
                 </label>
             </div>
             <div class="form-actions">

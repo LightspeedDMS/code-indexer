@@ -15,6 +15,7 @@ from typing import List
 from ..models.activated_repository import ActivatedRepository
 from ..models.composite_file_models import FileInfo
 from ...proxy.config_manager import ProxyConfigManager
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -58,10 +59,11 @@ def _walk_directory(
                         )
                     )
                 except (OSError, ValueError) as e:
-                    logger.warning(
+                    logger.warning(format_error_log(
+                        "MCP-GENERAL-019",
                         f"Cannot access file {item}: {e}",
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ))
                     continue
     else:
         # Single level listing
@@ -86,16 +88,18 @@ def _walk_directory(
                         )
                     )
                 except (OSError, ValueError) as e:
-                    logger.warning(
+                    logger.warning(format_error_log(
+                        "MCP-GENERAL-020",
                         f"Cannot access item {item}: {e}",
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ))
                     continue
         except OSError as e:
-            logger.warning(
+            logger.warning(format_error_log(
+                "MCP-GENERAL-021",
                 f"Cannot access directory {directory}: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
 
     return files
 
@@ -121,10 +125,11 @@ def _list_composite_files(
         proxy_config = ProxyConfigManager(repo.path)
         discovered_repos = proxy_config.get_repositories()
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "MCP-GENERAL-022",
             f"Failed to get discovered repos from {repo.path}: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return []
 
     # Walk each component repository

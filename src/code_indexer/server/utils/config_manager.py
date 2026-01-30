@@ -210,6 +210,8 @@ class GoldenReposConfig:
 
     # AC-M5: Refresh interval in seconds (default 3600s/1 hour, minimum 60s)
     refresh_interval_seconds: int = 3600
+    # Story #76 AC2: Claude model for repository analysis (opus or sonnet)
+    analysis_model: str = "opus"
 
 
 @dataclass
@@ -530,6 +532,28 @@ class ContentLimitsConfig:
 
 
 @dataclass
+@dataclass
+class SelfMonitoringConfig:
+    """
+    Self-monitoring configuration (Story #72 - Epic #71).
+
+    Controls automatic log analysis using Claude CLI to detect issues,
+    create bug reports, and maintain operational excellence.
+    """
+
+    # Enable/disable self-monitoring
+    enabled: bool = False
+    # Cadence in minutes for scheduled log analysis
+    cadence_minutes: int = 60
+    # Claude model to use for analysis (opus, sonnet, haiku)
+    model: str = "opus"
+    # Prompt template for log analysis
+    prompt_template: str = ""
+    # User modified flag - prevents automatic prompt upgrades
+    prompt_user_modified: bool = False
+
+
+@dataclass
 class ServerConfig:
     """
     Server configuration data structure.
@@ -590,6 +614,9 @@ class ServerConfig:
     # Story #32 - Unified content limits configuration
     content_limits_config: Optional[ContentLimitsConfig] = None
 
+    # Story #72 - Self-monitoring configuration
+    self_monitoring_config: Optional[SelfMonitoringConfig] = None
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:
@@ -648,6 +675,9 @@ class ServerConfig:
         # Story #32 - Initialize content limits config
         if self.content_limits_config is None:
             self.content_limits_config = ContentLimitsConfig()
+        # Story #72 - Initialize self-monitoring config
+        if self.self_monitoring_config is None:
+            self.self_monitoring_config = SelfMonitoringConfig()
 
 
 class ServerConfigManager:
@@ -1024,6 +1054,14 @@ class ServerConfigManager:
             ):
                 config_dict["content_limits_config"] = ContentLimitsConfig(
                     **config_dict["content_limits_config"]
+                )
+
+            # Story #72: Convert self_monitoring_config dict to SelfMonitoringConfig
+            if "self_monitoring_config" in config_dict and isinstance(
+                config_dict["self_monitoring_config"], dict
+            ):
+                config_dict["self_monitoring_config"] = SelfMonitoringConfig(
+                    **config_dict["self_monitoring_config"]
                 )
 
             # Remove obsolete reindexing_config field (deleted in previous commit)

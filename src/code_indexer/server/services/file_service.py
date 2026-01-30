@@ -6,6 +6,7 @@ All operations use real file system operations with proper pagination and filter
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 import os
 from pathlib import Path
@@ -203,9 +204,11 @@ class FileListingService:
             return cast(str, activated_path)
 
         except Exception as e:
-            logger.error(
-                f"Failed to get repository path for {repo_id}/{username}: {e}",
-                extra={"correlation_id": get_correlation_id()},
+            logger.error(format_error_log(
+                "CACHE-GENERAL-011",
+                "Failed to get repository path",
+                repo_id=repo_id, username=username, error=str(e)),
+                extra=get_log_extra("CACHE-GENERAL-011")
             )
             if isinstance(e, FileNotFoundError):
                 raise
@@ -263,16 +266,20 @@ class FileListingService:
                         files.append(file_info)
 
                     except (OSError, PermissionError) as e:
-                        logger.warning(
-                            f"Cannot access file {file_path}: {e}",
-                            extra={"correlation_id": get_correlation_id()},
+                        logger.warning(format_error_log(
+                            "CACHE-GENERAL-012",
+                            "Cannot access file",
+                            file_path=str(file_path), error=str(e)),
+                            extra=get_log_extra("CACHE-GENERAL-012")
                         )
                         continue
 
         except PermissionError as e:
-            logger.error(
-                f"Cannot access repository directory {repo_path}: {e}",
-                extra={"correlation_id": get_correlation_id()},
+            logger.error(format_error_log(
+                "CACHE-GENERAL-013",
+                "Cannot access repository directory",
+                repo_path=repo_path, error=str(e)),
+                extra=get_log_extra("CACHE-GENERAL-013")
             )
             raise
 
@@ -318,9 +325,11 @@ class FileListingService:
                 "gitwildmatch", gitignore_content.splitlines()
             )
         except (OSError, UnicodeDecodeError) as e:
-            logger.warning(
-                f"Failed to read .gitignore at {gitignore_path}: {e}",
-                extra={"correlation_id": get_correlation_id()},
+            logger.warning(format_error_log(
+                "CACHE-GENERAL-014",
+                "Failed to read .gitignore",
+                gitignore_path=str(gitignore_path), error=str(e)),
+                extra=get_log_extra("CACHE-GENERAL-014")
             )
             return None
 
@@ -431,9 +440,11 @@ class FileListingService:
 
         if sort_by is None or sort_by not in valid_sort_fields:
             if sort_by is not None:
-                logger.warning(
-                    f"Invalid sort field '{sort_by}', using 'path'",
-                    extra={"correlation_id": get_correlation_id()},
+                logger.warning(format_error_log(
+                    "CACHE-GENERAL-015",
+                    "Invalid sort field, using default",
+                    sort_by=sort_by, default="path"),
+                    extra=get_log_extra("CACHE-GENERAL-015")
                 )
             sort_by = "path"
 

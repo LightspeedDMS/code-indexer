@@ -13,6 +13,7 @@ from typing import Dict, Any, Optional
 from fastapi import Request
 
 from ..models.error_models import ErrorHandlerConfiguration
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 # Configure logger for this module
 logger = logging.getLogger(__name__)
@@ -42,10 +43,11 @@ class SensitiveDataSanitizer:
                     (pattern, rule.replacement, rule.field_names)
                 )
             except re.error as e:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "REPO-GENERAL-021",
                     f"Invalid sanitization regex pattern '{rule.pattern}': {e}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
 
     def sanitize_string(self, text: str) -> str:
         """
@@ -184,8 +186,9 @@ class SensitiveDataSanitizer:
             return request_info
 
         except Exception as e:
-            logger.warning(
+            logger.warning(format_error_log(
+                "REPO-GENERAL-022",
                 f"Error sanitizing request info: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return {"method": "UNKNOWN", "path": "UNKNOWN"}

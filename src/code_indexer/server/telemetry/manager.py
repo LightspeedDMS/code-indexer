@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from threading import Lock
 from typing import TYPE_CHECKING, Optional
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 if TYPE_CHECKING:
     from opentelemetry.metrics import Meter, MeterProvider
@@ -113,7 +114,10 @@ class TelemetryManager:
             )
 
         except Exception as e:
-            logger.error(f"Failed to initialize OpenTelemetry: {e}")
+            logger.error(format_error_log(
+                "QUERY-GENERAL-026",
+                f"Failed to initialize OpenTelemetry: {e}"
+            ))
             # Set initialized to True anyway - we tried, and we don't want to fail startup
             self._is_initialized = True
 
@@ -148,7 +152,10 @@ class TelemetryManager:
             self._tracer_provider.add_span_processor(BatchSpanProcessor(exporter))
 
         except Exception as e:
-            logger.warning(f"Failed to setup trace exporter: {e}")
+            logger.warning(format_error_log(
+                "QUERY-GENERAL-027",
+                f"Failed to setup trace exporter: {e}"
+            ))
 
     def _create_meter_provider(self, resource) -> "MeterProvider":
         """Create MeterProvider with OTLP exporter."""
@@ -183,7 +190,10 @@ class TelemetryManager:
             return MeterProvider(resource=resource, metric_readers=[reader])
 
         except Exception as e:
-            logger.warning(f"Failed to setup metric exporter: {e}")
+            logger.warning(format_error_log(
+                "REPO-GENERAL-042",
+                f"Failed to setup metric exporter: {e}"
+            ))
             return MeterProvider(resource=resource)
 
     @property
@@ -263,7 +273,10 @@ class TelemetryManager:
             logger.info("OpenTelemetry shutdown complete")
 
         except Exception as e:
-            logger.warning(f"Error during OpenTelemetry shutdown: {e}")
+            logger.warning(format_error_log(
+                "REPO-GENERAL-043",
+                f"Error during OpenTelemetry shutdown: {e}"
+            ))
 
         finally:
             self._is_initialized = False

@@ -4,6 +4,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 from pathlib import Path
 import subprocess
 import logging
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +36,11 @@ class ChangeDetector:
         )
 
         if result.returncode != 0:
-            logger.error(
+            logger.error(format_error_log(
+                "CACHE-GENERAL-001",
                 f"Git fetch failed: {result.stderr}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             raise subprocess.CalledProcessError(
                 result.returncode,
                 result.args,
@@ -68,10 +70,11 @@ class ChangeDetector:
         )
 
         if result.returncode != 0:
-            logger.error(
+            logger.error(format_error_log(
+                "CACHE-GENERAL-002",
                 f"Git rev-parse HEAD failed: {result.stderr}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             raise subprocess.CalledProcessError(
                 result.returncode,
                 result.args,
@@ -102,10 +105,11 @@ class ChangeDetector:
         )
 
         if result.returncode != 0:
-            logger.error(
+            logger.error(format_error_log(
+                "CACHE-GENERAL-003",
                 f"Git rev-parse origin/{self.branch} failed: {result.stderr}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             raise subprocess.CalledProcessError(
                 result.returncode,
                 result.args,

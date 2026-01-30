@@ -14,6 +14,7 @@ from .repo_pattern_matcher import RepoPatternMatcher
 from .result_aggregator import ResultAggregator
 from .omni_cache import OmniCache
 from ..utils.config_manager import MultiSearchLimitsConfig
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -129,16 +130,18 @@ class OmniSearchService:
                     errors[repo_alias] = (
                         f"Search timeout after {self.config.omni_per_repo_timeout_seconds}s"
                     )
-                    logger.warning(
+                    logger.warning(format_error_log(
+                        "REPO-GENERAL-038",
                         f"Search timeout for repo {repo_alias}",
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ))
                 except Exception as e:
                     errors[repo_alias] = str(e)
-                    logger.error(
+                    logger.error(format_error_log(
+                        "REPO-GENERAL-039",
                         f"Search error for repo {repo_alias}: {e}",
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ))
 
         # Aggregate results
         aggregator = ResultAggregator(mode=aggregation_mode, limit=limit)

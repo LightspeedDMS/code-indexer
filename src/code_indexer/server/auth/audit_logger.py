@@ -6,6 +6,7 @@ Following CLAUDE.md principles: NO MOCKS - Real audit logging implementation.
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 import logging
 import json
 from datetime import datetime, timezone
@@ -121,9 +122,9 @@ class PasswordChangeAuditLogger:
             "additional_context": additional_context or {},
         }
 
-        self.audit_logger.warning(
-            f"PASSWORD_CHANGE_FAILURE: {json.dumps(log_entry)}",
-            extra={"correlation_id": get_correlation_id()},
+        logger.warning(
+            format_error_log("AUTH-MIGRATE-001", "PASSWORD_CHANGE_FAILURE: {json.dumps(log_entry)}"),
+            extra=get_log_extra("AUTH-MIGRATE-001")
         )
 
     def log_rate_limit_triggered(
@@ -151,9 +152,9 @@ class PasswordChangeAuditLogger:
             "user_agent": user_agent,
         }
 
-        self.audit_logger.warning(
-            f"PASSWORD_CHANGE_RATE_LIMIT: {json.dumps(log_entry)}",
-            extra={"correlation_id": get_correlation_id()},
+        logger.warning(
+            format_error_log("AUTH-MIGRATE-002", "PASSWORD_CHANGE_RATE_LIMIT: {json.dumps(log_entry)}"),
+            extra=get_log_extra("AUTH-MIGRATE-002")
         )
 
     def log_concurrent_change_conflict(
@@ -175,9 +176,9 @@ class PasswordChangeAuditLogger:
             "user_agent": user_agent,
         }
 
-        self.audit_logger.warning(
-            f"PASSWORD_CHANGE_CONCURRENT_CONFLICT: {json.dumps(log_entry)}",
-            extra={"correlation_id": get_correlation_id()},
+        logger.warning(
+            format_error_log("AUTH-MIGRATE-003", "PASSWORD_CHANGE_CONCURRENT_CONFLICT: {json.dumps(log_entry)}"),
+            extra=get_log_extra("AUTH-MIGRATE-003")
         )
 
     def log_token_refresh_success(
@@ -278,9 +279,9 @@ class PasswordChangeAuditLogger:
             "additional_context": additional_context or {},
         }
 
-        self.audit_logger.error(
-            f"SECURITY_INCIDENT: {json.dumps(log_entry)}",
-            extra={"correlation_id": get_correlation_id()},
+        logger.error(
+            format_error_log("AUTH-MIGRATE-004", "SECURITY_INCIDENT: {json.dumps(log_entry)}"),
+            extra=get_log_extra("AUTH-MIGRATE-004")
         )
 
     def log_authentication_failure(
@@ -308,9 +309,9 @@ class PasswordChangeAuditLogger:
             "additional_context": additional_context or {},
         }
 
-        self.audit_logger.warning(
-            f"AUTHENTICATION_FAILURE: {json.dumps(log_entry)}",
-            extra={"correlation_id": get_correlation_id()},
+        logger.warning(
+            format_error_log("AUTH-MIGRATE-005", "AUTHENTICATION_FAILURE: {json.dumps(log_entry)}"),
+            extra=get_log_extra("AUTH-MIGRATE-005")
         )
 
     def log_registration_attempt(
@@ -346,7 +347,8 @@ class PasswordChangeAuditLogger:
             )
         else:
             self.audit_logger.warning(
-                log_message, extra={"correlation_id": get_correlation_id()}
+                format_error_log("AUTH-AUDIT-010", log_message),
+                extra=get_log_extra("AUTH-AUDIT-010")
             )
 
     def log_password_reset_attempt(
@@ -530,9 +532,9 @@ class PasswordChangeAuditLogger:
             "additional_context": additional_context or {},
         }
 
-        self.audit_logger.warning(
-            f"PR_CREATION_FAILURE: {json.dumps(log_entry)}",
-            extra={"correlation_id": get_correlation_id()},
+        logger.warning(
+            format_error_log("AUTH-MIGRATE-007", "PR_CREATION_FAILURE: {json.dumps(log_entry)}"),
+            extra=get_log_extra("AUTH-MIGRATE-007")
         )
 
     def log_pr_creation_disabled(
@@ -703,9 +705,9 @@ class PasswordChangeAuditLogger:
             "additional_context": additional_context or {},
         }
 
-        self.audit_logger.warning(
-            f"IMPERSONATION_DENIED: {json.dumps(log_entry)}",
-            extra={"correlation_id": get_correlation_id()},
+        logger.warning(
+            format_error_log("AUTH-MIGRATE-008", "IMPERSONATION_DENIED: {json.dumps(log_entry)}"),
+            extra=get_log_extra("AUTH-MIGRATE-008")
         )
 
     def get_pr_logs(
@@ -796,9 +798,9 @@ class PasswordChangeAuditLogger:
 
         except Exception as e:
             # Log the error for debugging, but return empty list for graceful degradation
-            self.audit_logger.warning(
-                f"Failed to parse log file: {e}",
-                extra={"correlation_id": get_correlation_id()},
+            logger.warning(
+                format_error_log("AUTH-MIGRATE-009", "Failed to parse log file: {e}"),
+                extra=get_log_extra("AUTH-MIGRATE-009")
             )
             return []
 

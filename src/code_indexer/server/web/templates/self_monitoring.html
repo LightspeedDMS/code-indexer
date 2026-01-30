@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+
+{% block title %}Self-Monitoring - CIDX Admin{% endblock %}
+
+{% block content %}
+<div class="self-monitoring-header">
+    <h1>Self-Monitoring</h1>
+</div>
+
+<!-- Status Section (AC2) -->
+<section class="status-section">
+    <h2>Status</h2>
+    <div class="status-info">
+        <p><strong>State:</strong> {% if config.enabled %}Enabled{% else %}Disabled{% endif %}</p>
+        <p><strong>Last Scan:</strong> <span id="last-scan">Never</span></p>
+        <p><strong>Next Scan:</strong> <span id="next-scan">N/A</span></p>
+        <p><strong>Scan Status:</strong> <span id="scan-status">Idle</span></p>
+    </div>
+
+    <!-- Run Now Button (Story #75 AC1) -->
+    <div class="run-now-controls">
+        <form id="run-now-form" hx-post="/admin/self-monitoring/run-now" hx-target="#scan-status" hx-swap="innerHTML">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button
+                type="submit"
+                id="run-now-button"
+                {% if not config.enabled %}disabled{% endif %}
+            >
+                Run Now
+            </button>
+        </form>
+        <p id="run-now-message" style="margin-top: 0.5em; font-style: italic;"></p>
+    </div>
+
+    <script>
+        // Handle HTMX response for run-now button (Story #75 AC2, AC5)
+        document.getElementById('run-now-form').addEventListener('htmx:afterRequest', function(event) {
+            const button = document.getElementById('run-now-button');
+            const message = document.getElementById('run-now-message');
+            const scanStatus = document.getElementById('scan-status');
+
+            if (event.detail.successful) {
+                try {
+                    const response = JSON.parse(event.detail.xhr.responseText);
+
+                    if (response.status === 'queued') {
+                        // Success - scan queued
+                        button.disabled = true;
+                        button.textContent = 'Running...';
+                        scanStatus.textContent = 'Running...';
+                        message.textContent = 'Scan queued successfully (ID: ' + response.scan_id + ')';
+                        message.style.color = 'green';
+
+                        // Re-enable button after a delay (AC4 - button returns to enabled state)
+                        setTimeout(function() {
+                            button.disabled = false;
+                            button.textContent = 'Run Now';
+                            scanStatus.textContent = 'Completed';
+                        }, 5000);
+                    } else if (response.status === 'error') {
+                        // Error from trigger_scan
+                        message.textContent = 'Error: ' + response.error;
+                        message.style.color = 'red';
+                    }
+                } catch (e) {
+                    message.textContent = 'Error parsing response';
+                    message.style.color = 'red';
+                }
+            } else {
+                // HTTP error
+                message.textContent = 'Request failed: ' + event.detail.xhr.status;
+                message.style.color = 'red';
+            }
+        });
+    </script>
+</section>
+
+<!-- Configuration Section (AC3) -->
+<section class="configuration-section">
+    <h2>Configuration</h2>
+    <form id="config-form" method="post" action="/admin/self-monitoring">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <label>
+            <input type="checkbox" name="enabled" {% if config.enabled %}checked{% endif %}>
+            Enable Self-Monitoring
+        </label>
+
+        <label>
+            Cadence:
+            <select name="cadence_minutes">
+                <option value="15" {% if config.cadence_minutes == 15 %}selected{% endif %}>15 minutes</option>
+                <option value="30" {% if config.cadence_minutes == 30 %}selected{% endif %}>30 minutes</option>
+                <option value="60" {% if config.cadence_minutes == 60 %}selected{% endif %}>1 hour</option>
+                <option value="360" {% if config.cadence_minutes == 360 %}selected{% endif %}>6 hours</option>
+                <option value="1440" {% if config.cadence_minutes == 1440 %}selected{% endif %}>24 hours</option>
+            </select>
+        </label>
+
+        <label>
+            Model:
+            <select name="model">
+                <option value="opus" {% if config.model == "opus" %}selected{% endif %}>Opus</option>
+                <option value="sonnet" {% if config.model == "sonnet" %}selected{% endif %}>Sonnet</option>
+            </select>
+        </label>
+
+        <label>
+            Prompt Template:
+            <textarea name="prompt_template" rows="10" cols="80">{{ current_prompt }}</textarea>
+        </label>
+
+        <button type="submit">Save Configuration</button>
+    </form>
+</section>
+
+<!-- Scan History Section (AC4) -->
+<section class="scan-history-section">
+    <h2>Scan History</h2>
+    {% if scans %}
+    <table>
+        <thead>
+            <tr>
+                <th>Timestamp</th>
+                <th>Status</th>
+                <th>Issues Created</th>
+                <th>Details</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for scan in scans %}
+            <tr>
+                <td>{{ scan.started_at }}</td>
+                <td>{{ scan.status }}</td>
+                <td>{{ scan.issues_created }}</td>
+                <td>{{ scan.scan_id }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No scan history available.</p>
+    {% endif %}
+</section>
+
+<!-- Created Issues Section (AC5) -->
+<section class="created-issues-section">
+    <h2>Created Issues</h2>
+    {% if issues %}
+    <table>
+        <thead>
+            <tr>
+                <th>Issue #</th>
+                <th>Title</th>
+                <th>Classification</th>
+                <th>Created</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for issue in issues %}
+            <tr>
+                <td>
+                    {% if issue.github_issue_url %}
+                    <a href="{{ issue.github_issue_url }}" target="_blank">{{ issue.github_issue_number }}</a>
+                    {% else %}
+                    {{ issue.github_issue_number or 'N/A' }}
+                    {% endif %}
+                </td>
+                <td>{{ issue.title }}</td>
+                <td>{{ issue.classification }}</td>
+                <td>{{ issue.created_at }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No issues created yet.</p>
+    {% endif %}
+</section>
+
+{% endblock %}

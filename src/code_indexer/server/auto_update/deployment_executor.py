@@ -11,6 +11,7 @@ import logging
 import time
 
 import requests
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -61,23 +62,26 @@ class DeploymentExecutor:
                 )
                 return True
 
-            logger.error(
+            logger.error(format_error_log(
+                "DEPLOY-GENERAL-001",
                 f"Failed to enter maintenance mode: {response.status_code}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return False
 
         except requests.exceptions.ConnectionError:
-            logger.warning(
+            logger.warning(format_error_log(
+                "DEPLOY-GENERAL-002",
                 "Could not connect to server for maintenance mode - proceeding anyway",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return False
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "DEPLOY-GENERAL-003",
                 f"Error entering maintenance mode: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return False
 
     def _wait_for_drain(self) -> bool:
@@ -109,22 +113,25 @@ class DeploymentExecutor:
                     )
 
             except requests.exceptions.ConnectionError:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "DEPLOY-GENERAL-004",
                     "Could not connect to server for drain status",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
             except Exception as e:
-                logger.error(
+                logger.error(format_error_log(
+                    "DEPLOY-GENERAL-005",
                     f"Error checking drain status: {e}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
 
             time.sleep(self.drain_poll_interval)
 
-        logger.warning(
+        logger.warning(format_error_log(
+            "DEPLOY-GENERAL-006",
             f"Drain timeout ({self.drain_timeout}s) exceeded",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return False
 
     def _exit_maintenance_mode(self) -> bool:
@@ -144,17 +151,19 @@ class DeploymentExecutor:
                 )
                 return True
 
-            logger.error(
+            logger.error(format_error_log(
+                "DEPLOY-GENERAL-007",
                 f"Failed to exit maintenance mode: {response.status_code}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return False
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "DEPLOY-GENERAL-008",
                 f"Error exiting maintenance mode: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return False
 
     def _get_running_jobs_for_logging(self) -> list:
@@ -177,16 +186,18 @@ class DeploymentExecutor:
             return []
 
         except requests.exceptions.ConnectionError:
-            logger.warning(
+            logger.warning(format_error_log(
+                "DEPLOY-GENERAL-009",
                 "Could not connect to server to get running jobs",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return []
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "DEPLOY-GENERAL-010",
                 f"Error getting running jobs: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return []
 
     def git_pull(self) -> bool:
@@ -204,10 +215,11 @@ class DeploymentExecutor:
             )
 
             if result.returncode != 0:
-                logger.error(
+                logger.error(format_error_log(
+                    "DEPLOY-GENERAL-011",
                     f"Git pull failed: {result.stderr}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return False
 
             logger.info(
@@ -246,10 +258,11 @@ class DeploymentExecutor:
             )
 
             if result.returncode != 0:
-                logger.error(
+                logger.error(format_error_log(
+                    "DEPLOY-GENERAL-012",
                     f"Pip install failed: {result.stderr}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return False
 
             logger.info(
@@ -293,26 +306,29 @@ class DeploymentExecutor:
                     operation_type = job.get("operation_type", "unknown")
                     started_at = job.get("started_at", "unknown")
                     progress = job.get("progress", 0)
-                    logger.warning(
+                    logger.warning(format_error_log(
+                        "DEPLOY-GENERAL-013",
                         f"Forcing restart - running job: job_id={job_id}, "
                         f"operation_type={operation_type}, started_at={started_at}, "
                         f"progress={progress}%",
                         extra={"correlation_id": get_correlation_id()},
-                    )
-                logger.warning(
+                    ))
+                logger.warning(format_error_log(
+                    "DEPLOY-GENERAL-014",
                     "Drain timeout exceeded, forcing restart",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
             else:
                 logger.info(
                     "System drained successfully, proceeding with restart",
                     extra={"correlation_id": get_correlation_id()},
                 )
         else:
-            logger.warning(
+            logger.warning(format_error_log(
+                "DEPLOY-GENERAL-015",
                 "Could not enter maintenance mode, proceeding with restart",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
 
         # Step 3: Execute restart
         try:
@@ -323,10 +339,11 @@ class DeploymentExecutor:
             )
 
             if result.returncode != 0:
-                logger.error(
+                logger.error(format_error_log(
+                    "DEPLOY-GENERAL-016",
                     f"Server restart failed: {result.stderr}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return False
 
             logger.info(
@@ -355,10 +372,11 @@ class DeploymentExecutor:
 
         try:
             if not service_path.exists():
-                logger.warning(
+                logger.warning(format_error_log(
+                    "DEPLOY-GENERAL-017",
                     f"Service file not found: {service_path}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return True  # Not an error if service doesn't exist yet
 
             content = service_path.read_text()
@@ -396,10 +414,11 @@ class DeploymentExecutor:
                     )
 
                     if result.returncode != 0:
-                        logger.error(
+                        logger.error(format_error_log(
+                            "DEPLOY-GENERAL-018",
                             f"Failed to update service file: {result.stderr}",
                             extra={"correlation_id": get_correlation_id()},
-                        )
+                        ))
                         return False
 
                     # Reload systemd
@@ -416,10 +435,11 @@ class DeploymentExecutor:
             return True
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "DEPLOY-GENERAL-019",
                 f"Error checking workers config: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return False
 
     def ensure_ripgrep(self) -> bool:
@@ -449,18 +469,20 @@ class DeploymentExecutor:
 
         # Step 1: Git pull
         if not self.git_pull():
-            logger.error(
+            logger.error(format_error_log(
+                "DEPLOY-GENERAL-020",
                 "Deployment failed at git pull step",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return False
 
         # Step 2: Pip install
         if not self.pip_install():
-            logger.error(
+            logger.error(format_error_log(
+                "DEPLOY-GENERAL-021",
                 "Deployment failed at pip install step",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return False
 
         # Step 3: Story #30 AC4 - Ensure workers config

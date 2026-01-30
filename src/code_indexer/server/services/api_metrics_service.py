@@ -19,6 +19,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Optional
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -135,9 +136,10 @@ class ApiMetricsService:
             Gracefully degrades (logs warning, no crash) if all retries fail.
         """
         if not self._db_path:
-            logger.warning(
+            logger.warning(format_error_log(
+                "APP-GENERAL-047",
                 f"ApiMetricsService not initialized, skipping {metric_type} increment"
-            )
+            ))
             return
 
         now = datetime.now(timezone.utc).isoformat()
@@ -158,7 +160,10 @@ class ApiMetricsService:
                     delay = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.01)
                     time.sleep(delay)
                     continue
-                logger.warning(f"Failed to insert metric {metric_type}: {e}")
+                logger.warning(format_error_log(
+                    "APP-GENERAL-048",
+                    f"Failed to insert metric {metric_type}: {e}"
+                ))
                 return  # Graceful degradation
 
         # Periodic cleanup (not on every insert)

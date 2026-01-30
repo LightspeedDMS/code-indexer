@@ -24,6 +24,7 @@ from .auth.user_manager import UserManager
 from .utils.config_manager import ServerConfigManager
 from .utils.jwt_secret_manager import JWTSecretManager
 from .utils.ripgrep_installer import RipgrepInstaller
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -386,10 +387,11 @@ WantedBy=multi-user.target
 
         # Check if npm available
         if not self._is_npm_available():
-            logger.warning(
+            logger.warning(format_error_log(
+                "GIT-GENERAL-038",
                 "npm not found - Claude CLI installation skipped",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             logger.info(
                 "Install manually: npm install -g @anthropic-ai/claude-code",
                 extra={"correlation_id": get_correlation_id()},
@@ -410,10 +412,11 @@ WantedBy=multi-user.target
             )
 
             if result.returncode != 0:
-                logger.error(
+                logger.error(format_error_log(
+                    "GIT-GENERAL-039",
                     f"Claude CLI installation failed: {result.stderr}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return False
 
             # Verify installation succeeded
@@ -424,23 +427,26 @@ WantedBy=multi-user.target
                 )
                 return True
             else:
-                logger.error(
+                logger.error(format_error_log(
+                    "GIT-GENERAL-040",
                     "Claude CLI installation failed: verification failed",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return False
 
         except subprocess.TimeoutExpired:
-            logger.error(
+            logger.error(format_error_log(
+                "GIT-GENERAL-041",
                 "Claude CLI installation failed: timeout",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return False
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "GIT-GENERAL-042",
                 f"Claude CLI installation failed: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return False
 
     def _is_scip_indexer_installed(self, indexer_name: str) -> bool:
@@ -485,10 +491,11 @@ WantedBy=multi-user.target
 
         # Check if npm available
         if not self._is_npm_available():
-            logger.warning(
+            logger.warning(format_error_log(
+                "MCP-GENERAL-001",
                 "npm not found - SCIP indexers installation skipped",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             logger.info(
                 "Install manually:", extra={"correlation_id": get_correlation_id()}
             )
@@ -523,10 +530,11 @@ WantedBy=multi-user.target
                 )
 
                 if result.returncode != 0:
-                    logger.error(
+                    logger.error(format_error_log(
+                        "MCP-GENERAL-002",
                         f"{indexer_cmd} installation failed: {result.stderr}",
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ))
                     all_installed = False
                     continue
 
@@ -537,23 +545,26 @@ WantedBy=multi-user.target
                         extra={"correlation_id": get_correlation_id()},
                     )
                 else:
-                    logger.error(
+                    logger.error(format_error_log(
+                        "MCP-GENERAL-003",
                         f"{indexer_cmd} installation failed: verification failed",
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ))
                     all_installed = False
 
             except subprocess.TimeoutExpired:
-                logger.error(
+                logger.error(format_error_log(
+                    "MCP-GENERAL-004",
                     f"{indexer_cmd} installation failed: timeout",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 all_installed = False
             except Exception as e:
-                logger.error(
+                logger.error(format_error_log(
+                    "MCP-GENERAL-005",
                     f"{indexer_cmd} installation failed: {e}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 all_installed = False
 
         # Install scip-dotnet (non-fatal if fails)
@@ -619,10 +630,11 @@ WantedBy=multi-user.target
 
         # Check if .NET SDK available
         if not self._is_dotnet_sdk_available():
-            logger.warning(
+            logger.warning(format_error_log(
+                "MCP-GENERAL-006",
                 ".NET SDK not found - scip-dotnet installation skipped",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             logger.info(
                 "Install .NET SDK manually to enable C# SCIP indexing",
                 extra={"correlation_id": get_correlation_id()},
@@ -643,10 +655,11 @@ WantedBy=multi-user.target
             )
 
             if result.returncode != 0:
-                logger.error(
+                logger.error(format_error_log(
+                    "MCP-GENERAL-007",
                     f"scip-dotnet installation failed: {result.stderr}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return False
 
             # Verify installation succeeded
@@ -657,23 +670,26 @@ WantedBy=multi-user.target
                 )
                 return True
             else:
-                logger.error(
+                logger.error(format_error_log(
+                    "MCP-GENERAL-008",
                     "scip-dotnet installation failed: verification failed",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return False
 
         except subprocess.TimeoutExpired:
-            logger.error(
+            logger.error(format_error_log(
+                "MCP-GENERAL-009",
                 "scip-dotnet installation failed: timeout",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return False
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "MCP-GENERAL-010",
                 f"scip-dotnet installation failed: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return False
 
     def _is_go_sdk_available(self) -> bool:
@@ -731,10 +747,11 @@ WantedBy=multi-user.target
 
         # Check if Go SDK available
         if not self._is_go_sdk_available():
-            logger.warning(
+            logger.warning(format_error_log(
+                "MCP-GENERAL-011",
                 "Go SDK not found - scip-go installation skipped",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             logger.info(
                 "Install Go from https://go.dev/dl/",
                 extra={"correlation_id": get_correlation_id()},
@@ -755,10 +772,11 @@ WantedBy=multi-user.target
             )
 
             if result.returncode != 0:
-                logger.error(
+                logger.error(format_error_log(
+                    "MCP-GENERAL-012",
                     f"scip-go installation failed: {result.stderr}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return False
 
             # Verify installation succeeded
@@ -769,23 +787,26 @@ WantedBy=multi-user.target
                 )
                 return True
             else:
-                logger.error(
+                logger.error(format_error_log(
+                    "MCP-GENERAL-013",
                     "scip-go installation failed: verification failed",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return False
 
         except subprocess.TimeoutExpired:
-            logger.error(
+            logger.error(format_error_log(
+                "MCP-GENERAL-014",
                 "scip-go installation failed: timeout",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return False
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "MCP-GENERAL-015",
                 f"scip-go installation failed: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return False
 
     def install_ripgrep(self) -> bool:
@@ -836,10 +857,11 @@ WantedBy=multi-user.target
             return True
 
         if platform.machine() != "x86_64":
-            logger.warning(
+            logger.warning(format_error_log(
+                "MCP-GENERAL-016",
                 f"Coursier binary only available for x86_64, found {platform.machine()}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return False
 
         try:
@@ -865,12 +887,16 @@ WantedBy=multi-user.target
                 logger.info("Coursier installed successfully", extra={"correlation_id": get_correlation_id()})
                 return True
             else:
-                logger.error("Coursier installation verification failed", extra={"correlation_id": get_correlation_id()})
+                logger.error(format_error_log(
+                    "MCP-GENERAL-017",
+                    "Coursier installation verification failed", extra={"correlation_id": get_correlation_id()}
+                ))
                 return False
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "MCP-GENERAL-018",
                 f"Coursier installation failed: {e}",
                 extra={"correlation_id": get_correlation_id(), "error": str(e)},
-            )
+            ))
             return False

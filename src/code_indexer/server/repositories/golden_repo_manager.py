@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from code_indexer.server.services.group_access_manager import GroupAccessManager
 
 from pydantic import BaseModel
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 
 class GoldenRepoError(Exception):
@@ -1695,11 +1696,12 @@ class GoldenRepoManager:
                         valid_versions.append((v_dir, timestamp))
                     except (ValueError, IndexError) as e:
                         # Skip malformed version directories gracefully
-                        logger.warning(
+                        logger.warning(format_error_log(
+                            "REPO-GENERAL-040",
                             f"Skipping malformed version directory: {v_dir} "
                             f"(expected format: v_TIMESTAMP, error: {e})",
                             extra={"correlation_id": get_correlation_id()},
-                        )
+                        ))
                         continue
 
                 if valid_versions:

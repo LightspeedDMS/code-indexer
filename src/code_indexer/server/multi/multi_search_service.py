@@ -23,6 +23,7 @@ from typing import Dict, List, Any
 from .multi_search_config import MultiSearchConfig
 from .multi_result_aggregator import MultiResultAggregator
 from .models import MultiSearchRequest, MultiSearchResponse, MultiSearchMetadata
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -180,12 +181,16 @@ class MultiSearchService:
             except TimeoutError:
                 error_msg = self._format_timeout_error(request, [repo_id])
                 errors[repo_id] = error_msg
-                logger.warning(
+                logger.warning(format_error_log(
+                    "REPO-GENERAL-023",
                     f"Search timeout for repo {repo_id} after {self.config.query_timeout_seconds}s"
-                )
+                ))
             except Exception as e:
                 errors[repo_id] = f"Search failed: {str(e)}"
-                logger.error(f"Search error for repo {repo_id}: {e}")
+                logger.error(format_error_log(
+                    "REPO-GENERAL-024",
+                    f"Search error for repo {repo_id}: {e}"
+                ))
 
         # Aggregate results with optional score filtering
         aggregator = MultiResultAggregator(
@@ -294,7 +299,10 @@ class MultiSearchService:
             return results
 
         except Exception as e:
-            logger.error(f"Failed semantic search for repository {repo_id}: {e}")
+            logger.error(format_error_log(
+                "REPO-GENERAL-025",
+                f"Failed semantic search for repository {repo_id}: {e}"
+            ))
             raise
 
     def _search_fts_sync(
@@ -364,7 +372,10 @@ class MultiSearchService:
             return results
 
         except Exception as e:
-            logger.error(f"Failed FTS search for repository {repo_id}: {e}")
+            logger.error(format_error_log(
+                "REPO-GENERAL-026",
+                f"Failed FTS search for repository {repo_id}: {e}"
+            ))
             raise
 
     def _search_temporal_sync(
@@ -455,7 +466,10 @@ class MultiSearchService:
             return results
 
         except Exception as e:
-            logger.error(f"Failed temporal search for repository {repo_id}: {e}")
+            logger.error(format_error_log(
+                "REPO-GENERAL-027",
+                f"Failed temporal search for repository {repo_id}: {e}"
+            ))
             raise
 
     def _search_single_repo_subprocess(
@@ -553,9 +567,10 @@ class MultiSearchService:
                             results.append(result_dict)
 
                     except (ValueError, IndexError) as e:
-                        logger.warning(
+                        logger.warning(format_error_log(
+                            "REPO-GENERAL-028",
                             f"Failed to parse subprocess output line: {line} - {e}"
-                        )
+                        ))
                         continue
 
             return results
@@ -565,7 +580,10 @@ class MultiSearchService:
                 f"Subprocess timeout after {self.config.query_timeout_seconds}s"
             )
         except Exception as e:
-            logger.error(f"Subprocess search failed for repo {repo_id}: {e}")
+            logger.error(format_error_log(
+                "REPO-GENERAL-029",
+                f"Subprocess search failed for repo {repo_id}: {e}"
+            ))
             raise
         finally:
             # Cleanup temporary file

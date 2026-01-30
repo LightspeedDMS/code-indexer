@@ -14,6 +14,7 @@ import base64
 
 from .jwt_manager import JWTManager, TokenExpiredError, InvalidTokenError
 from .user_manager import UserManager, User
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 if TYPE_CHECKING:
     from .oauth.oauth_manager import OAuthManager
@@ -546,9 +547,10 @@ def _hybrid_auth_impl(
         # Session role may be stale if admin changed it after login
         if session:
             if not user_manager:
-                logger.error(
+                logger.error(format_error_log(
+                    "AUTH-GENERAL-001",
                     f"Hybrid auth ({auth_type}): user_manager not initialized"
-                )
+                ))
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="User manager not initialized",
@@ -562,9 +564,10 @@ def _hybrid_auth_impl(
 
             if not user:
                 # Session is valid but user not found - user was deleted
-                logger.error(
+                logger.error(format_error_log(
+                    "AUTH-GENERAL-002",
                     f"Hybrid auth ({auth_type}): User {session.username} not found in database"
-                )
+                ))
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"User '{session.username}' not found in user database",
@@ -608,7 +611,10 @@ def _hybrid_auth_impl(
             raise
 
     # No valid authentication found
-    logger.warning(f"Hybrid auth ({auth_type}): No valid authentication found")
+    logger.warning(format_error_log(
+        "AUTH-GENERAL-003",
+        f"Hybrid auth ({auth_type}): No valid authentication found"
+    ))
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Authentication required",

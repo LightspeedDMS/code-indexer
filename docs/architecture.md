@@ -473,6 +473,36 @@ Container-based vector storage using Docker/Podman + Qdrant vector database:
 
 **When to use**: Production deployments, large teams, advanced vector search requirements
 
+## Self-Monitoring Architecture (v8.8.2+)
+
+CIDX Server includes automated self-monitoring using Claude CLI for intelligent log analysis.
+
+**Components:**
+- **SelfMonitoringService**: Background scheduler running at configurable intervals (default 60 min)
+- **LogScanner**: Executes Claude CLI with structured prompts for log analysis
+- **IssueManager**: Creates GitHub issues for detected bugs
+
+**Workflow:**
+```
+Scheduled Scan:
+1. Service submits job to BackgroundJobManager
+2. LogScanner assembles prompt with log database path
+3. Claude CLI queries SQLite logs directly (--allowedTools Bash)
+4. Claude analyzes logs and returns structured JSON (bugs found/not found)
+5. IssueManager creates GitHub issues for actionable bugs
+6. Scan results stored in self-monitoring database
+```
+
+**Key Design Decisions:**
+- **Claude queries DB directly**: Prompt contains database path, not embedded logs (5KB vs 548KB)
+- **Auto-detect github_repo**: Extracted from git remote origin (no env vars required)
+- **Actionable focus**: Prompt filters configuration noise, reports only development bugs
+- **Working directory context**: Claude runs with `cwd=repo_root` for full codebase access
+
+**Storage:**
+- Scan history: `~/.cidx-server/data/self_monitoring.db`
+- Server logs: `~/.cidx-server/logs.db` (SQLite structured logging)
+
 ## Related Documentation
 
 - **[v5.0.0 Architecture Summary](v5.0.0-architecture-summary.md)** - Server Mode architecture details

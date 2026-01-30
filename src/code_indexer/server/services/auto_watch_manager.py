@@ -15,6 +15,7 @@ from typing import Dict, Any, Optional, cast
 
 from code_indexer.daemon.watch_manager import DaemonWatchManager
 from code_indexer.config import ConfigManager
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -143,10 +144,11 @@ class AutoWatchManager:
                 )
 
                 if result.get("status") != "success":
-                    logger.error(
+                    logger.error(format_error_log(
+                        "APP-GENERAL-049",
                         f"Failed to start watch for {repo_path}: {result}",
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ))
                     return result
 
                 # Track watch state
@@ -191,10 +193,11 @@ class AutoWatchManager:
             if repo_path not in self._watch_state or not self._watch_state[
                 repo_path
             ].get("watch_running", False):
-                logger.warning(
+                logger.warning(format_error_log(
+                    "APP-GENERAL-050",
                     f"No watch running for {repo_path}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return {
                     "status": "error",
                     "message": "Watch not running",
@@ -242,10 +245,11 @@ class AutoWatchManager:
             if repo_path not in self._watch_state or not self._watch_state[
                 repo_path
             ].get("watch_running", False):
-                logger.warning(
+                logger.warning(format_error_log(
+                    "APP-GENERAL-051",
                     f"No watch running for {repo_path}, cannot reset timeout",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return {
                     "status": "error",
                     "message": "Watch not running",
@@ -351,11 +355,12 @@ class AutoWatchManager:
         if self._timeout_thread.is_alive():
             self._timeout_thread.join(timeout=self.SHUTDOWN_THREAD_JOIN_TIMEOUT_SECONDS)
             if self._timeout_thread.is_alive():
-                logger.warning(
+                logger.warning(format_error_log(
+                    "APP-GENERAL-052",
                     f"Timeout checker thread did not stop within "
                     f"{self.SHUTDOWN_THREAD_JOIN_TIMEOUT_SECONDS} seconds",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
             else:
                 logger.info(
                     "Timeout checker thread stopped successfully",

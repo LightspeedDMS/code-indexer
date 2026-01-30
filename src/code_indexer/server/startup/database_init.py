@@ -14,6 +14,7 @@ import logging
 import sqlite3
 from pathlib import Path
 from typing import Optional
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -107,9 +108,10 @@ def initialize_scip_audit_database(server_data_dir: str) -> Optional[Path]:
         return scip_audit_path
 
     except Exception as e:
-        logger.warning(
+        logger.warning(format_error_log(
+            "MCP-GENERAL-196",
             f"Failed to initialize SCIP audit database: {e}",
             exc_info=True,
             extra={"server_data_dir": server_data_dir},
-        )
+        ))
         return None

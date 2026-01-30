@@ -22,6 +22,7 @@ from .constants import (
     DEFAULT_GROUP_POWERUSERS,
     DEFAULT_GROUP_USERS,
 )
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -1165,10 +1166,16 @@ def seed_users_to_groups(
         users_group = group_manager.get_group_by_name(DEFAULT_GROUP_USERS)
 
         if not admins_group:
-            logger.warning("Cannot seed users: admins group not found")
+            logger.warning(format_error_log(
+                "DEPLOY-GENERAL-032",
+                "Cannot seed users: admins group not found"
+            ))
             return 0, 0
         if not users_group:
-            logger.warning("Cannot seed users: users group not found")
+            logger.warning(format_error_log(
+                "DEPLOY-GENERAL-033",
+                "Cannot seed users: users group not found"
+            ))
             return 0, 0
 
         # Get all users
@@ -1203,9 +1210,10 @@ def seed_users_to_groups(
                     regular_count += 1
                     logger.debug(f"Auto-assigned user '{user.username}' to users group")
             except Exception as assign_error:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "DEPLOY-GENERAL-034",
                     f"Failed to assign user '{user.username}' to {target_group.name} group: {assign_error}"
-                )
+                ))
 
         if admin_count > 0 or regular_count > 0:
             logger.info(
@@ -1213,7 +1221,10 @@ def seed_users_to_groups(
             )
 
     except Exception as e:
-        logger.warning(f"Failed to seed users to groups: {e}")
+        logger.warning(format_error_log(
+            "DEPLOY-GENERAL-035",
+            f"Failed to seed users to groups: {e}"
+        ))
 
     return admin_count, regular_count
 
@@ -1256,18 +1267,20 @@ def seed_existing_golden_repos(
             repo_alias = repo.get("alias") or repo.get("name")
 
             if not repo_alias:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "DEPLOY-GENERAL-036",
                     "Skipping repo during migration: no alias or name field found"
-                )
+                ))
                 continue
 
             try:
                 group_manager.auto_assign_golden_repo(repo_alias)
                 seeded_count += 1
             except Exception as repo_error:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "DEPLOY-GENERAL-037",
                     f"Failed to seed repo '{repo_alias}' to default groups: {repo_error}"
-                )
+                ))
                 # Continue with other repos - don't let one failure stop migration
 
         if seeded_count > 0:
@@ -1276,6 +1289,9 @@ def seed_existing_golden_repos(
             )
 
     except Exception as e:
-        logger.warning(f"Failed to seed existing golden repos: {e}")
+        logger.warning(format_error_log(
+            "DEPLOY-GENERAL-038",
+            f"Failed to seed existing golden repos: {e}"
+        ))
 
     return seeded_count

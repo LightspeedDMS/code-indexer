@@ -12,6 +12,7 @@ import logging
 import threading
 import time
 from typing import Optional
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,10 @@ class ScheduledCatchupService:
             return
 
         if self._running:
-            logger.warning("Scheduled catch-up service already running")
+            logger.warning(format_error_log(
+                "GIT-GENERAL-069",
+                "Scheduled catch-up service already running"
+            ))
             return
 
         # Check if manager is available
@@ -68,9 +72,10 @@ class ScheduledCatchupService:
 
         manager = get_claude_cli_manager()
         if manager is None:
-            logger.warning(
+            logger.warning(format_error_log(
+                "GIT-GENERAL-070",
                 "ClaudeCliManager not initialized, scheduled catch-up will check again on each run"
-            )
+            ))
 
         # Start background thread
         self._running = True
@@ -107,9 +112,10 @@ class ScheduledCatchupService:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5.0)
             if self._thread.is_alive():
-                logger.warning(
+                logger.warning(format_error_log(
+                    "GIT-GENERAL-071",
                     "Scheduled catch-up service thread did not terminate within timeout"
-                )
+                ))
 
         logger.info("Scheduled catch-up service stopped")
 
@@ -126,10 +132,11 @@ class ScheduledCatchupService:
             try:
                 self._process_catchup()
             except Exception as e:
-                logger.error(
+                logger.error(format_error_log(
+                    "GIT-GENERAL-072",
                     f"Scheduled catch-up processing failed: {e}",
                     exc_info=True,
-                )
+                ))
 
             # Wait for interval or until stopped
             self._stop_event.wait(timeout=interval_seconds)
@@ -164,10 +171,11 @@ class ScheduledCatchupService:
                     extra={"correlation_id": get_correlation_id()},
                 )
             elif result.error:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "MCP-GENERAL-136",
                     f"Scheduled catch-up partially completed: {result.error}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
             else:
                 logger.debug(
                     "Scheduled catch-up: no repos needed processing",
@@ -175,11 +183,12 @@ class ScheduledCatchupService:
                 )
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "MCP-GENERAL-137",
                 f"Scheduled catch-up failed: {e}",
                 exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
 
     @property
     def is_running(self) -> bool:

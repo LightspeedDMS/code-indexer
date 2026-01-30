@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>HTML Image Tag Variants</title>
+</head>
+<body>
+    <h1>HTML Image Tag Variants</h1>
+    <p>This document tests various HTML img tag formats.</p>
+
+    <h2>Standard Double Quotes</h2>
+    <img src="../images/database-schema.png" alt="Database Schema">
+
+    <h2>Single Quotes</h2>
+    <img src='../images/api-flow.jpg' alt='API Flow'>
+
+    <h2>No Quotes (Valid HTML5)</h2>
+    <img src=../images/config-options.webp alt=Config>
+
+    <h2>Self-Closing Tag</h2>
+    <img src="../images/error-codes.gif" alt="Error Codes" />
+
+    <h2>Additional Attributes</h2>
+    <img src="../images/database-schema.png" alt="Schema" class="responsive" width="800" height="600" loading="lazy">
+
+    <h2>srcset Attribute (Should Extract src, Not srcset)</h2>
+    <img src="../images/api-flow.jpg"
+         srcset="../images/api-flow-2x.jpg 2x, ../images/api-flow-3x.jpg 3x"
+         alt="API Flow Responsive">
+
+    <h2>data-src Lazy Loading (Should Extract src Only)</h2>
+    <img src="../images/config-options.webp"
+         data-src="../images/config-lazy.webp"
+         alt="Lazy Loaded">
+
+    <h2>Remote URL (Should Skip)</h2>
+    <img src="https://example.com/external-image.png" alt="External">
+
+    <h2>Data URI (Should Skip)</h2>
+    <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUg..." alt="Data URI">
+
+    <h2>Picture Element with img</h2>
+    <picture>
+        <source srcset="../images/database-schema.webp" type="image/webp">
+        <source srcset="../images/database-schema.png" type="image/png">
+        <img src="../images/database-schema.png" alt="Fallback Schema">
+    </picture>
+
+    <h2>Figure with Figcaption</h2>
+    <figure>
+        <img src="../images/error-codes.gif" alt="Error Reference">
+        <figcaption>HTTP Error Codes Reference</figcaption>
+    </figure>
+
+    <h2>Test Expectations</h2>
+    <ul>
+        <li>Extract all local src attributes from img tags</li>
+        <li>Handle double quotes, single quotes, no quotes</li>
+        <li>Handle self-closing and non-self-closing</li>
+        <li>Extract only src, not srcset or data-src</li>
+        <li>Skip remote URLs (http/https)</li>
+        <li>Skip data URIs</li>
+        <li>Extract img inside picture and figure elements</li>
+    </ul>
+</body>
+</html>

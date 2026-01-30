@@ -18,6 +18,7 @@ from ...models.auto_discovery import (
     RepositoryDiscoveryResult,
 )
 from ..git_url_normalizer import GitUrlNormalizer, GitUrlNormalizationError
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 if TYPE_CHECKING:
     from ..ci_token_manager import CITokenManager
@@ -441,7 +442,10 @@ class GitHubProvider(RepositoryProviderBase):
                     repositories[repo_idx].last_commit_date = commit_date
 
         except Exception as e:
-            logger.warning(f"Failed to enrich repositories with commit info: {e}")
+            logger.warning(format_error_log(
+                "GIT-GENERAL-065",
+                f"Failed to enrich repositories with commit info: {e}"
+            ))
 
         return repositories
 
@@ -682,7 +686,10 @@ class GitHubProvider(RepositoryProviderBase):
 
         except Exception as e:
             # Graceful degradation: Fall back to REST API without commit info
-            logger.warning(f"GraphQL discovery failed, falling back to REST API: {e}")
+            logger.warning(format_error_log(
+                "GIT-GENERAL-066",
+                f"GraphQL discovery failed, falling back to REST API: {e}"
+            ))
             return self._discover_via_rest_fallback(page, page_size, indexed_urls)
 
     def _discover_via_rest_fallback(

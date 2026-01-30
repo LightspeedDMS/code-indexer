@@ -15,6 +15,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from ..services.delegation_job_tracker import DelegationJobTracker, JobResult
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -100,8 +101,9 @@ async def receive_delegation_callback(
     job_found = await tracker.complete_job(result)
 
     if not job_found:
-        logger.warning(
+        logger.warning(format_error_log(
+            "STORE-GENERAL-017",
             f"Callback received for unknown or already completed job: {job_id}"
-        )
+        ))
 
     return CallbackResponse(received=True, job_found=job_found)

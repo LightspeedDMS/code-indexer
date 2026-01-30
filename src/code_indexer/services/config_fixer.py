@@ -360,23 +360,10 @@ class ConfigurationValidator:
                     )
                 )
 
-        # Check for invalid file paths (pointing to temp directories)
-        files_to_index = metadata.get("files_to_index", [])
-        invalid_files = [
-            f for f in files_to_index if "/tmp/" in f or not Path(f).exists()
-        ]
-
-        if invalid_files:
-            fixes.append(
-                ConfigFix(
-                    fix_type="invalid_file_paths",
-                    field="files_to_index",
-                    description="Remove invalid file paths",
-                    old_value=len(files_to_index),
-                    new_value=len(files_to_index) - len(invalid_files),
-                    reason=f"Found {len(invalid_files)} invalid/non-existent file paths",
-                )
-            )
+        # NOTE: files_to_index is runtime state for resuming interrupted operations.
+        # Invalid paths after project move/clone are expected and should NOT be
+        # treated as configuration errors. The next indexing operation will rebuild
+        # this list correctly.
 
         return fixes
 
@@ -577,43 +564,17 @@ class ConfigurationRepairer:
         # Get git state
         git_state = GitStateDetector.detect_git_state(correct_codebase_dir)
 
-        # Try to get collection stats
-        collection_stats = None
-        if self.collection_analyzer:
-            # Collection name is the model name (filesystem-safe)
-            if config.embedding_provider == "voyage-ai":
-                model_name = config.voyage_ai.model
-            else:
-                model_name = "unknown"
-
-            # Make filesystem-safe (matching FilesystemVectorStore.resolve_collection_name)
-            collection_name = model_name.replace("/", "_").replace(":", "_")
-            collection_stats = self.collection_analyzer.derive_stats_from_collection(
-                collection_name
-            )
-
-        # If no collection stats, use minimal placeholder without expensive file scanning
-        # NOTE: Config fixing should NOT require analyzing every file in repository
-        # Metadata will be rebuilt on next index operation
-        if not collection_stats:
-            collection_stats = {
-                "files_processed": 0,
-                "chunks_indexed": 0,
-                "completed_files": [],
-                "files_to_index": [],  # Empty - no need to scan filesystem
-                "total_files_to_index": 0,  # Zero - will be populated on next index operation
-                "status": "needs_indexing",
-            }
-
         # Build corrected metadata
+        # CRITICAL: Only update CONFIGURATION fields, preserve ALL runtime state
+        # Config fields: project_id, git state, embedding_provider, timestamps
+        # Runtime state: files_processed, chunks_indexed, status, files_to_index, etc.
         corrected_metadata = {
-            **metadata,  # Keep existing values as base
+            **metadata,  # Keep ALL existing values including indexing progress
             "project_id": correct_project_name,
             "git_available": git_state["git_available"],
             "current_branch": git_state["current_branch"],
             "current_commit": git_state["current_commit"],
             "embedding_provider": config.embedding_provider,
-            **collection_stats,
             "last_index_timestamp": time.time(),
             "indexed_at": datetime.now().isoformat(),
         }

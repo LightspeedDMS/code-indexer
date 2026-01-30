@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Set, List, Any, Optional, Callable, Union, TextIO, BinaryIO
 import psutil
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 
 # Configure logging
@@ -167,9 +168,10 @@ class ResourceTracker:
                 except Exception as e:
                     error_msg = f"Failed to close file handle: {e}"
                     cleanup_errors.append(error_msg)
-                    logger.warning(
+                    logger.warning(format_error_log(
+                        "SCIP-GENERAL-005",
                         error_msg, extra={"correlation_id": get_correlation_id()}
-                    )
+                    ))
 
             self.file_handles.clear()
 
@@ -191,9 +193,10 @@ class ResourceTracker:
                 except Exception as e:
                     error_msg = f"Failed to close database connection {conn_name}: {e}"
                     cleanup_errors.append(error_msg)
-                    logger.warning(
+                    logger.warning(format_error_log(
+                        "SCIP-GENERAL-006",
                         error_msg, extra={"correlation_id": get_correlation_id()}
-                    )
+                    ))
 
             self.database_connections.clear()
 
@@ -222,9 +225,10 @@ class ResourceTracker:
                 except Exception as e:
                     error_msg = f"Failed to remove temp file {temp_path}: {e}"
                     cleanup_errors.append(error_msg)
-                    logger.warning(
+                    logger.warning(format_error_log(
+                        "SCIP-GENERAL-007",
                         error_msg, extra={"correlation_id": get_correlation_id()}
-                    )
+                    ))
 
             self.temp_files.clear()
 
@@ -245,10 +249,11 @@ class ResourceTracker:
                     try:
                         await asyncio.wait_for(task, timeout=2.0)
                     except asyncio.TimeoutError:
-                        logger.warning(
+                        logger.warning(format_error_log(
+                            "SCIP-GENERAL-008",
                             f"Task {task_name} did not cancel within timeout",
                             extra={"correlation_id": get_correlation_id()},
-                        )
+                        ))
                     except asyncio.CancelledError:
                         pass  # Expected for cancelled tasks
 
@@ -259,9 +264,10 @@ class ResourceTracker:
             except Exception as e:
                 error_msg = f"Failed to cancel background task {task_name}: {e}"
                 cleanup_errors.append(error_msg)
-                logger.warning(
+                logger.warning(format_error_log(
+                    "SCIP-GENERAL-009",
                     error_msg, extra={"correlation_id": get_correlation_id()}
-                )
+                ))
 
         with self._lock:
             self.background_tasks.clear()
@@ -298,10 +304,11 @@ class MemoryMonitor:
             memory_info = process.memory_info()
             return float(memory_info.rss / (1024 * 1024))  # Convert to MB
         except Exception as e:
-            logger.warning(
+            logger.warning(format_error_log(
+                "SCIP-GENERAL-010",
                 f"Failed to capture memory usage: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return 0.0
 
     def get_current_memory_mb(self) -> float:
@@ -319,10 +326,11 @@ class MemoryMonitor:
             process = psutil.Process()
             return float(process.memory_percent())
         except Exception as e:
-            logger.warning(
+            logger.warning(format_error_log(
+                "SCIP-GENERAL-011",
                 f"Failed to get memory percentage: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return 0.0
 
     def check_for_memory_leaks(self) -> List[MemoryLeakWarning]:
@@ -341,7 +349,10 @@ class MemoryMonitor:
                 message=f"Memory usage increased by {memory_growth:.1f}MB, exceeding threshold of {self.leak_threshold_mb:.1f}MB",
             )
             warnings.append(warning)
-            logger.warning(str(warning), extra={"correlation_id": get_correlation_id()})
+            logger.warning(format_error_log(
+                "SCIP-GENERAL-012",
+                str(warning), extra={"correlation_id": get_correlation_id()}
+            ))
 
         return warnings
 
@@ -355,10 +366,11 @@ class MemoryMonitor:
             )
             return collected_objects
         except Exception as e:
-            logger.warning(
+            logger.warning(format_error_log(
+                "SCIP-GENERAL-013",
                 f"Garbage collection failed: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return 0
 
     def reset_baseline(self) -> None:
@@ -470,10 +482,11 @@ class GracefulShutdownHandler:
             # Check timeout before starting each callback
             elapsed = time.time() - start_time
             if elapsed >= self.shutdown_timeout:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "SCIP-GENERAL-014",
                     f"Cleanup timeout ({self.shutdown_timeout}s) exceeded after {elapsed:.2f}s, skipping remaining callbacks",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 break
 
             # Calculate remaining time for this callback
@@ -488,10 +501,11 @@ class GracefulShutdownHandler:
 
                 def timeout_handler():
                     if not callback_completed.wait(timeout=remaining_time):
-                        logger.warning(
+                        logger.warning(format_error_log(
+                            "SCIP-GENERAL-015",
                             f"Cleanup callback {callback.__name__} exceeded timeout of {remaining_time:.2f}s, continuing to next callback",
                             extra={"correlation_id": get_correlation_id()},
-                        )
+                        ))
                         return
 
                 def run_callback():
@@ -521,10 +535,11 @@ class GracefulShutdownHandler:
                     )
 
             except Exception as e:
-                logger.error(
+                logger.error(format_error_log(
+                    "SCIP-GENERAL-016",
                     f"Cleanup callback {callback.__name__} failed: {e}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
 
         # Execute asynchronous cleanup callbacks
         elapsed = time.time() - start_time
@@ -542,10 +557,11 @@ class GracefulShutdownHandler:
             try:
                 current_loop = asyncio.get_running_loop()
                 # If we're in a running loop, schedule the cleanup for later
-                logger.warning(
+                logger.warning(format_error_log(
+                    "SCIP-GENERAL-017",
                     "Cannot run async cleanup in existing event loop, scheduling for thread",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 # Schedule async cleanup in the current event loop
                 # We can't await in a signal handler, but we can schedule tasks
 
@@ -560,15 +576,17 @@ class GracefulShutdownHandler:
                                     extra={"correlation_id": get_correlation_id()},
                                 )
                             except Exception as e:
-                                logger.error(
+                                logger.error(format_error_log(
+                                    "SCIP-GENERAL-018",
                                     f"Failed to schedule async cleanup callback {callback.__name__}: {e}",
                                     extra={"correlation_id": get_correlation_id()},
-                                )
+                                ))
                     except Exception as e:
-                        logger.error(
+                        logger.error(format_error_log(
+                            "SCIP-GENERAL-019",
                             f"Failed to schedule async cleanup: {e}",
                             extra={"correlation_id": get_correlation_id()},
-                        )
+                        ))
 
                 # Schedule the async cleanup to run in the next event loop iteration
                 current_loop.call_soon(schedule_async_cleanup)
@@ -590,10 +608,11 @@ class GracefulShutdownHandler:
                             task = asyncio.create_task(callback())
                             tasks.append(task)
                         except Exception as e:
-                            logger.error(
+                            logger.error(format_error_log(
+                                "SCIP-GENERAL-020",
                                 f"Failed to create async cleanup task for {callback.__name__}: {e}",
                                 extra={"correlation_id": get_correlation_id()},
-                            )
+                            ))
 
                     if tasks:
                         try:
@@ -602,10 +621,11 @@ class GracefulShutdownHandler:
                                 timeout=timeout,
                             )
                         except asyncio.TimeoutError:
-                            logger.warning(
+                            logger.warning(format_error_log(
+                                "SCIP-GENERAL-021",
                                 "Async cleanup timeout exceeded",
                                 extra={"correlation_id": get_correlation_id()},
-                            )
+                            ))
                             for task in tasks:
                                 if not task.done():
                                     task.cancel()
@@ -615,10 +635,11 @@ class GracefulShutdownHandler:
                 loop.close()
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "SCIP-GENERAL-022",
                 f"Async cleanup execution failed: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
 
 
 class ResourceManager:
@@ -700,10 +721,11 @@ class ResourceManager:
         try:
             await self.cleanup_all()
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "STORE-GENERAL-001",
                 f"ResourceManager cleanup failed: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             # Don't suppress exceptions from the context
 
         logger.debug(
@@ -805,7 +827,10 @@ class ResourceManager:
         except Exception as e:
             error_msg = f"Background task cleanup failed: {e}"
             cleanup_errors.append(error_msg)
-            logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
+            logger.error(format_error_log(
+                "STORE-GENERAL-002",
+                error_msg, extra={"correlation_id": get_correlation_id()}
+            ))
 
         # 2. Close file handles
         try:
@@ -818,7 +843,10 @@ class ResourceManager:
         except Exception as e:
             error_msg = f"File handle cleanup failed: {e}"
             cleanup_errors.append(error_msg)
-            logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
+            logger.error(format_error_log(
+                "STORE-GENERAL-003",
+                error_msg, extra={"correlation_id": get_correlation_id()}
+            ))
 
         # 3. Close database connections
         try:
@@ -831,7 +859,10 @@ class ResourceManager:
         except Exception as e:
             error_msg = f"Database connection cleanup failed: {e}"
             cleanup_errors.append(error_msg)
-            logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
+            logger.error(format_error_log(
+                "STORE-GENERAL-004",
+                error_msg, extra={"correlation_id": get_correlation_id()}
+            ))
 
         # 4. Remove temporary files
         try:
@@ -844,7 +875,10 @@ class ResourceManager:
         except Exception as e:
             error_msg = f"Temporary file cleanup failed: {e}"
             cleanup_errors.append(error_msg)
-            logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
+            logger.error(format_error_log(
+                "STORE-GENERAL-005",
+                error_msg, extra={"correlation_id": get_correlation_id()}
+            ))
 
         # 5. Force garbage collection if memory monitoring enabled
         if self.memory_monitor:
@@ -857,7 +891,10 @@ class ResourceManager:
             except Exception as e:
                 error_msg = f"Garbage collection failed: {e}"
                 cleanup_errors.append(error_msg)
-                logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
+                logger.error(format_error_log(
+                    "STORE-GENERAL-006",
+                    error_msg, extra={"correlation_id": get_correlation_id()}
+                ))
 
         # Log cleanup summary
         total_errors = len(cleanup_errors)
@@ -867,14 +904,16 @@ class ResourceManager:
                 extra={"correlation_id": get_correlation_id()},
             )
         else:
-            logger.warning(
+            logger.warning(format_error_log(
+                "STORE-GENERAL-007",
                 f"Resource cleanup completed with {total_errors} errors",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             for error in cleanup_errors:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "STORE-GENERAL-008",
                     f"  - {error}", extra={"correlation_id": get_correlation_id()}
-                )
+                ))
 
         # Check for memory leaks after cleanup
         if self.memory_monitor:
@@ -882,15 +921,17 @@ class ResourceManager:
                 leak_warnings = self.check_for_memory_leaks()
                 if leak_warnings:
                     for warning in leak_warnings:
-                        logger.warning(
+                        logger.warning(format_error_log(
+                            "STORE-GENERAL-009",
                             f"Memory leak detected after cleanup: {warning}",
                             extra={"correlation_id": get_correlation_id()},
-                        )
+                        ))
             except Exception as e:
-                logger.error(
+                logger.error(format_error_log(
+                    "STORE-GENERAL-010",
                     f"Memory leak check failed: {e}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
 
 
 # Convenience function for server integration
@@ -939,10 +980,11 @@ def setup_graceful_shutdown(
                 # Run cleanup in new event loop
                 asyncio.run(resource_manager.cleanup_all())
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "STORE-GENERAL-011",
                 f"Resource cleanup during shutdown failed: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
 
     shutdown_handler.register_cleanup_callback(cleanup_resources)
     shutdown_handler.register_handlers()

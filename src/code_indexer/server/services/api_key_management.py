@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -134,9 +135,10 @@ class ApiKeySyncService:
                             f"{self._claude_credentials_path}"
                         )
                     except OSError as e:
-                        logger.warning(
+                        logger.warning(format_error_log(
+                            "APP-GENERAL-039",
                             f"Failed to remove credentials file: {e}"
-                        )
+                        ))
 
                 # Step 5: Update ~/.bashrc (for shell persistence)
                 self._update_bashrc("ANTHROPIC_API_KEY", api_key)
@@ -144,7 +146,10 @@ class ApiKeySyncService:
                 return SyncResult(success=True)
 
             except Exception as e:
-                logger.error(f"Failed to sync Anthropic API key: {e}")
+                logger.error(format_error_log(
+                    "APP-GENERAL-040",
+                    f"Failed to sync Anthropic API key: {e}"
+                ))
                 return SyncResult(success=False, error=str(e))
 
     def sync_voyageai_key(self, api_key: str) -> SyncResult:
@@ -179,7 +184,10 @@ class ApiKeySyncService:
                 return SyncResult(success=True)
 
             except Exception as e:
-                logger.error(f"Failed to sync VoyageAI API key: {e}")
+                logger.error(format_error_log(
+                    "APP-GENERAL-041",
+                    f"Failed to sync VoyageAI API key: {e}"
+                ))
                 return SyncResult(success=False, error=str(e))
 
     def _is_voyageai_key_synced(self, api_key: str) -> bool:
@@ -214,9 +222,10 @@ class ApiKeySyncService:
             try:
                 config = json.loads(self._claude_config_path.read_text())
             except json.JSONDecodeError:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "APP-GENERAL-042",
                     f"Invalid JSON in {self._claude_config_path}, overwriting"
-                )
+                ))
                 config = {}
 
         # Update apiKey field
@@ -253,12 +262,16 @@ class ApiKeySyncService:
             self._systemd_env_path.write_text("\n".join(lines) + "\n")
 
         except PermissionError:
-            logger.warning(
+            logger.warning(format_error_log(
+                "APP-GENERAL-043",
                 f"Cannot write to systemd env file {self._systemd_env_path}: "
                 "permission denied"
-            )
+            ))
         except Exception as e:
-            logger.warning(f"Failed to update systemd env file: {e}")
+            logger.warning(format_error_log(
+                "APP-GENERAL-044",
+                f"Failed to update systemd env file: {e}"
+            ))
 
     def _update_bashrc(self, env_var_name: str, value: str) -> None:
         """Update or add an export line in ~/.bashrc (idempotent - skips if value matches)."""
@@ -292,7 +305,10 @@ class ApiKeySyncService:
             logger.info(f"Updated {env_var_name} in ~/.bashrc")
 
         except Exception as e:
-            logger.warning(f"Failed to update ~/.bashrc: {e}")
+            logger.warning(format_error_log(
+                "APP-GENERAL-045",
+                f"Failed to update ~/.bashrc: {e}"
+            ))
 
 
 class ApiKeyConnectivityTester:
@@ -601,9 +617,10 @@ class ApiKeyAutoSeeder:
                 if json_key:
                     return json_key
             except (json.JSONDecodeError, IOError):
-                logger.warning(
+                logger.warning(format_error_log(
+                    "APP-GENERAL-046",
                     f"Failed to read {self._claude_json_path} for auto-seeding"
-                )
+                ))
 
         return None
 

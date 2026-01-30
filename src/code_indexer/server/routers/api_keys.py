@@ -24,6 +24,7 @@ from ..services.api_key_management import (
     ApiKeyConnectivityTester,
 )
 from ..services.config_service import ConfigService
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +57,11 @@ def trigger_catchup_on_api_key_save(api_key: Optional[str]) -> bool:
     # Get global manager
     manager = get_claude_cli_manager()
     if manager is None:
-        logger.warning(
+        logger.warning(format_error_log(
+            "STORE-GENERAL-012",
             "Cannot trigger catch-up: ClaudeCliManager not initialized",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
         return False
 
     # Update the manager's API key
@@ -79,21 +81,23 @@ def trigger_catchup_on_api_key_save(api_key: Optional[str]) -> bool:
                     extra={"correlation_id": get_correlation_id()},
                 )
             elif result.error:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "STORE-GENERAL-013",
                     f"Catch-up partially completed: {result.error}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
             else:
                 logger.info(
                     "Catch-up completed: no repos needed processing",
                     extra={"correlation_id": get_correlation_id()},
                 )
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "STORE-GENERAL-014",
                 f"Catch-up processing failed: {e}",
                 exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
 
     catchup_thread = threading.Thread(
         target=run_catchup,
@@ -189,7 +193,10 @@ def _clear_from_claude_config(key_to_clear: str) -> Optional[str]:
                     json.dump(claude_config, f, indent=2)
                 return "~/.claude.json"
     except Exception as e:
-        logger.warning(f"Could not check/clear apiKey from ~/.claude.json: {e}")
+        logger.warning(format_error_log(
+            "STORE-GENERAL-015",
+            f"Could not check/clear apiKey from ~/.claude.json: {e}"
+        ))
     return None
 
 
@@ -209,7 +216,10 @@ def _clear_from_rc_files(key_to_clear: str, env_var_name: str) -> List[str]:
                     rc_path.write_text(new_content)
                     cleared.append(f"~/{rc_file}")
         except Exception as e:
-            logger.warning(f"Could not check/clear from ~/{rc_file}: {e}")
+            logger.warning(format_error_log(
+                "STORE-GENERAL-016",
+                f"Could not check/clear from ~/{rc_file}: {e}"
+            ))
     return cleared
 
 

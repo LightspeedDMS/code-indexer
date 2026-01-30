@@ -29,6 +29,7 @@ from .database_health_service import (
     get_database_health_service,
 )
 from .config_service import get_config_service
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,10 @@ def _load_thresholds_from_config() -> None:
             DISK_CRITICAL_THRESHOLD_PERCENT = config.health_config.disk_critical_threshold_percent
             CPU_SUSTAINED_THRESHOLD = config.health_config.cpu_sustained_threshold_percent
     except Exception as e:
-        logger.warning(f"Could not read health config, using defaults: {e}")
+        logger.warning(format_error_log(
+            "DEPLOY-GENERAL-039",
+            f"Could not read health config, using defaults: {e}"
+        ))
 
 
 class HealthCheckService:
@@ -111,10 +115,11 @@ class HealthCheckService:
             _load_thresholds_from_config()
 
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "DEPLOY-GENERAL-040",
                 f"Failed to initialize real dependencies: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             raise RuntimeError(f"Cannot initialize health check service: {e}")
 
     def get_system_health(self) -> HealthCheckResponse:
@@ -205,10 +210,11 @@ class HealthCheckService:
 
         except Exception as e:
             response_time = int((time.time() - start_time) * 1000)
-            logger.error(
+            logger.error(format_error_log(
+                "DEPLOY-GENERAL-041",
                 f"Database health check failed: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
 
             return ServiceHealthInfo(
                 status=HealthStatus.UNHEALTHY,
@@ -265,10 +271,11 @@ class HealthCheckService:
 
         except Exception as e:
             response_time = int((time.time() - start_time) * 1000)
-            logger.error(
+            logger.error(format_error_log(
+                "GIT-GENERAL-043",
                 f"Storage health check failed: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
 
             return ServiceHealthInfo(
                 status=HealthStatus.UNHEALTHY,
@@ -699,10 +706,11 @@ class HealthCheckService:
                     continue
 
         except Exception as e:
-            logger.warning(
+            logger.warning(format_error_log(
+                "GIT-GENERAL-044",
                 f"Failed to get mounted volumes: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
 
         return volumes
 
@@ -722,10 +730,11 @@ class HealthCheckService:
             if background_job_manager:
                 return background_job_manager.get_active_job_count()
         except Exception as e:
-            logger.warning(
+            logger.warning(format_error_log(
+                "GIT-GENERAL-045",
                 f"Failed to get active job count: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
 
         # Return 0 if job manager not available or failed to query
         return 0

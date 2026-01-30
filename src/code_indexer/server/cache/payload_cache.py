@@ -18,6 +18,7 @@ from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import CacheConfig
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +177,10 @@ class PayloadCache:
             try:
                 self.cleanup_expired()
             except Exception as e:
-                logger.warning(f"Cleanup failed: {e}")
+                logger.warning(format_error_log(
+                    "GIT-GENERAL-014",
+                    f"Cleanup failed: {e}"
+                ))
 
     def store(self, content: str) -> str:
         """Store content and return a UUID4 handle.

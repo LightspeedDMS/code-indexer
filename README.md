@@ -2,7 +2,7 @@
 
 AI-powered semantic code search for your codebase. Find code by meaning, not just keywords.
 
-**Version 8.8.1** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
+**Version 8.8.2** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
 
 ## Quick Navigation
 
@@ -261,6 +261,12 @@ cidx-server start       # Start multi-user server
 - **OTEL Telemetry**: OpenTelemetry integration for traces, metrics, and observability
 - **Auto-Discovery**: Automatic repository discovery from GitHub organizations or local paths
 - **Auto-Update**: Job-aware server updates with graceful drain mode
+
+**Self-Monitoring** (v8.8.2+):
+- **Claude-Powered Log Analysis**: Scheduled background scans analyze server logs using Claude CLI
+- **Automatic Issue Creation**: Detected bugs automatically create GitHub issues with reproduction steps
+- **Actionable Focus**: Filters configuration noise, reports only development-actionable bugs
+- **Manual Trigger**: On-demand scans via admin API endpoint
 
 **Authentication & Authorization**:
 - OAuth 2.0 and OIDC (OpenID Connect) support

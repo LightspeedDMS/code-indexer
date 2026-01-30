@@ -12,6 +12,7 @@ import asyncio
 from typing import Dict, Optional, Any
 from dataclasses import dataclass, asdict
 from pathlib import Path
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -151,27 +152,30 @@ class SCIPResolutionQueue:
         except asyncio.CancelledError:
             # Worker is being stopped, re-queue current project if retrieved
             if item_retrieved and project:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "MCP-GENERAL-143",
                     f"Worker cancelled while processing {project.project_path}, "
                     "re-queuing project",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 await self.queue.put(project)
             raise
         except Exception as e:
             # Log error with project info if available
             if project:
-                logger.error(
+                logger.error(format_error_log(
+                    "MCP-GENERAL-144",
                     f"Error processing project {project.project_path}: {e}",
                     exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
             else:
-                logger.error(
+                logger.error(format_error_log(
+                    "MCP-GENERAL-145",
                     f"Error before project retrieval: {e}",
                     exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
         finally:
             async with self._lock:
                 self.current_project = None
@@ -277,11 +281,12 @@ class SCIPResolutionQueue:
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    logger.error(
+                    logger.error(format_error_log(
+                        "MCP-GENERAL-146",
                         f"Error in worker loop: {e}",
                         exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ))
                     # Continue processing other projects
 
         except asyncio.CancelledError:

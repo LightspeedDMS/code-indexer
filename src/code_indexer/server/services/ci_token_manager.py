@@ -20,6 +20,7 @@ from typing import Any, Dict, Optional, cast
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import padding
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -310,10 +311,11 @@ class CITokenManager:
             try:
                 decrypted_token = self._decrypt_token(token_row["encrypted_token"])
             except Exception as e:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "APP-GENERAL-061",
                     f"Failed to decrypt {platform} token, treating as unconfigured: {e}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 # Delete the corrupted token from storage
                 self._sqlite_backend.delete_token(platform)
                 return None
@@ -335,10 +337,11 @@ class CITokenManager:
             try:
                 decrypted_token = self._decrypt_token(token_data["token"])
             except Exception as e:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "APP-GENERAL-062",
                     f"Failed to decrypt {platform} token, treating as unconfigured: {e}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 # Delete the corrupted token from storage
                 del tokens[platform]
                 self._save_tokens(tokens)

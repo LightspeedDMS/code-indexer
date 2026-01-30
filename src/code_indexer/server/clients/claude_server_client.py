@@ -251,7 +251,7 @@ class ClaudeServerClient:
             )
 
     async def create_job(
-        self, prompt: str, repositories: List[str]
+        self, prompt: str, repositories: List[str], model: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Create a new job with the given prompt.
@@ -259,6 +259,7 @@ class ClaudeServerClient:
         Args:
             prompt: The rendered prompt for the job
             repositories: List of repository aliases to use
+            model: Optional Claude model to use (opus or sonnet) - Story #76 AC6
 
         Returns:
             Dictionary with job info including job_id
@@ -266,11 +267,17 @@ class ClaudeServerClient:
         Raises:
             ClaudeServerError: On job creation failure
         """
+        # Claude Server expects capitalized field names
+        json_data: Dict[str, Any] = {"prompt": prompt, "Repositories": repositories}
+
+        # Story #76 AC6: Include Model field if provided
+        if model:
+            json_data["Model"] = model
+
         response = await self._make_authenticated_request(
             "POST",
             "/jobs",
-            # Claude Server expects capitalized field names
-            json_data={"prompt": prompt, "Repositories": repositories},
+            json_data=json_data,
         )
 
         if response.status_code in (200, 201):

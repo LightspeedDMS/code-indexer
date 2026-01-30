@@ -19,6 +19,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from typing import Optional, Dict, Any
 
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
+
 from ..auth.dependencies import get_current_user
 from ..auth.user_manager import User
 from ..multi.scip_models import SCIPMultiRequest, SCIPMultiResponse
@@ -205,12 +207,23 @@ def multi_repository_definition(
 
     except ValueError as e:
         # Validation error from service
-        logger.error(f"SCIP multi-definition validation error: {e}")
+        logger.error(format_error_log(
+            "WEB-GENERAL-031",
+            "SCIP multi-definition validation error",
+            error=str(e)),
+            extra=get_log_extra("WEB-GENERAL-031")
+        )
         raise HTTPException(status_code=422, detail=str(e))
 
     except Exception as e:
         # Unexpected error
-        logger.error(f"SCIP multi-definition failed: {e}", exc_info=True)
+        logger.error(format_error_log(
+            "WEB-GENERAL-032",
+            "SCIP multi-definition failed",
+            error=str(e)),
+            extra=get_log_extra("WEB-GENERAL-032"),
+            exc_info=True
+        )
         raise HTTPException(
             status_code=500, detail=f"SCIP multi-definition failed: {str(e)}"
         )
@@ -283,12 +296,23 @@ def multi_repository_references(
 
     except ValueError as e:
         # Validation error from service
-        logger.error(f"SCIP multi-references validation error: {e}")
+        logger.error(format_error_log(
+            "WEB-GENERAL-033",
+            "SCIP multi-references validation error",
+            error=str(e)),
+            extra=get_log_extra("WEB-GENERAL-033")
+        )
         raise HTTPException(status_code=422, detail=str(e))
 
     except Exception as e:
         # Unexpected error
-        logger.error(f"SCIP multi-references failed: {e}", exc_info=True)
+        logger.error(format_error_log(
+            "WEB-GENERAL-034",
+            "SCIP multi-references failed",
+            error=str(e)),
+            extra=get_log_extra("WEB-GENERAL-034"),
+            exc_info=True
+        )
         raise HTTPException(
             status_code=500, detail=f"SCIP multi-references failed: {str(e)}"
         )
@@ -361,12 +385,23 @@ def multi_repository_dependencies(
 
     except ValueError as e:
         # Validation error from service
-        logger.error(f"SCIP multi-dependencies validation error: {e}")
+        logger.error(format_error_log(
+            "WEB-GENERAL-035",
+            "SCIP multi-dependencies validation error",
+            error=str(e)),
+            extra=get_log_extra("WEB-GENERAL-035")
+        )
         raise HTTPException(status_code=422, detail=str(e))
 
     except Exception as e:
         # Unexpected error
-        logger.error(f"SCIP multi-dependencies failed: {e}", exc_info=True)
+        logger.error(format_error_log(
+            "WEB-GENERAL-036",
+            "SCIP multi-dependencies failed",
+            error=str(e)),
+            extra=get_log_extra("WEB-GENERAL-036"),
+            exc_info=True
+        )
         raise HTTPException(
             status_code=500, detail=f"SCIP multi-dependencies failed: {str(e)}"
         )
@@ -439,12 +474,23 @@ def multi_repository_dependents(
 
     except ValueError as e:
         # Validation error from service
-        logger.error(f"SCIP multi-dependents validation error: {e}")
+        logger.error(format_error_log(
+            "WEB-GENERAL-037",
+            "SCIP multi-dependents validation error",
+            error=str(e)),
+            extra=get_log_extra("WEB-GENERAL-037")
+        )
         raise HTTPException(status_code=422, detail=str(e))
 
     except Exception as e:
         # Unexpected error
-        logger.error(f"SCIP multi-dependents failed: {e}", exc_info=True)
+        logger.error(format_error_log(
+            "WEB-GENERAL-038",
+            "SCIP multi-dependents failed",
+            error=str(e)),
+            extra=get_log_extra("WEB-GENERAL-038"),
+            exc_info=True
+        )
         raise HTTPException(
             status_code=500, detail=f"SCIP multi-dependents failed: {str(e)}"
         )
@@ -520,12 +566,23 @@ def multi_repository_callchain(
 
     except ValueError as e:
         # Validation error from service
-        logger.error(f"SCIP multi-callchain validation error: {e}")
+        logger.error(format_error_log(
+            "WEB-GENERAL-039",
+            "SCIP multi-callchain validation error",
+            error=str(e)),
+            extra=get_log_extra("WEB-GENERAL-039")
+        )
         raise HTTPException(status_code=422, detail=str(e))
 
     except Exception as e:
         # Unexpected error
-        logger.error(f"SCIP multi-callchain failed: {e}", exc_info=True)
+        logger.error(format_error_log(
+            "WEB-GENERAL-040",
+            "SCIP multi-callchain failed",
+            error=str(e)),
+            extra=get_log_extra("WEB-GENERAL-040"),
+            exc_info=True
+        )
         raise HTTPException(
             status_code=500, detail=f"SCIP multi-callchain failed: {str(e)}"
         )

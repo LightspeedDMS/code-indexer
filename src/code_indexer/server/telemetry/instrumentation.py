@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, List
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -93,13 +94,17 @@ def instrument_fastapi(
         return True
 
     except ImportError as e:
-        logger.warning(
+        logger.warning(format_error_log(
+            "QUERY-GENERAL-014",
             f"FastAPI instrumentation unavailable: {e}. "
             "Install opentelemetry-instrumentation-fastapi for auto-tracing."
-        )
+        ))
         return False
     except Exception as e:
-        logger.error(f"Failed to instrument FastAPI: {e}")
+        logger.error(format_error_log(
+            "QUERY-GENERAL-015",
+            f"Failed to instrument FastAPI: {e}"
+        ))
         return False
 
 
@@ -124,7 +129,10 @@ def uninstrument_fastapi() -> bool:
         return True
 
     except Exception as e:
-        logger.error(f"Failed to uninstrument FastAPI: {e}")
+        logger.error(format_error_log(
+            "QUERY-GENERAL-016",
+            f"Failed to uninstrument FastAPI: {e}"
+        ))
         return False
 
 

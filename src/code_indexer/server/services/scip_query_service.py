@@ -29,6 +29,7 @@ SERVER-ONLY SCOPE:
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Union, TYPE_CHECKING
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 if TYPE_CHECKING:
     from .access_filtering_service import AccessFilteringService
@@ -212,7 +213,10 @@ class SCIPQueryService:
                     self._query_result_to_dict(r) for r in results
                 )
             except Exception as e:
-                logger.warning(f"Failed to query SCIP file {scip_file}: {e}")
+                logger.warning(format_error_log(
+                    "MCP-GENERAL-138",
+                    f"Failed to query SCIP file {scip_file}: {e}"
+                ))
                 continue
 
         return all_results
@@ -257,7 +261,10 @@ class SCIPQueryService:
                     self._query_result_to_dict(r) for r in results
                 )
             except Exception as e:
-                logger.warning(f"Failed to query SCIP file {scip_file}: {e}")
+                logger.warning(format_error_log(
+                    "MCP-GENERAL-139",
+                    f"Failed to query SCIP file {scip_file}: {e}"
+                ))
                 continue
 
         return all_results
@@ -302,7 +309,10 @@ class SCIPQueryService:
                     self._query_result_to_dict(r) for r in results
                 )
             except Exception as e:
-                logger.warning(f"Failed to query SCIP file {scip_file}: {e}")
+                logger.warning(format_error_log(
+                    "MCP-GENERAL-140",
+                    f"Failed to query SCIP file {scip_file}: {e}"
+                ))
                 continue
 
         return all_results
@@ -347,7 +357,10 @@ class SCIPQueryService:
                     self._query_result_to_dict(r) for r in results
                 )
             except Exception as e:
-                logger.warning(f"Failed to query SCIP file {scip_file}: {e}")
+                logger.warning(format_error_log(
+                    "MCP-GENERAL-141",
+                    f"Failed to query SCIP file {scip_file}: {e}"
+                ))
                 continue
 
         return all_results
@@ -460,7 +473,10 @@ class SCIPQueryService:
                     for chain in chains
                 )
             except Exception as e:
-                logger.warning(f"Failed to trace call chain in {scip_file}: {e}")
+                logger.warning(format_error_log(
+                    "MCP-GENERAL-142",
+                    f"Failed to trace call chain in {scip_file}: {e}"
+                ))
                 continue
 
         return all_results

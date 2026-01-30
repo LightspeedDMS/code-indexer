@@ -26,6 +26,7 @@ from .resource_manager import create_server_resource_manager
 from .golden_repo_manager import GoldenRepoManager, GitOperationError
 from .activated_repo_manager import ActivatedRepoManager
 from .background_jobs import BackgroundJobManager
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -139,10 +140,11 @@ class ResourceManagedGoldenRepoOperations:
                     )
                     # Continue cleanup - don't fail entire operation for logging issue
 
-                logger.error(
+                logger.error(format_error_log(
+                    "REPO-GENERAL-041",
                     f"Golden repo addition failed for {alias}: {e}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 raise GitOperationError(
                     f"Resource-managed golden repo addition failed: {str(e)}"
                 )
@@ -254,10 +256,11 @@ class ResourceManagedActivatedRepoOperations:
                 return result
 
             except Exception as e:
-                logger.error(
+                logger.error(format_error_log(
+                    "SCIP-GENERAL-001",
                     f"Resource-managed sync failed for {username}/{user_alias}: {e}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 raise
 
         # All tracked resources automatically cleaned up
@@ -356,10 +359,11 @@ class ResourceManagedBackgroundJobOperations:
                     )
                     # Continue cleanup - don't fail entire operation for logging issue
 
-                logger.error(
+                logger.error(format_error_log(
+                    "SCIP-GENERAL-002",
                     f"Resource-managed job {job_id} failed: {e}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 raise
 
         # All job resources automatically cleaned up
@@ -399,10 +403,11 @@ async def resource_managed_repository_operation(operation_name: str):
         try:
             yield rm
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "SCIP-GENERAL-003",
                 f"Resource-managed operation {operation_name} failed: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             raise
         finally:
             logger.debug(
@@ -438,10 +443,11 @@ async def integrate_resource_manager_with_existing_operations():
             extra={"correlation_id": get_correlation_id()},
         )
     except Exception as e:
-        logger.error(
+        logger.error(format_error_log(
+            "SCIP-GENERAL-004",
             f"Failed to add golden repo with resource management: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
+        ))
 
     # Example: Using the context manager for custom operations
     async with resource_managed_repository_operation("custom_repo_sync") as rm:

@@ -40,7 +40,9 @@ class BaseTemplateSectionTest:
                 "claude_delegation": {"is_configured": False, "function_repo_alias": "", "claude_server_url": "", "claude_server_username": "", "claude_server_credential_type": "password", "cidx_callback_url": "", "skip_ssl_verify": False},
                 "search_limits": {"max_result_size_mb": 1, "timeout_seconds": 30},
                 "file_content_limits": {"max_tokens_per_request": 5000, "chars_per_token": 4},
-                "golden_repos": {"refresh_interval_seconds": 3600},
+                "golden_repos": {"refresh_interval_seconds": 3600, "analysis_model": "opus"},
+                "content_limits": {"chars_per_token": 4, "file_content_max_tokens": 50000, "git_diff_max_tokens": 50000, "git_log_max_tokens": 50000, "search_result_max_tokens": 50000, "cache_ttl_seconds": 3600, "cache_max_entries": 10000},
+                "provider_api_keys": {"anthropic_configured": False, "voyageai_configured": False},
                 # Story #3 - Phase 2: P0/P1 settings
                 "mcp_session": {"session_ttl_seconds": 3600, "cleanup_interval_seconds": 900},
                 "health": {"memory_warning_threshold_percent": 80.0, "memory_critical_threshold_percent": 90.0, "disk_warning_threshold_percent": 80.0, "disk_critical_threshold_percent": 90.0, "cpu_sustained_threshold_percent": 95.0, "system_metrics_cache_ttl_seconds": 5.0},
@@ -134,6 +136,7 @@ class TestGoldenReposSectionTemplate(BaseTemplateSectionTest):
 
         assert 'action="/admin/config/golden_repos"' in rendered, "Form should POST to /admin/config/golden_repos"
         assert 'name="refresh_interval_seconds"' in rendered, "refresh_interval_seconds input should exist"
+        assert 'name="analysis_model"' in rendered, "analysis_model select should exist"
 
     def test_golden_repos_edit_button(self):
         """Test Golden Repos section has Edit button."""

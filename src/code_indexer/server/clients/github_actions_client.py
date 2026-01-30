@@ -18,6 +18,7 @@ from tenacity import (
     retry_if_exception,
     before_sleep_log,
 )
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 logger = logging.getLogger(__name__)
 
@@ -214,10 +215,11 @@ class GitHubActionsClient:
             updated = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
             return int((updated - created).total_seconds())
         except (ValueError, AttributeError) as e:
-            logger.warning(
+            logger.warning(format_error_log(
+                "GIT-GENERAL-015",
                 f"Failed to calculate duration: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return None
 
     async def _fetch_jobs(
@@ -231,10 +233,11 @@ class GitHubActionsClient:
         try:
             response = await client.get(jobs_url, headers=headers)
             if response.status_code != 200:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "GIT-GENERAL-016",
                     f"Failed to fetch jobs for run {run_id}: HTTP {response.status_code}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return []
 
             jobs_data = response.json()
@@ -261,10 +264,11 @@ class GitHubActionsClient:
                 )
             return jobs
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "GIT-GENERAL-017",
                 f"Error fetching jobs for run {run_id}: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return []
 
     async def _fetch_artifacts(
@@ -278,10 +282,11 @@ class GitHubActionsClient:
         try:
             response = await client.get(artifacts_url, headers=headers)
             if response.status_code != 200:
-                logger.warning(
+                logger.warning(format_error_log(
+                    "GIT-GENERAL-018",
                     f"Failed to fetch artifacts for run {run_id}: HTTP {response.status_code}",
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ))
                 return []
 
             artifacts_data = response.json()
@@ -298,10 +303,11 @@ class GitHubActionsClient:
                 )
             return artifacts
         except Exception as e:
-            logger.error(
+            logger.error(format_error_log(
+                "GIT-GENERAL-019",
                 f"Error fetching artifacts for run {run_id}: {e}",
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ))
             return []
 
     @retry(
