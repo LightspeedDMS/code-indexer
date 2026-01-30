@@ -114,8 +114,15 @@ class GitOperationsService:
         config = config_manager.load_config()
 
         # Bug #83 Phase 1: Load timeout configuration from config_manager
-        self._git_timeouts = config.git_timeouts_config
-        self._api_limits = config.api_limits_config
+        # Handle case where no config file exists (e.g., CI/CD parity tests)
+        if config is not None:
+            self._git_timeouts = config.git_timeouts_config
+            self._api_limits = config.api_limits_config
+        else:
+            # Use defaults when no config file exists
+            from ..utils.config_manager import GitTimeoutsConfig, ApiLimitsConfig
+            self._git_timeouts = GitTimeoutsConfig()
+            self._api_limits = ApiLimitsConfig()
 
         # Import ActivatedRepoManager for resolving repo aliases to paths
         # (import here to avoid circular imports)
