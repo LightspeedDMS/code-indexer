@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.7] - 2026-01-30
+
+### Fixed
+
+- **Self-Monitoring MONITOR-GENERAL-011 on Production Servers** - Fixed repo detection failure on pip-installed packages:
+  - Root cause: Detection only walked up from `__file__` which points to site-packages (no `.git` there)
+  - Solution 1: Added cwd-based fallback detection - if systemd `WorkingDirectory` is the cloned repo, detection succeeds
+  - Solution 2: Added `github_repo` config field in Self-Monitoring UI for manual override
+  - Priority order: 1) Manually configured `github_repo`, 2) Auto-detected from app.state
+  - Production servers can now set `WorkingDirectory` to cloned repo OR manually configure `github_repo` in UI
+
+---
+
 ## [8.8.6] - 2026-01-30
 
 ### Fixed

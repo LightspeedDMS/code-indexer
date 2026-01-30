@@ -5,7 +5,9 @@ Validates that app.py startup stores repo_root and github_repo in app.state
 for manual trigger route access, preventing re-detection issues on production servers.
 """
 
+import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 def test_app_startup_stores_repo_root_in_state(web_client):
@@ -52,3 +54,34 @@ def test_app_startup_stores_github_repo_in_state(web_client):
     else:
         assert app.state.self_monitoring_github_repo is None, \
             "github_repo should be None when self-monitoring is disabled"
+
+
+def test_detect_repo_root_falls_back_to_cwd():
+    """
+    Test _detect_repo_root() uses cwd as fallback when __file__ detection fails.
+
+    This simulates pip-installed packages where __file__ points to site-packages
+    but the systemd service runs from the cloned repo directory (cwd has .git).
+
+    Bug: MONITOR-GENERAL-011
+    """
+    from code_indexer.server.app import _detect_repo_root
+
+    # Create a temporary directory structure simulating a git repo
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo_dir = Path(tmpdir) / "test-repo"
+        repo_dir.mkdir()
+        git_dir = repo_dir / ".git"
+        git_dir.mkdir()
+
+        # Test: When cwd is the repo directory, should detect from cwd
+        # (start_from_file=False simulates __file__ detection failure)
+        with patch("code_indexer.server.app.Path.cwd", return_value=repo_dir):
+            result = _detect_repo_root(start_from_file=False)
+
+            assert result is not None, \
+                "Should detect repo_root from cwd when __file__ detection skipped"
+            assert result == repo_dir, \
+                f"Should detect {repo_dir}, got {result}"
+            assert (result / ".git").exists(), \
+                "Detected repo_root should have .git directory"

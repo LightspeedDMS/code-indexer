@@ -550,6 +550,9 @@ class SelfMonitoringConfig:
     prompt_template: str = ""
     # User modified flag - prevents automatic prompt upgrades
     prompt_user_modified: bool = False
+    # GitHub repository (owner/repo format) - Bug Fix: MONITOR-GENERAL-011
+    # Auto-detected from git remote if empty. Set manually for production servers.
+    github_repo: Optional[str] = None
 
 
 @dataclass

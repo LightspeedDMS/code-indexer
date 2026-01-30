@@ -198,3 +198,19 @@ class TestServerConfigManager:
         assert secret is not None
         assert len(secret) > 0
         assert (tmp_path / ".jwt_secret").exists()
+
+    def test_self_monitoring_config_github_repo(self, tmp_path):
+        """Test github_repo field in SelfMonitoringConfig can be set and persisted."""
+        config_manager = ServerConfigManager(str(tmp_path))
+
+        # Create config with github_repo set
+        config = config_manager.create_default_config()
+        assert config.self_monitoring_config.github_repo is None  # Default is None
+
+        # Set github_repo
+        config.self_monitoring_config.github_repo = "LightspeedDMS/code-indexer"
+        config_manager.save_config(config)
+
+        # Load config and verify github_repo is persisted
+        loaded_config = config_manager.load_config()
+        assert loaded_config.self_monitoring_config.github_repo == "LightspeedDMS/code-indexer"

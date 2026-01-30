@@ -132,6 +132,52 @@ JOB_STATUS_PENDING = "pending"
 JOB_STATUS_RUNNING = "running"
 
 
+def _detect_repo_root(start_from_file: bool = True) -> Optional[Path]:
+    """
+    Detect git repository root directory.
+
+    Tries two strategies in order:
+    1. Walk up from __file__ location (works for development/source installations)
+    2. Walk up from current working directory (works for pip-installed packages)
+
+    Args:
+        start_from_file: If True, try __file__ location first. For testing, can be False.
+
+    Returns:
+        Path to repository root if found, None otherwise.
+
+    Bug: MONITOR-GENERAL-011 - Production servers with pip-installed packages
+    need cwd fallback because __file__ points to site-packages.
+    """
+    repo_root = None
+
+    # Strategy 1: Try __file__-based detection (development/source installations)
+    if start_from_file:
+        current = Path(__file__).resolve().parent
+        while current != current.parent:
+            if (current / '.git').exists():
+                repo_root = current
+                break
+            current = current.parent
+
+    # Strategy 2: Fallback to cwd (pip-installed packages on production)
+    # If systemd service runs from cloned repo directory, cwd will have .git
+    if not repo_root:
+        cwd = Path.cwd()
+        current = cwd
+        while current != current.parent:
+            if (current / '.git').exists():
+                repo_root = current
+                logger.info(
+                    f"Self-monitoring: Detected repo root from cwd: {repo_root}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                break
+            current = current.parent
+
+    return repo_root
+
+
 # Pydantic models for API requests/responses
 class LoginRequest(BaseModel):
     """Login request model with input validation."""
@@ -2566,20 +2612,16 @@ def create_app() -> FastAPI:
 
             # Auto-detect repo root and GitHub repository from git remote
             # The server runs from within the cloned repo, so we can detect this
-            repo_root = None
             github_repo = None
 
-            # Find repo root by walking up from this file until we find .git
-            current = Path(__file__).resolve().parent
-            while current != current.parent:
-                if (current / '.git').exists():
-                    repo_root = current
-                    break
-                current = current.parent
+            # Detect repo root (tries __file__ location, then cwd as fallback)
+            # Bug MONITOR-GENERAL-011: cwd fallback for pip-installed packages
+            repo_root = _detect_repo_root()
 
             if repo_root:
                 # Extract github_repo from git remote
                 import re
+                import subprocess
                 try:
                     git_result = subprocess.run(
                         ["git", "remote", "get-url", "origin"],
