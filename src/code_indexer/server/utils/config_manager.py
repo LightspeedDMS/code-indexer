@@ -50,23 +50,6 @@ class CacheConfig:
 
 
 @dataclass
-class ReindexingConfig:
-    """Reindexing trigger and analysis configuration."""
-
-    change_percentage_threshold: float = 80.0
-    accuracy_threshold: float = 0.85
-    max_index_age_days: int = 30
-    batch_size: int = 100
-    max_analysis_time_seconds: int = 300
-    max_memory_usage_mb: int = 512
-    enable_structural_analysis: bool = True
-    enable_config_change_detection: bool = True
-    enable_corruption_detection: bool = True
-    enable_periodic_check: bool = True
-    parallel_analysis: bool = True
-
-
-@dataclass
 class ServerResourceConfig:
     """
     Resource limits and timeout configuration for CIDX server.
@@ -297,7 +280,7 @@ class ScipConfig:
 @dataclass
 class GitTimeoutsConfig:
     """
-    Git operation timeouts configuration (Story #3 - Phase 2, AC12-AC15, AC27-AC30).
+    Git operation timeouts configuration (Story #3 - Phase 2, AC12-AC15, AC27-AC28).
 
     Controls timeout values for various git operations.
     Migrated from hardcoded constants in git_operations_service.py and activated_repo_manager.py.
@@ -307,18 +290,10 @@ class GitTimeoutsConfig:
     git_local_timeout: int = 30
     # AC14: Remote git operation timeout (default 300s, minimum 30s)
     git_remote_timeout: int = 300
-    # AC15: Git command timeout (default 30s, minimum 5s)
-    git_command_timeout: int = 30
-    # AC15: Git fetch timeout (default 60s, minimum 10s)
-    git_fetch_timeout: int = 60
     # AC27: GitHub API timeout (default 30s, range 5-120s)
     github_api_timeout: int = 30
     # AC28: GitLab API timeout (default 30s, range 5-120s)
     gitlab_api_timeout: int = 30
-    # AC29: GitHub provider timeout (default 30s, range 5-120s)
-    github_provider_timeout: int = 30
-    # AC30: GitLab provider timeout (default 30s, range 5-120s)
-    gitlab_provider_timeout: int = 30
 
 
 @dataclass
@@ -574,7 +549,6 @@ class ServerConfig:
     password_security: Optional[PasswordSecurityConfig] = None
     resource_config: Optional[ServerResourceConfig] = None
     cache_config: Optional[CacheConfig] = None
-    reindexing_config: Optional[ReindexingConfig] = None
     auto_watch_config: Optional[AutoWatchConfig] = None
     oidc_provider_config: Optional[OIDCProviderConfig] = None
     telemetry_config: Optional[TelemetryConfig] = None
@@ -624,8 +598,6 @@ class ServerConfig:
             self.resource_config = ServerResourceConfig()
         if self.cache_config is None:
             self.cache_config = CacheConfig()
-        if self.reindexing_config is None:
-            self.reindexing_config = ReindexingConfig()
         if self.auto_watch_config is None:
             self.auto_watch_config = AutoWatchConfig()
         if self.oidc_provider_config is None:
@@ -803,14 +775,6 @@ class ServerConfigManager:
             ):
                 config_dict["cache_config"] = CacheConfig(**config_dict["cache_config"])
 
-            # Convert nested reindexing_config dict to ReindexingConfig
-            if "reindexing_config" in config_dict and isinstance(
-                config_dict["reindexing_config"], dict
-            ):
-                config_dict["reindexing_config"] = ReindexingConfig(
-                    **config_dict["reindexing_config"]
-                )
-
             # Story #29: Migrate old omni_search_config to multi_search_limits_config
             if "omni_search_config" in config_dict and isinstance(
                 config_dict["omni_search_config"], dict
@@ -906,8 +870,19 @@ class ServerConfigManager:
             if "git_timeouts_config" in config_dict and isinstance(
                 config_dict["git_timeouts_config"], dict
             ):
+                # Bug #83 Phase 1: Remove obsolete timeout fields for backward compatibility
+                git_timeouts_dict = config_dict["git_timeouts_config"].copy()
+                obsolete_fields = [
+                    "git_command_timeout",
+                    "git_fetch_timeout",
+                    "github_provider_timeout",
+                    "gitlab_provider_timeout",
+                ]
+                for field in obsolete_fields:
+                    git_timeouts_dict.pop(field, None)
+
                 config_dict["git_timeouts_config"] = GitTimeoutsConfig(
-                    **config_dict["git_timeouts_config"]
+                    **git_timeouts_dict
                 )
 
             # Convert nested error_handling_config dict to ErrorHandlingConfig
@@ -1050,6 +1025,9 @@ class ServerConfigManager:
                 config_dict["content_limits_config"] = ContentLimitsConfig(
                     **config_dict["content_limits_config"]
                 )
+
+            # Remove obsolete reindexing_config field (deleted in previous commit)
+            config_dict.pop("reindexing_config", None)
 
             return ServerConfig(**config_dict)
         except json.JSONDecodeError as e:
@@ -1321,16 +1299,6 @@ class ServerConfigManager:
                 raise ValueError(
                     f"git_remote_timeout must be >= 30, got {config.git_timeouts_config.git_remote_timeout}"
                 )
-            # AC15: git_command_timeout minimum 5 seconds
-            if config.git_timeouts_config.git_command_timeout < 5:
-                raise ValueError(
-                    f"git_command_timeout must be >= 5, got {config.git_timeouts_config.git_command_timeout}"
-                )
-            # AC15: git_fetch_timeout minimum 10 seconds
-            if config.git_timeouts_config.git_fetch_timeout < 10:
-                raise ValueError(
-                    f"git_fetch_timeout must be >= 10, got {config.git_timeouts_config.git_fetch_timeout}"
-                )
             # AC27: github_api_timeout range 5-120 seconds
             if not (5 <= config.git_timeouts_config.github_api_timeout <= 120):
                 raise ValueError(
@@ -1340,16 +1308,6 @@ class ServerConfigManager:
             if not (5 <= config.git_timeouts_config.gitlab_api_timeout <= 120):
                 raise ValueError(
                     f"gitlab_api_timeout must be between 5 and 120, got {config.git_timeouts_config.gitlab_api_timeout}"
-                )
-            # AC29: github_provider_timeout range 5-120 seconds
-            if not (5 <= config.git_timeouts_config.github_provider_timeout <= 120):
-                raise ValueError(
-                    f"github_provider_timeout must be between 5 and 120, got {config.git_timeouts_config.github_provider_timeout}"
-                )
-            # AC30: gitlab_provider_timeout range 5-120 seconds
-            if not (5 <= config.git_timeouts_config.gitlab_provider_timeout <= 120):
-                raise ValueError(
-                    f"gitlab_provider_timeout must be between 5 and 120, got {config.git_timeouts_config.gitlab_provider_timeout}"
                 )
 
         # Validate error_handling_config (Story #3 - Phase 2, AC16-AC18)

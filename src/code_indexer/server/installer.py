@@ -7,17 +7,23 @@ and startup script generation.
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 import getpass
+import gzip
 import logging
+import os
+import platform
+import shutil
 import socket
 import stat
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 from typing import Tuple, Optional
 
 from .auth.user_manager import UserManager
 from .utils.config_manager import ServerConfigManager
 from .utils.jwt_secret_manager import JWTSecretManager
+from .utils.ripgrep_installer import RipgrepInstaller
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +274,12 @@ WantedBy=multi-user.target
 
             # Try to install SCIP indexers (non-fatal if fails)
             self.install_scip_indexers()
+
+            # Try to install ripgrep (non-fatal if fails)
+            self.install_ripgrep()
+
+            # Try to install Coursier (non-fatal if fails)
+            self.install_coursier()
 
             # Seed initial admin user
             self.seed_initial_admin_user()
@@ -773,5 +785,92 @@ WantedBy=multi-user.target
             logger.error(
                 f"scip-go installation failed: {e}",
                 extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+    def install_ripgrep(self) -> bool:
+        """
+        Install ripgrep if not present (x86_64 Linux only).
+
+        Uses pre-compiled static MUSL binary from GitHub releases.
+        Works on Amazon Linux, Rocky Linux, and Ubuntu without dependencies.
+
+        Returns:
+            True if ripgrep is available after this method
+            (either already installed or successfully installed),
+            False if installation failed or unsupported architecture.
+        """
+        installer = RipgrepInstaller(home_dir=self.home_dir)
+        return installer.install()
+
+    def _is_coursier_installed(self) -> bool:
+        """
+        Check if Coursier (cs) command exists.
+
+        Returns:
+            True if Coursier is installed and responds to --version
+        """
+        try:
+            result = subprocess.run(
+                ["cs", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
+    def install_coursier(self) -> bool:
+        """
+        Install Coursier if not present (x86_64 Linux only).
+
+        Coursier is required for Java/Kotlin SCIP indexing (scip-java).
+        Downloads pre-compiled binary from GitHub.
+
+        Returns:
+            True if Coursier available, False if installation failed.
+        """
+        if self._is_coursier_installed():
+            logger.info("Coursier already installed", extra={"correlation_id": get_correlation_id()})
+            return True
+
+        if platform.machine() != "x86_64":
+            logger.warning(
+                f"Coursier binary only available for x86_64, found {platform.machine()}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        try:
+            url = "https://github.com/coursier/launchers/raw/master/cs-x86_64-pc-linux.gz"
+            local_bin = self.home_dir / ".local" / "bin"
+            local_bin.mkdir(parents=True, exist_ok=True)
+
+            install_path = local_bin / "cs"
+            gz_path = local_bin / "cs.gz"
+
+            with urllib.request.urlopen(url, timeout=60) as response:
+                with open(gz_path, "wb") as f:
+                    f.write(response.read())
+
+            with gzip.open(gz_path, "rb") as f_in:
+                with open(install_path, "wb") as f_out:
+                    f_out.write(f_in.read())
+
+            gz_path.unlink()
+            install_path.chmod(install_path.stat().st_mode | stat.S_IEXEC)
+
+            if self._is_coursier_installed():
+                logger.info("Coursier installed successfully", extra={"correlation_id": get_correlation_id()})
+                return True
+            else:
+                logger.error("Coursier installation verification failed", extra={"correlation_id": get_correlation_id()})
+                return False
+
+        except Exception as e:
+            logger.error(
+                f"Coursier installation failed: {e}",
+                extra={"correlation_id": get_correlation_id(), "error": str(e)},
             )
             return False

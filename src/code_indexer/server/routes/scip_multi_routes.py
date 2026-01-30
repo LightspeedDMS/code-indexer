@@ -52,10 +52,17 @@ def get_scip_multi_service() -> SCIPMultiService:
         server_config = config_service.get_config()
         multi_search_limits = server_config.multi_search_limits_config
         assert multi_search_limits is not None  # Guaranteed by ServerConfig.__post_init__
+        # Bug #83-3 Fix: Pass SCIP query limits from config
+        scip_config = server_config.scip_config
+        assert scip_config is not None  # Guaranteed by ServerConfig.__post_init__
 
         _scip_multi_service = SCIPMultiService(
             max_workers=multi_search_limits.scip_multi_max_workers,
             query_timeout_seconds=multi_search_limits.scip_multi_timeout_seconds,
+            reference_limit=scip_config.scip_reference_limit,
+            dependency_depth=scip_config.scip_dependency_depth,
+            callchain_max_depth=scip_config.scip_callchain_max_depth,
+            callchain_limit=scip_config.scip_callchain_limit,
         )
     return _scip_multi_service
 

@@ -109,13 +109,9 @@ class TestGetCurrentConfigPhase2Sections:
         assert "git_timeouts" in config, "git_timeouts section should exist in config"
         assert "git_local_timeout" in config["git_timeouts"]
         assert "git_remote_timeout" in config["git_timeouts"]
-        assert "git_command_timeout" in config["git_timeouts"]
-        assert "git_fetch_timeout" in config["git_timeouts"]
         # Check default values (AC12-AC15)
         assert config["git_timeouts"]["git_local_timeout"] == 30
         assert config["git_timeouts"]["git_remote_timeout"] == 300
-        assert config["git_timeouts"]["git_command_timeout"] == 30
-        assert config["git_timeouts"]["git_fetch_timeout"] == 60
 
     def test_returns_error_handling_section(self):
         """Test _get_current_config includes error_handling section with defaults."""
@@ -211,7 +207,6 @@ class TestGetCurrentConfigPhase2Sections:
             "mcp_session": {"session_ttl_seconds": 7200, "cleanup_interval_seconds": 600},
             "health": {"memory_warning_threshold_percent": 75.0, "memory_critical_threshold_percent": 85.0, "disk_warning_threshold_percent": 75.0, "disk_critical_threshold_percent": 85.0, "cpu_sustained_threshold_percent": 90.0},
             "scip": {"indexing_timeout_seconds": 7200, "scip_generation_timeout_seconds": 1200, "temporal_stale_threshold_days": 14},
-            "git_timeouts": {"git_local_timeout": 60, "git_remote_timeout": 600, "git_command_timeout": 60, "git_fetch_timeout": 120},
             "error_handling": {"max_retry_attempts": 5, "base_retry_delay_seconds": 0.2, "max_retry_delay_seconds": 120.0},
             "api_limits": {"default_file_read_lines": 1000, "max_file_read_lines": 10000, "default_diff_lines": 1000, "max_diff_lines": 10000, "default_log_commits": 100, "max_log_commits": 1000},
             "web_security": {"csrf_max_age_seconds": 1200, "web_session_timeout_seconds": 43200},

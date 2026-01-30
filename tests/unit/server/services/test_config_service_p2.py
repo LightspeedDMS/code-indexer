@@ -23,8 +23,6 @@ class TestConfigServiceGetAllSettingsP2:
         assert "git_timeouts" in settings
         assert "git_local_timeout" in settings["git_timeouts"]
         assert "git_remote_timeout" in settings["git_timeouts"]
-        assert "git_command_timeout" in settings["git_timeouts"]
-        assert "git_fetch_timeout" in settings["git_timeouts"]
 
     def test_get_all_settings_git_timeouts_default_values(self, tmp_path):
         """AC12-AC15: git_timeouts has correct default values."""
@@ -33,8 +31,6 @@ class TestConfigServiceGetAllSettingsP2:
 
         assert settings["git_timeouts"]["git_local_timeout"] == 30
         assert settings["git_timeouts"]["git_remote_timeout"] == 300
-        assert settings["git_timeouts"]["git_command_timeout"] == 30
-        assert settings["git_timeouts"]["git_fetch_timeout"] == 60
 
     def test_get_all_settings_contains_error_handling(self, tmp_path):
         """AC16-AC18: get_all_settings includes error_handling section."""
@@ -121,25 +117,17 @@ class TestConfigServiceUpdateSettingGitTimeouts:
         config = service.get_config()
         assert config.git_timeouts_config.git_remote_timeout == 600
 
-    def test_update_git_command_timeout(self, tmp_path):
-        """AC12: Can update git_command_timeout via ConfigService."""
         service = ConfigService(server_dir_path=str(tmp_path))
         service.load_config()
 
-        service.update_setting("git_timeouts", "git_command_timeout", 60)
 
         config = service.get_config()
-        assert config.git_timeouts_config.git_command_timeout == 60
 
-    def test_update_git_fetch_timeout(self, tmp_path):
-        """AC15: Can update git_fetch_timeout via ConfigService."""
         service = ConfigService(server_dir_path=str(tmp_path))
         service.load_config()
 
-        service.update_setting("git_timeouts", "git_fetch_timeout", 120)
 
         config = service.get_config()
-        assert config.git_timeouts_config.git_fetch_timeout == 120
 
     def test_update_invalid_git_timeout_key_raises_error(self, tmp_path):
         """Test that invalid git_timeouts key raises ValueError."""

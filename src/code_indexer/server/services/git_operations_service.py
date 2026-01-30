@@ -30,15 +30,13 @@ from typing import Any, Dict, List, Optional
 
 from cachetools import TTLCache
 
-from code_indexer.config import ConfigManager
+from code_indexer.server.utils.config_manager import ServerConfigManager
 from code_indexer.utils.git_runner import run_git_command
 
 # Module logger
 logger = logging.getLogger(__name__)
 
-# Timeout constants
-DEFAULT_TIMEOUT = 30  # seconds for local git operations
-REMOTE_TIMEOUT = 300  # 5 minutes for remote operations (push/pull/fetch)
+# Token expiry constant (not configurable - internal security setting)
 TOKEN_EXPIRY = 300  # 5 minutes for confirmation tokens
 
 
@@ -91,13 +89,13 @@ class GitCommandError(Exception):
 class GitOperationsService:
     """Service for executing git operations with subprocess."""
 
-    def __init__(self, config_manager: Optional[ConfigManager] = None):
+    def __init__(self, config_manager: Optional[ServerConfigManager] = None):
         """
         Initialize GitOperationsService with configuration.
 
         Args:
-            config_manager: ConfigManager instance for loading git service config.
-                          If None, creates a new ConfigManager internally.
+            config_manager: ServerConfigManager instance for loading git service config.
+                          If None, creates a new ServerConfigManager internally.
         """
         # Thread-safe TTLCache for automatic token expiration (Issue #1, #2)
         # maxsize=10000: Reasonable limit for concurrent users
@@ -108,13 +106,16 @@ class GitOperationsService:
         )
         self._tokens_lock = threading.RLock()
 
-        # Create ConfigManager internally if not provided (for REST router compatibility)
+        # Create ServerConfigManager internally if not provided (for REST router compatibility)
         if config_manager is None:
-            config_manager = ConfigManager()
+            config_manager = ServerConfigManager()
 
         self.config_manager = config_manager
-        config = config_manager.load()
-        self.git_config = config.git_service
+        config = config_manager.load_config()
+
+        # Bug #83 Phase 1: Load timeout configuration from config_manager
+        self._git_timeouts = config.git_timeouts_config
+        self._api_limits = config.api_limits_config
 
         # Import ActivatedRepoManager for resolving repo aliases to paths
         # (import here to avoid circular imports)
@@ -809,7 +810,7 @@ class GitOperationsService:
         try:
             cmd = ["git", "status", "--porcelain=v1"]
             result = run_git_command(
-                cmd, cwd=repo_path, timeout=DEFAULT_TIMEOUT, check=True
+                cmd, cwd=repo_path, timeout=self._git_timeouts.git_local_timeout, check=True
             )
 
             # Parse porcelain v1 format: XY PATH
@@ -855,10 +856,6 @@ class GitOperationsService:
                 cwd=repo_path,
             )
 
-    # Story #686: Pagination constants for git_diff
-    DEFAULT_DIFF_LIMIT: int = 500  # Default lines returned when no limit specified
-    MAX_ALLOWED_DIFF_LINES: int = 5000  # Maximum lines client can request
-
     def git_diff(
         self,
         repo_path: Path,
@@ -895,8 +892,8 @@ class GitOperationsService:
             # Story #686: Validate and apply pagination defaults
             if offset < 0:
                 offset = 0
-            effective_limit = self.DEFAULT_DIFF_LIMIT if limit is None else limit
-            effective_limit = min(effective_limit, self.MAX_ALLOWED_DIFF_LINES)
+            effective_limit = self._api_limits.default_diff_lines if limit is None else limit
+            effective_limit = min(effective_limit, self._api_limits.max_diff_lines)
 
             cmd = ["git", "diff"]
 
@@ -923,7 +920,7 @@ class GitOperationsService:
                 cmd.extend(file_paths)
 
             result = run_git_command(
-                cmd, cwd=repo_path, timeout=DEFAULT_TIMEOUT, check=True
+                cmd, cwd=repo_path, timeout=self._git_timeouts.git_local_timeout, check=True
             )
 
             full_diff_text = result.stdout
@@ -970,10 +967,6 @@ class GitOperationsService:
                 cwd=repo_path,
             )
 
-    # Story #686: Pagination constants for git_log
-    DEFAULT_LOG_LIMIT: int = 50  # Default commits returned when no limit specified
-    MAX_ALLOWED_COMMITS: int = 500  # Maximum commits client can request
-
     def git_log(
         self,
         repo_path: Path,
@@ -1013,8 +1006,8 @@ class GitOperationsService:
             if offset < 0:
                 offset = 0
 
-            # Story #686: Cap limit at MAX_ALLOWED_COMMITS
-            effective_limit = min(limit, self.MAX_ALLOWED_COMMITS)
+            # Story #686: Cap limit at configured max_log_commits
+            effective_limit = min(limit, self._api_limits.max_log_commits)
 
             # Get total commit count (for pagination metadata)
             # Use branch or HEAD as the revision specifier
@@ -1033,7 +1026,7 @@ class GitOperationsService:
                 count_cmd.append(path)
 
             count_result = run_git_command(
-                count_cmd, cwd=repo_path, timeout=DEFAULT_TIMEOUT, check=True
+                count_cmd, cwd=repo_path, timeout=self._git_timeouts.git_local_timeout, check=True
             )
             total_commits = int(count_result.stdout.strip())
 
@@ -1061,7 +1054,7 @@ class GitOperationsService:
                 cmd.append(path)
 
             result = run_git_command(
-                cmd, cwd=repo_path, timeout=DEFAULT_TIMEOUT, check=True
+                cmd, cwd=repo_path, timeout=self._git_timeouts.git_local_timeout, check=True
             )
 
             commits = []
@@ -1127,7 +1120,7 @@ class GitOperationsService:
 
             cmd = ["git", "add"] + validated_paths
 
-            run_git_command(cmd, cwd=repo_path, timeout=DEFAULT_TIMEOUT, check=True)
+            run_git_command(cmd, cwd=repo_path, timeout=self._git_timeouts.git_local_timeout, check=True)
 
             return {"success": True, "staged_files": validated_paths}
 
@@ -1157,7 +1150,7 @@ class GitOperationsService:
         try:
             cmd = ["git", "reset", "HEAD"] + file_paths
 
-            run_git_command(cmd, cwd=repo_path, timeout=DEFAULT_TIMEOUT, check=True)
+            run_git_command(cmd, cwd=repo_path, timeout=self._git_timeouts.git_local_timeout, check=True)
 
             return {"success": True, "unstaged_files": file_paths}
 
@@ -1203,7 +1196,7 @@ class GitOperationsService:
             staged_result = run_git_command(
                 ["git", "diff", "--cached", "--name-only"],
                 cwd=repo_path,
-                timeout=DEFAULT_TIMEOUT,
+                timeout=self._git_timeouts.git_local_timeout,
                 check=True,
             )
             staged_files = [
@@ -1274,7 +1267,7 @@ class GitOperationsService:
             cmd = ["git", "commit", "-m", attributed_message]
 
             run_git_command(
-                cmd, cwd=repo_path, timeout=DEFAULT_TIMEOUT, check=True, env=env
+                cmd, cwd=repo_path, timeout=self._git_timeouts.git_local_timeout, check=True, env=env
             )
 
             # Get full commit hash using git rev-parse HEAD
@@ -1282,7 +1275,7 @@ class GitOperationsService:
             hash_result = run_git_command(
                 ["git", "rev-parse", "HEAD"],
                 cwd=repo_path,
-                timeout=DEFAULT_TIMEOUT,
+                timeout=self._git_timeouts.git_local_timeout,
                 check=True,
             )
             commit_hash = hash_result.stdout.strip()
@@ -1291,7 +1284,7 @@ class GitOperationsService:
             committer_result = run_git_command(
                 ["git", "show", "-s", "--format=%ce", "HEAD"],
                 cwd=repo_path,
-                timeout=DEFAULT_TIMEOUT,
+                timeout=self._git_timeouts.git_local_timeout,
                 check=True,
             )
             actual_committer = committer_result.stdout.strip()
@@ -1338,7 +1331,7 @@ class GitOperationsService:
                 cmd.append(branch)
 
             result = run_git_command(
-                cmd, cwd=repo_path, timeout=REMOTE_TIMEOUT, check=True
+                cmd, cwd=repo_path, timeout=self._git_timeouts.git_remote_timeout, check=True
             )
 
             pushed_commits = 0
@@ -1392,7 +1385,7 @@ class GitOperationsService:
                 cmd.append(branch)
 
             result = run_git_command(
-                cmd, cwd=repo_path, timeout=REMOTE_TIMEOUT, check=False
+                cmd, cwd=repo_path, timeout=self._git_timeouts.git_remote_timeout, check=False
             )
 
             conflicts = []
@@ -1436,7 +1429,7 @@ class GitOperationsService:
             result = run_git_command(
                 ["git", "fetch", remote],
                 cwd=repo_path,
-                timeout=REMOTE_TIMEOUT,
+                timeout=self._git_timeouts.git_remote_timeout,
                 check=True,
             )
 
@@ -1495,7 +1488,7 @@ class GitOperationsService:
             target = commit_hash or "HEAD"
             cmd = ["git", "reset", f"--{mode}", target]
 
-            run_git_command(cmd, cwd=repo_path, timeout=DEFAULT_TIMEOUT, check=True)
+            run_git_command(cmd, cwd=repo_path, timeout=self._git_timeouts.git_local_timeout, check=True)
 
             return {"success": True, "reset_mode": mode, "target_commit": target}
 
@@ -1536,7 +1529,7 @@ class GitOperationsService:
             result = run_git_command(
                 ["git", "clean", "-fd"],
                 cwd=repo_path,
-                timeout=DEFAULT_TIMEOUT,
+                timeout=self._git_timeouts.git_local_timeout,
                 check=True,
             )
 
@@ -1574,7 +1567,7 @@ class GitOperationsService:
             run_git_command(
                 ["git", "merge", "--abort"],
                 cwd=repo_path,
-                timeout=DEFAULT_TIMEOUT,
+                timeout=self._git_timeouts.git_local_timeout,
                 check=True,
             )
 
@@ -1609,7 +1602,7 @@ class GitOperationsService:
             run_git_command(
                 ["git", "checkout", "HEAD", "--", file_path],
                 cwd=repo_path,
-                timeout=DEFAULT_TIMEOUT,
+                timeout=self._git_timeouts.git_local_timeout,
                 check=True,
             )
 
@@ -1645,7 +1638,7 @@ class GitOperationsService:
             result = run_git_command(
                 ["git", "branch", "-a"],
                 cwd=repo_path,
-                timeout=DEFAULT_TIMEOUT,
+                timeout=self._git_timeouts.git_local_timeout,
                 check=True,
             )
 
@@ -1702,7 +1695,7 @@ class GitOperationsService:
             run_git_command(
                 ["git", "branch", branch_name],
                 cwd=repo_path,
-                timeout=DEFAULT_TIMEOUT,
+                timeout=self._git_timeouts.git_local_timeout,
                 check=True,
             )
 
@@ -1738,7 +1731,7 @@ class GitOperationsService:
             current_result = run_git_command(
                 ["git", "branch", "--show-current"],
                 cwd=repo_path,
-                timeout=DEFAULT_TIMEOUT,
+                timeout=self._git_timeouts.git_local_timeout,
                 check=True,
             )
             previous_branch = current_result.stdout.strip()
@@ -1747,7 +1740,7 @@ class GitOperationsService:
             run_git_command(
                 ["git", "checkout", branch_name],
                 cwd=repo_path,
-                timeout=DEFAULT_TIMEOUT,
+                timeout=self._git_timeouts.git_local_timeout,
                 check=True,
             )
 
@@ -1802,7 +1795,7 @@ class GitOperationsService:
             run_git_command(
                 ["git", "branch", "-d", branch_name],
                 cwd=repo_path,
-                timeout=DEFAULT_TIMEOUT,
+                timeout=self._git_timeouts.git_local_timeout,
                 check=True,
             )
 
@@ -1907,7 +1900,7 @@ def _get_git_operations_service():
     """Get or create the global GitOperationsService instance."""
     global _git_operations_service_instance
     if _git_operations_service_instance is None:
-        _git_operations_service_instance = GitOperationsService(ConfigManager())
+        _git_operations_service_instance = GitOperationsService(ServerConfigManager())
     return _git_operations_service_instance
 
 

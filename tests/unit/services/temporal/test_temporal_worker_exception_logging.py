@@ -81,7 +81,7 @@ def test_worker_exception_is_logged_and_propagated(tmp_path, caplog):
         mock_vcm_instance.embedding_provider = mock_embedding_provider
 
         mock_file_id_instance = Mock()
-        mock_file_id_instance._get_project_id.return_value = "test_project"
+        mock_file_id_instance.get_project_id.return_value = "test_project"
         mock_file_id.return_value = mock_file_id_instance
 
         # Create mock vector store that will fail on upsert

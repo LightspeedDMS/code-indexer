@@ -72,7 +72,7 @@ class TestBug7PointIDMapping(unittest.TestCase):
 
                 # Mock file identifier
                 with patch.object(
-                    indexer.file_identifier, "_get_project_id"
+                    indexer.file_identifier, "get_project_id"
                 ) as mock_project_id:
                     mock_project_id.return_value = "test-project"
 
@@ -149,7 +149,7 @@ class TestBug7PointIDMapping(unittest.TestCase):
 
                         if chunks:
                             # Check existence BEFORE API call (Bug #7 fix part 1)
-                            project_id = indexer.file_identifier._get_project_id()
+                            project_id = indexer.file_identifier.get_project_id()
                             chunks_to_process = []
                             chunk_indices_to_process = []
 

@@ -279,7 +279,7 @@ class GitAwareDocumentProcessor(DocumentProcessor):
             "git_available": git_state["git_available"],
             "current_branch": git_state.get("branch", "unknown"),
             "current_commit": git_state.get("commit_hash", "unknown"),
-            "project_id": self.file_identifier._get_project_id(),
+            "project_id": self.file_identifier.get_project_id(),
             "file_stats": file_stats,
             "last_index_time": git_state.get("last_index_time", 0),
         }
@@ -299,6 +299,6 @@ class GitAwareDocumentProcessor(DocumentProcessor):
             "git_available": git_state["git_available"],
             "current_branch": git_state.get("branch", "unknown"),
             "current_commit": git_state.get("commit_hash", "unknown"),
-            "project_id": self.file_identifier._get_project_id(),
+            "project_id": self.file_identifier.get_project_id(),
             "last_index_time": git_state.get("last_index_time", 0),
         }

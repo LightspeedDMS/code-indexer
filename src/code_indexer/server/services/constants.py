@@ -23,11 +23,9 @@ CIDX_META_REPO = "cidx-meta"
 # Story #3 Phase 2: P2 Configuration Validation Limits (AC12-AC26)
 # =============================================================================
 
-# Git Timeouts (AC12-AC15)
+# Git Timeouts (AC12-AC14)
 MIN_GIT_LOCAL_TIMEOUT_SECONDS = 5
 MIN_GIT_REMOTE_TIMEOUT_SECONDS = 30
-MIN_GIT_COMMAND_TIMEOUT_SECONDS = 5
-MIN_GIT_FETCH_TIMEOUT_SECONDS = 10
 
 # Error Handling (AC16-AC18)
 MIN_RETRY_ATTEMPTS = 1
@@ -61,15 +59,11 @@ MAX_WEB_SESSION_TIMEOUT_SECONDS = 86400
 # Story #3 Phase 2: P3 Configuration Validation Limits (AC27-AC39)
 # =============================================================================
 
-# API Provider Timeouts (AC27-AC30)
+# API Provider Timeouts (AC27-AC28)
 MIN_GITHUB_API_TIMEOUT_SECONDS = 5
 MAX_GITHUB_API_TIMEOUT_SECONDS = 120
 MIN_GITLAB_API_TIMEOUT_SECONDS = 5
 MAX_GITLAB_API_TIMEOUT_SECONDS = 120
-MIN_GITHUB_PROVIDER_TIMEOUT_SECONDS = 5
-MAX_GITHUB_PROVIDER_TIMEOUT_SECONDS = 120
-MIN_GITLAB_PROVIDER_TIMEOUT_SECONDS = 5
-MAX_GITLAB_PROVIDER_TIMEOUT_SECONDS = 120
 
 # SCIP Query Limits (AC31-AC34)
 MIN_SCIP_REFERENCE_LIMIT = 10

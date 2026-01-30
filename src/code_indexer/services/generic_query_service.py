@@ -205,7 +205,7 @@ class GenericQueryService:
         """
         query_metadata = {
             "query": query,
-            "project_id": self.file_identifier._get_project_id(),
+            "project_id": self.file_identifier.get_project_id(),
             "git_available": self.file_identifier.git_available,
         }
 
@@ -232,7 +232,7 @@ class GenericQueryService:
         # Add additional context that CLI expects
         result = {
             "git_available": self.file_identifier.git_available,
-            "project_id": self.file_identifier._get_project_id(),
+            "project_id": self.file_identifier.get_project_id(),
             "current_branch": branch_context.get("branch", "unknown"),
             "current_commit": branch_context.get("commit", "unknown"),
             "file_count": len(branch_context.get("files", set())),

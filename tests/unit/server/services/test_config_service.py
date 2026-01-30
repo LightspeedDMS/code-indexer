@@ -14,7 +14,6 @@ from code_indexer.server.services.config_service import ConfigService
 from code_indexer.server.utils.config_manager import (
     ServerConfig,
     CacheConfig,
-    ReindexingConfig,
 )
 
 
@@ -67,7 +66,6 @@ class TestConfigServiceGetAllSettings:
         # Verify structure
         assert "server" in settings
         assert "cache" in settings
-        assert "reindexing" in settings
         assert "timeouts" in settings
         assert "password_security" in settings
 
@@ -90,15 +88,6 @@ class TestConfigServiceGetAllSettings:
         assert "index_cache_ttl_minutes" in settings["cache"]
         assert "fts_cache_ttl_minutes" in settings["cache"]
         assert "fts_cache_reload_on_access" in settings["cache"]
-
-    def test_get_all_settings_contains_reindexing_settings(self, tmp_path):
-        """Test that reindexing settings are included."""
-        service = ConfigService(server_dir_path=str(tmp_path))
-        settings = service.get_all_settings()
-
-        assert "change_percentage_threshold" in settings["reindexing"]
-        assert "accuracy_threshold" in settings["reindexing"]
-        assert "batch_size" in settings["reindexing"]
 
 
 class TestConfigServiceUpdateSetting:
@@ -143,16 +132,6 @@ class TestConfigServiceUpdateSetting:
 
         config = service.get_config()
         assert config.cache_config.index_cache_ttl_minutes == 30.0
-
-    def test_update_reindexing_threshold(self, tmp_path):
-        """Test updating reindexing threshold."""
-        service = ConfigService(server_dir_path=str(tmp_path))
-        service.load_config()
-
-        service.update_setting("reindexing", "change_percentage_threshold", 15.0)
-
-        config = service.get_config()
-        assert config.reindexing_config.change_percentage_threshold == 15.0
 
     def test_update_timeout_setting(self, tmp_path):
         """Test updating timeout setting."""
@@ -268,7 +247,7 @@ class TestConfigServicePersistence:
 
 
 class TestNewConfigDataclasses:
-    """Test new CacheConfig and ReindexingConfig dataclasses."""
+    """Test CacheConfig dataclass."""
 
     def test_cache_config_defaults(self):
         """Test CacheConfig has correct defaults."""
@@ -280,24 +259,12 @@ class TestNewConfigDataclasses:
         assert config.fts_cache_ttl_minutes == 10.0
         assert config.fts_cache_reload_on_access is True
 
-    def test_reindexing_config_defaults(self):
-        """Test ReindexingConfig has correct defaults."""
-        config = ReindexingConfig()
-
-        assert config.change_percentage_threshold == 10.0
-        assert config.accuracy_threshold == 0.85
-        assert config.max_index_age_days == 30
-        assert config.batch_size == 100
-        assert config.parallel_analysis is True
-
     def test_server_config_includes_new_configs(self):
-        """Test ServerConfig includes cache and reindexing configs."""
+        """Test ServerConfig includes cache config."""
         config = ServerConfig(server_dir="/tmp/test")
 
         assert config.cache_config is not None
-        assert config.reindexing_config is not None
         assert isinstance(config.cache_config, CacheConfig)
-        assert isinstance(config.reindexing_config, ReindexingConfig)
 
     def test_server_config_workers_default(self):
         """Test ServerConfig has workers field with default value."""

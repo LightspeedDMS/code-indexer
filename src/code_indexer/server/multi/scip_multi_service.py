@@ -70,16 +70,33 @@ class SCIPMultiService:
     - Default: 2 workers, 30s timeout (configurable via Web UI, Story #25)
     """
 
-    def __init__(self, max_workers: int = 2, query_timeout_seconds: int = 30):
+    def __init__(
+        self,
+        max_workers: int = 2,
+        query_timeout_seconds: int = 30,
+        reference_limit: int = DEFAULT_REFERENCE_LIMIT,
+        dependency_depth: int = DEFAULT_DEPENDENCY_DEPTH,
+        callchain_max_depth: int = DEFAULT_CALLCHAIN_MAX_DEPTH,
+        callchain_limit: int = DEFAULT_CALLCHAIN_LIMIT,
+    ):
         """
         Initialize SCIP multi-repository service.
 
         Args:
             max_workers: Maximum number of concurrent threads (default: 2 per resource audit)
             query_timeout_seconds: Timeout for each repository query (default: 30)
+            reference_limit: Maximum references to return (default: 100, Bug #83-3 fix)
+            dependency_depth: Dependency traversal depth (default: 1, Bug #83-3 fix)
+            callchain_max_depth: Maximum callchain depth (default: 5, Bug #83-3 fix)
+            callchain_limit: Maximum callchain results (default: 100, Bug #83-3 fix)
         """
         self.max_workers = max_workers
         self.query_timeout_seconds = query_timeout_seconds
+        # Bug #83-3 Fix: Store config limits as instance variables
+        self.reference_limit = reference_limit
+        self.dependency_depth = dependency_depth
+        self.callchain_max_depth = callchain_max_depth
+        self.callchain_limit = callchain_limit
         self.thread_executor = ThreadPoolExecutor(max_workers=max_workers)
 
     def definition(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
@@ -153,8 +170,9 @@ class SCIPMultiService:
 
         try:
             engine = SCIPQueryEngine(scip_file)
+            # Bug #83-3 Fix: Use instance variable instead of hardcoded constant
             limit = (
-                request.limit if request.limit is not None else DEFAULT_REFERENCE_LIMIT
+                request.limit if request.limit is not None else self.reference_limit
             )
             return engine.find_references(request.symbol, limit=limit, exact=False)
         except Exception as e:
@@ -194,10 +212,11 @@ class SCIPMultiService:
 
         try:
             engine = SCIPQueryEngine(scip_file)
+            # Bug #83-3 Fix: Use instance variable instead of hardcoded constant
             depth = (
                 request.max_depth
                 if request.max_depth is not None
-                else DEFAULT_DEPENDENCY_DEPTH
+                else self.dependency_depth
             )
             return engine.get_dependencies(request.symbol, depth=depth, exact=False)
         except Exception as e:
@@ -237,10 +256,11 @@ class SCIPMultiService:
 
         try:
             engine = SCIPQueryEngine(scip_file)
+            # Bug #83-3 Fix: Use instance variable instead of hardcoded constant
             depth = (
                 request.max_depth
                 if request.max_depth is not None
-                else DEFAULT_DEPENDENCY_DEPTH
+                else self.dependency_depth
             )
             return engine.get_dependents(request.symbol, depth=depth, exact=False)
         except Exception as e:
@@ -287,13 +307,14 @@ class SCIPMultiService:
 
         try:
             engine = SCIPQueryEngine(scip_file)
+            # Bug #83-3 Fix: Use instance variables instead of hardcoded constants
             max_depth = (
                 request.max_depth
                 if request.max_depth is not None
-                else DEFAULT_CALLCHAIN_MAX_DEPTH
+                else self.callchain_max_depth
             )
             limit = (
-                request.limit if request.limit is not None else DEFAULT_CALLCHAIN_LIMIT
+                request.limit if request.limit is not None else self.callchain_limit
             )
             call_chains = engine.trace_call_chain(
                 request.from_symbol, request.to_symbol, max_depth=max_depth, limit=limit

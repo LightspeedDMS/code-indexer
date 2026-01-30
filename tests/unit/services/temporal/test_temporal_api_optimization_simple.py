@@ -64,7 +64,7 @@ class TestTemporalAPIOptimizationSimple(unittest.TestCase):
 
                 # Mock file identifier
                 with patch.object(
-                    indexer.file_identifier, "_get_project_id"
+                    indexer.file_identifier, "get_project_id"
                 ) as mock_project_id:
                     mock_project_id.return_value = "code-indexer"
 
@@ -149,7 +149,7 @@ class TestTemporalAPIOptimizationSimple(unittest.TestCase):
                                 # The fix should check existence BEFORE making API call
 
                                 # Get the project ID
-                                project_id = indexer.file_identifier._get_project_id()
+                                project_id = indexer.file_identifier.get_project_id()
 
                                 # Build point IDs to check existence
                                 chunks_to_process = []

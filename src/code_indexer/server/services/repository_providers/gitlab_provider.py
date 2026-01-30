@@ -41,7 +41,7 @@ class GitLabProvider(RepositoryProviderBase):
 
     DEFAULT_BASE_URL = "https://gitlab.com"
     API_VERSION = "v4"
-    DEFAULT_TIMEOUT = 30.0
+    SHORT_SHA_LENGTH = 7  # Length for displaying short commit hashes
 
     def __init__(
         self,
@@ -58,6 +58,11 @@ class GitLabProvider(RepositoryProviderBase):
         self._token_manager = token_manager
         self._golden_repo_manager = golden_repo_manager
         self._url_normalizer = GitUrlNormalizer()
+
+        # Bug #83 Phase 1: Load timeout from config
+        from code_indexer.server.utils.config_manager import ServerConfigManager
+        config = ServerConfigManager().load_config()
+        self._api_timeout = config.git_timeouts_config.gitlab_api_timeout
 
     @property
     def platform(self) -> str:
@@ -155,9 +160,209 @@ class GitLabProvider(RepositoryProviderBase):
             url,
             headers=headers,
             params=params,
-            timeout=self.DEFAULT_TIMEOUT,
+            timeout=self._api_timeout,
         )
         return response
+
+    def _make_graphql_request(
+        self,
+        query: str,
+        variables: Optional[dict] = None,
+    ) -> httpx.Response:
+        """
+        Make a synchronous GraphQL request to GitLab.
+
+        Args:
+            query: GraphQL query string
+            variables: Query variables (optional)
+
+        Returns:
+            HTTP response
+
+        Raises:
+            GitLabProviderError: If request fails
+        """
+        token_data = self._token_manager.get_token("gitlab")
+        if not token_data:
+            raise GitLabProviderError("GitLab token not configured")
+
+        base_url = self._get_base_url()
+        url = f"{base_url}/api/graphql"
+        headers = {
+            "PRIVATE-TOKEN": token_data.token,
+            "Content-Type": "application/json",
+        }
+
+        payload = {"query": query}
+        if variables:
+            payload["variables"] = variables
+
+        response = httpx.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=self._api_timeout,
+        )
+        return response
+
+    def _build_multiplex_query(self, full_paths: List[str]) -> str:
+        """
+        Build GraphQL multiplex query for fetching commit info from multiple projects.
+
+        Uses aliased queries to batch-fetch commit information for up to 50 projects
+        in a single GraphQL request.
+
+        Args:
+            full_paths: List of project full paths (e.g., ["group/repo1", "group/repo2"])
+
+        Returns:
+            GraphQL query string with aliased project queries
+        """
+        query_parts = ["query {"]
+
+        for idx, full_path in enumerate(full_paths):
+            alias = f"project{idx}"
+            query_parts.append(
+                f"""
+  {alias}: project(fullPath: "{full_path}") {{
+    repository {{
+      tree {{
+        lastCommit {{
+          sha
+          author {{ name }}
+          committedDate
+        }}
+      }}
+    }}
+  }}"""
+            )
+
+        query_parts.append("}")
+        return "\n".join(query_parts)
+
+    def _parse_multiplex_response(
+        self, graphql_response: dict, full_paths: List[str]
+    ) -> dict:
+        """
+        Parse GraphQL multiplex response and extract commit info per project.
+
+        Args:
+            graphql_response: GraphQL response JSON
+            full_paths: List of project full paths (same order as query)
+
+        Returns:
+            Dict mapping full_path to commit info dict with keys:
+            - commit_hash: 7-character SHA (or None)
+            - commit_author: Author name (or None)
+            - commit_date: datetime object (or None)
+        """
+        result = {}
+        data = graphql_response.get("data", {})
+
+        for idx, full_path in enumerate(full_paths):
+            alias = f"project{idx}"
+            project_data = data.get(alias)
+
+            commit_info = {
+                "commit_hash": None,
+                "commit_author": None,
+                "commit_date": None,
+            }
+
+            if project_data:
+                repository = project_data.get("repository", {})
+                tree = repository.get("tree")
+
+                if tree:
+                    last_commit = tree.get("lastCommit")
+
+                    if last_commit:
+                        # Extract commit hash (7 chars)
+                        sha = last_commit.get("sha")
+                        if sha:
+                            commit_info["commit_hash"] = sha[: self.SHORT_SHA_LENGTH]
+
+                        # Extract author name
+                        author = last_commit.get("author")
+                        if author:
+                            commit_info["commit_author"] = author.get("name")
+
+                        # Extract commit date
+                        committed_date = last_commit.get("committedDate")
+                        if committed_date:
+                            try:
+                                commit_info["commit_date"] = datetime.fromisoformat(
+                                    committed_date.replace("Z", "+00:00")
+                                )
+                            except (ValueError, TypeError) as e:
+                                logger.debug(
+                                    f"Failed to parse commit date '{committed_date}' "
+                                    f"for project '{full_path}': {e}"
+                                )
+
+            result[full_path] = commit_info
+
+        return result
+
+    def _enrich_repositories_with_commits(
+        self, repositories: List[DiscoveredRepository]
+    ) -> List[DiscoveredRepository]:
+        """
+        Enrich repositories with commit info via GraphQL batch query.
+
+        Batches repositories into groups of 50 (GitLab's GraphQL limit) and
+        fetches commit information for each batch. Updates repository objects
+        with last_commit_hash, last_commit_author, and last_commit_date.
+
+        Args:
+            repositories: List of repositories to enrich
+
+        Returns:
+            Same list of repositories with commit info populated (mutated in place)
+        """
+        if not repositories:
+            return repositories
+
+        # GitLab GraphQL has query complexity limits - use smaller batches
+        # to avoid "Query too large" errors (50 projects exceeds the limit)
+        BATCH_SIZE = 10
+
+        try:
+            # Process repositories in batches
+            for batch_start in range(0, len(repositories), BATCH_SIZE):
+                batch_end = min(batch_start + BATCH_SIZE, len(repositories))
+                batch_repos = repositories[batch_start:batch_end]
+
+                # Extract full paths for this batch
+                full_paths = [repo.name for repo in batch_repos]
+
+                # Build and execute GraphQL query
+                query = self._build_multiplex_query(full_paths)
+                logger.debug(f"GitLab GraphQL query: {query[:500]}...")
+                response = self._make_graphql_request(query)
+
+                # Log error response body for debugging before raising
+                if response.status_code >= 400:
+                    logger.error(
+                        f"GitLab GraphQL error {response.status_code}: {response.text}"
+                    )
+                response.raise_for_status()
+
+                # Parse response and update repositories
+                graphql_data = response.json()
+                commit_map = self._parse_multiplex_response(graphql_data, full_paths)
+
+                for repo in batch_repos:
+                    commit_info = commit_map.get(repo.name, {})
+                    repo.last_commit_hash = commit_info.get("commit_hash")
+                    repo.last_commit_author = commit_info.get("commit_author")
+                    repo.last_commit_date = commit_info.get("commit_date")
+
+        except Exception as e:
+            # Graceful degradation: Log warning but don't fail discovery
+            logger.warning(f"Failed to enrich repositories with commit info: {e}")
+
+        return repositories
 
     def _parse_project(self, project: dict) -> DiscoveredRepository:
         """
@@ -263,6 +468,9 @@ class GitLabProvider(RepositoryProviderBase):
 
         # Note: Client-side search filtering removed (Story #16)
         # Server-side filtering via API `search` parameter is used instead
+
+        # Story #81: Enrich with commit info via GraphQL
+        repositories = self._enrich_repositories_with_commits(repositories)
 
         return RepositoryDiscoveryResult(
             repositories=repositories,

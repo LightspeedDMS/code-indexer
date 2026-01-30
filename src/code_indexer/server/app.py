@@ -2339,10 +2339,16 @@ def create_app() -> FastAPI:
             from code_indexer.server.lifecycle.global_repos_lifecycle import (
                 GlobalReposLifecycleManager,
             )
+            from code_indexer.server.services.config_service import get_config_service
+
+            # Get server config for resource_config (timeouts, etc.)
+            config_service = get_config_service()
+            server_config = config_service.get_config()
 
             global_lifecycle_manager = GlobalReposLifecycleManager(
                 str(golden_repos_dir),
                 background_job_manager=background_job_manager,
+                resource_config=server_config.resource_config,
             )
             global_lifecycle_manager.start()
 
@@ -2834,11 +2840,19 @@ def create_app() -> FastAPI:
         error_data = global_error_handler.handle_validation_error(exc, request)
         return global_error_handler._create_error_response(error_data)
 
+    # Bug #83 Fix: Load config to use jwt_expiration_minutes and password_security
+    from code_indexer.server.services.config_service import get_config_service
+    config_service = get_config_service()
+    server_config = config_service.get_config()
+
     # Initialize authentication managers with persistent JWT secret
     jwt_secret_manager = JWTSecretManager()
     secret_key = jwt_secret_manager.get_or_create_secret()
+    # Bug #83-1 Fix: Use config.jwt_expiration_minutes instead of hardcoded 10
     jwt_manager = JWTManager(
-        secret_key=secret_key, token_expiration_minutes=10, algorithm="HS256"
+        secret_key=secret_key,
+        token_expiration_minutes=server_config.jwt_expiration_minutes,
+        algorithm="HS256"
     )
 
     # Initialize UserManager with server data directory support
@@ -2855,8 +2869,10 @@ def create_app() -> FastAPI:
 
     schema = DatabaseSchema(str(db_path))
     schema.initialize_database()
+    # Bug #83-2 Fix: Pass password_security_config to UserManager
     user_manager = UserManager(
         users_file_path=users_file_path,
+        password_security_config=server_config.password_security,
         use_sqlite=True,
         db_path=str(db_path),
     )

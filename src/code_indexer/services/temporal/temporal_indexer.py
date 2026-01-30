@@ -602,7 +602,7 @@ class TemporalIndexer:
 
                     # AC1: Index commit message as searchable entity (Story #476)
                     # This creates commit_message chunks that can be searched alongside code diffs
-                    project_id = self.file_identifier._get_project_id()
+                    project_id = self.file_identifier.get_project_id()
                     self._index_commit_message(commit, project_id, vector_manager)
 
                     # Track last file processed for THIS commit (local to this worker)
@@ -618,7 +618,7 @@ class TemporalIndexer:
                         # BATCHED EMBEDDINGS: Collect all chunks from all diffs first
                         # Then batch them into minimal API calls
                         all_chunks_data = []
-                        project_id = self.file_identifier._get_project_id()
+                        project_id = self.file_identifier.get_project_id()
                         total_commit_size = (
                             0  # Accumulate total size of all diffs in commit
                         )

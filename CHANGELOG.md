@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.1] - 2026-01-29
+
+### Fixed
+
+- **Versioned Directory Full Reindex on Refresh** (Bug #85) - Fixed bug where golden repository refresh with temporal indexing (CoW clones) triggered unnecessary full reindexing instead of incremental updates:
+  - Root cause: `config_fixer.py` determined `project_id` from directory name (e.g., `"v_1769727231"`), while `file_identifier.py` used git remote origin (e.g., `"evolution"`), causing mismatch in `should_force_full_index()`
+  - Solution: Made `FileIdentifier.get_project_id()` the single source of truth; `ConfigurationValidator.detect_correct_project_name()` now delegates to it
+  - API change: `FileIdentifier._get_project_id()` renamed to `get_project_id()` (public API)
+  - Refresh operations now correctly perform incremental indexing (minutes instead of hours)
+
+---
+
 ## [8.8.0] - 2026-01-29
 
 ### Added
@@ -35,12 +47,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Story #77: CLI integration displaying multimodal collection status
   - Story #78: Accurate wall-clock timing display for parallel queries
 
+- **Auto-Discovery Last Commit Enhancement** (Epic #79) - Repository auto-discovery now displays last commit information for each discovered repository:
+
+  **User Experience**:
+  - Auto-discovery table shows commit hash (7-char), author name, and commit date
+  - Information fetched efficiently via GraphQL batch queries
+  - Graceful degradation: discovery continues if commit info unavailable
+
+  **Technical Implementation**:
+  - **GitHub**: Pure GraphQL via `viewer.repositories` with `affiliations` and `ownerAffiliations` for full access to personal and organization repositories
+  - **GitLab**: REST API for listing + GraphQL multiplex pattern for commit enrichment (batches of 10 projects per query to respect complexity limits)
+  - **Batch Processing**: GitHub fetches commit info inline; GitLab uses aliased GraphQL queries to batch-fetch multiple projects in single requests
+
+  **Stories Completed**:
+  - Story #80: GitHub provider GraphQL enrichment with commit hash, author, and date
+  - Story #81: GitLab provider GraphQL multiplex enrichment with batch processing
+
+- **External Dependency Auto-Installation** - Server installer and auto-updater now automatically install required external tools that aren't provided by default on Linux distributions:
+
+  **Ripgrep (rg)**:
+  - Downloads pre-compiled static MUSL binary from GitHub releases (v14.1.1)
+  - Works on ANY x86_64 Linux (Amazon Linux, Rocky Linux, Ubuntu) without dependencies
+  - Installs to `~/.local/bin/rg` with proper PATH configuration in systemd service
+  - Eliminates grep fallback warnings and improves regex search performance
+  - Idempotent: safe to run multiple times
+
+  **Coursier (cs)**:
+  - Downloads pre-compiled binary for Java/Kotlin SCIP indexing
+  - Required by scip-java for Java and Kotlin code intelligence
+  - Installs to `~/.local/bin/cs` with executable permissions
+  - Idempotent: skips if already installed
+
+  **Architecture**:
+  - Shared `RipgrepInstaller` utility class eliminates code duplication between installer and auto-updater
+  - Secure tarfile extraction with path traversal prevention
+  - 60-second download timeout prevents hanging on network issues
+
+### Security
+
+- **Tarfile Path Traversal Prevention** - Fixed potential security vulnerability in ripgrep installation where malicious tarball could write files outside the intended directory:
+  - Added `_safe_extract_tar()` method that validates all tar members before extraction
+  - Blocks absolute paths (e.g., `/etc/passwd`)
+  - Blocks parent directory traversal (e.g., `../../../etc/passwd`)
+  - Raises `ValueError` with descriptive message if attack detected
+
 ### Fixed
 
 - **Multi-Index Query Timing Accuracy** (Story #78) - Fixed timing display where individual index times incorrectly exceeded parallel wall-clock time (e.g., showing 1.85s + 1.40s = 931ms total):
   - Root cause: Summing internal breakdown values (embedding_ms + hnsw_search_ms) instead of measuring actual elapsed time
   - Solution: Added wall-clock `elapsed_ms` measurement in each query method
   - Invariant now holds: `parallel_time >= max(code_index_ms, multimodal_index_ms)`
+
+- **RefreshScheduler Ignoring Configured Timeouts** - Fixed bug where user-configured "CIDX Index Timeout" setting (e.g., 7200 seconds) was ignored, always using hardcoded default of 3600 seconds:
+  - Root cause: `resource_config` parameter was not being passed from `app.py` through `GlobalReposLifecycleManager` to `RefreshScheduler`
+  - Solution: Added `resource_config` parameter to `GlobalReposLifecycleManager` and plumbed it through to `RefreshScheduler`
+  - All Web UI timeout settings (Git Clone, Git Pull, Git Refresh, CIDX Index) now properly respected by refresh scheduler
+
+- **Scheduled Refresh Timeouts Incorrectly Marked as Completed** (Bug #84) - Fixed bug where scheduled golden repository refreshes that timed out were incorrectly marked as "completed" instead of "failed" in the job dashboard:
+  - Root cause: `RefreshScheduler._execute_refresh()` caught exceptions and returned `{success: False}` dict, but `BackgroundJobManager` only marks jobs as FAILED when exceptions are raised
+  - Solution: Changed exception handler to raise `RuntimeError` instead of returning error dict, aligning with `GoldenRepoManager` pattern
+  - Job dashboard now correctly shows FAILED status when scheduled refreshes time out
+
+- **Web UI Configuration Settings Ignored** (Bug #83) - Comprehensive fix for 15 configuration settings that were displayed in Web UI but ignored by application code:
+
+  **Part 1: 3 Critical Bugs Fixed** (settings completely ignored):
+  - **JWT Token Expiration**: `app.py` now reads `jwt_expiration_minutes` from config (was hardcoded to 10)
+  - **Password Security**: `UserManager` now receives `password_security_config` (was using defaults)
+  - **SCIP Query Limits**: `SCIPMultiService` now accepts config parameters (was hardcoded)
+
+  **Part 2: 8 Type A Settings Wired** (hardcoded constants replaced with config reads):
+  - `git_local_timeout`, `git_remote_timeout` in `git_operations_service.py`
+  - `github_api_timeout` in `github_provider.py`, `gitlab_api_timeout` in `gitlab_provider.py`
+  - `default_diff_lines`, `max_diff_lines`, `default_log_commits`, `max_log_commits` in `git_operations_service.py`
+
+  **Part 3: 4 Type B Settings Removed** (genuinely unused, cleaned from codebase):
+  - Removed from `GitTimeoutsConfig`: `git_command_timeout`, `git_fetch_timeout`, `github_provider_timeout`, `gitlab_provider_timeout`
+  - Added backward compatibility for old config files containing these fields
 
 ---
 

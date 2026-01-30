@@ -235,8 +235,19 @@ class ConfigurationValidator:
         return self.config_dir.parent.absolute()
 
     def detect_correct_project_name(self) -> str:
-        """Derive project name from directory structure."""
-        return self.detect_correct_codebase_dir().name
+        """Derive project name using FileIdentifier (single source of truth).
+
+        IMPORTANT: Must use FileIdentifier to ensure consistency with smart_indexer's
+        project_id detection. Previous implementation used directory name which caused
+        project_id mismatch for versioned directories, triggering unnecessary full rebuilds.
+
+        See: Bug #85 - config_fixer uses wrong project_id for versioned directories
+        """
+        from code_indexer.services.file_identifier import FileIdentifier
+
+        codebase_dir = self.detect_correct_codebase_dir()
+        file_identifier = FileIdentifier(codebase_dir)
+        return file_identifier.get_project_id()
 
     def validate_config(self, config: Config) -> List[ConfigFix]:
         """Validate configuration and suggest fixes."""

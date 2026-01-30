@@ -98,6 +98,9 @@
                     {% if repo.last_commit_hash %}
                     <code title="{{ repo.last_commit_author or 'Unknown' }}">{{ repo.last_commit_hash[:7] }}</code>
                     <span class="commit-author">{{ repo.last_commit_author or 'Unknown' }}</span>
+                    {% if repo.last_commit_date %}
+                    <span class="commit-date">{{ repo.last_commit_date.strftime('%Y-%m-%d %H:%M') }}</span>
+                    {% endif %}
                     {% else %}
                     <span class="no-commit-info">N/A</span>
                     {% endif %}
@@ -294,6 +297,13 @@
     display: block;
     color: var(--muted-color);
     font-size: 0.8rem;
+    margin-top: 2px;
+}
+
+.commit-date {
+    display: block;
+    color: var(--muted-color);
+    font-size: 0.75rem;
     margin-top: 2px;
 }
 

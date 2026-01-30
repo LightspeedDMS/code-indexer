@@ -1,7 +1,11 @@
 """DeploymentExecutor - deployment command execution for auto-update service."""
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.utils.ripgrep_installer import RipgrepInstaller
 from pathlib import Path
+import platform
+import shutil
+import stat
 import subprocess
 import logging
 import time
@@ -418,6 +422,20 @@ class DeploymentExecutor:
             )
             return False
 
+    def ensure_ripgrep(self) -> bool:
+        """
+        Ensure ripgrep is installed (x86_64 Linux only).
+
+        Uses pre-compiled static MUSL binary from GitHub releases.
+        Works on Amazon Linux, Rocky Linux, and Ubuntu without dependencies.
+
+        Returns:
+            True if ripgrep is available (already installed or successfully installed),
+            False if installation failed or unsupported architecture.
+        """
+        installer = RipgrepInstaller()
+        return installer.install()
+
     def execute(self) -> bool:
         """Execute complete deployment: git pull + pip install.
 
@@ -447,6 +465,9 @@ class DeploymentExecutor:
 
         # Step 3: Story #30 AC4 - Ensure workers config
         self._ensure_workers_config()
+
+        # Step 4: Ensure ripgrep is installed
+        self.ensure_ripgrep()
 
         logger.info(
             "Deployment execution completed successfully",

@@ -246,7 +246,7 @@ class GitDetectionService:
         summary = {
             "total_files": len(current_files),
             "git_available": identifier.git_available,
-            "project_id": identifier._get_project_id(),
+            "project_id": identifier.get_project_id(),
         }
 
         if identifier.git_available:

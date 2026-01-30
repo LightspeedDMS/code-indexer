@@ -27,21 +27,15 @@ class TestGitTimeoutsConfig:
         config = GitTimeoutsConfig()
         assert config.git_local_timeout == 30
         assert config.git_remote_timeout == 300
-        assert config.git_command_timeout == 30
-        assert config.git_fetch_timeout == 60
 
     def test_custom_values(self):
         """GitTimeoutsConfig accepts custom values."""
         config = GitTimeoutsConfig(
             git_local_timeout=60,
             git_remote_timeout=600,
-            git_command_timeout=45,
-            git_fetch_timeout=120,
         )
         assert config.git_local_timeout == 60
         assert config.git_remote_timeout == 600
-        assert config.git_command_timeout == 45
-        assert config.git_fetch_timeout == 120
 
     def test_serialization(self):
         """GitTimeoutsConfig serializes to dict correctly."""
@@ -50,13 +44,9 @@ class TestGitTimeoutsConfig:
         assert data == {
             "git_local_timeout": 30,
             "git_remote_timeout": 300,
-            "git_command_timeout": 30,
-            "git_fetch_timeout": 60,
             # P3 API Provider Timeouts (AC27-AC30)
             "github_api_timeout": 30,
             "gitlab_api_timeout": 30,
-            "github_provider_timeout": 30,
-            "gitlab_provider_timeout": 30,
         }
 
     def test_validation_git_local_timeout_minimum(self):
@@ -81,26 +71,18 @@ class TestGitTimeoutsConfig:
             with pytest.raises(ValueError, match="git_remote_timeout"):
                 manager.validate_config(server_config)
 
-    def test_validation_git_command_timeout_minimum(self):
-        """AC15: git_command_timeout minimum is 5 seconds."""
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ServerConfigManager(tmpdir)
             server_config = ServerConfig(
                 server_dir=tmpdir,
-                git_timeouts_config=GitTimeoutsConfig(git_command_timeout=4),
             )
-            with pytest.raises(ValueError, match="git_command_timeout"):
                 manager.validate_config(server_config)
 
-    def test_validation_git_fetch_timeout_minimum(self):
-        """AC15: git_fetch_timeout minimum is 10 seconds."""
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ServerConfigManager(tmpdir)
             server_config = ServerConfig(
                 server_dir=tmpdir,
-                git_timeouts_config=GitTimeoutsConfig(git_fetch_timeout=9),
             )
-            with pytest.raises(ValueError, match="git_fetch_timeout"):
                 manager.validate_config(server_config)
 
     def test_valid_boundary_values(self):
@@ -112,8 +94,6 @@ class TestGitTimeoutsConfig:
                 git_timeouts_config=GitTimeoutsConfig(
                     git_local_timeout=5,
                     git_remote_timeout=30,
-                    git_command_timeout=5,
-                    git_fetch_timeout=10,
                 ),
             )
             # Should not raise
@@ -434,8 +414,6 @@ class TestServerConfigP2Integration:
                 git_timeouts_config=GitTimeoutsConfig(
                     git_local_timeout=60,
                     git_remote_timeout=600,
-                    git_command_timeout=45,
-                    git_fetch_timeout=120,
                 ),
                 error_handling_config=ErrorHandlingConfig(
                     max_retry_attempts=5,
@@ -467,8 +445,6 @@ class TestServerConfigP2Integration:
             assert isinstance(loaded_config.git_timeouts_config, GitTimeoutsConfig)
             assert loaded_config.git_timeouts_config.git_local_timeout == 60
             assert loaded_config.git_timeouts_config.git_remote_timeout == 600
-            assert loaded_config.git_timeouts_config.git_command_timeout == 45
-            assert loaded_config.git_timeouts_config.git_fetch_timeout == 120
 
             # Verify error_handling_config
             assert isinstance(loaded_config.error_handling_config, ErrorHandlingConfig)

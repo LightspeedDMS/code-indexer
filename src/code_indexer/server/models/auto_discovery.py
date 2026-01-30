@@ -27,6 +27,9 @@ class DiscoveredRepository(BaseModel):
         None, description="Short hash of last commit"
     )
     last_commit_author: Optional[str] = Field(None, description="Author of last commit")
+    last_commit_date: Optional[datetime] = Field(
+        None, description="Date of last commit"
+    )
     last_activity: Optional[datetime] = Field(
         None, description="Last activity timestamp"
     )

@@ -282,10 +282,11 @@ def test_refresh_lock_released_on_exception(scheduler, mock_git_pull_updater):
 
         mock_create_index.side_effect = create_index_with_exception
 
-        # First refresh should fail but release lock
-        scheduler.refresh_repo("test-repo-global")
+        # First refresh should fail and raise exception (Bug #84 fix)
+        with pytest.raises(RuntimeError, match="Refresh failed"):
+            scheduler.refresh_repo("test-repo-global")
 
-        # Verify exception was caught (no exception propagated)
+        # Verify exception was raised after first attempt
         assert call_count[0] == 1, "First refresh should have been attempted"
 
         # Second refresh should succeed (lock was released)

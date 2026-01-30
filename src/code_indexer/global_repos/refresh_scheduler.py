@@ -347,13 +347,9 @@ class RefreshScheduler:
 
             except Exception as e:
                 logger.error(f"Refresh failed for {alias_name}: {e}", exc_info=True)
-                # Return failure result instead of raising
-                return {
-                    "success": False,
-                    "alias": alias_name,
-                    "message": f"Refresh failed: {e}",
-                    "error": str(e),
-                }
+                # Bug #84 fix: Raise exception instead of returning error dict
+                # BackgroundJobManager marks jobs as FAILED only when exceptions are raised
+                raise RuntimeError(f"Refresh failed for {alias_name}: {e}")
 
     def _create_new_index(self, alias_name: str, source_path: str) -> str:
         """

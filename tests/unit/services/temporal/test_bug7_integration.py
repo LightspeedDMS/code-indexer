@@ -68,7 +68,7 @@ class TestBug7Integration(unittest.TestCase):
 
             # Mock the file identifier
             with patch.object(
-                indexer.file_identifier, "_get_project_id"
+                indexer.file_identifier, "get_project_id"
             ) as mock_project_id:
                 mock_project_id.return_value = "test-project"
 

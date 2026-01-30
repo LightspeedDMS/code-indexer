@@ -4275,7 +4275,6 @@ def _get_current_config() -> dict:
     return {
         "server": settings["server"],
         "cache": settings["cache"],
-        "reindexing": settings["reindexing"],
         "timeouts": settings["timeouts"],
         "password_security": settings["password_security"],
         "oidc": oidc_config,
@@ -4386,44 +4385,6 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             "payload_max_fetch_size_chars",
             "payload_cache_ttl_seconds",
             "payload_cleanup_interval_seconds",
-        ]:
-            value = data.get(field)
-            if value is not None:
-                try:
-                    val_int = int(value)
-                    if val_int < 1:
-                        field_name = field.replace("_", " ").title()
-                        return f"{field_name} must be a positive number"
-                except (ValueError, TypeError):
-                    field_name = field.replace("_", " ").title()
-                    return f"{field_name} must be a valid number"
-
-    elif section == "reindexing":
-        # Validate thresholds (0-100 for percentage, 0-1 for accuracy)
-        change_threshold = data.get("change_percentage_threshold")
-        if change_threshold is not None:
-            try:
-                val = float(change_threshold)
-                if val < 0 or val > 100:
-                    return "Change percentage threshold must be between 0 and 100"
-            except (ValueError, TypeError):
-                return "Change percentage threshold must be a valid number"
-
-        accuracy = data.get("accuracy_threshold")
-        if accuracy is not None:
-            try:
-                val = float(accuracy)
-                if val < 0 or val > 1:
-                    return "Accuracy threshold must be between 0 and 1"
-            except (ValueError, TypeError):
-                return "Accuracy threshold must be a valid number"
-
-        # Validate positive integers
-        for field in [
-            "max_index_age_days",
-            "batch_size",
-            "max_analysis_time_seconds",
-            "max_memory_usage_mb",
         ]:
             value = data.get(field)
             if value is not None:
@@ -4777,21 +4738,15 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                 return "SCIP Callchain Limit must be a valid number"
 
     elif section == "git_timeouts":
-        # Story #3 Phase 2 AC12-AC15: Git timeouts configuration
-        # Story #3 Phase 2 AC27-AC30: API provider timeouts
+        # Story #3 Phase 2 AC12-AC14: Git timeouts configuration
+        # Story #3 Phase 2 AC27-AC28: API provider timeouts
         from ..services.constants import (
             MIN_GIT_LOCAL_TIMEOUT_SECONDS,
             MIN_GIT_REMOTE_TIMEOUT_SECONDS,
-            MIN_GIT_COMMAND_TIMEOUT_SECONDS,
-            MIN_GIT_FETCH_TIMEOUT_SECONDS,
             MIN_GITHUB_API_TIMEOUT_SECONDS,
             MAX_GITHUB_API_TIMEOUT_SECONDS,
             MIN_GITLAB_API_TIMEOUT_SECONDS,
             MAX_GITLAB_API_TIMEOUT_SECONDS,
-            MIN_GITHUB_PROVIDER_TIMEOUT_SECONDS,
-            MAX_GITHUB_PROVIDER_TIMEOUT_SECONDS,
-            MIN_GITLAB_PROVIDER_TIMEOUT_SECONDS,
-            MAX_GITLAB_PROVIDER_TIMEOUT_SECONDS,
         )
 
         git_local = data.get("git_local_timeout")
@@ -4812,25 +4767,7 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             except (ValueError, TypeError):
                 return "Git Remote Timeout must be a valid number"
 
-        git_command = data.get("git_command_timeout")
-        if git_command is not None:
-            try:
-                timeout_int = int(git_command)
-                if timeout_int < MIN_GIT_COMMAND_TIMEOUT_SECONDS:
-                    return f"Git Command Timeout must be at least {MIN_GIT_COMMAND_TIMEOUT_SECONDS} seconds"
-            except (ValueError, TypeError):
-                return "Git Command Timeout must be a valid number"
-
-        git_fetch = data.get("git_fetch_timeout")
-        if git_fetch is not None:
-            try:
-                timeout_int = int(git_fetch)
-                if timeout_int < MIN_GIT_FETCH_TIMEOUT_SECONDS:
-                    return f"Git Fetch Timeout must be at least {MIN_GIT_FETCH_TIMEOUT_SECONDS} seconds"
-            except (ValueError, TypeError):
-                return "Git Fetch Timeout must be a valid number"
-
-        # P3 settings (AC27-AC30)
+        # P3 settings (AC27-AC28)
         github_api = data.get("github_api_timeout")
         if github_api is not None:
             try:
@@ -4848,24 +4785,6 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return f"GitLab API Timeout must be between {MIN_GITLAB_API_TIMEOUT_SECONDS} and {MAX_GITLAB_API_TIMEOUT_SECONDS} seconds"
             except (ValueError, TypeError):
                 return "GitLab API Timeout must be a valid number"
-
-        github_provider = data.get("github_provider_timeout")
-        if github_provider is not None:
-            try:
-                timeout_int = int(github_provider)
-                if timeout_int < MIN_GITHUB_PROVIDER_TIMEOUT_SECONDS or timeout_int > MAX_GITHUB_PROVIDER_TIMEOUT_SECONDS:
-                    return f"GitHub Provider Timeout must be between {MIN_GITHUB_PROVIDER_TIMEOUT_SECONDS} and {MAX_GITHUB_PROVIDER_TIMEOUT_SECONDS} seconds"
-            except (ValueError, TypeError):
-                return "GitHub Provider Timeout must be a valid number"
-
-        gitlab_provider = data.get("gitlab_provider_timeout")
-        if gitlab_provider is not None:
-            try:
-                timeout_int = int(gitlab_provider)
-                if timeout_int < MIN_GITLAB_PROVIDER_TIMEOUT_SECONDS or timeout_int > MAX_GITLAB_PROVIDER_TIMEOUT_SECONDS:
-                    return f"GitLab Provider Timeout must be between {MIN_GITLAB_PROVIDER_TIMEOUT_SECONDS} and {MAX_GITLAB_PROVIDER_TIMEOUT_SECONDS} seconds"
-            except (ValueError, TypeError):
-                return "GitLab Provider Timeout must be a valid number"
 
     elif section == "error_handling":
         # Story #3 Phase 2 AC16-AC18: Error handling configuration
@@ -5793,7 +5712,6 @@ async def update_config_section(
     valid_sections = [
         "server",
         "cache",
-        "reindexing",
         "timeouts",
         "password_security",
         "oidc",

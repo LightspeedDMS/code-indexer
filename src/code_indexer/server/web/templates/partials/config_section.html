@@ -219,68 +219,6 @@
     </article>
 </details>
 
-<!-- Reindexing Settings Section -->
-<details class="config-section" id="section-reindexing">
-    <summary>
-        <h2>Reindexing Settings</h2>
-    </summary>
-    <p class="section-description">
-        Controls reindexing decision thresholds during repository sync operations. When syncing repositories, these settings determine whether to perform incremental indexing (faster, updates only changed files) or full reindexing (slower, rebuilds entire index). The change threshold determines what percentage of file changes triggers a full reindex instead of incremental. Accuracy and max age thresholds help maintain index quality over time.
-    </p>
-    <article>
-        <!-- Display Mode -->
-        <div id="display-reindexing">
-            <table class="config-table">
-                <tbody>
-                    <tr>
-                        <td class="config-label">Change Threshold (%)</td>
-                        <td class="config-value">{{ config.reindexing.change_percentage_threshold }}</td>
-                        <td class="config-note"></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Accuracy Threshold</td>
-                        <td class="config-value">{{ config.reindexing.accuracy_threshold }}</td>
-                        <td class="config-note"></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Max Index Age (days)</td>
-                        <td class="config-value">{{ config.reindexing.max_index_age_days }}</td>
-                        <td class="config-note"></td>
-                    </tr>
-                </tbody>
-            </table>
-            <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('reindexing')">Edit</button>
-            </div>
-        </div>
-        <!-- Edit Mode -->
-        <form id="edit-form-reindexing" method="post" action="/admin/config/reindexing" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.reindexing %}
-            <div class="validation-error">{{ validation_errors.reindexing }}</div>
-            {% endif %}
-            <div class="form-grid">
-                <label for="reindex-change">
-                    Change Threshold (%)
-                    <input type="number" id="reindex-change" name="change_percentage_threshold" value="{{ config.reindexing.change_percentage_threshold }}" min="0" max="100" step="0.1">
-                </label>
-                <label for="reindex-accuracy">
-                    Accuracy Threshold
-                    <input type="number" id="reindex-accuracy" name="accuracy_threshold" value="{{ config.reindexing.accuracy_threshold }}" min="0" max="1" step="0.01">
-                </label>
-                <label for="reindex-age">
-                    Max Index Age (days)
-                    <input type="number" id="reindex-age" name="max_index_age_days" value="{{ config.reindexing.max_index_age_days }}" min="1">
-                </label>
-            </div>
-            <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('reindexing')">Cancel</button>
-            </div>
-        </form>
-    </article>
-</details>
-
 <!-- Timeout Settings Section -->
 <details class="config-section" id="section-timeouts">
     <summary>

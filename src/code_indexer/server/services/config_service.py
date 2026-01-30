@@ -82,7 +82,6 @@ class ConfigService:
 
         # These are guaranteed to be non-None by ServerConfig.__post_init__
         assert config.cache_config is not None
-        assert config.reindexing_config is not None
         assert config.resource_config is not None
         assert config.password_security is not None
         assert config.oidc_provider_config is not None
@@ -134,20 +133,6 @@ class ConfigService:
                 "payload_max_fetch_size_chars": config.cache_config.payload_max_fetch_size_chars,
                 "payload_cache_ttl_seconds": config.cache_config.payload_cache_ttl_seconds,
                 "payload_cleanup_interval_seconds": config.cache_config.payload_cleanup_interval_seconds,
-            },
-            # Reindexing settings
-            "reindexing": {
-                "change_percentage_threshold": config.reindexing_config.change_percentage_threshold,
-                "accuracy_threshold": config.reindexing_config.accuracy_threshold,
-                "max_index_age_days": config.reindexing_config.max_index_age_days,
-                "batch_size": config.reindexing_config.batch_size,
-                "max_analysis_time_seconds": config.reindexing_config.max_analysis_time_seconds,
-                "max_memory_usage_mb": config.reindexing_config.max_memory_usage_mb,
-                "enable_structural_analysis": config.reindexing_config.enable_structural_analysis,
-                "enable_config_change_detection": config.reindexing_config.enable_config_change_detection,
-                "enable_corruption_detection": config.reindexing_config.enable_corruption_detection,
-                "enable_periodic_check": config.reindexing_config.enable_periodic_check,
-                "parallel_analysis": config.reindexing_config.parallel_analysis,
             },
             # Git operation timeouts
             "timeouts": {
@@ -250,17 +235,12 @@ class ConfigService:
                 "scip_callchain_max_depth": config.scip_config.scip_callchain_max_depth,
                 "scip_callchain_limit": config.scip_config.scip_callchain_limit,
             },
-            # Story #3 - Phase 2: P2 settings (AC12-AC26)
+            # Story #3 - Phase 2: P2 settings (AC12-AC14, AC27-AC28)
             "git_timeouts": {
                 "git_local_timeout": config.git_timeouts_config.git_local_timeout,
                 "git_remote_timeout": config.git_timeouts_config.git_remote_timeout,
-                "git_command_timeout": config.git_timeouts_config.git_command_timeout,
-                "git_fetch_timeout": config.git_timeouts_config.git_fetch_timeout,
-                # P3 settings (AC27-AC30)
                 "github_api_timeout": config.git_timeouts_config.github_api_timeout,
                 "gitlab_api_timeout": config.git_timeouts_config.gitlab_api_timeout,
-                "github_provider_timeout": config.git_timeouts_config.github_provider_timeout,
-                "gitlab_provider_timeout": config.git_timeouts_config.gitlab_provider_timeout,
             },
             "error_handling": {
                 "max_retry_attempts": config.error_handling_config.max_retry_attempts,
@@ -351,8 +331,6 @@ class ConfigService:
             self._update_server_setting(config, key, value)
         elif category == "cache":
             self._update_cache_setting(config, key, value)
-        elif category == "reindexing":
-            self._update_reindexing_setting(config, key, value)
         elif category == "timeouts":
             self._update_timeout_setting(config, key, value)
         elif category == "password_security":
@@ -470,37 +448,6 @@ class ConfigService:
             cache.payload_cleanup_interval_seconds = int(value)
         else:
             raise ValueError(f"Unknown cache setting: {key}")
-
-    def _update_reindexing_setting(
-        self, config: ServerConfig, key: str, value: Any
-    ) -> None:
-        """Update a reindexing setting."""
-        reindex = config.reindexing_config
-        assert reindex is not None  # Guaranteed by ServerConfig.__post_init__
-        if key == "change_percentage_threshold":
-            reindex.change_percentage_threshold = float(value)
-        elif key == "accuracy_threshold":
-            reindex.accuracy_threshold = float(value)
-        elif key == "max_index_age_days":
-            reindex.max_index_age_days = int(value)
-        elif key == "batch_size":
-            reindex.batch_size = int(value)
-        elif key == "max_analysis_time_seconds":
-            reindex.max_analysis_time_seconds = int(value)
-        elif key == "max_memory_usage_mb":
-            reindex.max_memory_usage_mb = int(value)
-        elif key == "enable_structural_analysis":
-            reindex.enable_structural_analysis = bool(value)
-        elif key == "enable_config_change_detection":
-            reindex.enable_config_change_detection = bool(value)
-        elif key == "enable_corruption_detection":
-            reindex.enable_corruption_detection = bool(value)
-        elif key == "enable_periodic_check":
-            reindex.enable_periodic_check = bool(value)
-        elif key == "parallel_analysis":
-            reindex.parallel_analysis = bool(value)
-        else:
-            raise ValueError(f"Unknown reindexing setting: {key}")
 
     def _update_timeout_setting(
         self, config: ServerConfig, key: str, value: Any
@@ -750,26 +697,17 @@ class ConfigService:
     def _update_git_timeouts_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
-        """Update a git timeouts setting (Story #3 - Phase 2, AC12-AC15, AC27-AC30)."""
+        """Update a git timeouts setting (Story #3 - Phase 2, AC12-AC14, AC27-AC28)."""
         git_timeouts = config.git_timeouts_config
         assert git_timeouts is not None  # Guaranteed by ServerConfig.__post_init__
         if key == "git_local_timeout":
             git_timeouts.git_local_timeout = int(value)
         elif key == "git_remote_timeout":
             git_timeouts.git_remote_timeout = int(value)
-        elif key == "git_command_timeout":
-            git_timeouts.git_command_timeout = int(value)
-        elif key == "git_fetch_timeout":
-            git_timeouts.git_fetch_timeout = int(value)
-        # P3 settings (AC27-AC30)
         elif key == "github_api_timeout":
             git_timeouts.github_api_timeout = int(value)
         elif key == "gitlab_api_timeout":
             git_timeouts.gitlab_api_timeout = int(value)
-        elif key == "github_provider_timeout":
-            git_timeouts.github_provider_timeout = int(value)
-        elif key == "gitlab_provider_timeout":
-            git_timeouts.gitlab_provider_timeout = int(value)
         else:
             raise ValueError(f"Unknown git timeouts setting: {key}")
 
@@ -908,8 +846,6 @@ class ConfigService:
                     self._update_server_setting(config, key, value)
                 elif category == "cache":
                     self._update_cache_setting(config, key, value)
-                elif category == "reindexing":
-                    self._update_reindexing_setting(config, key, value)
                 elif category == "timeouts":
                     self._update_timeout_setting(config, key, value)
                 elif category == "password_security":

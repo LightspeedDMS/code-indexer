@@ -59,7 +59,7 @@ class TestTemporalIndexerBatchItemLimit(unittest.TestCase):
 
         # Mock the file identifier
         self.indexer.file_identifier = Mock()
-        self.indexer.file_identifier._get_project_id.return_value = "test-project"
+        self.indexer.file_identifier.get_project_id.return_value = "test-project"
 
         # Mock the chunker
         self.indexer.chunker = Mock()

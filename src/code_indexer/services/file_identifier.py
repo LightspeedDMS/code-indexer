@@ -48,12 +48,24 @@ class FileIdentifier:
         """
         return is_git_repository(self.project_dir)
 
-    def _get_project_id(self) -> str:
+    def get_project_id(self) -> str:
         """
-        Get a unique project identifier.
+        Get a unique project identifier (PUBLIC API).
+
+        This method is the single source of truth for project_id detection.
+        Use this method whenever you need to determine the project identifier
+        to ensure consistency across the codebase.
+
+        IMPORTANT: This is a PUBLIC API (not private with _) to enable other
+        components (e.g., config_fixer) to use it. See Bug #85.
 
         Returns:
             Project identifier string (git repo name or directory name)
+
+        Algorithm:
+            1. If git repository with remote: extract repo name from remote URL
+            2. Otherwise: use directory name as fallback
+            3. Normalize: lowercase, replace underscores with dashes
         """
         if self._project_id is not None:
             return self._project_id
@@ -172,7 +184,7 @@ class FileIdentifier:
         rel_path = str(file_path.relative_to(self.project_dir))
 
         metadata = {
-            "project_id": self._get_project_id(),
+            "project_id": self.get_project_id(),
             "file_path": rel_path,
             "file_hash": self._get_file_content_hash(file_path),
             "indexed_at": datetime.now(timezone.utc).isoformat() + "Z",

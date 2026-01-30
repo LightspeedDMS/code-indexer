@@ -179,14 +179,20 @@ class TestRefreshSchedulerBackgroundJobManagerIntegration:
             # Verify _execute_refresh was called with correct alias
             mock_execute.assert_called_once_with("test-repo-global")
 
-    def test_execute_refresh_returns_error_dict_on_exception(
+    def test_execute_refresh_raises_exception_on_timeout(
         self,
         golden_repos_dir,
         config_mgr,
         query_tracker,
         cleanup_manager,
     ):
-        """Test that _execute_refresh returns error dict on exception."""
+        """
+        Test that _execute_refresh raises exception on timeout (Bug #84).
+
+        This is the correct behavior for BackgroundJobManager integration.
+        When an exception is raised, BackgroundJobManager marks the job as FAILED.
+        When a dict with success=False is returned, the job is marked as COMPLETED.
+        """
         scheduler = RefreshScheduler(
             golden_repos_dir=str(golden_repos_dir),
             config_source=config_mgr,
@@ -195,15 +201,64 @@ class TestRefreshSchedulerBackgroundJobManagerIntegration:
         )
 
         with patch.object(
-            scheduler.alias_manager, "read_alias", side_effect=Exception("Test error")
+            scheduler.alias_manager, "read_alias", side_effect=RuntimeError("Refresh timeout")
         ):
-            result = scheduler._execute_refresh("test-repo-global")
+            with pytest.raises(RuntimeError, match="Refresh timeout"):
+                scheduler._execute_refresh("test-repo-global")
 
-            assert result["success"] is False
-            assert result["alias"] == "test-repo-global"
-            assert "error" in result
-            assert "message" in result  # After HIGH-2 fix
-            assert "Test error" in result["error"]
+    def test_background_job_manager_marks_failed_on_refresh_exception(
+        self,
+        golden_repos_dir,
+        config_mgr,
+        query_tracker,
+        cleanup_manager,
+        tmp_path,
+    ):
+        """
+        Integration test: BackgroundJobManager marks job as FAILED when refresh raises exception (Bug #84).
+
+        This test verifies the complete flow:
+        1. RefreshScheduler submits job to BackgroundJobManager
+        2. Job execution encounters an error and raises exception
+        3. BackgroundJobManager catches exception and marks job as FAILED
+        """
+        from code_indexer.server.repositories.background_jobs import BackgroundJobManager, JobStatus
+        import time
+
+        # Create real BackgroundJobManager
+        bjm = BackgroundJobManager(
+            storage_path=str(tmp_path / "jobs.json"),
+            use_sqlite=False,
+        )
+
+        scheduler = RefreshScheduler(
+            golden_repos_dir=str(golden_repos_dir),
+            config_source=config_mgr,
+            query_tracker=query_tracker,
+            cleanup_manager=cleanup_manager,
+            background_job_manager=bjm,
+        )
+
+        # Mock _execute_refresh to raise exception
+        with patch.object(
+            scheduler, "_execute_refresh", side_effect=RuntimeError("Simulated refresh timeout")
+        ):
+            job_id = scheduler._submit_refresh_job("test-repo-global")
+
+            # Wait for job to complete (max 5 seconds)
+            for _ in range(50):
+                job = bjm.jobs.get(job_id)
+                if job and job.status in [JobStatus.COMPLETED, JobStatus.FAILED]:
+                    break
+                time.sleep(0.1)
+
+            # Verify job is marked as FAILED, not COMPLETED
+            job = bjm.jobs[job_id]
+            assert job.status == JobStatus.FAILED, (
+                f"Expected job status FAILED, got {job.status}. "
+                "Bug #84: Exceptions should result in FAILED status, not COMPLETED."
+            )
+            assert "Simulated refresh timeout" in job.error
 
 
 class TestGlobalReposLifecycleManagerBackgroundJobManager:

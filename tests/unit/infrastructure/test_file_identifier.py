@@ -84,7 +84,7 @@ class TestFileIdentifier:
     def test_project_id_from_directory(self, non_git_dir, config):
         """Test project ID generation from directory name."""
         identifier = FileIdentifier(non_git_dir, config)
-        project_id = identifier._get_project_id()
+        project_id = identifier.get_project_id()
 
         # Should use directory name, converted to lowercase with underscores replaced
         expected = non_git_dir.name.lower().replace("_", "-")
@@ -100,7 +100,7 @@ class TestFileIdentifier:
         )
 
         identifier = FileIdentifier(git_repo, config)
-        project_id = identifier._get_project_id()
+        project_id = identifier.get_project_id()
 
         assert project_id == "test-repo"
 
@@ -351,3 +351,38 @@ class TestFileIdentifier:
 
         # Should store relative path from project root
         assert metadata["file_path"] == "src/utils/helper.py"
+
+    def test_project_id_public_api_works(self, temp_dir, config):
+        """Test that get_project_id() is a public API (Bug #85 regression test).
+
+        This test verifies the fix for Bug #85 where config_fixer needs to use
+        FileIdentifier.get_project_id() as the single source of truth for project_id.
+        The method must be public (not private with _) to be accessible.
+        """
+        # Test with non-git directory (uses directory name)
+        non_git_dir = temp_dir / "my_project_v123"
+        non_git_dir.mkdir()
+        identifier_non_git = FileIdentifier(non_git_dir, config)
+
+        # Public API should work
+        project_id = identifier_non_git.get_project_id()
+        assert project_id == "my-project-v123"
+
+        # Test with git directory (uses git remote)
+        git_dir = temp_dir / "v_1769727231"  # Versioned directory name (CoW clone)
+        git_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=git_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=git_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=git_dir, check=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/user/evolution.git"],
+            cwd=git_dir,
+            check=True,
+        )
+
+        identifier_git = FileIdentifier(git_dir, config)
+
+        # Should extract "evolution" from git remote, NOT "v_1769727231" from directory
+        project_id_git = identifier_git.get_project_id()
+        assert project_id_git == "evolution"
+        assert project_id_git != "v-1769727231"  # Must NOT use directory name

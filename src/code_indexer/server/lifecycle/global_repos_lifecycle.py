@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
+    from code_indexer.server.utils.config_manager import ServerResourceConfig
 
 from ...global_repos.query_tracker import QueryTracker
 from ...global_repos.cleanup_manager import CleanupManager
@@ -43,6 +44,7 @@ class GlobalReposLifecycleManager:
         self,
         golden_repos_dir: str,
         background_job_manager: Optional["BackgroundJobManager"] = None,
+        resource_config: Optional["ServerResourceConfig"] = None,
     ):
         """
         Initialize the lifecycle manager.
@@ -50,6 +52,7 @@ class GlobalReposLifecycleManager:
         Args:
             golden_repos_dir: Path to golden repos directory
             background_job_manager: Optional job manager for dashboard visibility (server mode)
+            resource_config: Optional resource configuration (timeouts, etc.)
         """
         self.golden_repos_dir = Path(golden_repos_dir)
 
@@ -75,6 +78,7 @@ class GlobalReposLifecycleManager:
             query_tracker=self.query_tracker,
             cleanup_manager=self.cleanup_manager,
             background_job_manager=background_job_manager,
+            resource_config=resource_config,
         )
 
         # Track running state

@@ -477,8 +477,9 @@ class TestUserManager:
         """Test that creating user with existing username raises error."""
         user_manager.create_user("testuser", "TestPassword123!", UserRole.NORMAL_USER)
 
+        # Bug #83-2 fix: Use strong unique password that passes validation
         with pytest.raises(ValueError, match="User already exists"):
-            user_manager.create_user("testuser", "Password2Strong!", UserRole.ADMIN)
+            user_manager.create_user("testuser", "UniqueStrong123!@#Pass", UserRole.ADMIN)
 
     def test_authenticate_user_valid_credentials(self, user_manager):
         """Test authenticating user with valid credentials."""
