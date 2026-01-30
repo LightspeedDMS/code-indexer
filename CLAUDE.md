@@ -109,6 +109,49 @@ systemctl status cidx-server --no-pager
 
 ---
 
+## CRITICAL: AUTO-UPDATER IDEMPOTENT DEPLOYMENT - MANDATORY
+
+**ABSOLUTE PROHIBITION**: NEVER implement server environment changes that require manual intervention on production servers.
+
+**MANDATORY APPROACH**: ALL changes to systemd service files, environment variables, or server configuration MUST be implemented through the auto-updater in an idempotent fashion.
+
+**WHY**: Production servers use the auto-updater workflow:
+1. `git pull` - gets new code
+2. `pip install` - installs new code
+3. `DeploymentExecutor.execute()` - runs idempotent configuration updates
+4. `systemctl restart` - restarts with new code AND new config
+
+The auto-updater is the ONLY mechanism that touches production servers. If you add a new environment variable, service file change, or configuration requirement, the auto-updater MUST handle it automatically.
+
+**IMPLEMENTATION PATTERN** (see `deployment_executor.py`):
+```python
+# Add idempotent method like _ensure_workers_config() or _ensure_cidx_repo_root()
+def _ensure_new_config(self) -> bool:
+    """Idempotently ensure new configuration is present."""
+    # 1. Check if already configured - return True if so
+    # 2. If not, add the configuration
+    # 3. Run sudo systemctl daemon-reload
+    # 4. Return True on success, False on error
+
+# Call it in execute() method
+def execute(self) -> bool:
+    # ... git pull, pip install ...
+    self._ensure_workers_config()
+    self._ensure_cidx_repo_root()
+    self._ensure_new_config()  # ADD YOUR NEW CONFIG HERE
+```
+
+**EXAMPLES**:
+- Adding `CIDX_REPO_ROOT` env var: Added `_ensure_cidx_repo_root()` to auto-updater
+- Adding `--workers 1` flag: Added `_ensure_workers_config()` to auto-updater
+- Adding new systemd setting: Add new `_ensure_*()` method to auto-updater
+
+**VIOLATION = BROKEN PRODUCTION**: Expecting manual server intervention means the fix will NEVER reach production servers that rely on auto-update.
+
+**RECORDED**: 2026-01-30 - Bug #87 fix required adding CIDX_REPO_ROOT to auto-updater because production servers don't re-run deploy-server.sh.
+
+---
+
 ## CIDX SERVER PORT CONFIGURATION - DO NOT CHANGE
 
 **ABSOLUTE PROHIBITION**: NEVER change the port configuration for cidx-server, HAProxy, or firewall.

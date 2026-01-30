@@ -439,6 +439,106 @@ class DeploymentExecutor:
             ))
             return False
 
+    def _ensure_cidx_repo_root(self) -> bool:
+        """Ensure systemd service has CIDX_REPO_ROOT environment variable configured.
+
+        CIDX_REPO_ROOT is required for self-monitoring to detect repository root.
+        Without it, self-monitoring fails with MONITOR-GENERAL-011 error.
+
+        Returns:
+            True if config is correct or was updated, False on error
+        """
+        service_path = Path(f"/etc/systemd/system/{self.service_name}.service")
+
+        try:
+            if not service_path.exists():
+                logger.warning(format_error_log(
+                    "DEPLOY-GENERAL-022",
+                    f"Service file not found: {service_path}",
+                    extra={"correlation_id": get_correlation_id()},
+                ))
+                return True  # Not an error if service doesn't exist yet
+
+            content = service_path.read_text()
+
+            # Check if CIDX_REPO_ROOT is already configured
+            if "CIDX_REPO_ROOT" in content:
+                logger.debug(
+                    "CIDX_REPO_ROOT already present in service file",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            # Find insertion point and add CIDX_REPO_ROOT
+            lines = content.split("\n")
+            new_env_line = f'Environment="CIDX_REPO_ROOT={self.repo_path}"'
+
+            # First pass: find the index of the last Environment= line
+            last_env_index = -1
+            for i, line in enumerate(lines):
+                if line.startswith("Environment="):
+                    last_env_index = i
+
+            # Second pass: build updated content with insertion
+            updated_lines = []
+            inserted = False
+
+            for i, line in enumerate(lines):
+                # Check if we need to insert before ExecStart (no Environment= lines case)
+                if last_env_index == -1 and not inserted and line.startswith("ExecStart="):
+                    updated_lines.append(new_env_line)
+                    inserted = True
+
+                updated_lines.append(line)
+
+                # Check if we need to insert after last Environment= line
+                if last_env_index >= 0 and i == last_env_index and not inserted:
+                    updated_lines.append(new_env_line)
+                    inserted = True
+
+            if not inserted:
+                logger.warning(format_error_log(
+                    "DEPLOY-GENERAL-023",
+                    "Could not find insertion point for CIDX_REPO_ROOT",
+                    extra={"correlation_id": get_correlation_id()},
+                ))
+                return True  # Not a fatal error
+
+            new_content = "\n".join(updated_lines)
+            result = subprocess.run(
+                ["sudo", "tee", str(service_path)],
+                input=new_content,
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                logger.error(format_error_log(
+                    "DEPLOY-GENERAL-024",
+                    f"Failed to update service file: {result.stderr}",
+                    extra={"correlation_id": get_correlation_id()},
+                ))
+                return False
+
+            subprocess.run(
+                ["sudo", "systemctl", "daemon-reload"],
+                capture_output=True,
+            )
+
+            logger.info(
+                f"Added CIDX_REPO_ROOT to service file: {self.repo_path}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.error(format_error_log(
+                "DEPLOY-GENERAL-025",
+                f"Error checking CIDX_REPO_ROOT config: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            ))
+            return False
+
     def ensure_ripgrep(self) -> bool:
         """
         Ensure ripgrep is installed (x86_64 Linux only).
@@ -485,7 +585,10 @@ class DeploymentExecutor:
         # Step 3: Story #30 AC4 - Ensure workers config
         self._ensure_workers_config()
 
-        # Step 4: Ensure ripgrep is installed
+        # Step 4: Bug #87 - Ensure CIDX_REPO_ROOT environment variable
+        self._ensure_cidx_repo_root()
+
+        # Step 5: Ensure ripgrep is installed
         self.ensure_ripgrep()
 
         logger.info(
