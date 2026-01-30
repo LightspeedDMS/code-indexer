@@ -143,9 +143,10 @@ def _detect_repo_root(start_from_file: bool = True) -> Optional[Path]:
     """
     Detect git repository root directory.
 
-    Tries two strategies in order:
-    1. Walk up from __file__ location (works for development/source installations)
-    2. Walk up from current working directory (works for pip-installed packages)
+    Tries three strategies in order:
+    1. CIDX_REPO_ROOT environment variable (explicit configuration from systemd service)
+    2. Walk up from __file__ location (works for development/source installations)
+    3. Walk up from current working directory (works for pip-installed packages)
 
     Args:
         start_from_file: If True, try __file__ location first. For testing, can be False.
@@ -153,21 +154,42 @@ def _detect_repo_root(start_from_file: bool = True) -> Optional[Path]:
     Returns:
         Path to repository root if found, None otherwise.
 
-    Bug: MONITOR-GENERAL-011 - Production servers with pip-installed packages
-    need cwd fallback because __file__ points to site-packages.
+    Bug Fix: MONITOR-GENERAL-011 - Use explicit CIDX_REPO_ROOT env var for production
+    servers to eliminate detection ambiguity.
     """
     repo_root = None
 
-    # Strategy 1: Try __file__-based detection (development/source installations)
+    # Strategy 1: Check CIDX_REPO_ROOT environment variable (set by systemd service)
+    # This is the most reliable method for production deployments
+    env_repo_root = os.environ.get("CIDX_REPO_ROOT")
+    if env_repo_root:
+        candidate = Path(env_repo_root).resolve()
+        if (candidate / ".git").exists():
+            logger.info(
+                f"Self-monitoring: Detected repo root from CIDX_REPO_ROOT env var: {candidate}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return candidate
+        else:
+            logger.warning(
+                f"Self-monitoring: CIDX_REPO_ROOT set to '{env_repo_root}' but no .git found",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+    # Strategy 2: Try __file__-based detection (development/source installations)
     if start_from_file:
         current = Path(__file__).resolve().parent
         while current != current.parent:
             if (current / ".git").exists():
                 repo_root = current
+                logger.info(
+                    f"Self-monitoring: Detected repo root from __file__: {repo_root}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
                 break
             current = current.parent
 
-    # Strategy 2: Fallback to cwd (pip-installed packages on production)
+    # Strategy 3: Fallback to cwd (pip-installed packages on production)
     # If systemd service runs from cloned repo directory, cwd will have .git
     if not repo_root:
         cwd = Path.cwd()

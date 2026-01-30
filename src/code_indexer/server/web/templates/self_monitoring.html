@@ -120,12 +120,6 @@
         </label>
 
         <label>
-            GitHub Repository (owner/repo):
-            <input type="text" name="github_repo" value="{{ config.github_repo or '' }}" placeholder="e.g., LightspeedDMS/code-indexer">
-            <small>Auto-detected from git remote if empty. Set manually for production servers.</small>
-        </label>
-
-        <label>
             Prompt Template:
             <textarea name="prompt_template" rows="10" cols="80">{{ current_prompt }}</textarea>
         </label>

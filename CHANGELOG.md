@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.9] - 2026-01-30
+
+### Fixed
+
+- **Self-Monitoring CIDX_REPO_ROOT Environment Variable** - Proper fix for repo detection on production servers:
+  - Root cause: Previous fixes (cwd-based, manual config field) were band-aids that didn't leverage the installer's knowledge
+  - Solution: Added `CIDX_REPO_ROOT` environment variable to systemd service template, set by deploy script
+  - Deploy script sets `CIDX_REPO_ROOT` to `WorkingDirectory` (the cloned repo location)
+  - Detection priority: 1) `CIDX_REPO_ROOT` env var, 2) `__file__`-based walk, 3) cwd-based walk
+  - Removed unnecessary `github_repo` config field from Self-Monitoring UI (the installer already knows!)
+  - This is the architecturally correct solution: installer knows the repo path, passes it via env var
+
+---
+
 ## [8.8.8] - 2026-01-30
 
 ### Fixed

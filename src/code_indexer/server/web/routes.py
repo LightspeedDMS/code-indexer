@@ -7546,7 +7546,6 @@ async def save_self_monitoring_config(
 
     model = form_data.get("model", "opus").strip()
     prompt_template = form_data.get("prompt_template", "").strip()
-    github_repo = form_data.get("github_repo", "").strip() or None  # Empty string becomes None
 
     # Determine if prompt was user-modified
     prompt_user_modified = config.self_monitoring_config.prompt_user_modified
@@ -7559,7 +7558,6 @@ async def save_self_monitoring_config(
     config.self_monitoring_config.model = model
     config.self_monitoring_config.prompt_template = prompt_template
     config.self_monitoring_config.prompt_user_modified = prompt_user_modified
-    config.self_monitoring_config.github_repo = github_repo
 
     # Save configuration
     config_service.config_manager.save_config(config)
@@ -7630,19 +7628,17 @@ async def trigger_manual_scan(
     if log_db_path:
         log_db_path = str(log_db_path)
 
-    # Get repo_root and github_repo (Bug Fix: MONITOR-GENERAL-011)
-    # Priority: 1) config.github_repo (manually set), 2) app.state (auto-detected)
+    # Get repo_root and github_repo from app.state (auto-detected at startup)
+    # Bug Fix: MONITOR-GENERAL-011 - CIDX_REPO_ROOT env var ensures reliable detection
     repo_root = getattr(request.app.state, "self_monitoring_repo_root", None)
-    github_repo = config.self_monitoring_config.github_repo or getattr(
-        request.app.state, "self_monitoring_github_repo", None
-    )
+    github_repo = getattr(request.app.state, "self_monitoring_github_repo", None)
 
     if not github_repo:
         logger.error(
             format_error_log(
                 "MONITOR-GENERAL-011",
-                "Self-monitoring: github_repo not configured and auto-detection failed. "
-                "Set 'GitHub Repository' in Self-Monitoring config UI (format: owner/repo).",
+                "Self-monitoring: github_repo auto-detection failed. "
+                "Ensure CIDX_REPO_ROOT environment variable is set correctly in systemd service.",
             ),
             extra={"correlation_id": get_correlation_id()},
         )
@@ -7650,7 +7646,7 @@ async def trigger_manual_scan(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={
                 "status": "error",
-                "error": "GitHub repository not configured. Set 'GitHub Repository' in config (format: owner/repo)."
+                "error": "GitHub repository auto-detection failed. Check server logs."
             }
         )
 

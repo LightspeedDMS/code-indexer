@@ -27,6 +27,10 @@ Environment="CIDX_ISSUER_URL=__ISSUER_URL__"
 # Leave empty if not using AI features
 Environment="ANTHROPIC_API_KEY=__ANTHROPIC_API_KEY__"
 
+# Repository root directory for self-monitoring and auto-update
+# Set to the directory where the code-indexer repository is cloned
+Environment="CIDX_REPO_ROOT=__REPO_ROOT__"
+
 # Optional: Server data directory (default: ~/.cidx-server)
 # Environment="CIDX_SERVER_DATA_DIR=__USER_HOME__/.cidx-server"
 

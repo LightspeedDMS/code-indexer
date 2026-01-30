@@ -167,6 +167,7 @@ sed -i "s|__USER_HOME__|$DEPLOY_USER_HOME|g" "$SERVICE_FILE"
 sed -i "s|__VOYAGE_API_KEY__|$VOYAGE_KEY|g" "$SERVICE_FILE"
 sed -i "s|__ISSUER_URL__|$ISSUER_URL|g" "$SERVICE_FILE"
 sed -i "s|__ANTHROPIC_API_KEY__|$ANTHROPIC_KEY|g" "$SERVICE_FILE"
+sed -i "s|__REPO_ROOT__|$WORKING_DIR|g" "$SERVICE_FILE"
 sed -i "s|__HOST__|$HOST|g" "$SERVICE_FILE"
 sed -i "s|__PORT__|$PORT|g" "$SERVICE_FILE"
 

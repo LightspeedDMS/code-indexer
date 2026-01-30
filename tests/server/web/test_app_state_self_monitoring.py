@@ -56,6 +56,37 @@ def test_app_startup_stores_github_repo_in_state(web_client):
             "github_repo should be None when self-monitoring is disabled"
 
 
+def test_detect_repo_root_uses_env_var_first():
+    """
+    Test _detect_repo_root() checks CIDX_REPO_ROOT environment variable first.
+
+    This is the most reliable detection method for production deployments where
+    the systemd service explicitly sets the repo root path.
+
+    Bug Fix: MONITOR-GENERAL-011
+    """
+    from code_indexer.server.app import _detect_repo_root
+    import os
+
+    # Create a temporary directory structure simulating a git repo
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo_dir = Path(tmpdir) / "test-repo"
+        repo_dir.mkdir()
+        git_dir = repo_dir / ".git"
+        git_dir.mkdir()
+
+        # Test: When CIDX_REPO_ROOT is set, should use it regardless of __file__ or cwd
+        with patch.dict(os.environ, {"CIDX_REPO_ROOT": str(repo_dir)}):
+            result = _detect_repo_root(start_from_file=True)
+
+            assert result is not None, \
+                "Should detect repo_root from CIDX_REPO_ROOT env var"
+            assert result == repo_dir, \
+                f"Should detect {repo_dir} from env var, got {result}"
+            assert (result / ".git").exists(), \
+                "Detected repo_root should have .git directory"
+
+
 def test_detect_repo_root_falls_back_to_cwd():
     """
     Test _detect_repo_root() uses cwd as fallback when __file__ detection fails.
