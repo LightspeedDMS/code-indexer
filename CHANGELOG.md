@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.13] - 2026-01-31
+
+### Changed
+
+- **Self-Monitoring: Replaced gh CLI with GitHub REST API** - Eliminates external tool dependency:
+  - `scanner.py`: `_fetch_existing_github_issues()` now uses `httpx.get` instead of subprocess `gh issue list`
+  - `issue_manager.py`: Renamed `_call_gh_cli()` to `_create_github_issue_via_api()`, uses `httpx.post`
+  - Self-monitoring now works on servers without GitHub CLI installed
+  - Follows existing REST API patterns from `github_provider.py`
+
+### Fixed
+
+- **Bug #87: Self-monitoring scan failure due to log_id_end NOT NULL constraint** - Database schema compatibility fix:
+  - `create_scan_record()` now includes `log_id_end` column in INSERT with initial value
+  - Added graceful handling for missing `gh` CLI (FileNotFoundError)
+  - Added comprehensive debug logging with `[SELF-MON-DEBUG]` prefix
+
+---
+
 ## [8.8.10] - 2026-01-30
 
 ### Fixed
