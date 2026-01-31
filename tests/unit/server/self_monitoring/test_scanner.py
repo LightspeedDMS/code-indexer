@@ -98,6 +98,39 @@ class TestLogScannerInit:
         assert scanner.log_db_path == "/path/to/logs.db"
         assert scanner.prompt_template == "Analyze logs: {context}"
 
+    def test_scanner_accepts_github_token_and_server_name(self, temp_db):
+        """Test scanner accepts github_token and server_name parameters (Bug #87 - Issue #2)."""
+        scanner = LogScanner(
+            db_path=temp_db,
+            scan_id="scan-123",
+            github_repo="org/repo",
+            log_db_path="/path/to/logs.db",
+            prompt_template="Analyze logs: {context}",
+            github_token="ghp_test_token",
+            server_name="Test Server"
+        )
+
+        assert scanner.github_token == "ghp_test_token"
+        assert scanner.server_name == "Test Server"
+
+    def test_scanner_passes_github_token_to_issue_manager(self, temp_db):
+        """Test scanner stores github_token and server_name for passing to IssueManager (Bug #87 - Issue #2)."""
+        scanner = LogScanner(
+            db_path=temp_db,
+            scan_id="scan-test",
+            github_repo="org/repo",
+            log_db_path="/path/to/logs.db",
+            prompt_template="Test",
+            github_token="ghp_token_123",
+            server_name="Production Server"
+        )
+
+        # Verify scanner stores the parameters that will be passed to IssueManager
+        assert scanner.github_token == "ghp_token_123"
+        assert scanner.server_name == "Production Server"
+
+        # Full integration test (service -> scanner -> issue_manager) is in test_service.py
+
 
 class TestPromptAssembly:
     """Test Claude prompt assembly (AC2).
@@ -208,6 +241,54 @@ class TestDeduplicationContext:
         assert "Tier 1" in context or "error code" in context.lower()
         assert "Tier 2" in context or "fingerprint" in context.lower()
         assert "Tier 3" in context or "semantic" in context.lower()
+
+
+class TestScanRecordManagement:
+    """Test scan record creation and management (Bug #87)."""
+
+    def test_create_scan_record_inserts_initial_record(self, scanner, temp_db):
+        """Test create_scan_record creates initial scan record with RUNNING status (Bug #87 - Issue #5)."""
+        # Call create_scan_record
+        scanner.create_scan_record(log_id_start=100)
+
+        # Verify record was created
+        conn = sqlite3.connect(temp_db)
+        try:
+            row = conn.execute(
+                "SELECT scan_id, status, log_id_start, log_id_end, issues_created FROM self_monitoring_scans WHERE scan_id = ?",
+                (scanner.scan_id,)
+            ).fetchone()
+
+            assert row is not None
+            assert row[0] == scanner.scan_id
+            assert row[1] == "RUNNING"
+            assert row[2] == 100  # log_id_start
+            assert row[3] is None  # log_id_end (not set yet)
+            assert row[4] == 0  # issues_created
+        finally:
+            conn.close()
+
+    def test_create_scan_record_sets_timestamp(self, scanner, temp_db):
+        """Test create_scan_record sets started_at timestamp (Bug #87 - Issue #5)."""
+        import datetime
+
+        before = datetime.datetime.utcnow()
+        scanner.create_scan_record(log_id_start=50)
+        after = datetime.datetime.utcnow()
+
+        # Verify timestamp is within reasonable range
+        conn = sqlite3.connect(temp_db)
+        try:
+            row = conn.execute(
+                "SELECT started_at FROM self_monitoring_scans WHERE scan_id = ?",
+                (scanner.scan_id,)
+            ).fetchone()
+
+            assert row is not None
+            started_at = datetime.datetime.fromisoformat(row[0])
+            assert before <= started_at <= after
+        finally:
+            conn.close()
 
 
 class TestLogDeltaTracking:
@@ -403,6 +484,111 @@ class TestIssueClassification:
             scanner.get_issue_prefix("unknown_type")
 
 
+class TestFetchExistingIssues:
+    """Test _fetch_existing_github_issues implementation (Bug #87)."""
+
+    def test_fetch_existing_github_issues_calls_gh_cli(self, temp_db):
+        """Test _fetch_existing_github_issues uses gh CLI to fetch open issues (Bug #87 - Issue #7)."""
+        scanner = LogScanner(
+            db_path=temp_db,
+            scan_id="scan-123",
+            github_repo="org/repo",
+            log_db_path="/path/to/logs.db",
+            prompt_template="Test",
+            github_token="ghp_token_123"
+        )
+
+        # Mock gh CLI response
+        gh_response = json.dumps([
+            {
+                "number": 101,
+                "title": "[BUG] Test issue",
+                "body": "Test body",
+                "labels": [{"name": "bug"}, {"name": "self-monitoring"}],
+                "createdAt": "2026-01-20T10:00:00Z"
+            },
+            {
+                "number": 102,
+                "title": "[CLIENT] Client error",
+                "body": "Client body",
+                "labels": [{"name": "client"}],
+                "createdAt": "2026-01-21T10:00:00Z"
+            }
+        ])
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=gh_response,
+                stderr=""
+            )
+
+            issues = scanner._fetch_existing_github_issues()
+
+            # Verify gh CLI was called correctly
+            mock_run.assert_called_once()
+            call_args = mock_run.call_args[0][0]
+            assert "gh" in call_args
+            assert "issue" in call_args
+            assert "list" in call_args
+            assert "--repo" in call_args
+            assert "org/repo" in call_args
+            assert "--state" in call_args
+            assert "open" in call_args
+            assert "--json" in call_args
+
+            # Verify GH_TOKEN was set in environment
+            call_env = mock_run.call_args[1]["env"]
+            assert "GH_TOKEN" in call_env
+            assert call_env["GH_TOKEN"] == "ghp_token_123"
+
+            # Verify returned issues are correctly formatted
+            assert len(issues) == 2
+            assert issues[0]["number"] == 101
+            assert issues[0]["title"] == "[BUG] Test issue"
+            assert issues[0]["labels"] == ["bug", "self-monitoring"]
+            assert issues[1]["number"] == 102
+
+    def test_fetch_existing_github_issues_returns_empty_on_error(self, temp_db):
+        """Test _fetch_existing_github_issues returns empty list on gh CLI error (Bug #87 - Issue #7)."""
+        scanner = LogScanner(
+            db_path=temp_db,
+            scan_id="scan-123",
+            github_repo="org/repo",
+            log_db_path="/path/to/logs.db",
+            prompt_template="Test",
+            github_token="ghp_token_123"
+        )
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=1,
+                stdout="",
+                stderr="API error"
+            )
+
+            issues = scanner._fetch_existing_github_issues()
+
+            # Should return empty list on error
+            assert issues == []
+
+    def test_fetch_existing_github_issues_returns_empty_without_token(self, temp_db):
+        """Test _fetch_existing_github_issues returns empty list when no token (Bug #87 - Issue #7)."""
+        scanner = LogScanner(
+            db_path=temp_db,
+            scan_id="scan-123",
+            github_repo="org/repo",
+            log_db_path="/path/to/logs.db",
+            prompt_template="Test",
+            github_token=None  # No token
+        )
+
+        issues = scanner._fetch_existing_github_issues()
+
+        # Should return empty list without token
+        assert issues == []
+
+
 class TestExecuteScan:
     """Test execute_scan orchestration method."""
 
@@ -419,18 +605,7 @@ class TestExecuteScan:
             prompt_template="Analyze logs from {log_db_path} where id > {last_scan_log_id}. Context: {dedup_context}"
         )
 
-        # Insert running scan record
-        conn = sqlite3.connect(temp_db)
-        try:
-            conn.execute(
-                "INSERT INTO self_monitoring_scans "
-                "(scan_id, started_at, status, log_id_start) "
-                "VALUES (?, ?, ?, ?)",
-                ("scan-test", "2026-01-30T10:00:00", "running", 0)
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        # No need to manually insert scan record - execute_scan creates it automatically (Bug #87 issue #6)
 
         # Mock Claude CLI response
         claude_response = {
@@ -498,18 +673,7 @@ class TestExecuteScan:
             prompt_template="Analyze logs from {log_db_path} where id > {last_scan_log_id}. Context: {dedup_context}"
         )
 
-        # Insert running scan record
-        conn = sqlite3.connect(temp_db)
-        try:
-            conn.execute(
-                "INSERT INTO self_monitoring_scans "
-                "(scan_id, started_at, status, log_id_start) "
-                "VALUES (?, ?, ?, ?)",
-                ("scan-fail", "2026-01-30T10:00:00", "running", 0)
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        # No need to manually insert scan record - execute_scan creates it automatically (Bug #87 issue #6)
 
         # Mock subprocess failure
         with patch("subprocess.run") as mock_run:

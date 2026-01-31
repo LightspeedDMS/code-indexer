@@ -6,14 +6,18 @@ Extends the pattern from ~/.claude/scripts/utils/issue_manager.py with
 database persistence for tracking issues created by self-monitoring.
 """
 
+import logging
 import os
 import re
+import socket
 import sqlite3
 import subprocess
 import tempfile
 import hashlib
-from typing import Dict, List
+from typing import Dict, List, Optional
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 class IssueManager:
@@ -36,7 +40,9 @@ class IssueManager:
         self,
         db_path: str,
         scan_id: str,
-        github_repo: str
+        github_repo: str,
+        github_token: Optional[str] = None,
+        server_name: Optional[str] = None
     ):
         """
         Initialize IssueManager.
@@ -45,10 +51,14 @@ class IssueManager:
             db_path: Path to SQLite database
             scan_id: Current scan identifier
             github_repo: GitHub repository (owner/repo)
+            github_token: GitHub token for authentication (optional, Bug #87)
+            server_name: Server display name for issue identification (optional, Bug #87)
         """
         self.db_path = db_path
         self.scan_id = scan_id
         self.github_repo = github_repo
+        self.github_token = github_token
+        self.server_name = server_name
 
     def create_issue(
         self,
@@ -79,6 +89,25 @@ class IssueManager:
         Raises:
             RuntimeError: If gh CLI fails to create issue
         """
+        # Prepend server identity if server_name provided (Bug #87 issue #4)
+        if self.server_name:
+            try:
+                server_ip = socket.gethostbyname(socket.gethostname())
+            except Exception as e:
+                logger.warning(f"Failed to resolve server IP: {e}")
+                server_ip = "unknown"
+
+            identity_section = (
+                f"**Created by CIDX Server**\n"
+                f"- Server Name: {self.server_name}\n"
+                f"- Server IP: {server_ip}\n"
+                f"- Scan ID: {self.scan_id}\n"
+                f"\n"
+                f"---\n"
+                f"\n"
+            )
+            body = identity_section + body
+
         # Create issue via gh CLI
         github_issue_number, github_issue_url = self._call_gh_cli(
             title=title,
@@ -148,6 +177,10 @@ class IssueManager:
             env['GH_PROMPT_DISABLED'] = '1'
             env['GH_NO_UPDATE_NOTIFIER'] = '1'
             env['GH_PAGER'] = ''
+
+            # Set GH_TOKEN if provided (Bug #87 issue #3)
+            if self.github_token:
+                env['GH_TOKEN'] = self.github_token
 
             # Execute command
             result = subprocess.run(cmd, capture_output=True, text=True, env=env)

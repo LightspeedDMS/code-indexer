@@ -244,3 +244,110 @@ class TestSelfMonitoringServiceLogScannerIntegration:
 
         assert result["status"] == "FAILURE"
         assert "not configured" in result["error"].lower() or "missing" in result["error"].lower()
+
+    def test_submit_scan_job_includes_repo_alias(self):
+        """Test _submit_scan_job passes repo_alias parameter to submit_job (Bug #87 - Issue #1)."""
+        from code_indexer.server.self_monitoring.service import SelfMonitoringService
+
+        mock_job_manager = Mock()
+        mock_job_manager.submit_job.return_value = "job-123"
+
+        service = SelfMonitoringService(
+            enabled=True,
+            cadence_minutes=60,
+            job_manager=mock_job_manager,
+            db_path="/path/to/db",
+            log_db_path="/path/to/logs",
+            github_repo="owner/repo"
+        )
+
+        # Call _submit_scan_job directly
+        service._submit_scan_job()
+
+        # Verify submit_job was called with repo_alias parameter
+        mock_job_manager.submit_job.assert_called_once()
+        call_kwargs = mock_job_manager.submit_job.call_args[1]
+        assert "repo_alias" in call_kwargs
+        assert call_kwargs["repo_alias"] == "owner/repo"
+
+    def test_trigger_scan_includes_repo_alias(self):
+        """Test trigger_scan passes repo_alias parameter to submit_job (Bug #87 - Issue #1)."""
+        from code_indexer.server.self_monitoring.service import SelfMonitoringService
+
+        mock_job_manager = Mock()
+        mock_job_manager.submit_job.return_value = "job-456"
+
+        service = SelfMonitoringService(
+            enabled=True,
+            cadence_minutes=60,
+            job_manager=mock_job_manager,
+            db_path="/path/to/db",
+            log_db_path="/path/to/logs",
+            github_repo="owner/repo"
+        )
+
+        # Call trigger_scan
+        result = service.trigger_scan()
+
+        # Verify submit_job was called with repo_alias parameter
+        assert result["status"] == "queued"
+        mock_job_manager.submit_job.assert_called_once()
+        call_kwargs = mock_job_manager.submit_job.call_args[1]
+        assert "repo_alias" in call_kwargs
+        assert call_kwargs["repo_alias"] == "owner/repo"
+
+    def test_service_accepts_github_token_and_server_name(self):
+        """Test service accepts github_token and server_name parameters (Bug #87 - Issue #2)."""
+        from code_indexer.server.self_monitoring.service import SelfMonitoringService
+
+        service = SelfMonitoringService(
+            enabled=True,
+            cadence_minutes=60,
+            job_manager=Mock(),
+            db_path="/path/to/db",
+            log_db_path="/path/to/logs",
+            github_repo="owner/repo",
+            github_token="ghp_test_token",
+            server_name="Production CIDX Server"
+        )
+
+        assert service._github_token == "ghp_test_token"
+        assert service._server_name == "Production CIDX Server"
+
+    def test_service_passes_github_token_to_scanner(self):
+        """Test service passes github_token to LogScanner (Bug #87 - Issue #2)."""
+        from code_indexer.server.self_monitoring.service import SelfMonitoringService
+        from unittest.mock import patch, MagicMock
+        import tempfile
+
+        temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        temp_db.close()
+
+        service = SelfMonitoringService(
+            enabled=True,
+            cadence_minutes=60,
+            job_manager=Mock(),
+            db_path=temp_db.name,
+            log_db_path="/path/to/logs.db",
+            github_repo="owner/repo",
+            github_token="ghp_test_token_123",
+            server_name="Test Server"
+        )
+
+        with patch('code_indexer.server.self_monitoring.scanner.LogScanner') as mock_scanner_class:
+            mock_scanner_instance = MagicMock()
+            mock_scanner_instance.execute_scan.return_value = {"status": "SUCCESS"}
+            mock_scanner_class.return_value = mock_scanner_instance
+
+            service._execute_scan()
+
+            # Verify LogScanner was created with github_token and server_name
+            mock_scanner_class.assert_called_once()
+            call_kwargs = mock_scanner_class.call_args[1]
+            assert "github_token" in call_kwargs
+            assert call_kwargs["github_token"] == "ghp_test_token_123"
+            assert "server_name" in call_kwargs
+            assert call_kwargs["server_name"] == "Test Server"
+
+        import os
+        os.unlink(temp_db.name)

@@ -410,3 +410,101 @@ class TestIssueManager:
         assert "AUTH-TOKEN-001" in error_codes_str
         assert "DB-CONN-002" in error_codes_str
         assert "CACHE-MISS-003" in error_codes_str
+
+    def test_create_issue_sets_gh_token_env_var(self, temp_db, mock_subprocess):
+        """Test IssueManager sets GH_TOKEN environment variable when token provided."""
+        from code_indexer.server.self_monitoring.issue_manager import IssueManager
+
+        # Mock successful gh CLI response
+        mock_subprocess.return_value = Mock(
+            returncode=0,
+            stdout="https://github.com/owner/repo/issues/888\n",
+            stderr=""
+        )
+
+        # Create manager WITH github_token parameter
+        manager = IssueManager(
+            db_path=temp_db,
+            scan_id="test-scan-009",
+            github_repo="owner/repo",
+            github_token="ghp_test_token_123456789012345678901234"
+        )
+
+        manager.create_issue(
+            classification="server_bug",
+            title="[BUG] Test issue with token",
+            body="Test body",
+            source_log_ids=[9001],
+            source_files=["test.py"],
+            error_codes=[]
+        )
+
+        # Verify subprocess was called with GH_TOKEN in environment
+        assert mock_subprocess.call_count >= 1
+        call_kwargs = mock_subprocess.call_args_list[0][1]
+        env = call_kwargs.get("env")
+
+        assert env is not None
+        assert "GH_TOKEN" in env
+        assert env["GH_TOKEN"] == "ghp_test_token_123456789012345678901234"
+
+    def test_create_issue_prepends_server_identity_to_body(self, temp_db):
+        """Test IssueManager prepends server identity to issue body when server_name provided (Bug #87 - Issue #4)."""
+        from code_indexer.server.self_monitoring.issue_manager import IssueManager
+        import socket
+
+        # Track the body content written to temp file
+        captured_body = None
+
+        def mock_run_side_effect(*args, **kwargs):
+            nonlocal captured_body
+            # Read body file before it gets deleted
+            cmd_args = args[0]
+            if "--body-file" in cmd_args:
+                body_file_idx = cmd_args.index("--body-file") + 1
+                body_file_path = cmd_args[body_file_idx]
+                with open(body_file_path, 'r') as f:
+                    captured_body = f.read()
+
+            return Mock(
+                returncode=0,
+                stdout="https://github.com/owner/repo/issues/777\n",
+                stderr=""
+            )
+
+        with patch("subprocess.run", side_effect=mock_run_side_effect):
+            # Create manager WITH server_name parameter
+            manager = IssueManager(
+                db_path=temp_db,
+                scan_id="test-scan-010",
+                github_repo="owner/repo",
+                server_name="Production CIDX Server"
+            )
+
+            original_body = "## Problem\nDatabase connection timeout occurred."
+
+            manager.create_issue(
+                classification="server_bug",
+                title="[BUG] DB timeout",
+                body=original_body,
+                source_log_ids=[10001],
+                source_files=["db/connection.py"],
+                error_codes=["DB-CONN-001"]
+            )
+
+        # Verify body was captured
+        assert captured_body is not None
+
+        # Verify server identity section is prepended
+        assert "**Created by CIDX Server**" in captured_body
+        assert "Production CIDX Server" in captured_body
+        assert "test-scan-010" in captured_body
+        assert socket.gethostbyname(socket.gethostname()) in captured_body or "Server IP:" in captured_body
+
+        # Verify original body is still present after the identity section
+        assert original_body in captured_body
+
+        # Verify identity section comes before original body
+        identity_pos = captured_body.find("**Created by CIDX Server**")
+        original_pos = captured_body.find(original_body)
+        assert identity_pos < original_pos

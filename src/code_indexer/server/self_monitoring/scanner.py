@@ -7,9 +7,13 @@ and implements three-tier deduplication algorithm.
 
 import datetime
 import json
+import logging
+import os
 import sqlite3
 import subprocess
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 # Constants for deduplication context
 BODY_PREVIEW_MAX_LENGTH = 500
@@ -17,6 +21,10 @@ FINGERPRINT_RETENTION_DAYS = 90
 
 # Constants for Claude CLI invocation
 CLAUDE_CLI_TIMEOUT_SECONDS = 300  # 5 minute timeout
+
+# Constants for GitHub issue fetching (Bug #87)
+GITHUB_ISSUE_FETCH_LIMIT = 100  # Fetch last 100 open issues for deduplication
+GITHUB_CLI_TIMEOUT_SECONDS = 30  # Reasonable timeout for GitHub API calls
 
 # JSON Schema for structured Claude output (forces valid JSON response)
 CLAUDE_RESPONSE_SCHEMA = json.dumps({
@@ -70,7 +78,9 @@ class LogScanner:
         log_db_path: str,
         prompt_template: str,
         model: str = "opus",
-        repo_root: Optional[str] = None
+        repo_root: Optional[str] = None,
+        github_token: Optional[str] = None,
+        server_name: Optional[str] = None
     ):
         """
         Initialize LogScanner.
@@ -83,6 +93,8 @@ class LogScanner:
             prompt_template: Claude prompt template
             model: Claude model to use (opus or sonnet, default: opus) - Story #76 AC5
             repo_root: Path to repo root for Claude working directory
+            github_token: GitHub token for authentication (optional, Bug #87)
+            server_name: Server display name for issue identification (optional, Bug #87)
         """
         self.db_path = db_path
         self.scan_id = scan_id
@@ -91,6 +103,8 @@ class LogScanner:
         self.prompt_template = prompt_template
         self.model = model
         self.repo_root = repo_root
+        self.github_token = github_token
+        self.server_name = server_name
 
     def assemble_prompt(
         self,
@@ -250,6 +264,25 @@ class LogScanner:
             conn.close()
 
         return lines
+
+    def create_scan_record(self, log_id_start: int) -> None:
+        """
+        Create initial scan record in database (Bug #87 issue #5).
+
+        Args:
+            log_id_start: Starting log ID for this scan
+        """
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO self_monitoring_scans "
+                "(scan_id, started_at, status, log_id_start, issues_created) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (self.scan_id, datetime.datetime.utcnow().isoformat(), "RUNNING", log_id_start, 0)
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def get_last_scan_log_id(self) -> int:
         """
@@ -461,6 +494,9 @@ class LogScanner:
             # Step 1: Get last processed log ID for delta tracking
             last_log_id = self.get_last_scan_log_id()
 
+            # Step 1b: Create initial scan record (Bug #87 issue #6)
+            self.create_scan_record(log_id_start=last_log_id)
+
             # Step 2: Fetch existing GitHub issues for deduplication
             existing_issues = self._fetch_existing_github_issues()
 
@@ -492,7 +528,9 @@ class LogScanner:
             issue_manager = IssueManager(
                 db_path=self.db_path,
                 scan_id=self.scan_id,
-                github_repo=self.github_repo
+                github_repo=self.github_repo,
+                github_token=self.github_token,
+                server_name=self.server_name
             )
             issues_created_count = self._create_issues_from_response(response, issue_manager)
 
@@ -561,14 +599,55 @@ class LogScanner:
 
     def _fetch_existing_github_issues(self) -> List[Dict]:
         """
-        Fetch existing open GitHub issues for deduplication.
+        Fetch existing open GitHub issues for deduplication (Bug #87 issue #7).
+
+        Uses gh CLI to fetch open issues from the repository.
 
         Returns:
-            List of issue dictionaries from GitHub API
+            List of issue dictionaries with keys: number, title, body, labels, created_at
+            Returns empty list if github_token is not provided or on error.
         """
-        # TODO: Implement GitHub API call to fetch open issues
-        # For now, return empty list (will be implemented in integration phase)
-        return []
+        if not self.github_token:
+            return []
+
+        try:
+            env = os.environ.copy()
+            env['GH_TOKEN'] = self.github_token
+            env['GH_PROMPT_DISABLED'] = '1'
+
+            result = subprocess.run(
+                ["gh", "issue", "list", "--repo", self.github_repo,
+                 "--state", "open", "--json", "number,title,body,labels,createdAt",
+                 "--limit", str(GITHUB_ISSUE_FETCH_LIMIT)],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=GITHUB_CLI_TIMEOUT_SECONDS
+            )
+
+            if result.returncode != 0:
+                logger.warning(f"gh CLI failed to fetch issues: {result.stderr}")
+                return []
+
+            issues = json.loads(result.stdout)
+
+            # Convert to expected format
+            return [
+                {
+                    "number": i["number"],
+                    "title": i["title"],
+                    "body": i.get("body", ""),
+                    "labels": [l["name"] for l in i.get("labels", [])],
+                    "created_at": i.get("createdAt", "")
+                }
+                for i in issues
+            ]
+        except subprocess.TimeoutExpired:
+            logger.warning(f"gh CLI timed out after {GITHUB_CLI_TIMEOUT_SECONDS} seconds")
+            return []
+        except (subprocess.SubprocessError, json.JSONDecodeError, KeyError) as e:
+            logger.warning(f"Failed to fetch GitHub issues: {e}")
+            return []
 
     def _invoke_claude_cli(self, prompt: str) -> str:
         """

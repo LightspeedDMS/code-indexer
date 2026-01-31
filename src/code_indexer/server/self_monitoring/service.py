@@ -43,6 +43,8 @@ class SelfMonitoringService:
         prompt_template: str = "",
         model: str = "opus",
         repo_root: Optional[str] = None,
+        github_token: Optional[str] = None,
+        server_name: Optional[str] = None,
     ):
         """
         Initialize the self-monitoring service.
@@ -57,6 +59,8 @@ class SelfMonitoringService:
             prompt_template: Template string for Claude prompt (empty = use default)
             model: Claude model to use (opus, sonnet, haiku)
             repo_root: Path to repo root for Claude to run in (working directory)
+            github_token: GitHub token for authentication (optional, Bug #87)
+            server_name: Server display name for issue identification (optional, Bug #87)
         """
         self._enabled = enabled
         self._cadence_minutes = cadence_minutes
@@ -67,6 +71,8 @@ class SelfMonitoringService:
         self._prompt_template = prompt_template
         self._model = model
         self._repo_root = repo_root
+        self._github_token = github_token
+        self._server_name = server_name
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -192,6 +198,7 @@ class SelfMonitoringService:
                 func=self._execute_scan,
                 submitter_username="system",
                 is_admin=True,
+                repo_alias=self._github_repo,
             )
             logger.info(f"Self-monitoring scan job submitted: {job_id}")
         except Exception as e:
@@ -250,7 +257,9 @@ class SelfMonitoringService:
             log_db_path=self._log_db_path,
             prompt_template=prompt,
             model=self._model,
-            repo_root=self._repo_root
+            repo_root=self._repo_root,
+            github_token=self._github_token,
+            server_name=self._server_name
         )
 
         # Execute scan (this handles all workflow including creating scan record)
@@ -318,6 +327,7 @@ class SelfMonitoringService:
                 func=self._execute_scan,
                 submitter_username="system",
                 is_admin=True,
+                repo_alias=self._github_repo,
             )
 
             logger.info(f"Manual scan trigger: job submitted with ID {job_id}")
