@@ -2740,7 +2740,7 @@ def create_app() -> FastAPI:
                         db_path=db_path,
                     )
                     github_token_data = token_manager.get_token("github")
-                    github_token = github_token_data.get("token") if github_token_data else None
+                    github_token = github_token_data.token if github_token_data else None
 
                     # Get server name for issue identification (Bug #87)
                     server_name = server_config.service_display_name or "Neo"

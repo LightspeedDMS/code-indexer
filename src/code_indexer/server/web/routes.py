@@ -7653,7 +7653,7 @@ async def trigger_manual_scan(
     # Get GitHub token for authentication (Bug #87)
     token_manager = _get_token_manager()
     github_token_data = token_manager.get_token("github")
-    github_token = github_token_data.get("token") if github_token_data else None
+    github_token = github_token_data.token if github_token_data else None
 
     # Get server name for issue identification (Bug #87)
     server_name = config.service_display_name or "Neo"
