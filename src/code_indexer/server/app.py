@@ -2732,6 +2732,19 @@ def create_app() -> FastAPI:
                     app.state.self_monitoring_repo_root = None
                     app.state.self_monitoring_github_repo = None
                 else:
+                    # Get GitHub token for authentication (Bug #87)
+                    from code_indexer.server.services.ci_token_manager import CITokenManager
+                    token_manager = CITokenManager(
+                        server_dir_path=server_data_dir,
+                        use_sqlite=True,
+                        db_path=db_path,
+                    )
+                    github_token_data = token_manager.get_token("github")
+                    github_token = github_token_data.get("token") if github_token_data else None
+
+                    # Get server name for issue identification (Bug #87)
+                    server_name = server_config.service_display_name or "Neo"
+
                     self_monitoring_service = SelfMonitoringService(
                         enabled=sm_config.enabled,
                         cadence_minutes=sm_config.cadence_minutes,
@@ -2742,6 +2755,8 @@ def create_app() -> FastAPI:
                         prompt_template=sm_config.prompt_template,
                         model=sm_config.model,
                         repo_root=str(repo_root),  # For Claude to run in repo context
+                        github_token=github_token,
+                        server_name=server_name,
                     )
                     self_monitoring_service.start()
                     app.state.self_monitoring_service = self_monitoring_service

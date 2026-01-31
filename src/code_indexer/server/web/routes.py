@@ -7650,6 +7650,14 @@ async def trigger_manual_scan(
             }
         )
 
+    # Get GitHub token for authentication (Bug #87)
+    token_manager = _get_token_manager()
+    github_token_data = token_manager.get_token("github")
+    github_token = github_token_data.get("token") if github_token_data else None
+
+    # Get server name for issue identification (Bug #87)
+    server_name = config.service_display_name or "Neo"
+
     # Create service instance with current configuration (Bug #87)
     service = SelfMonitoringService(
         enabled=config.self_monitoring_config.enabled,
@@ -7660,7 +7668,9 @@ async def trigger_manual_scan(
         github_repo=github_repo,
         prompt_template=config.self_monitoring_config.prompt_template,
         model=config.self_monitoring_config.model,
-        repo_root=str(repo_root) if repo_root else None
+        repo_root=str(repo_root) if repo_root else None,
+        github_token=github_token,
+        server_name=server_name
     )
 
     # Trigger the scan
