@@ -51,26 +51,31 @@ class TestIssueManager:
         Path(db_path).unlink(missing_ok=True)
 
     @pytest.fixture
-    def mock_subprocess(self):
-        """Mock subprocess for gh CLI calls."""
-        with patch("subprocess.run") as mock_run:
-            yield mock_run
+    def mock_httpx_post(self):
+        """Mock httpx.post for GitHub API calls."""
+        with patch("code_indexer.server.self_monitoring.issue_manager.httpx.post") as mock_post:
+            yield mock_post
 
-    def test_create_issue_calls_gh_cli(self, temp_db, mock_subprocess):
-        """Test IssueManager calls gh CLI to create GitHub issue."""
+    def test_create_issue_calls_github_api(self, temp_db, mock_httpx_post):
+        """Test IssueManager calls GitHub REST API to create GitHub issue."""
         from code_indexer.server.self_monitoring.issue_manager import IssueManager
 
-        # Mock successful gh CLI response
-        mock_subprocess.return_value = Mock(
-            returncode=0,
-            stdout="https://github.com/owner/repo/issues/123\n",
-            stderr=""
+        # Mock successful GitHub API response
+        mock_httpx_post.return_value = Mock(
+            status_code=201,
+            json=lambda: {
+                "number": 123,
+                "html_url": "https://github.com/owner/repo/issues/123"
+            },
+            headers={},
+            raise_for_status=lambda: None
         )
 
         manager = IssueManager(
             db_path=temp_db,
             scan_id="test-scan-001",
-            github_repo="owner/repo"
+            github_repo="owner/repo",
+            github_token="ghp_test_token"
         )
 
         issue_data = manager.create_issue(
@@ -82,36 +87,48 @@ class TestIssueManager:
             error_codes=["AUTH-TOKEN-001"]
         )
 
-        # Verify gh CLI was called correctly
-        assert mock_subprocess.call_count >= 1
-        args = mock_subprocess.call_args_list[0][0][0]
-        assert "gh" in args
-        assert "issue" in args
-        assert "create" in args
-        assert "--repo" in args
-        assert "owner/repo" in args
-        assert "--title" in args
+        # Verify GitHub API was called correctly
+        assert mock_httpx_post.call_count >= 1
+        call_kwargs = mock_httpx_post.call_args[1]
+
+        # Verify URL
+        call_url = mock_httpx_post.call_args[0][0]
+        assert "https://api.github.com/repos/owner/repo/issues" == call_url
+
+        # Verify headers include Bearer token
+        assert "headers" in call_kwargs
+        assert "Authorization" in call_kwargs["headers"]
+        assert call_kwargs["headers"]["Authorization"] == "Bearer ghp_test_token"
+
+        # Verify JSON payload
+        assert "json" in call_kwargs
+        assert call_kwargs["json"]["title"] == "[BUG] Authentication token validation failed"
 
         # Verify returned issue data
         assert issue_data["github_issue_number"] == 123
         assert issue_data["github_issue_url"] == "https://github.com/owner/repo/issues/123"
         assert issue_data["classification"] == "server_bug"
 
-    def test_create_issue_stores_metadata_in_db(self, temp_db, mock_subprocess):
+    def test_create_issue_stores_metadata_in_db(self, temp_db, mock_httpx_post):
         """Test IssueManager stores issue metadata in SQLite database."""
         from code_indexer.server.self_monitoring.issue_manager import IssueManager
 
-        # Mock successful gh CLI response
-        mock_subprocess.return_value = Mock(
-            returncode=0,
-            stdout="https://github.com/owner/repo/issues/456\n",
-            stderr=""
+        # Mock successful GitHub API response
+        mock_httpx_post.return_value = Mock(
+            status_code=201,
+            json=lambda: {
+                "number": 456,
+                "html_url": "https://github.com/owner/repo/issues/456"
+            },
+            headers={},
+            raise_for_status=lambda: None
         )
 
         manager = IssueManager(
             db_path=temp_db,
             scan_id="test-scan-002",
-            github_repo="owner/repo"
+            github_repo="owner/repo",
+            github_token="ghp_test_token"
         )
 
         manager.create_issue(
@@ -144,25 +161,31 @@ class TestIssueManager:
         assert "api/query_handler.py" in row[6]  # source_files
         assert row[7] == "[CLIENT] Invalid query parameter format"  # title
 
-    def test_create_issue_handles_gh_cli_failure(self, temp_db, mock_subprocess):
-        """Test IssueManager handles gh CLI failure gracefully."""
+    def test_create_issue_handles_github_api_failure(self, temp_db, mock_httpx_post):
+        """Test IssueManager handles GitHub API failure gracefully."""
         from code_indexer.server.self_monitoring.issue_manager import IssueManager
+        import httpx
 
-        # Mock gh CLI failure
-        mock_subprocess.return_value = Mock(
-            returncode=1,
-            stdout="",
-            stderr="Error: API rate limit exceeded"
-        )
+        # Mock GitHub API failure
+        mock_response = Mock()
+        mock_response.status_code = 403
+        mock_response.headers = {"X-RateLimit-Remaining": "0"}
+
+        def raise_http_error():
+            raise httpx.HTTPStatusError("API rate limit exceeded", request=Mock(), response=mock_response)
+
+        mock_response.raise_for_status = raise_http_error
+        mock_httpx_post.return_value = mock_response
 
         manager = IssueManager(
             db_path=temp_db,
             scan_id="test-scan-007",
-            github_repo="owner/repo"
+            github_repo="owner/repo",
+            github_token="ghp_test_token"
         )
 
         # Should raise exception on failure
-        with pytest.raises(RuntimeError, match="rate limit"):
+        with pytest.raises(RuntimeError, match="GitHub API rate limit exceeded"):
             manager.create_issue(
                 classification="server_bug",
                 title="[BUG] Test issue",
@@ -183,21 +206,26 @@ class TestIssueManager:
 
         assert count == 0
 
-    def test_create_issue_computes_fingerprint(self, temp_db, mock_subprocess):
+    def test_create_issue_computes_fingerprint(self, temp_db, mock_httpx_post):
         """Test IssueManager computes deterministic fingerprint for deduplication."""
         from code_indexer.server.self_monitoring.issue_manager import IssueManager
 
-        # Mock successful gh CLI response
-        mock_subprocess.return_value = Mock(
-            returncode=0,
-            stdout="https://github.com/owner/repo/issues/789\n",
-            stderr=""
+        # Mock successful GitHub API response
+        mock_httpx_post.return_value = Mock(
+            status_code=201,
+            json=lambda: {
+                "number": 789,
+                "html_url": "https://github.com/owner/repo/issues/789"
+            },
+            headers={},
+            raise_for_status=lambda: None
         )
 
         manager = IssueManager(
             db_path=temp_db,
             scan_id="test-scan-003",
-            github_repo="owner/repo"
+            github_repo="owner/repo",
+            github_token="ghp_test_token"
         )
 
         manager.create_issue(
@@ -226,7 +254,7 @@ class TestIssueManager:
         # Should be hex-encoded hash
         assert all(c in "0123456789abcdef" for c in fingerprint)
 
-    def test_fingerprint_is_deterministic(self, temp_db, mock_subprocess):
+    def test_fingerprint_is_deterministic(self, temp_db):
         """Test fingerprint computation is deterministic for same inputs."""
         from code_indexer.server.self_monitoring.issue_manager import IssueManager
 
@@ -251,7 +279,7 @@ class TestIssueManager:
 
         assert fingerprint1 == fingerprint2
 
-    def test_fingerprint_differs_for_different_inputs(self, temp_db, mock_subprocess):
+    def test_fingerprint_differs_for_different_inputs(self, temp_db):
         """Test fingerprint differs when inputs change."""
         from code_indexer.server.self_monitoring.issue_manager import IssueManager
 
@@ -285,7 +313,7 @@ class TestIssueManager:
 
         assert fp1 != fp3
 
-    def test_extract_error_codes_from_title(self, temp_db, mock_subprocess):
+    def test_extract_error_codes_from_title(self, temp_db):
         """Test extracting error codes from issue title for Tier 1 deduplication."""
         from code_indexer.server.self_monitoring.issue_manager import IssueManager
 
@@ -309,7 +337,7 @@ class TestIssueManager:
         codes = manager.extract_error_codes("[BUG] Generic error message")
         assert codes == []
 
-    def test_get_existing_issues_metadata(self, temp_db, mock_subprocess):
+    def test_get_existing_issues_metadata(self, temp_db):
         """Test retrieving existing issue metadata for deduplication."""
         from code_indexer.server.self_monitoring.issue_manager import IssueManager
 
@@ -369,21 +397,26 @@ class TestIssueManager:
         assert any(m["error_codes"] == "AUTH-TOKEN-001" for m in metadata)
         assert any(m["fingerprint"] == "abc123" for m in metadata)
 
-    def test_create_issue_handles_multiple_error_codes(self, temp_db, mock_subprocess):
+    def test_create_issue_handles_multiple_error_codes(self, temp_db, mock_httpx_post):
         """Test IssueManager stores multiple error codes correctly."""
         from code_indexer.server.self_monitoring.issue_manager import IssueManager
 
-        # Mock successful gh CLI response
-        mock_subprocess.return_value = Mock(
-            returncode=0,
-            stdout="https://github.com/owner/repo/issues/999\n",
-            stderr=""
+        # Mock successful GitHub API response
+        mock_httpx_post.return_value = Mock(
+            status_code=201,
+            json=lambda: {
+                "number": 999,
+                "html_url": "https://github.com/owner/repo/issues/999"
+            },
+            headers={},
+            raise_for_status=lambda: None
         )
 
         manager = IssueManager(
             db_path=temp_db,
             scan_id="test-scan-008",
-            github_repo="owner/repo"
+            github_repo="owner/repo",
+            github_token="ghp_test_token"
         )
 
         manager.create_issue(
@@ -411,73 +444,37 @@ class TestIssueManager:
         assert "DB-CONN-002" in error_codes_str
         assert "CACHE-MISS-003" in error_codes_str
 
-    def test_create_issue_sets_gh_token_env_var(self, temp_db, mock_subprocess):
-        """Test IssueManager sets GH_TOKEN environment variable when token provided."""
-        from code_indexer.server.self_monitoring.issue_manager import IssueManager
-
-        # Mock successful gh CLI response
-        mock_subprocess.return_value = Mock(
-            returncode=0,
-            stdout="https://github.com/owner/repo/issues/888\n",
-            stderr=""
-        )
-
-        # Create manager WITH github_token parameter
-        manager = IssueManager(
-            db_path=temp_db,
-            scan_id="test-scan-009",
-            github_repo="owner/repo",
-            github_token="ghp_test_token_123456789012345678901234"
-        )
-
-        manager.create_issue(
-            classification="server_bug",
-            title="[BUG] Test issue with token",
-            body="Test body",
-            source_log_ids=[9001],
-            source_files=["test.py"],
-            error_codes=[]
-        )
-
-        # Verify subprocess was called with GH_TOKEN in environment
-        assert mock_subprocess.call_count >= 1
-        call_kwargs = mock_subprocess.call_args_list[0][1]
-        env = call_kwargs.get("env")
-
-        assert env is not None
-        assert "GH_TOKEN" in env
-        assert env["GH_TOKEN"] == "ghp_test_token_123456789012345678901234"
-
     def test_create_issue_prepends_server_identity_to_body(self, temp_db):
         """Test IssueManager prepends server identity to issue body when server_name provided (Bug #87 - Issue #4)."""
         from code_indexer.server.self_monitoring.issue_manager import IssueManager
         import socket
 
-        # Track the body content written to temp file
+        # Track the JSON payload sent to GitHub API
         captured_body = None
 
-        def mock_run_side_effect(*args, **kwargs):
+        def mock_post_side_effect(*args, **kwargs):
             nonlocal captured_body
-            # Read body file before it gets deleted
-            cmd_args = args[0]
-            if "--body-file" in cmd_args:
-                body_file_idx = cmd_args.index("--body-file") + 1
-                body_file_path = cmd_args[body_file_idx]
-                with open(body_file_path, 'r') as f:
-                    captured_body = f.read()
+            # Capture the body from JSON payload
+            if "json" in kwargs:
+                captured_body = kwargs["json"].get("body")
 
             return Mock(
-                returncode=0,
-                stdout="https://github.com/owner/repo/issues/777\n",
-                stderr=""
+                status_code=201,
+                json=lambda: {
+                    "number": 777,
+                    "html_url": "https://github.com/owner/repo/issues/777"
+                },
+                headers={},
+                raise_for_status=lambda: None
             )
 
-        with patch("subprocess.run", side_effect=mock_run_side_effect):
+        with patch("code_indexer.server.self_monitoring.issue_manager.httpx.post", side_effect=mock_post_side_effect):
             # Create manager WITH server_name parameter
             manager = IssueManager(
                 db_path=temp_db,
                 scan_id="test-scan-010",
                 github_repo="owner/repo",
+                github_token="ghp_test_token",
                 server_name="Production CIDX Server"
             )
 

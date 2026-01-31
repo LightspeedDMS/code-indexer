@@ -13,6 +13,8 @@ import sqlite3
 import subprocess
 from typing import Dict, List, Optional
 
+import httpx
+
 logger = logging.getLogger(__name__)
 
 # Constants for deduplication context
@@ -634,7 +636,7 @@ class LogScanner:
         """
         Fetch existing open GitHub issues for deduplication (Bug #87 issue #7).
 
-        Uses gh CLI to fetch open issues from the repository.
+        Uses GitHub REST API v3 to fetch open issues from the repository.
 
         Returns:
             List of issue dictionaries with keys: number, title, body, labels, created_at
@@ -647,58 +649,78 @@ class LogScanner:
             return []
 
         try:
-            env = os.environ.copy()
-            env['GH_TOKEN'] = self.github_token
-            env['GH_PROMPT_DISABLED'] = '1'
-
-            logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: Invoking gh CLI - repo={self.github_repo}, limit={GITHUB_ISSUE_FETCH_LIMIT}, timeout={GITHUB_CLI_TIMEOUT_SECONDS}s")
-
-            result = subprocess.run(
-                ["gh", "issue", "list", "--repo", self.github_repo,
-                 "--state", "open", "--json", "number,title,body,labels,createdAt",
-                 "--limit", str(GITHUB_ISSUE_FETCH_LIMIT)],
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=GITHUB_CLI_TIMEOUT_SECONDS
-            )
-
-            logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: gh CLI completed - returncode={result.returncode}, stdout_length={len(result.stdout)}, stderr_length={len(result.stderr)}")
-
-            if result.returncode != 0:
-                logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: gh CLI failed - stderr={result.stderr}")
-                logger.warning(f"gh CLI failed to fetch issues: {result.stderr}")
+            # Parse github_repo to extract owner and repo
+            parts = self.github_repo.split("/")
+            if len(parts) != 2:
+                logger.warning(f"Invalid github_repo format: {self.github_repo} (expected owner/repo)")
                 return []
 
-            issues = json.loads(result.stdout)
+            owner, repo = parts
+
+            # GitHub REST API endpoint
+            url = f"https://api.github.com/repos/{owner}/{repo}/issues"
+            headers = {
+                "Authorization": f"Bearer {self.github_token}",
+                "Accept": "application/vnd.github.v3+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            params = {
+                "state": "open",
+                "per_page": GITHUB_ISSUE_FETCH_LIMIT,
+            }
+
+            logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: Calling GitHub API - url={url}, limit={GITHUB_ISSUE_FETCH_LIMIT}, timeout={GITHUB_CLI_TIMEOUT_SECONDS}s")
+
+            response = httpx.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=GITHUB_CLI_TIMEOUT_SECONDS,
+            )
+
+            logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: GitHub API completed - status_code={response.status_code}, response_length={len(response.text)}")
+
+            # Check rate limiting
+            if response.status_code == 403:
+                remaining = response.headers.get("X-RateLimit-Remaining", "")
+                if remaining == "0":
+                    logger.warning("GitHub API rate limit exceeded")
+                    return []
+
+            response.raise_for_status()
+
+            issues = response.json()
             logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: Parsed {len(issues)} issues from JSON")
 
             # Convert to expected format
             converted = [
                 {
-                    "number": i["number"],
-                    "title": i["title"],
-                    "body": i.get("body", ""),
-                    "labels": [label["name"] for label in i.get("labels", [])],
-                    "created_at": i.get("createdAt", "")
+                    "number": issue["number"],
+                    "title": issue["title"],
+                    "body": issue.get("body", ""),
+                    "labels": [label["name"] for label in issue.get("labels", [])],
+                    "created_at": issue.get("created_at", "")
                 }
-                for i in issues
+                for issue in issues
             ]
             logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: Returning {len(converted)} converted issues")
             return converted
 
-        except subprocess.TimeoutExpired:
-            logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: gh CLI timed out after {GITHUB_CLI_TIMEOUT_SECONDS} seconds")
-            logger.warning(f"gh CLI timed out after {GITHUB_CLI_TIMEOUT_SECONDS} seconds")
+        except httpx.TimeoutException:
+            logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: GitHub API timed out after {GITHUB_CLI_TIMEOUT_SECONDS} seconds")
+            logger.warning(f"GitHub API request timed out after {GITHUB_CLI_TIMEOUT_SECONDS} seconds")
             return []
-        except FileNotFoundError:
-            # gh CLI not installed - this is expected on servers without GitHub integration
-            logger.debug("[SELF-MON-DEBUG] _fetch_existing_github_issues: gh CLI not found - returning empty list")
-            logger.info("gh CLI not installed - GitHub issue deduplication disabled")
+        except httpx.HTTPStatusError as e:
+            logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: GitHub API HTTP error - status={e.response.status_code}")
+            logger.warning(f"GitHub API error: {e.response.status_code}")
             return []
-        except (subprocess.SubprocessError, json.JSONDecodeError, KeyError) as e:
+        except httpx.RequestError as e:
+            logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: GitHub API request error - {type(e).__name__}: {e}")
+            logger.warning(f"GitHub API request failed: {e}")
+            return []
+        except (json.JSONDecodeError, KeyError) as e:
             logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: Exception - {type(e).__name__}: {e}")
-            logger.warning(f"Failed to fetch GitHub issues: {e}")
+            logger.warning(f"Failed to parse GitHub issues response: {e}")
             return []
 
     def _invoke_claude_cli(self, prompt: str) -> str:

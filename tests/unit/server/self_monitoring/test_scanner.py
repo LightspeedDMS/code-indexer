@@ -487,8 +487,8 @@ class TestIssueClassification:
 class TestFetchExistingIssues:
     """Test _fetch_existing_github_issues implementation (Bug #87)."""
 
-    def test_fetch_existing_github_issues_calls_gh_cli(self, temp_db):
-        """Test _fetch_existing_github_issues uses gh CLI to fetch open issues (Bug #87 - Issue #7)."""
+    def test_fetch_existing_github_issues_calls_github_api(self, temp_db):
+        """Test _fetch_existing_github_issues uses GitHub REST API to fetch open issues (Bug #87 - Issue #7)."""
         scanner = LogScanner(
             db_path=temp_db,
             scan_id="scan-123",
@@ -498,49 +498,51 @@ class TestFetchExistingIssues:
             github_token="ghp_token_123"
         )
 
-        # Mock gh CLI response
-        gh_response = json.dumps([
+        # Mock GitHub API response
+        api_response = [
             {
                 "number": 101,
                 "title": "[BUG] Test issue",
                 "body": "Test body",
                 "labels": [{"name": "bug"}, {"name": "self-monitoring"}],
-                "createdAt": "2026-01-20T10:00:00Z"
+                "created_at": "2026-01-20T10:00:00Z"
             },
             {
                 "number": 102,
                 "title": "[CLIENT] Client error",
                 "body": "Client body",
                 "labels": [{"name": "client"}],
-                "createdAt": "2026-01-21T10:00:00Z"
+                "created_at": "2026-01-21T10:00:00Z"
             }
-        ])
+        ]
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout=gh_response,
-                stderr=""
+        with patch("code_indexer.server.self_monitoring.scanner.httpx.get") as mock_get:
+            mock_get.return_value = MagicMock(
+                status_code=200,
+                json=lambda: api_response,
+                headers={},
+                text=json.dumps(api_response),
+                raise_for_status=lambda: None
             )
 
             issues = scanner._fetch_existing_github_issues()
 
-            # Verify gh CLI was called correctly
-            mock_run.assert_called_once()
-            call_args = mock_run.call_args[0][0]
-            assert "gh" in call_args
-            assert "issue" in call_args
-            assert "list" in call_args
-            assert "--repo" in call_args
-            assert "org/repo" in call_args
-            assert "--state" in call_args
-            assert "open" in call_args
-            assert "--json" in call_args
+            # Verify GitHub API was called correctly
+            mock_get.assert_called_once()
+            call_kwargs = mock_get.call_args[1]
 
-            # Verify GH_TOKEN was set in environment
-            call_env = mock_run.call_args[1]["env"]
-            assert "GH_TOKEN" in call_env
-            assert call_env["GH_TOKEN"] == "ghp_token_123"
+            # Verify URL
+            call_url = mock_get.call_args[0][0]
+            assert "https://api.github.com/repos/org/repo/issues" == call_url
+
+            # Verify headers include Bearer token
+            assert "headers" in call_kwargs
+            assert "Authorization" in call_kwargs["headers"]
+            assert call_kwargs["headers"]["Authorization"] == "Bearer ghp_token_123"
+
+            # Verify params include state=open
+            assert "params" in call_kwargs
+            assert call_kwargs["params"]["state"] == "open"
 
             # Verify returned issues are correctly formatted
             assert len(issues) == 2
@@ -549,8 +551,10 @@ class TestFetchExistingIssues:
             assert issues[0]["labels"] == ["bug", "self-monitoring"]
             assert issues[1]["number"] == 102
 
-    def test_fetch_existing_github_issues_returns_empty_on_error(self, temp_db):
-        """Test _fetch_existing_github_issues returns empty list on gh CLI error (Bug #87 - Issue #7)."""
+    def test_fetch_existing_github_issues_returns_empty_on_http_error(self, temp_db):
+        """Test _fetch_existing_github_issues returns empty list on HTTP error (Bug #87 - Issue #7)."""
+        import httpx
+
         scanner = LogScanner(
             db_path=temp_db,
             scan_id="scan-123",
@@ -560,12 +564,17 @@ class TestFetchExistingIssues:
             github_token="ghp_token_123"
         )
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=1,
-                stdout="",
-                stderr="API error"
-            )
+        with patch("code_indexer.server.self_monitoring.scanner.httpx.get") as mock_get:
+            # Create mock response object for HTTPStatusError
+            mock_response = MagicMock()
+            mock_response.status_code = 500
+
+            # Create proper HTTPStatusError
+            def raise_http_error():
+                raise httpx.HTTPStatusError("Server error", request=MagicMock(), response=mock_response)
+
+            mock_response.raise_for_status = raise_http_error
+            mock_get.return_value = mock_response
 
             issues = scanner._fetch_existing_github_issues()
 
@@ -587,6 +596,50 @@ class TestFetchExistingIssues:
 
         # Should return empty list without token
         assert issues == []
+
+    def test_fetch_existing_github_issues_handles_rate_limiting(self, temp_db):
+        """Test _fetch_existing_github_issues handles GitHub API rate limiting (Bug #87 - Issue #7)."""
+        scanner = LogScanner(
+            db_path=temp_db,
+            scan_id="scan-123",
+            github_repo="org/repo",
+            log_db_path="/path/to/logs.db",
+            prompt_template="Test",
+            github_token="ghp_token_123"
+        )
+
+        with patch("code_indexer.server.self_monitoring.scanner.httpx.get") as mock_get:
+            mock_get.return_value = MagicMock(
+                status_code=403,
+                headers={"X-RateLimit-Remaining": "0"},
+                raise_for_status=lambda: None
+            )
+
+            issues = scanner._fetch_existing_github_issues()
+
+            # Should return empty list on rate limit
+            assert issues == []
+
+    def test_fetch_existing_github_issues_handles_timeout(self, temp_db):
+        """Test _fetch_existing_github_issues handles request timeout (Bug #87 - Issue #7)."""
+        import httpx
+
+        scanner = LogScanner(
+            db_path=temp_db,
+            scan_id="scan-123",
+            github_repo="org/repo",
+            log_db_path="/path/to/logs.db",
+            prompt_template="Test",
+            github_token="ghp_token_123"
+        )
+
+        with patch("code_indexer.server.self_monitoring.scanner.httpx.get") as mock_get:
+            mock_get.side_effect = httpx.TimeoutException("Request timed out")
+
+            issues = scanner._fetch_existing_github_issues()
+
+            # Should return empty list on timeout
+            assert issues == []
 
 
 class TestExecuteScan:

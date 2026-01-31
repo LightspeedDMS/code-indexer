@@ -6,16 +6,17 @@ Extends the pattern from ~/.claude/scripts/utils/issue_manager.py with
 database persistence for tracking issues created by self-monitoring.
 """
 
+import hashlib
+import json
 import logging
 import os
 import re
 import socket
 import sqlite3
-import subprocess
-import tempfile
-import hashlib
-from typing import Dict, List, Optional
 from datetime import datetime
+from typing import Dict, List, Optional
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -108,8 +109,8 @@ class IssueManager:
             )
             body = identity_section + body
 
-        # Create issue via gh CLI
-        github_issue_number, github_issue_url = self._call_gh_cli(
+        # Create issue via GitHub REST API
+        github_issue_number, github_issue_url = self._create_github_issue_via_api(
             title=title,
             body=body
         )
@@ -140,13 +141,13 @@ class IssueManager:
             "classification": classification
         }
 
-    def _call_gh_cli(
+    def _create_github_issue_via_api(
         self,
         title: str,
         body: str
     ) -> tuple:
         """
-        Call gh CLI to create GitHub issue.
+        Create GitHub issue via REST API.
 
         Args:
             title: Issue title
@@ -156,64 +157,60 @@ class IssueManager:
             Tuple of (issue_number, issue_url)
 
         Raises:
-            RuntimeError: If gh CLI fails
+            RuntimeError: If GitHub API request fails
         """
-        # Write body to temp file (may be too long for command line)
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
-            f.write(body)
-            temp_file = f.name
+        if not self.github_token:
+            raise RuntimeError("GitHub token not configured")
+
+        # Parse github_repo to extract owner and repo
+        parts = self.github_repo.split("/")
+        if len(parts) != 2:
+            raise RuntimeError(f"Invalid github_repo format: {self.github_repo} (expected owner/repo)")
+
+        owner, repo = parts
+
+        # GitHub REST API endpoint
+        url = f"https://api.github.com/repos/{owner}/{repo}/issues"
+        headers = {
+            "Authorization": f"Bearer {self.github_token}",
+            "Accept": "application/vnd.github.v3+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        payload = {
+            "title": title,
+            "body": body,
+        }
 
         try:
-            # Build gh CLI command
-            cmd = [
-                "gh", "issue", "create",
-                "--repo", self.github_repo,
-                "--title", title,
-                "--body-file", temp_file
-            ]
+            response = httpx.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=30.0,
+            )
 
-            # Disable prompts and pager
-            env = os.environ.copy()
-            env['GH_PROMPT_DISABLED'] = '1'
-            env['GH_NO_UPDATE_NOTIFIER'] = '1'
-            env['GH_PAGER'] = ''
+            # Check rate limiting
+            if response.status_code == 403:
+                remaining = response.headers.get("X-RateLimit-Remaining", "")
+                if remaining == "0":
+                    raise RuntimeError("GitHub API rate limit exceeded")
 
-            # Set GH_TOKEN if provided (Bug #87 issue #3)
-            if self.github_token:
-                env['GH_TOKEN'] = self.github_token
+            response.raise_for_status()
 
-            # Execute command
-            result = subprocess.run(cmd, capture_output=True, text=True, env=env)
-
-            if result.returncode != 0:
-                # Check for rate limiting
-                if "rate limit" in result.stderr.lower():
-                    raise RuntimeError(
-                        f"GitHub rate limit exceeded. Error: {result.stderr}"
-                    )
-                raise RuntimeError(f"gh issue create failed: {result.stderr}")
-
-            issue_url = result.stdout.strip()
-
-            if not issue_url:
-                raise RuntimeError(
-                    f"gh issue create returned empty output. stderr: {result.stderr}"
-                )
-
-            # Extract issue number from URL
-            match = re.search(r'/issues/(\d+)$', issue_url)
-            if not match:
-                raise RuntimeError(
-                    f"Could not parse issue number from URL: {issue_url}"
-                )
-
-            issue_number = int(match.group(1))
+            issue_data = response.json()
+            issue_number = issue_data["number"]
+            issue_url = issue_data["html_url"]
 
             return issue_number, issue_url
 
-        finally:
-            # Clean up temp file
-            os.unlink(temp_file)
+        except httpx.TimeoutException as e:
+            raise RuntimeError(f"GitHub API request timed out: {e}") from e
+        except httpx.HTTPStatusError as e:
+            raise RuntimeError(f"GitHub API error: {e.response.status_code}") from e
+        except httpx.RequestError as e:
+            raise RuntimeError(f"GitHub API request failed: {e}") from e
+        except (KeyError, json.JSONDecodeError) as e:
+            raise RuntimeError(f"Failed to parse GitHub API response: {e}") from e
 
     def _store_metadata(
         self,
