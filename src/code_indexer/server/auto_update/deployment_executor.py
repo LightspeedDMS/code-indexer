@@ -3,6 +3,7 @@
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.utils.ripgrep_installer import RipgrepInstaller
 from pathlib import Path
+from typing import Optional
 import subprocess
 import logging
 import time
@@ -439,6 +440,34 @@ class DeploymentExecutor:
             ))
             return False
 
+    def _extract_service_user(self, content: str) -> Optional[str]:
+        """Extract User= value from service file content.
+
+        Args:
+            content: Service file content as string
+
+        Returns:
+            Service user name, or None if User= line not found
+        """
+        for line in content.split("\n"):
+            if line.strip().startswith("User="):
+                return line.split("=", 1)[1].strip()
+        return None
+
+    def _extract_working_directory(self, content: str) -> Path:
+        """Extract WorkingDirectory= value from service file content.
+
+        Args:
+            content: Service file content as string
+
+        Returns:
+            Path from WorkingDirectory=, or self.repo_path if not found
+        """
+        for line in content.split("\n"):
+            if line.strip().startswith("WorkingDirectory="):
+                return Path(line.split("=", 1)[1].strip())
+        return self.repo_path
+
     def _ensure_cidx_repo_root(self) -> bool:
         """Ensure systemd service has CIDX_REPO_ROOT environment variable configured.
 
@@ -473,11 +502,7 @@ class DeploymentExecutor:
             lines = content.split("\n")
 
             # Extract WorkingDirectory from service file - this is the canonical repo path
-            repo_root = self.repo_path  # Default to self.repo_path
-            for line in lines:
-                if line.strip().startswith("WorkingDirectory="):
-                    repo_root = Path(line.split("=", 1)[1].strip())
-                    break
+            repo_root = self._extract_working_directory(content)
 
             new_env_line = f'Environment="CIDX_REPO_ROOT={repo_root}"'
 
@@ -547,6 +572,109 @@ class DeploymentExecutor:
             ))
             return False
 
+    def _ensure_git_safe_directory(self) -> bool:
+        """Ensure git safe.directory is configured for the service user.
+
+        On production servers where the repo is owned by root but the service runs
+        as a different user (e.g., code-indexer), git refuses to operate due to
+        "dubious ownership" security check. This method configures safe.directory
+        to allow git operations.
+
+        Returns:
+            True if config is correct or was updated or not needed, False on error
+        """
+        service_path = Path(f"/etc/systemd/system/{self.service_name}.service")
+
+        try:
+            if not service_path.exists():
+                logger.warning(format_error_log(
+                    "DEPLOY-GENERAL-026",
+                    f"Service file not found: {service_path}",
+                    extra={"correlation_id": get_correlation_id()},
+                ))
+                return True  # Not a fatal error if service doesn't exist yet
+
+            content = service_path.read_text()
+
+            # Extract User from service file
+            service_user = self._extract_service_user(content)
+
+            # If no User= line, skip (service runs as current user)
+            if not service_user:
+                logger.debug(
+                    "No User= line in service file, skipping git safe.directory config",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            # Extract WorkingDirectory from service file - this is the canonical repo path
+            repo_root = self._extract_working_directory(content)
+
+            # Check if already configured
+            check_result = subprocess.run(
+                [
+                    "sudo",
+                    "-u",
+                    service_user,
+                    "git",
+                    "config",
+                    "--global",
+                    "--get-all",
+                    "safe.directory",
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            if check_result.returncode == 0:
+                # Check if our repo path is in the output
+                configured_paths = check_result.stdout.strip().split("\n")
+                if str(repo_root) in configured_paths:
+                    logger.debug(
+                        f"Git safe.directory already configured for {service_user}: {repo_root}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return True
+
+            # Add safe.directory configuration
+            add_result = subprocess.run(
+                [
+                    "sudo",
+                    "-u",
+                    service_user,
+                    "git",
+                    "config",
+                    "--global",
+                    "--add",
+                    "safe.directory",
+                    str(repo_root),
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            if add_result.returncode != 0:
+                logger.error(format_error_log(
+                    "DEPLOY-GENERAL-027",
+                    f"Failed to add git safe.directory: {add_result.stderr}",
+                    extra={"correlation_id": get_correlation_id()},
+                ))
+                return False
+
+            logger.info(
+                f"Added git safe.directory for {service_user}: {repo_root}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.error(format_error_log(
+                "DEPLOY-GENERAL-028",
+                f"Error configuring git safe.directory: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            ))
+            return False
+
     def ensure_ripgrep(self) -> bool:
         """
         Ensure ripgrep is installed (x86_64 Linux only).
@@ -596,7 +724,10 @@ class DeploymentExecutor:
         # Step 4: Bug #87 - Ensure CIDX_REPO_ROOT environment variable
         self._ensure_cidx_repo_root()
 
-        # Step 5: Ensure ripgrep is installed
+        # Step 5: Ensure git safe.directory configured
+        self._ensure_git_safe_directory()
+
+        # Step 6: Ensure ripgrep is installed
         self.ensure_ripgrep()
 
         logger.info(
