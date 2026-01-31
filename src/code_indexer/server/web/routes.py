@@ -7593,8 +7593,11 @@ async def trigger_manual_scan(
 
     Requires authenticated admin session and valid CSRF token.
     """
+    logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: Entry - endpoint called")
+
     session = _require_admin_session(request)
     if not session:
+        logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: No admin session found")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required"
@@ -7602,10 +7605,13 @@ async def trigger_manual_scan(
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
+        logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: Invalid CSRF token")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid CSRF token"
         )
+
+    logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: Auth validated, loading config")
 
     # Get self-monitoring service from app state
     # The service is initialized in app.py during startup
@@ -7616,8 +7622,11 @@ async def trigger_manual_scan(
     config_service = get_config_service()
     config = config_service.get_config()
 
+    logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: Config loaded - enabled={config.self_monitoring_config.enabled}, cadence_minutes={config.self_monitoring_config.cadence_minutes}, model={config.self_monitoring_config.model}")
+
     # Get background job manager from app state
     job_manager = getattr(request.app.state, "background_job_manager", None)
+    logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: job_manager={job_manager is not None}")
 
     # Get database paths from app state and config (Bug #87)
     server_data_dir = os.environ.get(
@@ -7628,12 +7637,17 @@ async def trigger_manual_scan(
     if log_db_path:
         log_db_path = str(log_db_path)
 
+    logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: Database paths - db_path={db_path}, log_db_path={log_db_path}")
+
     # Get repo_root and github_repo from app.state (auto-detected at startup)
     # Bug Fix: MONITOR-GENERAL-011 - CIDX_REPO_ROOT env var ensures reliable detection
     repo_root = getattr(request.app.state, "self_monitoring_repo_root", None)
     github_repo = getattr(request.app.state, "self_monitoring_github_repo", None)
 
+    logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: Repo config - repo_root={repo_root}, github_repo={github_repo}")
+
     if not github_repo:
+        logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: github_repo is None - returning error")
         logger.error(
             format_error_log(
                 "MONITOR-GENERAL-011",
@@ -7655,10 +7669,15 @@ async def trigger_manual_scan(
     github_token_data = token_manager.get_token("github")
     github_token = github_token_data.token if github_token_data else None
 
+    logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: GitHub token retrieved - has_token={github_token is not None}")
+
     # Get server name for issue identification (Bug #87)
     server_name = config.service_display_name or "Neo"
 
+    logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: server_name={server_name}")
+
     # Create service instance with current configuration (Bug #87)
+    logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: Creating SelfMonitoringService instance")
     service = SelfMonitoringService(
         enabled=config.self_monitoring_config.enabled,
         cadence_minutes=config.self_monitoring_config.cadence_minutes,
@@ -7674,15 +7693,19 @@ async def trigger_manual_scan(
     )
 
     # Trigger the scan
+    logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: Calling service.trigger_scan()")
     result = service.trigger_scan()
+    logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: trigger_scan returned - result={result}")
 
     # Return JSON response
     if result["status"] == "error":
+        logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: Returning error response - {result}")
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content=result
         )
 
+    logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: Returning success response - {result}")
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content=result

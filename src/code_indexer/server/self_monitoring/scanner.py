@@ -272,15 +272,20 @@ class LogScanner:
         Args:
             log_id_start: Starting log ID for this scan
         """
+        logger.debug(f"[SELF-MON-DEBUG] create_scan_record: Entry - scan_id={self.scan_id}, log_id_start={log_id_start}, db_path={self.db_path}")
         conn = sqlite3.connect(self.db_path)
         try:
+            logger.debug("[SELF-MON-DEBUG] create_scan_record: Executing INSERT into self_monitoring_scans")
+            # Include log_id_end with initial value to handle databases with NOT NULL constraint
+            # (schema migration issue - older databases may have NOT NULL on log_id_end)
             conn.execute(
                 "INSERT INTO self_monitoring_scans "
-                "(scan_id, started_at, status, log_id_start, issues_created) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (self.scan_id, datetime.datetime.utcnow().isoformat(), "RUNNING", log_id_start, 0)
+                "(scan_id, started_at, status, log_id_start, log_id_end, issues_created) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (self.scan_id, datetime.datetime.utcnow().isoformat(), "RUNNING", log_id_start, log_id_start, 0)
             )
             conn.commit()
+            logger.debug("[SELF-MON-DEBUG] create_scan_record: INSERT committed successfully")
         finally:
             conn.close()
 
@@ -295,8 +300,10 @@ class LogScanner:
         Returns:
             Last processed log ID, or 0 if no previous scans
         """
+        logger.debug(f"[SELF-MON-DEBUG] get_last_scan_log_id: Entry - db_path={self.db_path}")
         conn = sqlite3.connect(self.db_path)
         try:
+            logger.debug("[SELF-MON-DEBUG] get_last_scan_log_id: Executing SELECT query for last successful scan")
             cursor = conn.execute(
                 "SELECT log_id_end FROM self_monitoring_scans "
                 "WHERE status = 'SUCCESS' AND log_id_end IS NOT NULL "
@@ -304,7 +311,9 @@ class LogScanner:
                 "LIMIT 1"
             )
             row = cursor.fetchone()
-            return row[0] if row else 0
+            result = row[0] if row else 0
+            logger.debug(f"[SELF-MON-DEBUG] get_last_scan_log_id: Query complete - result={result}, has_row={row is not None}")
+            return result
         finally:
             conn.close()
 
@@ -488,33 +497,48 @@ class LogScanner:
             This method handles both SUCCESS and FAILURE cases.
             On FAILURE, log_id_end is NOT advanced to allow retry from same position.
         """
+        logger.debug(f"[SELF-MON-DEBUG] execute_scan: Entry - scan_id={self.scan_id}, db_path={self.db_path}, log_db_path={self.log_db_path}")
+
         from code_indexer.server.self_monitoring.issue_manager import IssueManager
 
         try:
             # Step 1: Get last processed log ID for delta tracking
+            logger.debug("[SELF-MON-DEBUG] execute_scan: Step 1 - Calling get_last_scan_log_id()")
             last_log_id = self.get_last_scan_log_id()
+            logger.debug(f"[SELF-MON-DEBUG] execute_scan: Step 1 complete - last_log_id={last_log_id}")
 
             # Step 1b: Create initial scan record (Bug #87 issue #6)
+            logger.debug(f"[SELF-MON-DEBUG] execute_scan: Step 1b - Calling create_scan_record(log_id_start={last_log_id})")
             self.create_scan_record(log_id_start=last_log_id)
+            logger.debug("[SELF-MON-DEBUG] execute_scan: Step 1b complete - scan record created")
 
             # Step 2: Fetch existing GitHub issues for deduplication
+            logger.debug("[SELF-MON-DEBUG] execute_scan: Step 2 - Calling _fetch_existing_github_issues()")
             existing_issues = self._fetch_existing_github_issues()
+            logger.debug(f"[SELF-MON-DEBUG] execute_scan: Step 2 complete - fetched {len(existing_issues)} existing issues")
 
             # Step 3: Assemble Claude prompt
+            logger.debug("[SELF-MON-DEBUG] execute_scan: Step 3 - Calling assemble_prompt()")
             prompt = self.assemble_prompt(
                 last_scan_log_id=last_log_id,
                 existing_issues=existing_issues
             )
+            logger.debug(f"[SELF-MON-DEBUG] execute_scan: Step 3 complete - prompt length={len(prompt)}")
 
             # Step 4: Invoke Claude CLI
+            logger.debug(f"[SELF-MON-DEBUG] execute_scan: Step 4 - Calling _invoke_claude_cli() with model={self.model}, repo_root={self.repo_root}")
             claude_response_str = self._invoke_claude_cli(prompt)
+            logger.debug(f"[SELF-MON-DEBUG] execute_scan: Step 4 complete - response length={len(claude_response_str)}")
 
             # Step 5: Parse Claude response
+            logger.debug("[SELF-MON-DEBUG] execute_scan: Step 5 - Calling parse_claude_response()")
             response = self.parse_claude_response(claude_response_str)
+            logger.debug(f"[SELF-MON-DEBUG] execute_scan: Step 5 complete - response status={response.get('status')}")
 
             # Handle FAILURE response from Claude
             if response["status"] == "FAILURE":
                 error_msg = response.get("error", "Unknown Claude error")
+                logger.debug(f"[SELF-MON-DEBUG] execute_scan: Claude returned FAILURE - error={error_msg}")
                 self.update_scan_record(
                     status="FAILURE",
                     error_message=error_msg
@@ -525,6 +549,7 @@ class LogScanner:
                 }
 
             # Step 6: Create issues via IssueManager (SUCCESS case)
+            logger.debug("[SELF-MON-DEBUG] execute_scan: Step 6 - Creating IssueManager")
             issue_manager = IssueManager(
                 db_path=self.db_path,
                 scan_id=self.scan_id,
@@ -532,27 +557,35 @@ class LogScanner:
                 github_token=self.github_token,
                 server_name=self.server_name
             )
+            logger.debug(f"[SELF-MON-DEBUG] execute_scan: Step 6 - Calling _create_issues_from_response() with {len(response.get('issues_created', []))} issues")
             issues_created_count = self._create_issues_from_response(response, issue_manager)
+            logger.debug(f"[SELF-MON-DEBUG] execute_scan: Step 6 complete - created {issues_created_count} issues")
 
             # Step 7: Update scan record with SUCCESS
             max_log_id = response.get("max_log_id_processed", last_log_id)
+            logger.debug(f"[SELF-MON-DEBUG] execute_scan: Step 7 - Updating scan record with SUCCESS, max_log_id={max_log_id}")
             self.update_scan_record(
                 status="SUCCESS",
                 log_id_end=max_log_id,
                 issues_created=issues_created_count
             )
+            logger.debug("[SELF-MON-DEBUG] execute_scan: Step 7 complete - scan record updated")
 
-            return {
+            result = {
                 "status": "SUCCESS",
                 "issues_created": issues_created_count,
                 "duplicates_skipped": response.get("duplicates_skipped", 0),
                 "potential_duplicates_commented": response.get("potential_duplicates_commented", 0),
                 "max_log_id_processed": max_log_id
             }
+            logger.debug(f"[SELF-MON-DEBUG] execute_scan: Returning SUCCESS result - {result}")
+            return result
 
         except Exception as e:
             # Handle unexpected errors
             error_msg = f"Scan failed: {str(e)}"
+            logger.debug(f"[SELF-MON-DEBUG] execute_scan: Exception caught - {type(e).__name__}: {e}")
+            logger.error("[SELF-MON-DEBUG] execute_scan: Full exception", exc_info=True)
             self.update_scan_record(
                 status="FAILURE",
                 error_message=error_msg
@@ -607,13 +640,18 @@ class LogScanner:
             List of issue dictionaries with keys: number, title, body, labels, created_at
             Returns empty list if github_token is not provided or on error.
         """
+        logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: Entry - github_repo={self.github_repo}, has_token={self.github_token is not None}")
+
         if not self.github_token:
+            logger.debug("[SELF-MON-DEBUG] _fetch_existing_github_issues: No github_token - returning empty list")
             return []
 
         try:
             env = os.environ.copy()
             env['GH_TOKEN'] = self.github_token
             env['GH_PROMPT_DISABLED'] = '1'
+
+            logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: Invoking gh CLI - repo={self.github_repo}, limit={GITHUB_ISSUE_FETCH_LIMIT}, timeout={GITHUB_CLI_TIMEOUT_SECONDS}s")
 
             result = subprocess.run(
                 ["gh", "issue", "list", "--repo", self.github_repo,
@@ -625,27 +663,36 @@ class LogScanner:
                 timeout=GITHUB_CLI_TIMEOUT_SECONDS
             )
 
+            logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: gh CLI completed - returncode={result.returncode}, stdout_length={len(result.stdout)}, stderr_length={len(result.stderr)}")
+
             if result.returncode != 0:
+                logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: gh CLI failed - stderr={result.stderr}")
                 logger.warning(f"gh CLI failed to fetch issues: {result.stderr}")
                 return []
 
             issues = json.loads(result.stdout)
+            logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: Parsed {len(issues)} issues from JSON")
 
             # Convert to expected format
-            return [
+            converted = [
                 {
                     "number": i["number"],
                     "title": i["title"],
                     "body": i.get("body", ""),
-                    "labels": [l["name"] for l in i.get("labels", [])],
+                    "labels": [label["name"] for label in i.get("labels", [])],
                     "created_at": i.get("createdAt", "")
                 }
                 for i in issues
             ]
+            logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: Returning {len(converted)} converted issues")
+            return converted
+
         except subprocess.TimeoutExpired:
+            logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: gh CLI timed out after {GITHUB_CLI_TIMEOUT_SECONDS} seconds")
             logger.warning(f"gh CLI timed out after {GITHUB_CLI_TIMEOUT_SECONDS} seconds")
             return []
         except (subprocess.SubprocessError, json.JSONDecodeError, KeyError) as e:
+            logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: Exception - {type(e).__name__}: {e}")
             logger.warning(f"Failed to fetch GitHub issues: {e}")
             return []
 
