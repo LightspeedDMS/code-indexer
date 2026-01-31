@@ -691,6 +691,11 @@ class LogScanner:
             logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: gh CLI timed out after {GITHUB_CLI_TIMEOUT_SECONDS} seconds")
             logger.warning(f"gh CLI timed out after {GITHUB_CLI_TIMEOUT_SECONDS} seconds")
             return []
+        except FileNotFoundError:
+            # gh CLI not installed - this is expected on servers without GitHub integration
+            logger.debug("[SELF-MON-DEBUG] _fetch_existing_github_issues: gh CLI not found - returning empty list")
+            logger.info("gh CLI not installed - GitHub issue deduplication disabled")
+            return []
         except (subprocess.SubprocessError, json.JSONDecodeError, KeyError) as e:
             logger.debug(f"[SELF-MON-DEBUG] _fetch_existing_github_issues: Exception - {type(e).__name__}: {e}")
             logger.warning(f"Failed to fetch GitHub issues: {e}")
