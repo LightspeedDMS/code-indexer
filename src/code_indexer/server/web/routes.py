@@ -7368,6 +7368,27 @@ def _load_self_monitoring_data(db_path: Path, session: SessionData) -> Tuple[Lis
             )
             scans = [dict(row) for row in cursor.fetchall()]
 
+            # Add duration calculation for each scan
+            from datetime import datetime
+            for scan in scans:
+                if scan['completed_at'] and scan['started_at']:
+                    # Parse timestamps and calculate duration
+                    try:
+                        started = datetime.fromisoformat(scan['started_at'])
+                        completed = datetime.fromisoformat(scan['completed_at'])
+                        duration_seconds = (completed - started).total_seconds()
+
+                        # Format as "Xm Ys"
+                        minutes = int(duration_seconds // 60)
+                        seconds = int(duration_seconds % 60)
+                        scan['duration'] = f"{minutes}m {seconds}s"
+                    except (ValueError, TypeError):
+                        scan['duration'] = 'N/A'
+                elif scan['status'] == 'RUNNING':
+                    scan['duration'] = 'In progress'
+                else:
+                    scan['duration'] = 'N/A'
+
             # Load issues (most recent first)
             cursor.execute(
                 """

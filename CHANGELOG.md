@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.15] - 2026-01-31
+
+### Fixed
+
+- **Self-Monitoring: Job flood caused by corrupted configuration** - Resolved runaway scan execution:
+  - Configuration file had corrupted cadence_minutes value (0.5 instead of 1440)
+  - Caused 5,090+ scan jobs to be created in 38 hours at 30-second intervals
+  - Systemd service restart loaded correct 24-hour cadence configuration
+  - Verified zero new jobs created after restart
+
+---
+
 ## [8.8.14] - 2026-01-31
 
 ### Changed
