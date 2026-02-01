@@ -22,7 +22,7 @@ BODY_PREVIEW_MAX_LENGTH = 500
 FINGERPRINT_RETENTION_DAYS = 90
 
 # Constants for Claude CLI invocation
-CLAUDE_CLI_TIMEOUT_SECONDS = 300  # 5 minute timeout
+CLAUDE_CLI_TIMEOUT_SECONDS = 1800  # 30 minute timeout
 
 # Constants for GitHub issue fetching (Bug #87)
 GITHUB_ISSUE_FETCH_LIMIT = 100  # Fetch last 100 open issues for deduplication

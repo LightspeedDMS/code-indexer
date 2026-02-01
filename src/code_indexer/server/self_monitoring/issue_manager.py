@@ -61,6 +61,55 @@ class IssueManager:
         self.github_token = github_token
         self.server_name = server_name
 
+    def _get_all_server_ips(self) -> str:
+        """
+        Get all non-loopback IPv4 addresses for this server.
+
+        Returns comma-separated string of all non-loopback IPv4 addresses.
+        Returns "unknown" if no addresses can be determined.
+
+        Returns:
+            Comma-separated string of IPv4 addresses (e.g., "192.168.1.10, 10.0.0.5")
+            or "unknown" on failure
+        """
+        ipv4_addresses = set()
+
+        try:
+            import socket
+
+            # Method 1: Try to get IP from hostname resolution
+            hostname = socket.gethostname()
+            addr_info = socket.getaddrinfo(hostname, None, socket.AF_INET)
+
+            for info in addr_info:
+                ip = info[4][0]  # Address is in info[4][0]
+                # Skip loopback addresses
+                if not ip.startswith("127."):
+                    ipv4_addresses.add(ip)
+
+        except Exception as e:
+            logger.debug(f"Hostname resolution failed: {e}")
+
+        try:
+            # Method 2: Determine local IP by checking which interface would route to external address
+            # This doesn't actually connect, just determines the local endpoint
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(('8.8.8.8', 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+
+            if not local_ip.startswith("127."):
+                ipv4_addresses.add(local_ip)
+
+        except Exception as e:
+            logger.debug(f"External route detection failed: {e}")
+
+        if ipv4_addresses:
+            return ", ".join(sorted(ipv4_addresses))
+        else:
+            # No non-loopback addresses found
+            return "unknown"
+
     def create_issue(
         self,
         classification: str,
@@ -92,11 +141,7 @@ class IssueManager:
         """
         # Prepend server identity if server_name provided (Bug #87 issue #4)
         if self.server_name:
-            try:
-                server_ip = socket.gethostbyname(socket.gethostname())
-            except Exception as e:
-                logger.warning(f"Failed to resolve server IP: {e}")
-                server_ip = "unknown"
+            server_ip = self._get_all_server_ips()
 
             identity_section = (
                 f"**Created by CIDX Server**\n"

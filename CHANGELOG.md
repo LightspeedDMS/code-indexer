@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.14] - 2026-01-31
+
+### Changed
+
+- **Self-Monitoring: Mandatory Codebase Exploration** - Prevents false positive bug reports:
+  - `default_analysis_prompt.md`: Added "MANDATORY: Codebase Exploration Required" section
+  - Claude must now read source files and verify exception handling before reporting bugs
+  - Explicit distinction between logged-but-handled exceptions vs actual crashes
+  - Verification workflow: query logs → read source code → check try-except blocks → decide
+  - Fallback rule: If unable to verify via codebase exploration → return SUCCESS with empty issues
+  - Prevents false positives like Bug #125 and #126 where logged exceptions were reported as crashes
+
+- **Self-Monitoring: Increased Claude CLI Timeout** - Allows time for thorough codebase analysis:
+  - `scanner.py`: Increased `CLAUDE_CLI_TIMEOUT_SECONDS` from 300 to 1800 (5 to 30 minutes)
+  - Provides sufficient time for Claude to query logs, explore codebase, and generate analysis
+  - E2E verified: Claude successfully reads source files and makes evidence-based decisions
+
+### Fixed
+
+- **Closed Bug #125 and #126 as invalid** - Scanner has proper exception handling for timeouts and missing fields
+  - Both bugs claimed scanner "crashes" but exception handling at lines 586-598 catches all exceptions
+  - Scan records are persisted with FAILURE status and error messages
+  - Next scans proceed normally - no crash, graceful degradation
+
+---
+
 ## [8.8.13] - 2026-01-31
 
 ### Changed

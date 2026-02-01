@@ -29,6 +29,63 @@ CREATE TABLE logs (
 );
 ```
 
+## MANDATORY: Codebase Exploration Required
+
+**YOU HAVE FULL ACCESS TO THE CIDX CODEBASE** for analysis and verification.
+
+Working directory: CIDX repository root (where you can use Read tool, Grep, Bash, etc.)
+
+**CRITICAL DISTINCTION - Logged Exceptions vs Crashes:**
+
+- **Logged exception with error handling** = ERROR in logs + proper exception handling in code = **NOT A BUG**
+  - Example: `except SomeException as e: logger.error(f"Error: {{e}}"); return {{"status": "FAILURE"}}`
+  - The exception is caught, logged, and handled gracefully
+  - DO NOT CREATE ISSUES for these
+
+- **Unhandled exception / crash** = ERROR in logs + NO exception handling = **ACTUAL BUG**
+  - Example: Exception propagates up and crashes the process
+  - Stack trace shows uncaught exception terminating execution
+  - CREATE ISSUES for these
+
+**VERIFICATION WORKFLOW (MANDATORY):**
+
+1. Query logs.db to find ERROR/WARNING entries
+2. Extract source file path from `source` field (e.g., "code_indexer.server.web.routes")
+3. **READ THE SOURCE CODE** using Read tool to verify exception handling
+4. **CHECK FOR TRY-EXCEPT BLOCKS** around the code that raised the exception
+5. **VERIFY GRACEFUL HANDLING** - does it log and return/continue, or does it crash?
+6. **ONLY CREATE ISSUE** if you confirm the exception is NOT handled
+
+**Example Verification Process:**
+
+```bash
+# 1. Find error in logs
+sqlite3 "{log_db_path}" "SELECT source, message FROM logs WHERE level='ERROR' AND id > {last_scan_log_id} LIMIT 1"
+
+# Output: source="code_indexer.server.self_monitoring.scanner", message="ValueError: Missing required field: status"
+
+# 2. Locate source file
+# Source module: code_indexer.server.self_monitoring.scanner → src/code_indexer/server/self_monitoring/scanner.py
+
+# 3. Read the code using Read tool
+# (Use Read tool to examine scanner.py)
+
+# 4. Verify exception handling
+# Look for try-except blocks in execute_scan() or calling methods
+# If found: "except Exception as e: logger.error(...); update_scan_record(status='FAILURE'); return {{...}}"
+# Conclusion: Exception is HANDLED - NOT A BUG
+
+# 5. Decision: Do NOT create issue (this is proper error handling)
+```
+
+**IF YOU CANNOT VERIFY VIA CODE EXPLORATION:**
+
+- If you cannot locate or read the source files
+- If the codebase structure is unclear
+- If you lack tools to explore properly
+
+**THEN: Return SUCCESS with empty issues_created array** - do not speculate based on logs alone.
+
 ## Delta Processing
 
 **CRITICAL**: You must only analyze NEW log entries since the last scan.
@@ -61,11 +118,13 @@ Classify each issue into ONE of these categories:
 ## Analysis Guidelines
 
 1. **Query the database** - Use sqlite3 to read log entries directly
-2. **Focus on patterns** - Single occurrences may be transient; recurring errors are more significant
-3. **Check error codes** - Look for `[ERROR_CODE]` patterns like `[AUTH-TOKEN-001]` in messages
-4. **Group related errors** - Multiple log entries about the same problem = one issue
-5. **Assess severity** - Crashes and data loss are critical; validation errors may be client issues
-6. **Include context** - Note correlation_id, user patterns, timing patterns
+2. **Explore the codebase** - Use Read, Grep, Glob tools to examine source files mentioned in logs
+3. **Verify exception handling** - Check if exceptions are caught and handled gracefully
+4. **Focus on patterns** - Single occurrences may be transient; recurring errors are more significant
+5. **Check error codes** - Look for `[ERROR_CODE]` patterns like `[AUTH-TOKEN-001]` in messages
+6. **Group related errors** - Multiple log entries about the same problem = one issue
+7. **Assess severity** - Crashes and data loss are critical; validation errors may be client issues
+8. **Include context** - Note correlation_id, user patterns, timing patterns
 
 ## CRITICAL: Focus on Actionable Development Bugs
 
@@ -156,3 +215,4 @@ You MUST respond with valid JSON in this exact format:
 4. **Don't create duplicate issues** - Use the deduplication context provided
 5. **Be conservative** - When in doubt, don't create an issue
 6. **Group related logs** - Multiple errors from same root cause = one issue
+7. **DO NOT include server identity in body** - NEVER add "Created by CIDX Server", "Server Name", "Server IP", "Scan ID", or "Log ID" sections to the issue body. The system automatically prepends this information.
