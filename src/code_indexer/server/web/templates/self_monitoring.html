@@ -12,9 +12,9 @@
     <h2>Status</h2>
     <div class="status-info">
         <p><strong>State:</strong> {% if config.enabled %}Enabled{% else %}Disabled{% endif %}</p>
-        <p><strong>Last Scan:</strong> <span id="last-scan">Never</span></p>
-        <p><strong>Next Scan:</strong> <span id="next-scan">N/A</span></p>
-        <p><strong>Scan Status:</strong> <span id="scan-status">Idle</span></p>
+        <p><strong>Last Scan:</strong> <span id="last-scan">{{ last_scan }}</span></p>
+        <p><strong>Next Scan:</strong> <span id="next-scan">{{ next_scan }}</span></p>
+        <p><strong>Scan Status:</strong> <span id="scan-status">{{ scan_status }}</span></p>
     </div>
 
     <!-- Run Now Button (Story #75 AC1) -->

@@ -5,6 +5,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.18] - 2026-02-01
+
+### Fixed
+
+- **Bug #129 Part 3: Scan Status detection now correctly identifies running scans** - Fixed SQL query to use authoritative table:
+  - Changed `_get_scan_status()` to query `self_monitoring_scans.completed_at IS NULL` instead of `background_jobs.status='running'`
+  - Root cause: `background_jobs` table immediately marks self_monitoring jobs as 'completed' when submitted, not when actually finished
+  - Actual running state tracked in `self_monitoring_scans` table where running scans have `completed_at IS NULL`
+  - Database evidence: All 3,389 self_monitoring jobs in background_jobs have status='completed' (zero with 'running')
+  - E2E testing: 8/8 automated tests passed + real 30-minute production scan verified
+  - Fixes issue where status always showed "Idle" even when scan was actively running for 30 minutes
+  - Production verification: Real scan executed for 30 minutes with `completed_at=NULL` during entire execution window
+
+### Added
+
+- **Orphaned scan cleanup feature** - Automatic cleanup prevents "stuck Running..." status:
+  - Added `_cleanup_orphaned_scans()` method in `service.py` to find scans older than 2 hours with `completed_at IS NULL`
+  - Marks orphaned scans as FAILURE with error message: "Scan failed to complete (orphaned after 2 hours)"
+  - Cleanup runs automatically before each scheduled scan cycle
+  - Prevents crashed/interrupted scans from permanently showing "Running..." status
+  - Found and cleaned 26 orphaned records during testing from previous crashes
+  - Test coverage: 5 comprehensive tests covering all cleanup scenarios (orphaned detection, recent scan preservation, completed scan handling, logging, integration)
+
+---
+
+## [8.8.17] - 2026-02-01
+
+### Fixed
+
+- **Bug #129: Self-monitoring status display now shows accurate real-time information** - Fixed three display issues on admin page:
+  - **Last Scan** changed from hardcoded "Never" to actual database query showing most recent scan timestamp
+  - **Next Scan** changed from hardcoded "N/A" to calculated future time (last scan + cadence)
+  - **Scan Status** changed from hardcoded "Idle" to real-time job status query showing "Running..." when job executing, "Idle" when no job running
+  - Added `_get_last_scan_time()` helper function to query `self_monitoring_scans` table
+  - Added `_calculate_next_scan_time()` helper function to compute next scan time based on cadence
+  - Added `_get_scan_status()` helper function to query `background_jobs` table for running jobs
+  - Updated `self_monitoring.html` template to display dynamic values instead of hardcoded strings
+  - Test coverage: 6 comprehensive tests covering all display scenarios (last scan with/without data, next scan calculation, status idle/running/completed)
+  - Fixes issue where users couldn't see when last scan occurred, when next scan would run, or if scan was actually running
+
+---
+
+## [8.8.16] - 2026-02-01
+
+### Fixed
+
+- **Bug #127: Self-monitoring service now respects cadence on startup** - Service queries database for last scan timestamp and waits remaining time:
+  - Added `_calculate_initial_wait()` method in `service.py` to query last scan from database
+  - Service calculates elapsed time since last scan and waits remaining cadence time before first scan
+  - Handles three scenarios: recent scan (wait remaining time), no previous scans (wait full cadence), overdue scan (run immediately)
+  - Production verification: Logs show "Last scan was 115.5 minutes ago (cadence: 60.0 minutes), running immediately"
+  - Fixes issue where server restart triggered immediate scan regardless of when last scan occurred
+  - Test coverage: 3 unit tests covering all three scenarios
+
+- **Bug #128: Self-monitoring enabled toggle now starts/stops service immediately** - No server restart required:
+  - Modified `save_self_monitoring_config()` in `routes.py` to access running service from `app.state`
+  - Service `_enabled` flag synchronized before start/stop to ensure `trigger_scan()` works after toggle
+  - Toggling enabled ON immediately starts service if not running
+  - Toggling enabled OFF immediately stops service if running
+  - Fixes issue where toggle only updated config file without affecting running service
+  - Test coverage: 2 toggle tests + 2 state synchronization tests
+
+- **Deprecated datetime.utcnow() replaced** - Future-proofing for Python 3.12+:
+  - Replaced deprecated `datetime.utcnow()` with `datetime.now(timezone.utc)` in `service.py`
+  - Added timezone-aware datetime handling with backward compatibility for naive timestamps
+
+---
+
 ## [8.8.15] - 2026-01-31
 
 ### Fixed

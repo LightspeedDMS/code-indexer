@@ -148,17 +148,150 @@ class SelfMonitoringService:
 
         logger.info("Self-monitoring service stopped")
 
+    def _cleanup_orphaned_scans(self) -> None:
+        """
+        Clean up orphaned scans that failed to complete.
+
+        Finds scans with completed_at IS NULL and started_at older than 2 hours,
+        marks them as FAILURE with error message "Scan failed to complete (orphaned after 2 hours)".
+
+        This prevents "stuck Running..." status caused by crashed scans.
+        """
+        if not self._db_path:
+            logger.debug("No database path configured, skipping orphaned scan cleanup")
+            return
+
+        try:
+            import sqlite3
+
+            with sqlite3.connect(self._db_path) as conn:
+                cursor = conn.cursor()
+
+                # Find and mark orphaned scans (>2 hours old, not completed)
+                cursor.execute("""
+                    UPDATE self_monitoring_scans
+                    SET completed_at = datetime('now'),
+                        status = 'FAILURE',
+                        error_message = 'Scan failed to complete (orphaned after 2 hours)'
+                    WHERE completed_at IS NULL
+                      AND datetime(started_at) < datetime('now', '-2 hours')
+                """)
+
+                orphaned_count = cursor.rowcount
+                conn.commit()
+
+            if orphaned_count > 0:
+                logger.info(f"Cleaned up {orphaned_count} orphaned scans older than 2 hours")
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "MONITOR-GENERAL-013",
+                    f"Failed to cleanup orphaned scans: {e}",
+                ),
+                exc_info=True,
+            )
+
+    def _calculate_initial_wait(self, interval_seconds: float) -> float:
+        """
+        Calculate initial wait time based on last scan timestamp (Bug #127).
+
+        Queries the database for the most recent scan and calculates how long
+        to wait before the next scan, respecting the configured cadence.
+
+        Args:
+            interval_seconds: Configured cadence interval in seconds
+
+        Returns:
+            Number of seconds to wait before first scan. Returns 0 if:
+            - No previous scans exist (fresh install)
+            - Last scan was longer ago than cadence (scan overdue)
+            - Database error occurs (fail-safe: run immediately)
+        """
+        if not self._db_path:
+            logger.debug("No database path configured, skipping initial wait calculation")
+            return 0.0
+
+        try:
+            import sqlite3
+            from datetime import datetime, timezone
+
+            with sqlite3.connect(self._db_path) as conn:
+                cursor = conn.cursor()
+
+                # Query for most recent scan
+                cursor.execute(
+                    "SELECT started_at FROM self_monitoring_scans "
+                    "ORDER BY started_at DESC LIMIT 1"
+                )
+                row = cursor.fetchone()
+
+            if not row:
+                logger.info("No previous scans found, running immediately")
+                return 0.0
+
+            # Parse timestamp - handle both naive and timezone-aware formats
+            last_scan_iso = row[0]
+            # Try parsing as timezone-aware first (with 'Z' or offset)
+            if last_scan_iso.endswith('Z'):
+                last_scan_time = datetime.fromisoformat(last_scan_iso.replace("Z", "+00:00"))
+            else:
+                # Parse as-is, which may be naive or have offset
+                last_scan_time = datetime.fromisoformat(last_scan_iso)
+
+            # If naive datetime, assume it's UTC and make it aware
+            if last_scan_time.tzinfo is None:
+                last_scan_time = last_scan_time.replace(tzinfo=timezone.utc)
+
+            now = datetime.now(timezone.utc)
+            elapsed_seconds = (now - last_scan_time).total_seconds()
+
+            remaining_seconds = interval_seconds - elapsed_seconds
+
+            if remaining_seconds <= 0:
+                logger.info(
+                    f"Last scan was {elapsed_seconds/60:.1f} minutes ago "
+                    f"(cadence: {interval_seconds/60:.1f} minutes), running immediately"
+                )
+                return 0.0
+
+            logger.info(
+                f"Last scan was {elapsed_seconds/60:.1f} minutes ago, "
+                f"waiting {remaining_seconds/60:.1f} minutes before first scan"
+            )
+            return remaining_seconds
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "MONITOR-GENERAL-012",
+                    f"Failed to calculate initial wait time: {e}. Running immediately.",
+                ),
+                exc_info=True,
+            )
+            return 0.0
+
     def _run_loop(self) -> None:
         """
         Main loop for self-monitoring processing.
 
         Runs periodically at the configured interval, submitting jobs to the
         background job queue for log analysis.
+
+        Bug #127 fix: Checks last scan timestamp and waits remaining time
+        before first scan to respect configured cadence.
         """
         interval_seconds = self._cadence_minutes * 60
 
+        # Calculate initial wait based on last scan timestamp (Bug #127)
+        initial_wait = self._calculate_initial_wait(interval_seconds)
+        if initial_wait > 0:
+            self._stop_event.wait(timeout=initial_wait)
+
         while self._running and not self._stop_event.is_set():
             try:
+                # Clean up orphaned scans before submitting new scan
+                self._cleanup_orphaned_scans()
                 self._submit_scan_job()
             except Exception as e:
                 logger.error(

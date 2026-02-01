@@ -7432,6 +7432,111 @@ def _load_default_prompt() -> str:
     return ""
 
 
+def _get_last_scan_time(db_path: Path) -> Optional[str]:
+    """
+    Get timestamp of most recent scan from database (Bug #129 Fix - Problem 1).
+
+    Args:
+        db_path: Path to SQLite database
+
+    Returns:
+        started_at timestamp of most recent scan, or None if no scans exist
+    """
+    try:
+        import sqlite3
+
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT started_at
+                FROM self_monitoring_scans
+                ORDER BY started_at DESC
+                LIMIT 1
+                """
+            )
+            row = cursor.fetchone()
+            return row["started_at"] if row else None
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "WEB-SELF-MONITORING-002",
+                f"Failed to get last scan time: {e}",
+            ),
+            extra=get_log_extra("WEB-SELF-MONITORING-002"),
+        )
+        return None
+
+
+def _calculate_next_scan_time(
+    last_scan_time: Optional[str], cadence_minutes: int
+) -> Optional[str]:
+    """
+    Calculate next scan time based on last scan + cadence (Bug #129 Fix - Problem 2).
+
+    Args:
+        last_scan_time: ISO timestamp of last scan (or None)
+        cadence_minutes: Scan cadence in minutes
+
+    Returns:
+        ISO timestamp of next scan, or None if cannot calculate
+    """
+    if not last_scan_time:
+        return None
+
+    try:
+        from datetime import datetime, timedelta
+
+        last_scan_dt = datetime.fromisoformat(last_scan_time)
+        next_scan_dt = last_scan_dt + timedelta(minutes=cadence_minutes)
+        return next_scan_dt.isoformat()
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "WEB-SELF-MONITORING-003",
+                f"Failed to calculate next scan time: {e}",
+            ),
+            extra=get_log_extra("WEB-SELF-MONITORING-003"),
+        )
+        return None
+
+
+def _get_scan_status(db_path: Path) -> str:
+    """
+    Get current scan status by checking background jobs table (Bug #129 Fix - Problem 3).
+
+    Args:
+        db_path: Path to SQLite database
+
+    Returns:
+        "Running..." if self_monitoring job is running, "Idle" otherwise
+    """
+    try:
+        import sqlite3
+
+        with sqlite3.connect(str(db_path)) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM self_monitoring_scans
+                WHERE completed_at IS NULL
+                """
+            )
+            count = cursor.fetchone()[0]
+            return "Running..." if count > 0 else "Idle"
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "WEB-SELF-MONITORING-004",
+                f"Failed to get scan status: {e}",
+            ),
+            extra=get_log_extra("WEB-SELF-MONITORING-004"),
+        )
+        return "Idle"
+
+
 def _create_self_monitoring_page_response(
     request: Request,
     session: SessionData,
@@ -7440,11 +7545,12 @@ def _create_self_monitoring_page_response(
     current_prompt: str,
     scans: List[Dict],
     issues: List[Dict],
+    db_path: Path,
     success_message: Optional[str] = None,
     error_message: Optional[str] = None,
 ):
     """
-    Build self-monitoring page response with template context (Story #74).
+    Build self-monitoring page response with template context (Story #74, Bug #129).
 
     Args:
         request: FastAPI request
@@ -7454,12 +7560,24 @@ def _create_self_monitoring_page_response(
         current_prompt: Current prompt (config or default)
         scans: Scan history list
         issues: Issues history list
+        db_path: Path to database (for status calculations - Bug #129)
         success_message: Optional success message to display
         error_message: Optional error message to display
 
     Returns:
         TemplateResponse with CSRF cookie set
     """
+    # Bug #129 Fix: Calculate status values from database
+    last_scan = _get_last_scan_time(db_path)
+    next_scan = _calculate_next_scan_time(
+        last_scan, self_monitoring_config.cadence_minutes
+    )
+    scan_status = _get_scan_status(db_path)
+
+    # Format values for display
+    last_scan_display = last_scan if last_scan else "Never"
+    next_scan_display = next_scan if next_scan else "N/A"
+
     csrf_token = generate_csrf_token()
     response = templates.TemplateResponse(
         "self_monitoring.html",
@@ -7476,6 +7594,10 @@ def _create_self_monitoring_page_response(
             "issues": issues,
             "success_message": success_message,
             "error_message": error_message,
+            # Bug #129 Fix: Pass calculated status values to template
+            "last_scan": last_scan_display,
+            "next_scan": next_scan_display,
+            "scan_status": scan_status,
         },
     )
     set_csrf_cookie(response, csrf_token, path="/")
@@ -7517,7 +7639,7 @@ def self_monitoring_page(request: Request):
 
     return _create_self_monitoring_page_response(
         request, session, self_monitoring_config, default_prompt,
-        current_prompt, scans, issues
+        current_prompt, scans, issues, db_path
     )
 
 
@@ -7551,7 +7673,7 @@ async def save_self_monitoring_config(
         current_prompt = config.self_monitoring_config.prompt_template or default_prompt
         return _create_self_monitoring_page_response(
             request, session, config.self_monitoring_config, default_prompt,
-            current_prompt, scans, issues, error_message="Invalid CSRF token"
+            current_prompt, scans, issues, db_path, error_message="Invalid CSRF token"
         )
 
     # Parse form data
@@ -7583,6 +7705,21 @@ async def save_self_monitoring_config(
     # Save configuration
     config_service.config_manager.save_config(config)
 
+    # Bug #128: Start/stop service based on enabled flag
+    service = getattr(request.app.state, "self_monitoring_service", None)
+
+    if service is not None:
+        # Critical: Update service's internal _enabled flag BEFORE start/stop
+        # This ensures trigger_scan() works after enabling via toggle
+        service._enabled = enabled
+
+        if enabled and not service.is_running:
+            service.start()
+            logger.info("Self-monitoring service started via configuration toggle")
+        elif not enabled and service.is_running:
+            service.stop()
+            logger.info("Self-monitoring service stopped via configuration toggle")
+
     # Re-render page with success message
     current_prompt = prompt_template or default_prompt
     server_dir = config_service.config_manager.server_dir
@@ -7591,7 +7728,7 @@ async def save_self_monitoring_config(
 
     return _create_self_monitoring_page_response(
         request, session, config.self_monitoring_config, default_prompt,
-        current_prompt, scans, issues,
+        current_prompt, scans, issues, db_path,
         success_message="Self-monitoring configuration saved successfully"
     )
 
