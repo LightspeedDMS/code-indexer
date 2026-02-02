@@ -82,15 +82,72 @@ class DeploymentExecutor:
             ))
             return False
 
+    def _get_drain_timeout(self) -> int:
+        """Get drain timeout dynamically from server config (Bug #135).
+
+        Queries /api/admin/maintenance/drain-timeout endpoint to get recommended
+        drain timeout based on configured job timeouts. Falls back to 2 hours
+        if server is unavailable or returns error.
+
+        Returns:
+            Drain timeout in seconds (from server or fallback value)
+        """
+        try:
+            url = f"{self.server_url}/api/admin/maintenance/drain-timeout"
+            response = requests.get(url, timeout=10)
+
+            if response.status_code == 200:
+                data = response.json()
+                recommended_timeout = data.get("recommended_drain_timeout_seconds")
+
+                if recommended_timeout and isinstance(recommended_timeout, int):
+                    logger.info(
+                        f"Using dynamic drain timeout from server: {recommended_timeout}s",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return recommended_timeout
+
+            logger.warning(format_error_log(
+                "DEPLOY-GENERAL-029",
+                f"Server returned invalid drain timeout response: {response.status_code}",
+                extra={"correlation_id": get_correlation_id()},
+            ))
+
+        except requests.exceptions.ConnectionError:
+            logger.warning(format_error_log(
+                "DEPLOY-GENERAL-030",
+                "Could not connect to server for drain timeout - using fallback",
+                extra={"correlation_id": get_correlation_id()},
+            ))
+        except Exception as e:
+            logger.error(format_error_log(
+                "DEPLOY-GENERAL-031",
+                f"Error getting drain timeout: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            ))
+
+        # Fallback: 2 hours (reasonable for max job timeout of 1 hour)
+        fallback_timeout = 7200
+        logger.info(
+            f"Using fallback drain timeout: {fallback_timeout}s",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return fallback_timeout
+
     def _wait_for_drain(self) -> bool:
         """Wait for jobs to drain before restart.
+
+        Bug #135: Uses dynamic timeout from server config instead of hardcoded value.
 
         Returns:
             True if drained, False if timeout
         """
+        # Get dynamic timeout from server
+        drain_timeout = self._get_drain_timeout()
+
         start_time = time.time()
 
-        while time.time() - start_time < self.drain_timeout:
+        while time.time() - start_time < drain_timeout:
             try:
                 url = f"{self.server_url}/api/admin/maintenance/drain-status"
                 response = requests.get(url, timeout=10)
@@ -127,7 +184,7 @@ class DeploymentExecutor:
 
         logger.warning(format_error_log(
             "DEPLOY-GENERAL-006",
-            f"Drain timeout ({self.drain_timeout}s) exceeded",
+            f"Drain timeout ({drain_timeout}s) exceeded",
             extra={"correlation_id": get_correlation_id()},
         ))
         return False

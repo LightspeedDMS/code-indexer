@@ -204,3 +204,55 @@ class MaintenanceState:
                     f"Failed to get job details from tracker: {e}"
                 ))
         return jobs
+
+    def get_max_job_timeout(self, config: Any) -> int:
+        """Calculate maximum job timeout from server configuration.
+
+        Bug #135: Used to dynamically determine auto-update drain timeout.
+
+        Examines all job-related timeout settings in ServerConfig and returns
+        the maximum value. This ensures drain timeout accommodates the longest
+        possible job duration.
+
+        Args:
+            config: ServerConfig instance
+
+        Returns:
+            Maximum timeout value in seconds from all job-related config settings
+        """
+        timeouts = []
+
+        # Resource config timeouts
+        if config.resource_config:
+            timeouts.extend([
+                config.resource_config.git_refresh_timeout,
+                config.resource_config.cidx_index_timeout,
+            ])
+
+        # SCIP config timeouts
+        if config.scip_config:
+            timeouts.extend([
+                config.scip_config.indexing_timeout_seconds,
+                config.scip_config.scip_generation_timeout_seconds,
+            ])
+
+        return max(timeouts) if timeouts else 3600  # Default 1 hour
+
+    def get_recommended_drain_timeout(self, config: Any) -> int:
+        """Calculate recommended drain timeout (1.5x max job timeout).
+
+        Bug #135: Provides drain timeout with safety margin for auto-updater.
+
+        The 1.5x multiplier provides buffer for:
+        - Job cleanup and finalization
+        - Network delays
+        - System resource contention
+
+        Args:
+            config: ServerConfig instance
+
+        Returns:
+            Recommended drain timeout in seconds (integer)
+        """
+        max_timeout = self.get_max_job_timeout(config)
+        return int(max_timeout * 1.5)
