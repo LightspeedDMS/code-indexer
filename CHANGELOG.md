@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.22] - 2026-02-02
+
+### Fixed
+
+- **Bug #135: Auto-update drain timeout now dynamically calculated** - The auto-updater's drain_timeout was hardcoded at 300 seconds (5 minutes), but background jobs can run for up to 1 hour. This caused running jobs to be killed during auto-updates. Fix: drain_timeout is now calculated at runtime as 1.5x the maximum configured job timeout by querying `/api/admin/maintenance/drain-timeout`. Default is now 5400 seconds (1.5 hours) with 7200 second fallback if server unreachable.
+
+---
+
 ## [8.8.21] - 2026-02-02
 
 ### Fixed
