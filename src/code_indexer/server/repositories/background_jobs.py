@@ -33,6 +33,19 @@ class JobStatus(str, Enum):
     RESOLVING_PREREQUISITES = "resolving_prerequisites"  # AC2: SCIP self-healing state
 
 
+class DuplicateJobError(Exception):
+    """Raised when attempting to submit a duplicate job (Bug #133)."""
+
+    def __init__(self, operation_type: str, repo_alias: str, existing_job_id: str):
+        self.operation_type = operation_type
+        self.repo_alias = repo_alias
+        self.existing_job_id = existing_job_id
+        super().__init__(
+            f"A '{operation_type}' job is already running for repository '{repo_alias}' "
+            f"(job_id: {existing_job_id}). Please wait for it to complete."
+        )
+
+
 @dataclass
 class BackgroundJob:
     """Background job data structure with SCIP self-healing support."""
@@ -138,6 +151,33 @@ class BackgroundJobManager:
         """Get the maximum number of concurrent background jobs (Story #26)."""
         return self._background_jobs_config.max_concurrent_background_jobs
 
+    def _check_operation_conflict(
+        self, operation_type: str, repo_alias: str
+    ) -> Optional[str]:
+        """Check if operation is already running for this repository.
+
+        Bug #133: Prevent duplicate jobs with same (operation_type, repo_alias)
+        from running concurrently.
+
+        Returns job_id of conflicting job, or None if no conflict.
+        Must be called while holding self._lock.
+
+        Args:
+            operation_type: Type of operation (e.g., 'refresh_golden_repo')
+            repo_alias: Repository alias being processed
+
+        Returns:
+            Job ID of conflicting job if found, None otherwise
+        """
+        for job in self.jobs.values():
+            if (
+                job.operation_type == operation_type
+                and job.repo_alias == repo_alias
+                and job.status in (JobStatus.PENDING, JobStatus.RUNNING)
+            ):
+                return job.job_id
+        return None
+
     def submit_job(
         self,
         operation_type: str,
@@ -208,6 +248,13 @@ class BackgroundJobManager:
         )
 
         with self._lock:
+            # Bug #133: Check for duplicate operation on same repo
+            # This check MUST be inside the lock to prevent TOCTOU race conditions
+            if repo_alias:
+                conflict_job_id = self._check_operation_conflict(operation_type, repo_alias)
+                if conflict_job_id:
+                    raise DuplicateJobError(operation_type, repo_alias, conflict_job_id)
+
             self.jobs[job_id] = job
             self._persist_jobs()
 

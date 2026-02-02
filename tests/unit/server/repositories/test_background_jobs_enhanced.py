@@ -377,3 +377,182 @@ class TestEnhancedBackgroundJobManager:
         # Job should still be trackable in memory
         job_status = invalid_manager.get_job_status(job_id, username="user1")
         assert job_status is not None
+
+
+class TestDuplicateJobDetection:
+    """Test Bug #133: Duplicate job detection for concurrent operations."""
+
+    def setup_method(self):
+        """Setup test environment."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.job_storage_path = Path(self.temp_dir) / "jobs.json"
+        self.manager = BackgroundJobManager(storage_path=str(self.job_storage_path))
+
+    def teardown_method(self):
+        """Clean up test environment."""
+        if hasattr(self, "manager") and self.manager:
+            self.manager.shutdown()
+
+        if self.job_storage_path.exists():
+            self.job_storage_path.unlink()
+
+        import shutil
+
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir)
+
+    def test_submit_job_rejects_duplicate_refresh_for_same_repo(self):
+        """Test that duplicate refresh jobs for the same repo are rejected."""
+        from src.code_indexer.server.repositories.background_jobs import (
+            DuplicateJobError,
+            JobStatus,
+        )
+
+        def slow_refresh_task():
+            time.sleep(1)
+            return {"status": "success"}
+
+        # Submit first job
+        job1_id = self.manager.submit_job(
+            operation_type="refresh_golden_repo",
+            func=slow_refresh_task,
+            submitter_username="user1",
+            repo_alias="test-repo",
+        )
+
+        # Verify first job is running or pending
+        time.sleep(0.1)
+        job1_status = self.manager.get_job_status(job1_id, username="user1")
+        assert job1_status is not None
+        assert job1_status["status"] in ["pending", "running"]
+
+        # Submit duplicate job - should raise DuplicateJobError
+        with pytest.raises(DuplicateJobError) as exc_info:
+            self.manager.submit_job(
+                operation_type="refresh_golden_repo",
+                func=slow_refresh_task,
+                submitter_username="user1",
+                repo_alias="test-repo",
+            )
+
+        # Verify error message contains expected information
+        error = exc_info.value
+        assert error.operation_type == "refresh_golden_repo"
+        assert error.repo_alias == "test-repo"
+        assert error.existing_job_id == job1_id
+        assert "already running" in str(error).lower()
+
+        # Verify first job is still running
+        job1_status = self.manager.get_job_status(job1_id, username="user1")
+        assert job1_status is not None
+        assert job1_status["status"] in ["pending", "running"]
+
+    def test_submit_job_allows_refresh_for_different_repos(self):
+        """Test that refresh jobs for different repos are allowed."""
+
+        def refresh_task():
+            time.sleep(0.5)
+            return {"status": "success"}
+
+        # Submit jobs for different repositories
+        job1_id = self.manager.submit_job(
+            operation_type="refresh_golden_repo",
+            func=refresh_task,
+            submitter_username="user1",
+            repo_alias="repo-a",
+        )
+
+        job2_id = self.manager.submit_job(
+            operation_type="refresh_golden_repo",
+            func=refresh_task,
+            submitter_username="user1",
+            repo_alias="repo-b",
+        )
+
+        # Both jobs should be accepted
+        assert job1_id is not None
+        assert job2_id is not None
+        assert job1_id != job2_id
+
+        # Verify both jobs exist
+        time.sleep(0.1)
+        job1_status = self.manager.get_job_status(job1_id, username="user1")
+        job2_status = self.manager.get_job_status(job2_id, username="user1")
+
+        assert job1_status is not None
+        assert job2_status is not None
+
+    def test_submit_job_allows_same_repo_after_previous_completes(self):
+        """Test that same repo job is allowed after previous job completes."""
+
+        def quick_task():
+            return {"status": "success"}
+
+        # Submit first job
+        job1_id = self.manager.submit_job(
+            operation_type="refresh_golden_repo",
+            func=quick_task,
+            submitter_username="user1",
+            repo_alias="test-repo",
+        )
+
+        # Wait for job to complete
+        time.sleep(0.2)
+        job1_status = self.manager.get_job_status(job1_id, username="user1")
+        assert job1_status is not None
+        assert job1_status["status"] == "completed"
+
+        # Submit another job for same repo - should be accepted
+        job2_id = self.manager.submit_job(
+            operation_type="refresh_golden_repo",
+            func=quick_task,
+            submitter_username="user1",
+            repo_alias="test-repo",
+        )
+
+        assert job2_id is not None
+        assert job2_id != job1_id
+
+        # Verify second job exists
+        time.sleep(0.1)
+        job2_status = self.manager.get_job_status(job2_id, username="user1")
+        assert job2_status is not None
+
+    def test_submit_job_allows_duplicate_when_previous_failed(self):
+        """Test that duplicate job is allowed after previous job failed."""
+
+        def failing_task():
+            raise Exception("Simulated failure")
+
+        # Submit first job that will fail
+        job1_id = self.manager.submit_job(
+            operation_type="refresh_golden_repo",
+            func=failing_task,
+            submitter_username="user1",
+            repo_alias="test-repo",
+        )
+
+        # Wait for job to fail
+        time.sleep(0.2)
+        job1_status = self.manager.get_job_status(job1_id, username="user1")
+        assert job1_status is not None
+        assert job1_status["status"] == "failed"
+
+        # Submit another job for same repo - should be accepted (retry allowed)
+        def success_task():
+            return {"status": "success"}
+
+        job2_id = self.manager.submit_job(
+            operation_type="refresh_golden_repo",
+            func=success_task,
+            submitter_username="user1",
+            repo_alias="test-repo",
+        )
+
+        assert job2_id is not None
+        assert job2_id != job1_id
+
+        # Verify second job exists
+        time.sleep(0.1)
+        job2_status = self.manager.get_job_status(job2_id, username="user1")
+        assert job2_status is not None
