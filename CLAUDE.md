@@ -407,6 +407,168 @@ pytest tests/path/to/failing_test.py -v --tb=short
 
 ---
 
+## GIT BRANCHING AND DEPLOYMENT STRATEGY
+
+### Branch Structure
+
+**Three-tier branching model**:
+- `development` - Active development branch, all work happens here
+- `staging` - Staging environment branch, receives merges from development
+- `master` - Production branch, receives merges from staging
+
+**Key Principles**:
+- ALL code changes and version bumps happen in `development` branch ONLY
+- `staging` and `master` are merge-only branches (no direct commits)
+- Version tags automatically trigger environment deployments
+
+### Auto-Deployment Strategy
+
+**Deployment triggers** - Version tags on specific branches trigger automatic deployment:
+
+| Branch | Tag Presence | Deployment Target | Server |
+|--------|--------------|-------------------|--------|
+| `master` | v8.x.x tag | Production environment | .30 server |
+| `staging` | v8.x.x tag | Staging environment | .20 server |
+| `development` | Any state | No auto-deployment | localhost only |
+
+**How it works**:
+- When you push a commit with a version tag to `staging` branch → .20 server auto-deploys
+- When you push a commit with a version tag to `master` branch → .30 server auto-deploys
+- Tags automatically transfer with commits during merge operations (Git behavior)
+
+### "Deploy to Staging" Workflow
+
+When user says **"deploy to staging"**, execute this workflow:
+
+**Step 1: Ensure version tag exists in development**
+```bash
+# Check if development HEAD has version tag
+git checkout development
+git describe --exact-match HEAD 2>/dev/null
+
+# If no tag found:
+# - Bump version in development (__init__.py, CHANGELOG.md, README.md)
+# - Commit: "chore: bump version to X.Y.Z"
+# - Create tag: git tag vX.Y.Z
+# - Push: git push origin development --tags
+```
+
+**Step 2: Merge development to staging**
+```bash
+git checkout staging
+git merge development
+# Version tag automatically transfers with the merge commit
+```
+
+**Step 3: Push staging (triggers auto-deployment)**
+```bash
+git push origin staging
+# Tag is already present from merge, triggers .20 server deployment
+```
+
+**Key Notes**:
+- If development HEAD doesn't have a tag, you MUST bump version first
+- Never make code changes directly in staging branch
+- Tags automatically transfer during merge (no manual re-tagging needed)
+
+### "Deploy to Production" Workflow
+
+When user says **"deploy to production"**, execute this workflow:
+
+**Step 1: Ensure staging HEAD has version tag**
+```bash
+# Check if staging HEAD has version tag
+git checkout staging
+git describe --exact-match HEAD 2>/dev/null
+
+# If no tag found:
+# - This means you forgot to deploy to staging properly
+# - Go back to development, bump version, deploy to staging first
+# - NEVER bump version directly in staging
+```
+
+**Step 2: Merge staging to master**
+```bash
+git checkout master
+git merge staging
+# Version tag automatically transfers with the merge commit
+```
+
+**Step 3: Push master (triggers auto-deployment)**
+```bash
+git push origin master
+# Tag is already present from merge, triggers .30 server deployment
+```
+
+**Key Notes**:
+- Production deployment ALWAYS goes through staging first
+- If staging doesn't have a tag, go back to development and fix the workflow
+- Never make code changes directly in master branch
+- Tags automatically transfer during merge (no manual re-tagging needed)
+
+### Branch Verification Before Development (MANDATORY CHECK)
+
+**CRITICAL SAFETY CHECK**: Before starting ANY development work, verify you're in the correct branch.
+
+**Pre-Development Checklist**:
+```bash
+# Check current branch
+git branch --show-current
+```
+
+**Required Branches for Development**:
+- `development` - Main development branch (default for all work)
+- `feature/*` - Feature branches (created from development)
+- `bugfix/*` - Bug fix branches (created from development)
+
+**WRONG Branches for Development**:
+- `staging` - Merge-only branch, NO direct commits
+- `master` - Merge-only branch, NO direct commits
+
+**Workflow When Not in Development Branch**:
+1. If in `staging` or `master`: STOP immediately
+2. Ask user: "Currently in [branch]. Do you want to develop in staging/master, or should I switch to development branch?"
+3. Wait for explicit user confirmation before proceeding
+4. If user confirms developing in staging/master: Proceed with WARNING logged
+5. If user wants development branch: Switch to development first
+
+**Example Interaction**:
+```
+Assistant: I notice we're currently in the 'staging' branch. Development work should
+happen in the 'development' branch (or feature branch).
+
+Should I:
+A) Switch to development branch (recommended)
+B) Continue developing in staging branch (not recommended)
+
+Please confirm your choice.
+```
+
+**VIOLATION = BROKEN WORKFLOW**: Making direct commits to staging/master bypasses the merge-based deployment workflow and causes branch divergence.
+
+### Version Management Rules
+
+**ABSOLUTE REQUIREMENTS**:
+- Version bumps ONLY happen in `development` branch
+- Version consists of: `__init__.py`, `CHANGELOG.md`, `README.md` updates + git tag
+- Format: `vX.Y.Z` (e.g., `v8.8.18`)
+- Every deployment MUST have a version tag
+
+**Workflow Summary**:
+```
+development (bump version, create tag)
+    ↓ merge
+staging (tag transfers automatically, push triggers .20 deployment)
+    ↓ merge
+master (tag transfers automatically, push triggers .30 deployment)
+```
+
+**VIOLATION = BROKEN DEPLOYMENT**: Skipping version tags or making direct commits to staging/master breaks the auto-deployment workflow.
+
+**RECORDED**: 2026-02-01 - Established three-tier branching strategy with tag-based auto-deployment.
+
+---
+
 ## 1. CRITICAL BUSINESS INSIGHT - Query is Everything
 
 **THE SINGLE MOST IMPORTANT FEATURE**: Query capability is the core value proposition of CIDX. All query features available in CLI MUST be available in MCP/REST APIs with full parity.

@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.19] - 2026-02-01
+
+### Added
+
+- **Three-tier branching strategy with auto-deployment** - Implemented development → staging → master workflow:
+  - Created `development` and `staging` branches from master
+  - All development work now happens in `development` branch only
+  - `staging` and `master` are merge-only branches (no direct commits)
+  - Version tags automatically trigger environment deployments:
+    - Tags on `staging` branch → auto-deploy to .20 staging server
+    - Tags on `master` branch → auto-deploy to .30 production server
+  - Configurable auto-update branch via `CIDX_AUTO_UPDATE_BRANCH` environment variable
+  - Staging server (.20) configured to pull from `staging` branch
+  - Production server (.30) configured to pull from `master` branch (default)
+
+- **Comprehensive branching documentation in CLAUDE.md**:
+  - Auto-deployment strategy with tag-based triggers
+  - "Deploy to staging" workflow (development → staging)
+  - "Deploy to production" workflow (staging → master)
+  - Branch verification safety check (must be in development/feature branch before coding)
+  - Version management rules (all version bumps in development only)
+
+- **Auto-update configurable branch support** - Added environment variable for flexible branch targeting:
+  - New environment variable: `CIDX_AUTO_UPDATE_BRANCH` (defaults to "master")
+  - Implemented in `src/code_indexer/server/auto_update/run_once.py`
+  - Test coverage: 3 new tests for default/custom/development branch configuration
+  - All 53 auto-update tests passing
+
+### Changed
+
+- **Updated .local-testing configuration** - Clarified server environment designations:
+  - Documented .20 server as STAGING environment (pulls from `staging` branch)
+  - Documented .30 server as PRODUCTION environment (pulls from `master` branch)
+
+---
+
 ## [8.8.18] - 2026-02-01
 
 ### Fixed

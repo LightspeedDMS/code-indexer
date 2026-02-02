@@ -39,7 +39,7 @@ class TestRunOnceMainFunction:
         mock_service.assert_called_once_with(
             repo_path=Path("/custom/repo/path"),
             check_interval=60,
-            lock_file=Path("/var/run/cidx-auto-update.lock"),
+            lock_file=Path("/tmp/cidx-auto-update.lock"),
         )
 
         mock_exit.assert_called_once_with(0)
@@ -97,7 +97,7 @@ class TestRunOnceMainFunction:
         # Verify all components initialized
         mock_change_detector.assert_called_once()
         mock_deployment_lock.assert_called_once_with(
-            lock_file=Path("/var/run/cidx-auto-update.lock")
+            lock_file=Path("/tmp/cidx-auto-update.lock")
         )
         mock_deployment_executor.assert_called_once_with(
             repo_path=Path("/home/sebabattig/cidx-server"),
@@ -248,3 +248,90 @@ class TestRunOnceMainFunction:
         call_args = mock_logger.exception.call_args[0][0]
         assert "Auto-update polling failed" in call_args
         assert error == mock_service_instance.poll_once.side_effect
+
+    @patch("code_indexer.server.auto_update.run_once.AutoUpdateService")
+    @patch("code_indexer.server.auto_update.run_once.DeploymentExecutor")
+    @patch("code_indexer.server.auto_update.run_once.DeploymentLock")
+    @patch("code_indexer.server.auto_update.run_once.ChangeDetector")
+    @patch.dict("os.environ", {}, clear=True)
+    def test_main_uses_default_branch_when_env_not_set(
+        self,
+        mock_change_detector,
+        mock_deployment_lock,
+        mock_deployment_executor,
+        mock_service,
+    ):
+        """main() should use default branch 'master' when CIDX_AUTO_UPDATE_BRANCH not set."""
+        from code_indexer.server.auto_update.run_once import main
+
+        # Mock service instance
+        mock_service_instance = Mock()
+        mock_service.return_value = mock_service_instance
+
+        with patch.object(sys, "exit") as mock_exit:
+            main()
+
+        # Verify ChangeDetector initialized with default "master" branch
+        mock_change_detector.assert_called_once_with(
+            repo_path=Path("/home/sebabattig/cidx-server"), branch="master"
+        )
+
+        mock_exit.assert_called_once_with(0)
+
+    @patch("code_indexer.server.auto_update.run_once.AutoUpdateService")
+    @patch("code_indexer.server.auto_update.run_once.DeploymentExecutor")
+    @patch("code_indexer.server.auto_update.run_once.DeploymentLock")
+    @patch("code_indexer.server.auto_update.run_once.ChangeDetector")
+    @patch.dict("os.environ", {"CIDX_AUTO_UPDATE_BRANCH": "staging"})
+    def test_main_uses_custom_branch_from_env(
+        self,
+        mock_change_detector,
+        mock_deployment_lock,
+        mock_deployment_executor,
+        mock_service,
+    ):
+        """main() should use CIDX_AUTO_UPDATE_BRANCH environment variable."""
+        from code_indexer.server.auto_update.run_once import main
+
+        # Mock service instance
+        mock_service_instance = Mock()
+        mock_service.return_value = mock_service_instance
+
+        with patch.object(sys, "exit") as mock_exit:
+            main()
+
+        # Verify ChangeDetector initialized with custom "staging" branch
+        mock_change_detector.assert_called_once_with(
+            repo_path=Path("/home/sebabattig/cidx-server"), branch="staging"
+        )
+
+        mock_exit.assert_called_once_with(0)
+
+    @patch("code_indexer.server.auto_update.run_once.AutoUpdateService")
+    @patch("code_indexer.server.auto_update.run_once.DeploymentExecutor")
+    @patch("code_indexer.server.auto_update.run_once.DeploymentLock")
+    @patch("code_indexer.server.auto_update.run_once.ChangeDetector")
+    @patch.dict("os.environ", {"CIDX_AUTO_UPDATE_BRANCH": "development"})
+    def test_main_uses_development_branch_from_env(
+        self,
+        mock_change_detector,
+        mock_deployment_lock,
+        mock_deployment_executor,
+        mock_service,
+    ):
+        """main() should support 'development' branch via environment variable."""
+        from code_indexer.server.auto_update.run_once import main
+
+        # Mock service instance
+        mock_service_instance = Mock()
+        mock_service.return_value = mock_service_instance
+
+        with patch.object(sys, "exit") as mock_exit:
+            main()
+
+        # Verify ChangeDetector initialized with "development" branch
+        mock_change_detector.assert_called_once_with(
+            repo_path=Path("/home/sebabattig/cidx-server"), branch="development"
+        )
+
+        mock_exit.assert_called_once_with(0)
