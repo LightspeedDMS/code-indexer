@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.21] - 2026-02-02
+
+### Fixed
+
+- **Bug #132: Golden repo refresh now uses incremental indexing** - Fixed issue where global repository refresh was triggering full reindex (70-90 minutes) instead of incremental update (2-5 minutes). Changed `force_init=True` to `force_init=False` in `_execute_post_clone_workflow()` to preserve existing indexing state.
+
+- **Bug #133: Duplicate refresh jobs prevented** - Added duplicate job detection to `BackgroundJobManager.submit_job()` to prevent multiple refresh jobs from running concurrently on the same repository. Raises `DuplicateJobError` when attempting to submit a job that's already running.
+
+- **Bug #134: CSRF token error on cancel job** - Removed CSRF validation from `cancel_job` endpoint. Session authentication via `_require_admin_session()` provides sufficient security, and removing CSRF eliminates race conditions between HTMX auto-refresh and user actions.
+
+---
+
 ## [8.8.20] - 2026-02-01
 
 ### Fixed
