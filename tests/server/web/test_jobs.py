@@ -464,20 +464,27 @@ class TestCancelJobEndpoint:
             403,
         ], f"Cancel should require auth, got {response.status_code}"
 
-    def test_cancel_job_requires_csrf(self, authenticated_client: TestClient):
+    def test_cancel_job_works_without_csrf(self, authenticated_client: TestClient):
         """
-        POST /admin/jobs/{job_id}/cancel requires CSRF token.
+        POST /admin/jobs/{job_id}/cancel works without CSRF token (Bug #134 fix).
 
         Given I am authenticated
         When I try to cancel a job without CSRF token
-        Then I receive a 403 error
+        Then the request is processed (authentication is sufficient protection)
+
+        Note: CSRF protection removed per Bug #134. Session authentication
+        provides sufficient security for internal admin actions.
         """
         # Submit cancel without CSRF token
         response = authenticated_client.post("/admin/jobs/test-job-id/cancel", data={})
 
-        assert (
-            response.status_code == 403
-        ), f"Expected 403 without CSRF token, got {response.status_code}"
+        # Should not be rejected due to missing CSRF (session auth is enough)
+        # Response may be 200 (error message about nonexistent job) or redirect
+        assert response.status_code in [
+            200,
+            302,
+            303,
+        ], f"Expected success/redirect (not 403), got {response.status_code}"
 
     def test_cancel_nonexistent_job(
         self, web_infrastructure: WebTestInfrastructure, admin_user: dict

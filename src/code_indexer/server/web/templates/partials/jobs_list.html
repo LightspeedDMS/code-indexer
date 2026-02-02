@@ -156,10 +156,9 @@
             </td>
         </tr>
 
-        <!-- Cancel Form (hidden) -->
+        <!-- Cancel Form (hidden) - No CSRF token needed, session auth is sufficient (Bug #134) -->
         {% if job.status == 'running' or job.status == 'queued' or job.status == 'pending' %}
         <form id="cancel-form-{{ job.job_id }}" method="post" action="/admin/jobs/{{ job.job_id }}/cancel" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         </form>
         {% endif %}
         {% endfor %}

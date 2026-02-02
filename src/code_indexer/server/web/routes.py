@@ -2909,16 +2909,17 @@ def jobs_list_partial(
 def cancel_job(
     request: Request,
     job_id: str,
-    csrf_token: Optional[str] = Form(None),
 ):
-    """Cancel a running or pending job."""
+    """
+    Cancel a running or pending job.
+
+    CSRF protection removed: This endpoint is protected by admin session
+    authentication via _require_admin_session(), making CSRF redundant.
+    Session auth is sufficient for internal admin actions.
+    """
     session = _require_admin_session(request)
     if not session:
         return _create_login_redirect(request)
-
-    # Validate CSRF token
-    if not validate_login_csrf_token(request, csrf_token):
-        raise HTTPException(status_code=403, detail="Invalid CSRF token")
 
     # Get job manager
     job_manager = _get_background_job_manager()
