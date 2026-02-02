@@ -395,6 +395,105 @@ class TestGoldenRepoManager:
             assert "filesystem-test-repo" in golden_repo_manager.golden_repos
             mock_cleanup.assert_called_once_with("/path/to/filesystem-test-repo")
 
+    def test_refresh_golden_repo_uses_incremental_indexing(
+        self, golden_repo_manager, temp_data_dir
+    ):
+        """Test that refreshing a golden repository uses incremental indexing (Bug #132).
+
+        Verify that _execute_post_clone_workflow is called with force_init=False
+        during refresh, preserving indexing state for incremental updates instead
+        of forcing full reindex.
+        """
+        # Create test repository (remote)
+        clone_path = os.path.join(temp_data_dir, "golden-repos", "test-repo")
+        os.makedirs(clone_path, exist_ok=True)
+
+        test_repo = GoldenRepo(
+            alias="test-repo",
+            repo_url="https://github.com/test/repo.git",
+            default_branch="main",
+            clone_path=clone_path,
+            created_at="2023-01-01T00:00:00Z",
+            enable_temporal=False,
+            temporal_options=None,
+        )
+        golden_repo_manager.golden_repos["test-repo"] = test_repo
+
+        # Mock git pull to succeed
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+            # Mock _execute_post_clone_workflow to verify force_init parameter
+            with patch.object(
+                golden_repo_manager, "_execute_post_clone_workflow"
+            ) as mock_workflow:
+                # Trigger refresh (returns job_id since it's async)
+                job_id = golden_repo_manager.refresh_golden_repo("test-repo")
+
+                # Execute background worker
+                call_args = (
+                    golden_repo_manager.background_job_manager.submit_job.call_args
+                )
+                background_worker = call_args[1]["func"]
+                background_worker()
+
+                # CRITICAL: Verify force_init=False (incremental indexing)
+                mock_workflow.assert_called_once_with(
+                    clone_path,
+                    force_init=False,  # Should be False, not True
+                    enable_temporal=False,
+                    temporal_options=None,
+                )
+
+    def test_refresh_local_repo_uses_incremental_indexing(
+        self, golden_repo_manager, temp_data_dir
+    ):
+        """Test that refreshing a local repository uses incremental indexing (Bug #132).
+
+        Verify that _execute_post_clone_workflow is called with force_init=False
+        for local repository paths during refresh.
+        """
+        # Create test repository (local path)
+        clone_path = os.path.join(temp_data_dir, "golden-repos", "local-repo")
+        os.makedirs(clone_path, exist_ok=True)
+
+        test_repo = GoldenRepo(
+            alias="local-repo",
+            repo_url="/tmp/local-repo",  # Local path
+            default_branch="main",
+            clone_path=clone_path,
+            created_at="2023-01-01T00:00:00Z",
+            enable_temporal=False,
+            temporal_options=None,
+        )
+        golden_repo_manager.golden_repos["local-repo"] = test_repo
+
+        # Mock _is_local_path to return True
+        with patch.object(golden_repo_manager, "_is_local_path") as mock_is_local:
+            mock_is_local.return_value = True
+
+            # Mock _execute_post_clone_workflow to verify force_init parameter
+            with patch.object(
+                golden_repo_manager, "_execute_post_clone_workflow"
+            ) as mock_workflow:
+                # Trigger refresh (returns job_id since it's async)
+                job_id = golden_repo_manager.refresh_golden_repo("local-repo")
+
+                # Execute background worker
+                call_args = (
+                    golden_repo_manager.background_job_manager.submit_job.call_args
+                )
+                background_worker = call_args[1]["func"]
+                background_worker()
+
+                # CRITICAL: Verify force_init=False (incremental indexing)
+                mock_workflow.assert_called_once_with(
+                    clone_path,
+                    force_init=False,  # Should be False, not True
+                    enable_temporal=False,
+                    temporal_options=None,
+                )
+
     def test_regular_copy_always_used_for_local_repos(self, golden_repo_manager):
         """Test that regular copying is always used for local repository registration."""
         # Create a temporary directory to simulate /tmp (different filesystem)

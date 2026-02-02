@@ -1204,7 +1204,7 @@ class GoldenRepoManager:
                     )
                     self._execute_post_clone_workflow(
                         clone_path,
-                        force_init=True,
+                        force_init=False,
                         enable_temporal=enable_temporal,
                         temporal_options=temporal_options,
                     )
@@ -1224,10 +1224,10 @@ class GoldenRepoManager:
 
                     logging.info(f"Git pull successful for {alias}")
 
-                    # Re-run the indexing workflow with force flag for refresh
+                    # Re-run the indexing workflow for incremental refresh
                     self._execute_post_clone_workflow(
                         clone_path,
-                        force_init=True,
+                        force_init=False,
                         enable_temporal=enable_temporal,
                         temporal_options=temporal_options,
                     )
