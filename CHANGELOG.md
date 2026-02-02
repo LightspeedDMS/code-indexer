@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.20] - 2026-02-01
+
+### Fixed
+
+- **CI/CD workflow tag creation** - Fixed idempotency issue in three-tier branching workflow:
+  - Split monolithic build-and-release job into separate create-tag and create-release jobs
+  - create-tag: Runs only on development branch when version changes (creates and pushes git tag)
+  - create-release: Runs only on master branch when version changes (creates GitHub release using existing tag)
+  - staging branch: Tests only, no tag or release creation (tags inherited from merge)
+  - Ensures tags are created exactly once (in development) and inherited by staging/master via merge
+  - Prevents "tag already exists" errors when merging through branches
+
+---
+
 ## [8.8.19] - 2026-02-01
 
 ### Added
