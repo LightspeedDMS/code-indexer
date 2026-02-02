@@ -2,7 +2,7 @@ name: CI/CD with Auto Release
 
 on:
   push:
-    branches: [ master, main, develop ]
+    branches: [ master, main, develop, development, staging ]
   pull_request:
     branches: [ master, main ]
 
