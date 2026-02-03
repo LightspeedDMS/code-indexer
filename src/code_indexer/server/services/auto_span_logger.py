@@ -188,10 +188,12 @@ class AutoSpanLogger:
             result = await handler()
 
             # End span with summarized output
+            # Langfuse SDK 3.x: use update() to set output, then end() with no args
             if span:
                 try:
                     summarized_result = self._summarize_output(result)
-                    span.end(output=summarized_result)
+                    span.update(output=summarized_result)
+                    span.end()
                 except Exception as span_error:
                     logger.warning(f"Failed to end span: {span_error}", exc_info=True)
 
@@ -199,12 +201,14 @@ class AutoSpanLogger:
 
         except Exception as e:
             # Capture error in span
+            # Langfuse SDK 3.x: use update() to set output/level, then end() with no args
             if span:
                 try:
-                    span.end(
+                    span.update(
                         output={"error": str(e), "error_type": type(e).__name__},
                         level="ERROR",
                     )
+                    span.end()
                 except Exception as span_error:
                     logger.warning(
                         f"Failed to end span with error: {span_error}", exc_info=True

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.26] - 2026-02-03
+
+### Fixed
+
+- **Bug #134 Follow-up: Langfuse SDK 3.x span API fix** - Fixed span.end() API mismatch causing tool call spans to not appear in Langfuse dashboard. Root cause: AutoSpanLogger called `span.end(output=...)` but Langfuse SDK 3.x's `LangfuseObservationWrapper.end()` doesn't accept `output` parameter. Fix: Use `span.update(output=...)` to set output data, then `span.end()` with no arguments. This matches the SDK 3.x pattern where `update()` sets observation data and `end()` just marks completion.
+
+---
+
 ## [8.8.25] - 2026-02-03
 
 ### Fixed

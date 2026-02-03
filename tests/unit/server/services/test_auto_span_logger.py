@@ -154,9 +154,11 @@ class TestInterceptToolCallWithActiveTrace:
             handler=handler,
         )
 
-        mock_span.end.assert_called_once()
-        call_kwargs = mock_span.end.call_args[1]
+        # Langfuse SDK 3.x: output is set via update(), then end() with no args
+        mock_span.update.assert_called_once()
+        call_kwargs = mock_span.update.call_args[1]
         assert call_kwargs["output"] == {"status": "success", "data": "result"}
+        mock_span.end.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_captures_execution_timing(
