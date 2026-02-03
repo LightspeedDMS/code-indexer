@@ -21,7 +21,10 @@ from sse_starlette.sse import EventSourceResponse
 import asyncio
 import uuid
 import json
+import logging
 from code_indexer import __version__
+
+logger = logging.getLogger(__name__)
 
 mcp_router = APIRouter()
 
@@ -137,6 +140,40 @@ def handle_tools_list(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     return {"tools": tools}
 
 
+async def _invoke_handler(
+    handler: Any,
+    arguments: Dict[str, Any],
+    user: User,
+    session_state: Any,
+    sig: Any,
+    is_async: bool,
+) -> Any:
+    """
+    Invoke handler with appropriate parameters.
+
+    Args:
+        handler: The handler function to invoke
+        arguments: Tool arguments
+        user: Authenticated user
+        session_state: Session state (may be None)
+        sig: Handler function signature (from inspect.signature)
+        is_async: Whether handler is async
+
+    Returns:
+        Handler result
+    """
+    if "session_state" in sig.parameters:
+        if is_async:
+            return await handler(arguments, user, session_state=session_state)
+        else:
+            return handler(arguments, user, session_state=session_state)
+    else:
+        if is_async:
+            return await handler(arguments, user)
+        else:
+            return handler(arguments, user)
+
+
 async def handle_tools_call(
     params: Dict[str, Any], user: User, session_id: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -157,6 +194,7 @@ async def handle_tools_call(
     from .handlers import HANDLER_REGISTRY
     from .tools import TOOL_REGISTRY
     from .session_registry import get_session_registry
+    from code_indexer.server.services.langfuse_service import get_langfuse_service
 
     # Validate required 'name' parameter
     if "name" not in params:
@@ -210,16 +248,49 @@ async def handle_tools_call(
     sig = inspect.signature(handler)
     is_async = asyncio.iscoroutinefunction(handler)
 
-    if "session_state" in sig.parameters:
-        if is_async:
-            result = await handler(arguments, user, session_state=session_state)
-        else:
-            result = handler(arguments, user, session_state=session_state)
+    # Determine if we should intercept this tool call with span logging
+    # Exclude tracing tools to avoid recursion
+    should_intercept = tool_name not in {"start_trace", "end_trace"}
+
+    # Get langfuse service (may be None if not available/configured)
+    langfuse_service = None
+    try:
+        langfuse_service = get_langfuse_service()
+    except Exception as e:
+        # Graceful degradation: if service unavailable, continue without tracing
+        logger.debug("Langfuse service unavailable, skipping span logging: %s", e)
+
+    # If we should intercept and service is available, wrap with span logging
+    if should_intercept and langfuse_service:
+        # Create async wrapper for handler execution
+        async def handler_wrapper():
+            return await _invoke_handler(
+                handler, arguments, user, session_state, sig, is_async
+            )
+
+        # Execute through span interceptor
+        try:
+            result = await langfuse_service.span_logger.intercept_tool_call(
+                session_id=session_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                handler=handler_wrapper,
+                username=user.username,
+            )
+        except Exception as e:
+            # If span logging fails, execute handler directly (graceful degradation)
+            logger.debug(
+                "Span logging failed for tool %s, continuing without tracing: %s",
+                tool_name,
+                e,
+            )
+            result = await handler_wrapper()
     else:
-        if is_async:
-            result = await handler(arguments, user)
-        else:
-            result = handler(arguments, user)
+        # No interception - execute handler directly
+        result = await _invoke_handler(
+            handler, arguments, user, session_state, sig, is_async
+        )
+
     return cast(Dict[str, Any], result)
 
 

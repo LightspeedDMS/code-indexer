@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.25] - 2026-02-03
+
+### Fixed
+
+- **Story #136 Follow-up: AutoSpanLogger integration** - Wired AutoSpanLogger.intercept_tool_call() into protocol.py's handle_tools_call() so MCP tool calls within active Langfuse traces now create child spans. Features:
+  - Tool calls create spans with name, sanitized inputs, and outputs when trace is active
+  - Graceful degradation - Langfuse errors never fail tool execution (three-layer protection)
+  - start_trace/end_trace excluded from interception to prevent recursion
+  - Both sync and async handlers supported
+  - Extracted `_invoke_handler()` helper to eliminate code duplication
+
+---
+
 ## [8.8.24] - 2026-02-03
 
 ### Fixed
