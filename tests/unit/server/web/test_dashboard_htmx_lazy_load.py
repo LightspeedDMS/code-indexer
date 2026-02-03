@@ -34,10 +34,15 @@ class TestDashboardHTMXLazyLoad:
         # Should have hx-trigger="load" for lazy loading on page load
         assert 'hx-trigger="load"' in dashboard_template_content
 
-    def test_health_section_has_loading_indicator(self, dashboard_template_content: str):
+    def test_health_section_has_loading_indicator(
+        self, dashboard_template_content: str
+    ):
         """AC5: Health section should show loading indicator while data loads."""
         # Should have some loading indicator text/element
-        assert "Loading" in dashboard_template_content or "loading" in dashboard_template_content
+        assert (
+            "Loading" in dashboard_template_content
+            or "loading" in dashboard_template_content
+        )
 
     def test_health_section_does_not_use_synchronous_include(
         self, dashboard_template_content: str
@@ -58,6 +63,7 @@ class TestDashboardHTMXLazyLoad:
         health_section_content = dashboard_template_content[health_start:section_end]
 
         # Should NOT contain synchronous include directive
-        assert '{% include "partials/dashboard_health.html" %}' not in health_section_content, (
-            "AC5: Health section should use HTMX lazy-loading, not synchronous include"
-        )
+        assert (
+            '{% include "partials/dashboard_health.html" %}'
+            not in health_section_content
+        ), "AC5: Health section should use HTMX lazy-loading, not synchronous include"

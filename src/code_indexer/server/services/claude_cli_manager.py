@@ -128,18 +128,22 @@ class ClaudeCliManager:
                         extra={"correlation_id": get_correlation_id()},
                     )
             else:
-                logger.warning(format_error_log(
-                    "APP-GENERAL-063",
-                    f"API key sync failed: {result.error}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "APP-GENERAL-063",
+                        f"API key sync failed: {result.error}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
         except Exception as e:
-            logger.error(format_error_log(
-                "APP-GENERAL-064",
-                f"Failed to sync API key via ApiKeySyncService: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-064",
+                    f"Failed to sync API key via ApiKeySyncService: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
     def sync_api_key(self) -> None:
         """
@@ -175,23 +179,27 @@ class ClaudeCliManager:
                 )
                 return
             else:
-                logger.warning(format_error_log(
-                    "APP-GENERAL-065",
-                    f"ApiKeySyncService sync failed: {result.error}, "
-                    "falling back to legacy sync",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "APP-GENERAL-065",
+                        f"ApiKeySyncService sync failed: {result.error}, "
+                        "falling back to legacy sync",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
         except ImportError:
             logger.debug(
                 "ApiKeySyncService not available, using legacy sync",
                 extra={"correlation_id": get_correlation_id()},
             )
         except Exception as e:
-            logger.warning(format_error_log(
-                "APP-GENERAL-066",
-                f"ApiKeySyncService error: {e}, falling back to legacy sync",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-066",
+                    f"ApiKeySyncService error: {e}, falling back to legacy sync",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Legacy fallback: direct file write with locking
         lock_path = Path.home() / ".claude.json.lock"
@@ -207,11 +215,13 @@ class ClaudeCliManager:
                         try:
                             existing = json.loads(json_path.read_text())
                         except json.JSONDecodeError:
-                            logger.warning(format_error_log(
-                                "APP-GENERAL-067",
-                                f"Invalid JSON in {json_path}, overwriting",
-                                extra={"correlation_id": get_correlation_id()},
-                            ))
+                            logger.warning(
+                                format_error_log(
+                                    "APP-GENERAL-067",
+                                    f"Invalid JSON in {json_path}, overwriting",
+                                    extra={"correlation_id": get_correlation_id()},
+                                )
+                            )
 
                     # Update primaryApiKey
                     existing["primaryApiKey"] = self._api_key
@@ -223,12 +233,14 @@ class ClaudeCliManager:
                 finally:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         except Exception as e:
-            logger.error(format_error_log(
-                "AUTH-GENERAL-010",
-                f"Failed to sync API key: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "AUTH-GENERAL-010",
+                    f"Failed to sync API key: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise
 
     def check_cli_available(self) -> bool:
@@ -351,11 +363,13 @@ class ClaudeCliManager:
                 processed.append(alias)
                 remaining.remove(alias)
             except Exception as e:
-                logger.error(format_error_log(
-                    "AUTH-GENERAL-011",
-                    f"Catch-up failed for {alias}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "AUTH-GENERAL-011",
+                        f"Catch-up failed for {alias}: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return CatchupResult(
                     partial=True, processed=processed, remaining=remaining, error=str(e)
                 )
@@ -398,11 +412,13 @@ class ClaudeCliManager:
             )
             return True
         except Exception as e:
-            logger.error(format_error_log(
-                "AUTH-GENERAL-012",
-                f"Failed to process fallback for {alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "AUTH-GENERAL-012",
+                    f"Failed to process fallback for {alias}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return False
 
     def _commit_and_reindex(self, processed: List[str]) -> None:
@@ -434,11 +450,13 @@ class ClaudeCliManager:
                 extra={"correlation_id": get_correlation_id()},
             )
         except Exception as e:
-            logger.warning(format_error_log(
-                "AUTH-GENERAL-013",
-                f"Git commit failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "AUTH-GENERAL-013",
+                    f"Git commit failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         try:
             subprocess.run(
@@ -452,10 +470,13 @@ class ClaudeCliManager:
                 extra={"correlation_id": get_correlation_id()},
             )
         except Exception as e:
-            logger.warning(format_error_log(
-                "AUTH-GENERAL-014",
-                f"Re-index failed: {e}", extra={"correlation_id": get_correlation_id()}
-            ))
+            logger.warning(
+                format_error_log(
+                    "AUTH-GENERAL-014",
+                    f"Re-index failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
     def update_api_key(self, api_key: Optional[str]) -> None:
         """
@@ -505,11 +526,13 @@ class ClaudeCliManager:
         for t in self._worker_threads:
             t.join(timeout=timeout)
             if t.is_alive():
-                logger.warning(format_error_log(
-                    "AUTH-GENERAL-015",
-                    f"Worker thread {t.name} did not stop within timeout",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "AUTH-GENERAL-015",
+                        f"Worker thread {t.name} did not stop within timeout",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
 
         # Set shutdown event for any remaining logic
         self._shutdown_event.set()
@@ -546,12 +569,14 @@ class ClaudeCliManager:
             except queue.Empty:
                 continue
             except Exception as e:
-                logger.error(format_error_log(
-                    "AUTH-GENERAL-016",
-                    f"{thread_name} error: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "AUTH-GENERAL-016",
+                        f"{thread_name} error: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
 
         logger.debug(
             f"{thread_name} stopped", extra={"correlation_id": get_correlation_id()}
@@ -573,11 +598,13 @@ class ClaudeCliManager:
 
             # Check CLI availability
             if not self.check_cli_available():
-                logger.warning(format_error_log(
-                    "AUTH-GENERAL-017",
-                    f"Claude CLI not available for {repo_path}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "AUTH-GENERAL-017",
+                        f"Claude CLI not available for {repo_path}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 callback(False, "Claude CLI not available")
                 return
 
@@ -594,12 +621,14 @@ class ClaudeCliManager:
             self._on_cli_success()
 
         except Exception as e:
-            logger.error(format_error_log(
-                "AUTH-GENERAL-018",
-                f"Error processing {repo_path}: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "AUTH-GENERAL-018",
+                    f"Error processing {repo_path}: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             callback(False, str(e))
 
 

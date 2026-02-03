@@ -152,7 +152,9 @@ class TestApiMetricsServiceDatabaseInsert:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM api_metrics WHERE metric_type = 'regex'")
         regex_count = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM api_metrics WHERE metric_type = 'other_api'")
+        cursor.execute(
+            "SELECT COUNT(*) FROM api_metrics WHERE metric_type = 'other_api'"
+        )
         other_api_count = cursor.fetchone()[0]
         conn.close()
 
@@ -260,9 +262,7 @@ class TestApiMetricsServiceDatabaseCleanupReset:
         service.initialize(str(db_path))
 
         # Insert old record (25 hours ago)
-        old_timestamp = (
-            datetime.now(timezone.utc) - timedelta(hours=25)
-        ).isoformat()
+        old_timestamp = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
         cursor.execute(
@@ -281,11 +281,15 @@ class TestApiMetricsServiceDatabaseCleanupReset:
         # Check that old record is removed but new one exists
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM api_metrics WHERE metric_type = 'semantic'")
+        cursor.execute(
+            "SELECT COUNT(*) FROM api_metrics WHERE metric_type = 'semantic'"
+        )
         count = cursor.fetchone()[0]
         conn.close()
 
-        assert count == 1, "Should only have the new record, old one should be cleaned up"
+        assert (
+            count == 1
+        ), "Should only have the new record, old one should be cleaned up"
 
     def test_reset_clears_all_records(self, tmp_path: Path):
         """Test that reset() removes all records from database."""
@@ -388,9 +392,9 @@ class TestApiMetricsServiceMultiWorker:
         verify_service.initialize(str(db_path))
         metrics = verify_service.get_metrics()
 
-        assert metrics["semantic_searches"] == expected_total, (
-            f"Expected {expected_total}, got {metrics['semantic_searches']}"
-        )
+        assert (
+            metrics["semantic_searches"] == expected_total
+        ), f"Expected {expected_total}, got {metrics['semantic_searches']}"
 
 
 class TestApiMetricsServiceUninitializedGraceful:
@@ -579,18 +583,20 @@ class TestApiMetricsServiceRetryLogic:
                 raise sqlite3.OperationalError("database is locked")
             return original_connect(*args, **kwargs)
 
-        with patch('sqlite3.connect', side_effect=mock_connect):
+        with patch("sqlite3.connect", side_effect=mock_connect):
             service.increment_semantic_search()
 
         # Should have tried 3 times (2 failures + 1 success)
-        assert connection_attempts == 3, (
-            f"Expected 3 connection attempts, got {connection_attempts}"
-        )
+        assert (
+            connection_attempts == 3
+        ), f"Expected 3 connection attempts, got {connection_attempts}"
 
         # Verify record was inserted after retry succeeded
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM api_metrics WHERE metric_type = 'semantic'")
+        cursor.execute(
+            "SELECT COUNT(*) FROM api_metrics WHERE metric_type = 'semantic'"
+        )
         count = cursor.fetchone()[0]
         conn.close()
 
@@ -623,20 +629,20 @@ class TestApiMetricsServiceRetryLogic:
                 raise sqlite3.OperationalError("database is locked")
             return original_connect(*args, **kwargs)
 
-        with patch('sqlite3.connect', side_effect=mock_connect):
-            with patch('time.sleep', side_effect=mock_sleep):
+        with patch("sqlite3.connect", side_effect=mock_connect):
+            with patch("time.sleep", side_effect=mock_sleep):
                 service.increment_semantic_search()
 
         # Should have 3 sleep calls (before retries 2, 3, 4)
-        assert len(sleep_calls) == 3, (
-            f"Expected 3 sleep calls for exponential backoff, got {len(sleep_calls)}"
-        )
+        assert (
+            len(sleep_calls) == 3
+        ), f"Expected 3 sleep calls for exponential backoff, got {len(sleep_calls)}"
 
         # Verify exponential progression (each delay should roughly double)
         # Base delay = 0.01, so delays should be approximately:
         # 0.01 * (2^0) + jitter, 0.01 * (2^1) + jitter, 0.01 * (2^2) + jitter
         for i, delay in enumerate(sleep_calls):
-            expected_base = RETRY_BASE_DELAY * (2 ** i)
+            expected_base = RETRY_BASE_DELAY * (2**i)
             # Allow for jitter up to 0.01
             assert expected_base <= delay <= expected_base + 0.01, (
                 f"Delay {i} should be between {expected_base} and {expected_base + 0.01}, "
@@ -665,14 +671,14 @@ class TestApiMetricsServiceGracefulDegradation:
             connection_attempts += 1
             raise sqlite3.OperationalError("database is locked")
 
-        with patch('sqlite3.connect', side_effect=always_fail_connect):
+        with patch("sqlite3.connect", side_effect=always_fail_connect):
             # Should NOT raise exception - graceful degradation
             service.increment_semantic_search()
 
         # Should have tried MAX_RETRIES times
-        assert connection_attempts == MAX_RETRIES, (
-            f"Expected {MAX_RETRIES} retry attempts, got {connection_attempts}"
-        )
+        assert (
+            connection_attempts == MAX_RETRIES
+        ), f"Expected {MAX_RETRIES} retry attempts, got {connection_attempts}"
 
     def test_logs_warning_on_persistent_failure(self, tmp_path: Path, caplog):
         """Test that a warning is logged when all retries fail."""
@@ -688,14 +694,14 @@ class TestApiMetricsServiceGracefulDegradation:
         def always_fail_connect(*args, **kwargs):
             raise sqlite3.OperationalError("database is locked")
 
-        with patch('sqlite3.connect', side_effect=always_fail_connect):
+        with patch("sqlite3.connect", side_effect=always_fail_connect):
             with caplog.at_level(logging.WARNING):
                 service.increment_semantic_search()
 
         # Check that warning was logged
-        assert any("Failed to insert metric" in record.message for record in caplog.records), (
-            "Expected warning log about failed metric insert"
-        )
+        assert any(
+            "Failed to insert metric" in record.message for record in caplog.records
+        ), "Expected warning log about failed metric insert"
 
     def test_other_error_types_do_not_retry(self, tmp_path: Path):
         """Test that non-lock errors fail fast without retrying."""
@@ -714,11 +720,11 @@ class TestApiMetricsServiceGracefulDegradation:
             connection_attempts += 1
             raise sqlite3.OperationalError("disk I/O error")
 
-        with patch('sqlite3.connect', side_effect=fail_with_other_error):
+        with patch("sqlite3.connect", side_effect=fail_with_other_error):
             # Should NOT raise exception - graceful degradation
             service.increment_semantic_search()
 
         # Should only try once for non-lock errors
-        assert connection_attempts == 1, (
-            f"Non-lock errors should not retry, but tried {connection_attempts} times"
-        )
+        assert (
+            connection_attempts == 1
+        ), f"Non-lock errors should not retry, but tried {connection_attempts} times"

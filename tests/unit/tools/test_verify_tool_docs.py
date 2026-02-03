@@ -13,7 +13,17 @@ def temp_docs_dir(tmp_path):
     """Create a temporary tool_docs directory with category subdirectories."""
     docs_dir = tmp_path / "tool_docs"
     docs_dir.mkdir()
-    for category in ["search", "git", "scip", "files", "admin", "repos", "ssh", "guides", "cicd"]:
+    for category in [
+        "search",
+        "git",
+        "scip",
+        "files",
+        "admin",
+        "repos",
+        "ssh",
+        "guides",
+        "cicd",
+    ]:
         (docs_dir / category).mkdir()
     return docs_dir
 
@@ -50,7 +60,9 @@ class TestVerifyToolDocs:
         assert result["success"] is False
         assert "expected 128" in result["message"].lower()
 
-    def test_verify_file_count_passes_when_matching(self, temp_docs_dir, valid_md_content):
+    def test_verify_file_count_passes_when_matching(
+        self, temp_docs_dir, valid_md_content
+    ):
         """verify_docs should pass when file count matches registry."""
         from tools.verify_tool_docs import verify_file_count
 
@@ -133,6 +145,7 @@ class TestVerifyToolDocs:
 
         # Monkeypatch the docs dir
         import tools.verify_tool_docs as verify_module
+
         monkeypatch.setattr(verify_module, "DEFAULT_DOCS_DIR", temp_docs_dir)
 
         exit_code = verify_module.main([])
@@ -141,6 +154,7 @@ class TestVerifyToolDocs:
     def test_main_returns_exit_code_one_on_failure(self, temp_docs_dir, monkeypatch):
         """main() should return 1 when verification fails."""
         import tools.verify_tool_docs as verify_module
+
         monkeypatch.setattr(verify_module, "DEFAULT_DOCS_DIR", temp_docs_dir)
 
         # Empty docs dir - should fail

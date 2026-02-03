@@ -34,9 +34,7 @@ def mock_scip_files(tmp_path):
 class TestSCIPDefinitionTool:
     """Tests for scip_definition MCP tool."""
 
-    def test_scip_definition_returns_mcp_response(
-        self, mock_user, mock_scip_files
-    ):
+    def test_scip_definition_returns_mcp_response(self, mock_user, mock_scip_files):
         """Should return MCP-compliant response with definition results."""
         from code_indexer.server.mcp.handlers import scip_definition
 
@@ -80,9 +78,7 @@ class TestSCIPDefinitionTool:
 class TestSCIPReferencesTool:
     """Tests for scip_references MCP tool."""
 
-    def test_scip_references_returns_mcp_response(
-        self, mock_user, mock_scip_files
-    ):
+    def test_scip_references_returns_mcp_response(self, mock_user, mock_scip_files):
         """Should return MCP-compliant response with reference results."""
         from code_indexer.server.mcp.handlers import scip_references
 
@@ -118,9 +114,7 @@ class TestSCIPReferencesTool:
 class TestSCIPDependenciesTool:
     """Tests for scip_dependencies MCP tool."""
 
-    def test_scip_dependencies_returns_mcp_response(
-        self, mock_user, mock_scip_files
-    ):
+    def test_scip_dependencies_returns_mcp_response(self, mock_user, mock_scip_files):
         """Should return MCP-compliant response with dependency results."""
         from code_indexer.server.mcp.handlers import scip_dependencies
 
@@ -164,9 +158,7 @@ class TestSCIPDependenciesTool:
 class TestSCIPDependentsTool:
     """Tests for scip_dependents MCP tool."""
 
-    def test_scip_dependents_returns_mcp_response(
-        self, mock_user, mock_scip_files
-    ):
+    def test_scip_dependents_returns_mcp_response(self, mock_user, mock_scip_files):
         """Should return MCP-compliant response with dependent results."""
         from code_indexer.server.mcp.handlers import scip_dependents
 

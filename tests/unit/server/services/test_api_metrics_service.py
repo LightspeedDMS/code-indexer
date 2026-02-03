@@ -120,7 +120,9 @@ class TestApiMetricsService:
 
         # Execute concurrent increments
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
-            futures = [executor.submit(increment_all_counters) for _ in range(num_threads)]
+            futures = [
+                executor.submit(increment_all_counters) for _ in range(num_threads)
+            ]
             # Wait for all threads to complete
             for future in concurrent.futures.as_completed(futures):
                 future.result()  # Raises any exception from threads

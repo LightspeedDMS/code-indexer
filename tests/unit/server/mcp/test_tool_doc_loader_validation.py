@@ -13,7 +13,17 @@ def temp_docs_dir(tmp_path):
     """Create a temporary tool_docs directory with category subdirectories."""
     docs_dir = tmp_path / "tool_docs"
     docs_dir.mkdir()
-    for category in ["search", "git", "scip", "files", "admin", "repos", "ssh", "guides", "cicd"]:
+    for category in [
+        "search",
+        "git",
+        "scip",
+        "files",
+        "admin",
+        "repos",
+        "ssh",
+        "guides",
+        "cicd",
+    ]:
         (docs_dir / category).mkdir()
     return docs_dir
 
@@ -23,7 +33,10 @@ class TestFrontmatterRequiredFields:
 
     def test_missing_required_field_raises_error(self, temp_docs_dir):
         """Missing tl_dr field should raise FrontmatterValidationError."""
-        from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader, FrontmatterValidationError
+        from code_indexer.server.mcp.tool_doc_loader import (
+            ToolDocLoader,
+            FrontmatterValidationError,
+        )
 
         search_dir = temp_docs_dir / "search"
         (search_dir / "missing_field.md").write_text(
@@ -84,7 +97,10 @@ class TestFrontmatterFormatErrors:
 
     def test_invalid_yaml_raises_error(self, temp_docs_dir):
         """Invalid YAML syntax should raise FrontmatterValidationError."""
-        from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader, FrontmatterValidationError
+        from code_indexer.server.mcp.tool_doc_loader import (
+            ToolDocLoader,
+            FrontmatterValidationError,
+        )
 
         search_dir = temp_docs_dir / "search"
         (search_dir / "bad_yaml.md").write_text(
@@ -98,10 +114,15 @@ class TestFrontmatterFormatErrors:
 
     def test_missing_frontmatter_raises_error(self, temp_docs_dir):
         """File without frontmatter should raise FrontmatterValidationError."""
-        from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader, FrontmatterValidationError
+        from code_indexer.server.mcp.tool_doc_loader import (
+            ToolDocLoader,
+            FrontmatterValidationError,
+        )
 
         search_dir = temp_docs_dir / "search"
-        (search_dir / "no_frontmatter.md").write_text("Just markdown without frontmatter.")
+        (search_dir / "no_frontmatter.md").write_text(
+            "Just markdown without frontmatter."
+        )
 
         loader = ToolDocLoader(temp_docs_dir)
         with pytest.raises(FrontmatterValidationError):

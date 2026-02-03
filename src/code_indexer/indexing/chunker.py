@@ -934,7 +934,10 @@ class TextChunker:
         return chunks
 
     def chunk_text(
-        self, text: str, file_path: Optional[Path] = None, repo_root: Optional[Path] = None
+        self,
+        text: str,
+        file_path: Optional[Path] = None,
+        repo_root: Optional[Path] = None,
     ) -> List[Dict[str, Any]]:
         """Split text into chunks with metadata including line numbers and images.
 
@@ -960,10 +963,13 @@ class TextChunker:
             # Get appropriate extractor for file type
             image_extractor = ImageExtractorFactory.get_extractor(f".{file_extension}")
             if image_extractor:
-                extracted_images = image_extractor.extract_images(text, file_path, repo_root)
+                extracted_images = image_extractor.extract_images(
+                    text, file_path, repo_root
+                )
                 # Filter images by validation
                 extracted_images = [
-                    img for img in extracted_images
+                    img
+                    for img in extracted_images
                     if image_extractor.validate_image(img, repo_root)
                 ]
 
@@ -1056,7 +1062,7 @@ class TextChunker:
         text: str,
         file_path: Optional[Path] = None,
         repo_root: Optional[Path] = None,
-        verbose: bool = False
+        verbose: bool = False,
     ) -> List[Dict[str, Any]]:
         """Split text into chunks with validation logging - Story #64 AC7.
 
@@ -1081,8 +1087,10 @@ class TextChunker:
 
             if image_extractor:
                 # Use extract_images_with_validation() for skip reasons
-                valid_images, all_results = image_extractor.extract_images_with_validation(
-                    text, file_path, repo_root
+                valid_images, all_results = (
+                    image_extractor.extract_images_with_validation(
+                        text, file_path, repo_root
+                    )
                 )
                 extracted_images = valid_images
 
@@ -1094,18 +1102,17 @@ class TextChunker:
                             "remote_url": "Remote URL (not local file)",
                             "oversized": "File exceeds size limit (10MB)",
                             "unsupported_format": "Unsupported image format",
-                            "data_uri": "Data URI (not a file path)"
+                            "data_uri": "Data URI (not a file path)",
                         }
                         reason_message = reason_messages.get(
-                            result.skip_reason,
-                            f"Invalid: {result.skip_reason}"
+                            result.skip_reason, f"Invalid: {result.skip_reason}"
                         )
 
                         self._adaptive_logger.warn_image_skipped(
                             file_path=str(file_path),
                             image_ref=result.path,
                             reason=reason_message,
-                            verbose=verbose
+                            verbose=verbose,
                         )
 
         # Delegate to existing chunk_text() for chunking logic
@@ -1152,7 +1159,9 @@ class TextChunker:
 
         return False
 
-    def chunk_file(self, file_path: Path, repo_root: Optional[Path] = None) -> List[Dict[str, Any]]:
+    def chunk_file(
+        self, file_path: Path, repo_root: Optional[Path] = None
+    ) -> List[Dict[str, Any]]:
         """Read and chunk a file.
 
         Args:

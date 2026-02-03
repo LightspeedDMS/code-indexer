@@ -14,7 +14,10 @@ import shutil
 from datetime import datetime, timezone
 import jwt as pyjwt
 
-from code_indexer.server.services.config_service import ConfigService, reset_config_service
+from code_indexer.server.services.config_service import (
+    ConfigService,
+    reset_config_service,
+)
 from code_indexer.server.auth.jwt_manager import JWTManager
 from code_indexer.server.utils.jwt_secret_manager import JWTSecretManager
 from code_indexer.server.auth.user_manager import UserManager, UserRole
@@ -72,14 +75,14 @@ class TestBug83AppInitialization:
         jwt_manager = JWTManager(
             secret_key=secret_key,
             token_expiration_minutes=config.jwt_expiration_minutes,  # From config!
-            algorithm="HS256"
+            algorithm="HS256",
         )
 
         # Create token
         user_data = {
             "username": "testuser",
             "role": "admin",
-            "created_at": datetime.now(timezone.utc).isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
         token = jwt_manager.create_token(user_data)
 
@@ -135,9 +138,7 @@ class TestBug83AppInitialization:
         # Assert: Should reject weak password based on custom config
         with pytest.raises(ValueError) as exc_info:
             user_manager.create_user(
-                username="testuser",
-                password=weak_password,
-                role=UserRole.NORMAL_USER
+                username="testuser", password=weak_password, role=UserRole.NORMAL_USER
             )
 
         error_message = str(exc_info.value).lower()
@@ -171,9 +172,7 @@ class TestBug83AppInitialization:
 
         # Assert: Should accept strong password
         user = user_manager.create_user(
-            username="testuser",
-            password=strong_password,
-            role=UserRole.NORMAL_USER
+            username="testuser", password=strong_password, role=UserRole.NORMAL_USER
         )
 
         assert user.username == "testuser"
@@ -189,21 +188,21 @@ class TestBug83AppInitialization:
         config = config_service.get_config()
 
         # Bug #83-1: JWT expiration
-        assert hasattr(config, 'jwt_expiration_minutes')
+        assert hasattr(config, "jwt_expiration_minutes")
         assert isinstance(config.jwt_expiration_minutes, int)
         assert config.jwt_expiration_minutes > 0
 
         # Bug #83-2: Password security
-        assert hasattr(config, 'password_security')
+        assert hasattr(config, "password_security")
         assert config.password_security is not None
-        assert hasattr(config.password_security, 'min_length')
-        assert hasattr(config.password_security, 'required_char_classes')
+        assert hasattr(config.password_security, "min_length")
+        assert hasattr(config.password_security, "required_char_classes")
 
         # Bug #83-3: SCIP config
-        assert hasattr(config, 'scip_config')
+        assert hasattr(config, "scip_config")
         assert config.scip_config is not None
-        assert hasattr(config.scip_config, 'scip_reference_limit')
-        assert hasattr(config.scip_config, 'scip_dependency_depth')
+        assert hasattr(config.scip_config, "scip_reference_limit")
+        assert hasattr(config.scip_config, "scip_dependency_depth")
 
     def test_scip_multi_service_uses_config_limits(self, temp_server_dir):
         """
@@ -235,14 +234,22 @@ class TestBug83AppInitialization:
         )
 
         # Assert: Service should store config values
-        assert hasattr(service, 'reference_limit'), "Service should have reference_limit"
+        assert hasattr(
+            service, "reference_limit"
+        ), "Service should have reference_limit"
         assert service.reference_limit == CUSTOM_SCIP_REFERENCE_LIMIT
 
-        assert hasattr(service, 'dependency_depth'), "Service should have dependency_depth"
+        assert hasattr(
+            service, "dependency_depth"
+        ), "Service should have dependency_depth"
         assert service.dependency_depth == CUSTOM_SCIP_DEPENDENCY_DEPTH
 
-        assert hasattr(service, 'callchain_max_depth'), "Service should have callchain_max_depth"
+        assert hasattr(
+            service, "callchain_max_depth"
+        ), "Service should have callchain_max_depth"
         assert service.callchain_max_depth == CUSTOM_SCIP_CALLCHAIN_MAX_DEPTH
 
-        assert hasattr(service, 'callchain_limit'), "Service should have callchain_limit"
+        assert hasattr(
+            service, "callchain_limit"
+        ), "Service should have callchain_limit"
         assert service.callchain_limit == CUSTOM_SCIP_CALLCHAIN_LIMIT

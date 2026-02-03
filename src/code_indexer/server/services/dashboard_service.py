@@ -138,11 +138,13 @@ class DashboardService:
         try:
             return health_service.get_system_health()
         except Exception as e:
-            logger.error(format_error_log(
-                "AUTH-GENERAL-019",
-                f"Failed to get health data: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "AUTH-GENERAL-019",
+                    f"Failed to get health data: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             # Return degraded status on error
             from ..models.api_models import (
                 ServiceHealthInfo,
@@ -204,11 +206,13 @@ class DashboardService:
             )
 
         except Exception as e:
-            logger.error(format_error_log(
-                "AUTH-GENERAL-020",
-                f"Failed to get job counts: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "AUTH-GENERAL-020",
+                    f"Failed to get job counts: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return JobCounts()
 
     def _get_repo_counts(self, username: str, user_role: str = "user") -> RepoCounts:
@@ -232,11 +236,13 @@ class DashboardService:
                 golden_repos = golden_manager.list_golden_repos()
                 golden_count = len(golden_repos) if golden_repos else 0
         except Exception as e:
-            logger.error(format_error_log(
-                "AUTH-GENERAL-021",
-                f"Failed to get golden repos count: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "AUTH-GENERAL-021",
+                    f"Failed to get golden repos count: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Get activated repos count
         try:
@@ -253,11 +259,13 @@ class DashboardService:
                     )
                 activated_count = len(activated_repos) if activated_repos else 0
         except Exception as e:
-            logger.error(format_error_log(
-                "AUTH-GENERAL-022",
-                f"Failed to get activated repos count: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "AUTH-GENERAL-022",
+                    f"Failed to get activated repos count: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         return RepoCounts(
             golden=golden_count,
@@ -319,11 +327,13 @@ class DashboardService:
             return recent
 
         except Exception as e:
-            logger.error(format_error_log(
-                "AUTH-GENERAL-023",
-                f"Failed to get recent jobs: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "AUTH-GENERAL-023",
+                    f"Failed to get recent jobs: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return []
 
     def _get_background_job_manager(self) -> Optional[Any]:

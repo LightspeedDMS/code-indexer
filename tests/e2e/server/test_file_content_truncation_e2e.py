@@ -232,7 +232,9 @@ class TestFileContentTruncationE2E:
             assert truncated is True, "Expected truncated=True for large file"
 
             # Step 4: Retrieve full content via get_cached_content
-            full_content = await self._retrieve_all_pages(handlers, cache_handle, real_user)
+            full_content = await self._retrieve_all_pages(
+                handlers, cache_handle, real_user
+            )
 
             # Step 5: Verify retrieved content matches original file
             assert full_content == original_content, (

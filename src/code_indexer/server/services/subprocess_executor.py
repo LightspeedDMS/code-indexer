@@ -108,11 +108,13 @@ class SubprocessExecutor:
 
         except asyncio.TimeoutError:
             # Asyncio timeout exceeded (should not happen if subprocess timeout works)
-            logger.warning(format_error_log(
-                "MCP-GENERAL-183",
-                f"Asyncio timeout exceeded for command: {' '.join(command)}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-183",
+                    f"Asyncio timeout exceeded for command: {' '.join(command)}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return SearchExecutionResult(
                 status=ExecutionStatus.TIMEOUT,
                 output_file=output_file_path,
@@ -122,12 +124,14 @@ class SubprocessExecutor:
             )
 
         except Exception as e:
-            logger.error(format_error_log(
-                "MCP-GENERAL-184",
-                f"Unexpected error executing command: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-184",
+                    f"Unexpected error executing command: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return SearchExecutionResult(
                 status=ExecutionStatus.ERROR,
                 output_file=output_file_path,
@@ -191,22 +195,26 @@ class SubprocessExecutor:
 
                 except subprocess.TimeoutExpired:
                     # Timeout exceeded - terminate process
-                    logger.warning(format_error_log(
-                        "MCP-GENERAL-185",
-                        f"Command timed out after {timeout_seconds}s: {' '.join(command)}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "MCP-GENERAL-185",
+                            f"Command timed out after {timeout_seconds}s: {' '.join(command)}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
 
                     # Terminate process
                     process.kill()
                     try:
                         process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
-                        logger.error(format_error_log(
-                            "MCP-GENERAL-186",
-                            "Failed to kill timed out process",
-                            extra={"correlation_id": get_correlation_id()},
-                        ))
+                        logger.error(
+                            format_error_log(
+                                "MCP-GENERAL-186",
+                                "Failed to kill timed out process",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
 
                     # Partial output already written to file
                     return SearchExecutionResult(
@@ -225,12 +233,14 @@ class SubprocessExecutor:
             )
 
         except Exception as e:
-            logger.error(format_error_log(
-                "MCP-GENERAL-187",
-                f"Error running subprocess: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-187",
+                    f"Error running subprocess: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return SearchExecutionResult(
                 status=ExecutionStatus.ERROR,
                 output_file=output_file_path,

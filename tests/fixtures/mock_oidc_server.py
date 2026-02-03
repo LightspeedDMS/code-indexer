@@ -18,8 +18,12 @@ def _create_mock_id_token(claims: dict) -> str:
     allows the token to be parsed by get_user_info().
     """
     header = {"alg": "RS256", "typ": "JWT"}
-    header_b64 = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip("=")
-    payload_b64 = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    header_b64 = (
+        base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip("=")
+    )
+    payload_b64 = (
+        base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    )
     signature = "mock_signature"
     return f"{header_b64}.{payload_b64}.{signature}"
 

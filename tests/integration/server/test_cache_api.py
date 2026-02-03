@@ -68,7 +68,9 @@ class TestCacheRetrievalEndpoint:
         assert data["has_more"] is True
 
     @pytest.mark.asyncio
-    async def test_get_cache_page_1_returns_second_page(self, app_with_cache, real_cache):
+    async def test_get_cache_page_1_returns_second_page(
+        self, app_with_cache, real_cache
+    ):
         """Test GET /cache/{handle}?page=1 returns second page content."""
         # Store real content with two pages
         content = "A" * 5000 + "B" * 5000
@@ -116,7 +118,9 @@ class TestCacheRetrievalEndpoint:
         assert data["has_more"] is False
 
     @pytest.mark.asyncio
-    async def test_get_cache_small_content_single_page(self, app_with_cache, real_cache):
+    async def test_get_cache_small_content_single_page(
+        self, app_with_cache, real_cache
+    ):
         """Test GET /cache/{handle} with small content returns full content."""
         content = "This is a small piece of content"
         handle = await real_cache.store(content)
@@ -133,7 +137,9 @@ class TestCacheRetrievalEndpoint:
         assert data["has_more"] is False
 
     @pytest.mark.asyncio
-    async def test_get_cache_page_out_of_range_returns_404(self, app_with_cache, real_cache):
+    async def test_get_cache_page_out_of_range_returns_404(
+        self, app_with_cache, real_cache
+    ):
         """Test GET /cache/{handle}?page=999 returns 404 for out-of-range page."""
         content = "Small content"
         handle = await real_cache.store(content)
@@ -158,7 +164,9 @@ class TestCacheRetrievalEndpoint:
 
         try:
             transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as client:
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
                 response = await client.get("/cache/any-handle?page=0")
 
             assert response.status_code == 503

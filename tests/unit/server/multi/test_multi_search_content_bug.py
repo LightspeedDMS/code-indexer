@@ -58,13 +58,13 @@ class TestSemanticSearchIncludesSourceContent:
         # It should contain include_source=True, not False
         request_pattern = "SemanticSearchRequest("
 
-        assert request_pattern in source, (
-            "SemanticSearchRequest should be constructed in _search_semantic_sync"
-        )
+        assert (
+            request_pattern in source
+        ), "SemanticSearchRequest should be constructed in _search_semantic_sync"
 
         # The construction should have include_source=True
         # Find the line with SemanticSearchRequest and check context
-        lines = source.split('\n')
+        lines = source.split("\n")
         in_request_block = False
         found_include_source_true = False
 
@@ -79,9 +79,9 @@ class TestSemanticSearchIncludesSourceContent:
                     # Closed the constructor, stop looking
                     break
 
-        assert found_include_source_true, (
-            "SemanticSearchRequest construction must include 'include_source=True'"
-        )
+        assert (
+            found_include_source_true
+        ), "SemanticSearchRequest construction must include 'include_source=True'"
 
 
 class TestIncludeSourceMatchesSingleRepoBehavior:
@@ -100,6 +100,6 @@ class TestIncludeSourceMatchesSingleRepoBehavior:
 
         # The bug was that multi-repo excluded content while single-repo included it
         # After the fix, both should include content
-        assert "include_source=False" not in source, (
-            "Multi-repo search should match single-repo behavior and include content"
-        )
+        assert (
+            "include_source=False" not in source
+        ), "Multi-repo search should match single-repo behavior and include content"

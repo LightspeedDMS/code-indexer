@@ -29,8 +29,7 @@ class TestGoldenReposConfigAnalysisModel:
     def test_analysis_model_with_refresh_interval(self):
         """AC2: analysis_model coexists with existing refresh_interval_seconds field."""
         config = GoldenReposConfig(
-            refresh_interval_seconds=7200,
-            analysis_model="sonnet"
+            refresh_interval_seconds=7200, analysis_model="sonnet"
         )
         assert config.refresh_interval_seconds == 7200
         assert config.analysis_model == "sonnet"

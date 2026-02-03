@@ -686,7 +686,10 @@ class TestGitStageErrors:
                 file_paths=["this_file_does_not_exist.txt"],
             )
 
-        assert "git add failed" in str(exc_info.value).lower() or exc_info.value.returncode != 0
+        assert (
+            "git add failed" in str(exc_info.value).lower()
+            or exc_info.value.returncode != 0
+        )
 
     def test_stage_code_indexer_files_blocked(
         self,

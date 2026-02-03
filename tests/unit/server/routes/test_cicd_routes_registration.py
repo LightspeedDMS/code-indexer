@@ -93,7 +93,9 @@ class TestCICDRoutesRegistration:
         """Test that exactly 12 CI/CD routes are registered."""
         routes = [route.path for route in app_with_cicd_router.routes]
         cicd_routes = [r for r in routes if r.startswith("/api/cicd/")]
-        assert len(cicd_routes) == 12, f"Expected 12 routes, found {len(cicd_routes)}: {cicd_routes}"
+        assert (
+            len(cicd_routes) == 12
+        ), f"Expected 12 routes, found {len(cicd_routes)}: {cicd_routes}"
 
 
 class TestCICDRoutesHTTPMethods:
@@ -159,7 +161,10 @@ class TestCICDRoutesHTTPMethods:
     def test_gitlab_search_logs_is_get(self, app_with_cicd_router):
         """Test GitLab search logs uses GET method."""
         for route in app_with_cicd_router.routes:
-            if route.path == "/api/cicd/gitlab/{project_id}/pipelines/{pipeline_id}/logs":
+            if (
+                route.path
+                == "/api/cicd/gitlab/{project_id}/pipelines/{pipeline_id}/logs"
+            ):
                 assert "GET" in route.methods
 
     def test_gitlab_get_job_logs_is_get(self, app_with_cicd_router):
@@ -171,11 +176,17 @@ class TestCICDRoutesHTTPMethods:
     def test_gitlab_retry_pipeline_is_post(self, app_with_cicd_router):
         """Test GitLab retry pipeline uses POST method."""
         for route in app_with_cicd_router.routes:
-            if route.path == "/api/cicd/gitlab/{project_id}/pipelines/{pipeline_id}/retry":
+            if (
+                route.path
+                == "/api/cicd/gitlab/{project_id}/pipelines/{pipeline_id}/retry"
+            ):
                 assert "POST" in route.methods
 
     def test_gitlab_cancel_pipeline_is_post(self, app_with_cicd_router):
         """Test GitLab cancel pipeline uses POST method."""
         for route in app_with_cicd_router.routes:
-            if route.path == "/api/cicd/gitlab/{project_id}/pipelines/{pipeline_id}/cancel":
+            if (
+                route.path
+                == "/api/cicd/gitlab/{project_id}/pipelines/{pipeline_id}/cancel"
+            ):
                 assert "POST" in route.methods

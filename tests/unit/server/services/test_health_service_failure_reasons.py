@@ -75,15 +75,14 @@ class TestFailureReasonsContent:
             ]
             mock_db_cls.return_value = mock_db
 
-            with patch("psutil.virtual_memory") as mock_mem, patch(
-                "psutil.cpu_percent"
-            ) as mock_cpu, patch("psutil.disk_usage") as mock_disk, patch(
-                "psutil.disk_partitions"
-            ) as mock_parts, patch(
-                "psutil.disk_io_counters"
-            ) as mock_disk_io, patch(
-                "psutil.net_io_counters"
-            ) as mock_net_io:
+            with (
+                patch("psutil.virtual_memory") as mock_mem,
+                patch("psutil.cpu_percent") as mock_cpu,
+                patch("psutil.disk_usage") as mock_disk,
+                patch("psutil.disk_partitions") as mock_parts,
+                patch("psutil.disk_io_counters") as mock_disk_io,
+                patch("psutil.net_io_counters") as mock_net_io,
+            ):
                 mock_mem.return_value = MagicMock(percent=50.0)
                 mock_cpu.return_value = 30.0
                 mock_disk.return_value = MagicMock(
@@ -126,15 +125,14 @@ class TestFailureReasonsContent:
             ]
             mock_db_cls.return_value = mock_db
 
-            with patch("psutil.virtual_memory") as mock_mem, patch(
-                "psutil.cpu_percent"
-            ) as mock_cpu, patch("psutil.disk_usage") as mock_disk, patch(
-                "psutil.disk_partitions"
-            ) as mock_parts, patch(
-                "psutil.disk_io_counters"
-            ) as mock_disk_io, patch(
-                "psutil.net_io_counters"
-            ) as mock_net_io:
+            with (
+                patch("psutil.virtual_memory") as mock_mem,
+                patch("psutil.cpu_percent") as mock_cpu,
+                patch("psutil.disk_usage") as mock_disk,
+                patch("psutil.disk_partitions") as mock_parts,
+                patch("psutil.disk_io_counters") as mock_disk_io,
+                patch("psutil.net_io_counters") as mock_net_io,
+            ):
                 mock_mem.return_value = MagicMock(percent=50.0)
                 mock_cpu.return_value = 30.0
                 mock_disk.return_value = MagicMock(
@@ -184,15 +182,14 @@ class TestFailureReasonsLimit:
             mock_db.get_all_database_health.return_value = db_results
             mock_db_cls.return_value = mock_db
 
-            with patch("psutil.virtual_memory") as mock_mem, patch(
-                "psutil.cpu_percent"
-            ) as mock_cpu, patch("psutil.disk_usage") as mock_disk, patch(
-                "psutil.disk_partitions"
-            ) as mock_parts, patch(
-                "psutil.disk_io_counters"
-            ) as mock_disk_io, patch(
-                "psutil.net_io_counters"
-            ) as mock_net_io:
+            with (
+                patch("psutil.virtual_memory") as mock_mem,
+                patch("psutil.cpu_percent") as mock_cpu,
+                patch("psutil.disk_usage") as mock_disk,
+                patch("psutil.disk_partitions") as mock_parts,
+                patch("psutil.disk_io_counters") as mock_disk_io,
+                patch("psutil.net_io_counters") as mock_net_io,
+            ):
                 mock_mem.return_value = MagicMock(percent=50.0)
                 mock_cpu.return_value = 30.0
                 mock_disk.return_value = MagicMock(
@@ -238,15 +235,14 @@ class TestServiceErrorMessagesInFailureReasons:
             ]
             mock_db_cls.return_value = mock_db
 
-            with patch("psutil.virtual_memory") as mock_mem, patch(
-                "psutil.cpu_percent"
-            ) as mock_cpu, patch("psutil.disk_usage") as mock_disk, patch(
-                "psutil.disk_partitions"
-            ) as mock_parts, patch(
-                "psutil.disk_io_counters"
-            ) as mock_disk_io, patch(
-                "psutil.net_io_counters"
-            ) as mock_net_io:
+            with (
+                patch("psutil.virtual_memory") as mock_mem,
+                patch("psutil.cpu_percent") as mock_cpu,
+                patch("psutil.disk_usage") as mock_disk,
+                patch("psutil.disk_partitions") as mock_parts,
+                patch("psutil.disk_io_counters") as mock_disk_io,
+                patch("psutil.net_io_counters") as mock_net_io,
+            ):
                 # Set low memory to trigger healthy system metrics
                 mock_mem.return_value = MagicMock(percent=50.0)
                 mock_cpu.return_value = 30.0
@@ -295,17 +291,15 @@ class TestServiceErrorMessagesInFailureReasons:
             ]
             mock_db_cls.return_value = mock_db
 
-            with patch("psutil.virtual_memory") as mock_mem, patch(
-                "psutil.cpu_percent"
-            ) as mock_cpu, patch("psutil.disk_usage") as mock_disk, patch(
-                "psutil.disk_partitions"
-            ) as mock_parts, patch(
-                "psutil.disk_io_counters"
-            ) as mock_disk_io, patch(
-                "psutil.net_io_counters"
-            ) as mock_net_io, patch(
-                "sqlite3.connect"
-            ) as mock_sqlite:
+            with (
+                patch("psutil.virtual_memory") as mock_mem,
+                patch("psutil.cpu_percent") as mock_cpu,
+                patch("psutil.disk_usage") as mock_disk,
+                patch("psutil.disk_partitions") as mock_parts,
+                patch("psutil.disk_io_counters") as mock_disk_io,
+                patch("psutil.net_io_counters") as mock_net_io,
+                patch("sqlite3.connect") as mock_sqlite,
+            ):
                 mock_mem.return_value = MagicMock(percent=50.0)
                 mock_cpu.return_value = 30.0
                 mock_disk.return_value = MagicMock(
@@ -353,15 +347,14 @@ class TestServiceErrorMessagesInFailureReasons:
             ]
             mock_db_cls.return_value = mock_db
 
-            with patch("psutil.virtual_memory") as mock_mem, patch(
-                "psutil.cpu_percent"
-            ) as mock_cpu, patch("psutil.disk_usage") as mock_disk, patch(
-                "psutil.disk_partitions"
-            ) as mock_parts, patch(
-                "psutil.disk_io_counters"
-            ) as mock_disk_io, patch(
-                "psutil.net_io_counters"
-            ) as mock_net_io:
+            with (
+                patch("psutil.virtual_memory") as mock_mem,
+                patch("psutil.cpu_percent") as mock_cpu,
+                patch("psutil.disk_usage") as mock_disk,
+                patch("psutil.disk_partitions") as mock_parts,
+                patch("psutil.disk_io_counters") as mock_disk_io,
+                patch("psutil.net_io_counters") as mock_net_io,
+            ):
                 mock_mem.return_value = MagicMock(percent=50.0)
                 mock_cpu.return_value = 30.0
                 # Set disk space in warning range (80-90% used = DEGRADED)

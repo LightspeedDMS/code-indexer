@@ -152,7 +152,9 @@ class TestTemporalPathFilterBug(TestCase):
                                         mock_cache_entry.temporal_hnsw_index = (
                                             MagicMock()
                                         )
-                                        mock_cache_entry.is_temporal_stale_after_rebuild.return_value = False
+                                        mock_cache_entry.is_temporal_stale_after_rebuild.return_value = (
+                                            False
+                                        )
 
                                         # Call with multiple path filters
                                         service.exposed_query_temporal(

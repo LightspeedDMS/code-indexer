@@ -135,10 +135,12 @@ class SCIPMultiService:
             engine = SCIPQueryEngine(scip_file)
             return engine.find_definition(request.symbol, exact=False)
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-030",
-                f"Definition query failed for repo {repo_id}: {e}"
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-030",
+                    f"Definition query failed for repo {repo_id}: {e}",
+                )
+            )
             raise
 
     def references(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
@@ -175,15 +177,15 @@ class SCIPMultiService:
         try:
             engine = SCIPQueryEngine(scip_file)
             # Bug #83-3 Fix: Use instance variable instead of hardcoded constant
-            limit = (
-                request.limit if request.limit is not None else self.reference_limit
-            )
+            limit = request.limit if request.limit is not None else self.reference_limit
             return engine.find_references(request.symbol, limit=limit, exact=False)
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-031",
-                f"References query failed for repo {repo_id}: {e}"
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-031",
+                    f"References query failed for repo {repo_id}: {e}",
+                )
+            )
             raise
 
     def dependencies(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
@@ -227,10 +229,12 @@ class SCIPMultiService:
             )
             return engine.get_dependencies(request.symbol, depth=depth, exact=False)
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-032",
-                f"Dependencies query failed for repo {repo_id}: {e}"
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-032",
+                    f"Dependencies query failed for repo {repo_id}: {e}",
+                )
+            )
             raise
 
     def dependents(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
@@ -274,10 +278,12 @@ class SCIPMultiService:
             )
             return engine.get_dependents(request.symbol, depth=depth, exact=False)
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-033",
-                f"Dependents query failed for repo {repo_id}: {e}"
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-033",
+                    f"Dependents query failed for repo {repo_id}: {e}",
+                )
+            )
             raise
 
     def callchain(self, request: SCIPMultiRequest) -> SCIPMultiResponse:
@@ -326,9 +332,7 @@ class SCIPMultiService:
                 if request.max_depth is not None
                 else self.callchain_max_depth
             )
-            limit = (
-                request.limit if request.limit is not None else self.callchain_limit
-            )
+            limit = request.limit if request.limit is not None else self.callchain_limit
             call_chains = engine.trace_call_chain(
                 request.from_symbol, request.to_symbol, max_depth=max_depth, limit=limit
             )
@@ -352,10 +356,12 @@ class SCIPMultiService:
                 )
             return results
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-034",
-                f"Callchain tracing failed for repo {repo_id}: {e}"
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-034",
+                    f"Callchain tracing failed for repo {repo_id}: {e}",
+                )
+            )
             raise
 
     def _execute_parallel_operation(
@@ -424,16 +430,20 @@ class SCIPMultiService:
                     f"Consider reducing the number of repositories or increasing timeout."
                 )
                 errors[repo_id] = error_msg
-                logger.warning(format_error_log(
-                    "REPO-GENERAL-035",
-                    f"SCIP {operation_name} timeout for repo {repo_id} after {timeout_seconds}s"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "REPO-GENERAL-035",
+                        f"SCIP {operation_name} timeout for repo {repo_id} after {timeout_seconds}s",
+                    )
+                )
             except Exception as e:
                 errors[repo_id] = f"SCIP {operation_name} failed: {str(e)}"
-                logger.error(format_error_log(
-                    "REPO-GENERAL-036",
-                    f"SCIP {operation_name} error for repo {repo_id}: {e}"
-                ))
+                logger.error(
+                    format_error_log(
+                        "REPO-GENERAL-036",
+                        f"SCIP {operation_name} error for repo {repo_id}: {e}",
+                    )
+                )
 
         # Calculate metadata
         total_results = sum(len(results) for results in repo_results.values())
@@ -483,10 +493,12 @@ class SCIPMultiService:
             # ("not found in global repositories") reaches the user
             raise
         except Exception as e:
-            logger.warning(format_error_log(
-                "REPO-GENERAL-037",
-                f"Failed to get SCIP path for repo {repo_id}: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "REPO-GENERAL-037",
+                    f"Failed to get SCIP path for repo {repo_id}: {e}",
+                )
+            )
             return None
 
     def _get_repository_path(self, repo_id: str) -> str:

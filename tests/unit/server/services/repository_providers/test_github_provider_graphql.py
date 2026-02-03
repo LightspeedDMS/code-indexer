@@ -173,7 +173,9 @@ class TestGitHubGraphQLNonSearchDiscovery:
 
         # Verify both affiliations and ownerAffiliations are present
         assert "affiliations:" in query_built or "affiliations :" in query_built
-        assert "ownerAffiliations:" in query_built or "ownerAffiliations :" in query_built
+        assert (
+            "ownerAffiliations:" in query_built or "ownerAffiliations :" in query_built
+        )
         # Verify ORGANIZATION_MEMBER is in both
         assert "ORGANIZATION_MEMBER" in query_built
 

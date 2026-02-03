@@ -326,9 +326,12 @@ class TestSessionImpersonationAuditLogging:
             session_id="audit-test-001", authenticated_user=admin_user
         )
 
-        with patch.object(UserManager, "get_user", return_value=target_user), patch.object(
-            audit_logger.password_audit_logger, "log_impersonation_set"
-        ) as mock_log_set:
+        with (
+            patch.object(UserManager, "get_user", return_value=target_user),
+            patch.object(
+                audit_logger.password_audit_logger, "log_impersonation_set"
+            ) as mock_log_set,
+        ):
             await handle_set_session_impersonation(
                 {"username": "target_user"}, admin_user, session_state=session_state
             )

@@ -363,20 +363,28 @@ class GlobalErrorHandler(BaseHTTPMiddleware):
             # Use the correlation_id parameter (not get_correlation_id() from context)
             # to ensure the ID shown in the error response matches the logged ID
             if error_type in ["ValidationError", "HTTPException"]:
-                logger.warning(format_error_log(
-                    "REPO-GENERAL-017",
-                    log_message, extra={"correlation_id": correlation_id}
-                ))
+                logger.warning(
+                    format_error_log(
+                        "REPO-GENERAL-017",
+                        log_message,
+                        extra={"correlation_id": correlation_id},
+                    )
+                )
             else:
-                logger.error(format_error_log(
-                    "REPO-GENERAL-018",
-                    log_message, extra={"correlation_id": correlation_id}
-                ))
+                logger.error(
+                    format_error_log(
+                        "REPO-GENERAL-018",
+                        log_message,
+                        extra={"correlation_id": correlation_id},
+                    )
+                )
 
         except Exception as log_error:
             # Fallback logging if there's an error in the logging process
-            logger.error(format_error_log(
-                "REPO-GENERAL-019",
-                f"Error logging failed [ID: {correlation_id}]: {log_error}",
-                extra={"correlation_id": correlation_id},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-019",
+                    f"Error logging failed [ID: {correlation_id}]: {log_error}",
+                    extra={"correlation_id": correlation_id},
+                )
+            )

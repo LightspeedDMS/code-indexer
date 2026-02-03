@@ -344,8 +344,12 @@ class TestUserManagerWithSqliteBackend:
             db_path=str(db_path),
         )
 
-        manager.create_user(username="user1", password="StrongP@ssword123!", role=UserRole.ADMIN)
-        manager.create_user(username="user2", password="StrongP@ssword456!", role=UserRole.NORMAL_USER)
+        manager.create_user(
+            username="user1", password="StrongP@ssword123!", role=UserRole.ADMIN
+        )
+        manager.create_user(
+            username="user2", password="StrongP@ssword456!", role=UserRole.NORMAL_USER
+        )
 
         users = manager.get_all_users()
 

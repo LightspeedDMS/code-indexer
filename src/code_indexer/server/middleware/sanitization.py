@@ -43,11 +43,13 @@ class SensitiveDataSanitizer:
                     (pattern, rule.replacement, rule.field_names)
                 )
             except re.error as e:
-                logger.warning(format_error_log(
-                    "REPO-GENERAL-021",
-                    f"Invalid sanitization regex pattern '{rule.pattern}': {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "REPO-GENERAL-021",
+                        f"Invalid sanitization regex pattern '{rule.pattern}': {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
 
     def sanitize_string(self, text: str) -> str:
         """
@@ -186,9 +188,11 @@ class SensitiveDataSanitizer:
             return request_info
 
         except Exception as e:
-            logger.warning(format_error_log(
-                "REPO-GENERAL-022",
-                f"Error sanitizing request info: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "REPO-GENERAL-022",
+                    f"Error sanitizing request info: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return {"method": "UNKNOWN", "path": "UNKNOWN"}

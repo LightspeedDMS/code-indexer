@@ -115,9 +115,7 @@ async def test_pr_creation_triggered_on_full_success(
         ],
     )
 
-    self_healing_service.handle_scip_failure(
-        job_id, generation_result, "test-repo"
-    )
+    self_healing_service.handle_scip_failure(job_id, generation_result, "test-repo")
 
     # Verify job transitioned to RESOLVING_PREREQUISITES
     job = job_manager.jobs[job_id]
@@ -196,9 +194,7 @@ async def test_pr_creation_triggered_on_partial_success(
         ],
     )
 
-    self_healing_service.handle_scip_failure(
-        job_id, generation_result, "test-repo"
-    )
+    self_healing_service.handle_scip_failure(job_id, generation_result, "test-repo")
 
     # Simulate Python resolved
     with patch.object(
@@ -275,9 +271,7 @@ async def test_pr_creation_not_triggered_on_total_failure(
         ],
     )
 
-    self_healing_service.handle_scip_failure(
-        job_id, generation_result, "test-repo"
-    )
+    self_healing_service.handle_scip_failure(job_id, generation_result, "test-repo")
 
     # Simulate unresolvable response
     await self_healing_service.handle_project_response(
@@ -339,9 +333,7 @@ async def test_pr_creation_error_does_not_block_completion(
         ],
     )
 
-    self_healing_service.handle_scip_failure(
-        job_id, generation_result, "test-repo"
-    )
+    self_healing_service.handle_scip_failure(job_id, generation_result, "test-repo")
 
     # Simulate successful resolution
     with patch.object(

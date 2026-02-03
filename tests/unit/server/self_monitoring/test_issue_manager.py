@@ -27,7 +27,8 @@ class TestIssueManager:
 
         # Initialize database with self_monitoring_issues table
         conn = sqlite3.connect(db_path)
-        conn.execute("""
+        conn.execute(
+            """
             CREATE TABLE self_monitoring_issues (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 scan_id TEXT NOT NULL,
@@ -41,7 +42,8 @@ class TestIssueManager:
                 title TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
-        """)
+        """
+        )
         conn.commit()
         conn.close()
 
@@ -53,7 +55,9 @@ class TestIssueManager:
     @pytest.fixture
     def mock_httpx_post(self):
         """Mock httpx.post for GitHub API calls."""
-        with patch("code_indexer.server.self_monitoring.issue_manager.httpx.post") as mock_post:
+        with patch(
+            "code_indexer.server.self_monitoring.issue_manager.httpx.post"
+        ) as mock_post:
             yield mock_post
 
     def test_create_issue_calls_github_api(self, temp_db, mock_httpx_post):
@@ -65,17 +69,17 @@ class TestIssueManager:
             status_code=201,
             json=lambda: {
                 "number": 123,
-                "html_url": "https://github.com/owner/repo/issues/123"
+                "html_url": "https://github.com/owner/repo/issues/123",
             },
             headers={},
-            raise_for_status=lambda: None
+            raise_for_status=lambda: None,
         )
 
         manager = IssueManager(
             db_path=temp_db,
             scan_id="test-scan-001",
             github_repo="owner/repo",
-            github_token="ghp_test_token"
+            github_token="ghp_test_token",
         )
 
         issue_data = manager.create_issue(
@@ -84,7 +88,7 @@ class TestIssueManager:
             body="## Description\nToken validation error...",
             source_log_ids=[1001, 1002, 1003],
             source_files=["auth/token_validator.py"],
-            error_codes=["AUTH-TOKEN-001"]
+            error_codes=["AUTH-TOKEN-001"],
         )
 
         # Verify GitHub API was called correctly
@@ -102,11 +106,16 @@ class TestIssueManager:
 
         # Verify JSON payload
         assert "json" in call_kwargs
-        assert call_kwargs["json"]["title"] == "[BUG] Authentication token validation failed"
+        assert (
+            call_kwargs["json"]["title"]
+            == "[BUG] Authentication token validation failed"
+        )
 
         # Verify returned issue data
         assert issue_data["github_issue_number"] == 123
-        assert issue_data["github_issue_url"] == "https://github.com/owner/repo/issues/123"
+        assert (
+            issue_data["github_issue_url"] == "https://github.com/owner/repo/issues/123"
+        )
         assert issue_data["classification"] == "server_bug"
 
     def test_create_issue_stores_metadata_in_db(self, temp_db, mock_httpx_post):
@@ -118,17 +127,17 @@ class TestIssueManager:
             status_code=201,
             json=lambda: {
                 "number": 456,
-                "html_url": "https://github.com/owner/repo/issues/456"
+                "html_url": "https://github.com/owner/repo/issues/456",
             },
             headers={},
-            raise_for_status=lambda: None
+            raise_for_status=lambda: None,
         )
 
         manager = IssueManager(
             db_path=temp_db,
             scan_id="test-scan-002",
             github_repo="owner/repo",
-            github_token="ghp_test_token"
+            github_token="ghp_test_token",
         )
 
         manager.create_issue(
@@ -137,7 +146,7 @@ class TestIssueManager:
             body="## Description\nClient sent malformed request...",
             source_log_ids=[2001, 2002],
             source_files=["api/query_handler.py", "api/validators.py"],
-            error_codes=["QUERY-PARAM-001"]
+            error_codes=["QUERY-PARAM-001"],
         )
 
         # Verify metadata was stored in database
@@ -146,7 +155,7 @@ class TestIssueManager:
             "SELECT scan_id, github_issue_number, github_issue_url, "
             "classification, error_codes, source_log_ids, source_files, title "
             "FROM self_monitoring_issues WHERE github_issue_number = ?",
-            (456,)
+            (456,),
         )
         row = cursor.fetchone()
         conn.close()
@@ -172,7 +181,9 @@ class TestIssueManager:
         mock_response.headers = {"X-RateLimit-Remaining": "0"}
 
         def raise_http_error():
-            raise httpx.HTTPStatusError("API rate limit exceeded", request=Mock(), response=mock_response)
+            raise httpx.HTTPStatusError(
+                "API rate limit exceeded", request=Mock(), response=mock_response
+            )
 
         mock_response.raise_for_status = raise_http_error
         mock_httpx_post.return_value = mock_response
@@ -181,7 +192,7 @@ class TestIssueManager:
             db_path=temp_db,
             scan_id="test-scan-007",
             github_repo="owner/repo",
-            github_token="ghp_test_token"
+            github_token="ghp_test_token",
         )
 
         # Should raise exception on failure
@@ -192,14 +203,14 @@ class TestIssueManager:
                 body="Test body",
                 source_log_ids=[9999],
                 source_files=["test.py"],
-                error_codes=[]
+                error_codes=[],
             )
 
         # Should NOT store metadata in database on failure
         conn = sqlite3.connect(temp_db)
         cursor = conn.execute(
             "SELECT COUNT(*) FROM self_monitoring_issues WHERE scan_id = ?",
-            ("test-scan-007",)
+            ("test-scan-007",),
         )
         count = cursor.fetchone()[0]
         conn.close()
@@ -215,17 +226,17 @@ class TestIssueManager:
             status_code=201,
             json=lambda: {
                 "number": 789,
-                "html_url": "https://github.com/owner/repo/issues/789"
+                "html_url": "https://github.com/owner/repo/issues/789",
             },
             headers={},
-            raise_for_status=lambda: None
+            raise_for_status=lambda: None,
         )
 
         manager = IssueManager(
             db_path=temp_db,
             scan_id="test-scan-003",
             github_repo="owner/repo",
-            github_token="ghp_test_token"
+            github_token="ghp_test_token",
         )
 
         manager.create_issue(
@@ -234,14 +245,14 @@ class TestIssueManager:
             body="## Description\nDatabase connection pool exhausted...",
             source_log_ids=[3001],
             source_files=["db/connection_pool.py"],
-            error_codes=["DB-POOL-001"]
+            error_codes=["DB-POOL-001"],
         )
 
         # Retrieve fingerprint from database
         conn = sqlite3.connect(temp_db)
         cursor = conn.execute(
             "SELECT fingerprint FROM self_monitoring_issues WHERE github_issue_number = ?",
-            (789,)
+            (789,),
         )
         row = cursor.fetchone()
         conn.close()
@@ -259,22 +270,20 @@ class TestIssueManager:
         from code_indexer.server.self_monitoring.issue_manager import IssueManager
 
         manager = IssueManager(
-            db_path=temp_db,
-            scan_id="test-scan-004",
-            github_repo="owner/repo"
+            db_path=temp_db, scan_id="test-scan-004", github_repo="owner/repo"
         )
 
         # Compute fingerprint twice with same inputs
         fingerprint1 = manager.compute_fingerprint(
             classification="server_bug",
             source_files=["auth/validator.py"],
-            error_type="ValidationError"
+            error_type="ValidationError",
         )
 
         fingerprint2 = manager.compute_fingerprint(
             classification="server_bug",
             source_files=["auth/validator.py"],
-            error_type="ValidationError"
+            error_type="ValidationError",
         )
 
         assert fingerprint1 == fingerprint2
@@ -284,22 +293,20 @@ class TestIssueManager:
         from code_indexer.server.self_monitoring.issue_manager import IssueManager
 
         manager = IssueManager(
-            db_path=temp_db,
-            scan_id="test-scan-005",
-            github_repo="owner/repo"
+            db_path=temp_db, scan_id="test-scan-005", github_repo="owner/repo"
         )
 
         # Different classification
         fp1 = manager.compute_fingerprint(
             classification="server_bug",
             source_files=["auth/validator.py"],
-            error_type="ValidationError"
+            error_type="ValidationError",
         )
 
         fp2 = manager.compute_fingerprint(
             classification="client_misuse",  # Changed
             source_files=["auth/validator.py"],
-            error_type="ValidationError"
+            error_type="ValidationError",
         )
 
         assert fp1 != fp2
@@ -308,7 +315,7 @@ class TestIssueManager:
         fp3 = manager.compute_fingerprint(
             classification="server_bug",
             source_files=["api/handler.py"],  # Changed
-            error_type="ValidationError"
+            error_type="ValidationError",
         )
 
         assert fp1 != fp3
@@ -318,13 +325,13 @@ class TestIssueManager:
         from code_indexer.server.self_monitoring.issue_manager import IssueManager
 
         manager = IssueManager(
-            db_path=temp_db,
-            scan_id="test-scan-006",
-            github_repo="owner/repo"
+            db_path=temp_db, scan_id="test-scan-006", github_repo="owner/repo"
         )
 
         # Test single error code
-        codes = manager.extract_error_codes("[BUG] Authentication failed [AUTH-TOKEN-001]")
+        codes = manager.extract_error_codes(
+            "[BUG] Authentication failed [AUTH-TOKEN-001]"
+        )
         assert codes == ["AUTH-TOKEN-001"]
 
         # Test multiple error codes
@@ -358,8 +365,8 @@ class TestIssueManager:
                 "1,2,3",
                 "auth/validator.py",
                 "[BUG] Token validation [AUTH-TOKEN-001]",
-                datetime.utcnow().isoformat()
-            )
+                datetime.utcnow().isoformat(),
+            ),
         )
         conn.execute(
             "INSERT INTO self_monitoring_issues "
@@ -376,16 +383,14 @@ class TestIssueManager:
                 "4,5",
                 "api/handler.py",
                 "[CLIENT] Invalid parameter [QUERY-PARAM-001]",
-                datetime.utcnow().isoformat()
-            )
+                datetime.utcnow().isoformat(),
+            ),
         )
         conn.commit()
         conn.close()
 
         manager = IssueManager(
-            db_path=temp_db,
-            scan_id="scan-003",
-            github_repo="owner/repo"
+            db_path=temp_db, scan_id="scan-003", github_repo="owner/repo"
         )
 
         # Retrieve metadata for last 90 days
@@ -406,17 +411,17 @@ class TestIssueManager:
             status_code=201,
             json=lambda: {
                 "number": 999,
-                "html_url": "https://github.com/owner/repo/issues/999"
+                "html_url": "https://github.com/owner/repo/issues/999",
             },
             headers={},
-            raise_for_status=lambda: None
+            raise_for_status=lambda: None,
         )
 
         manager = IssueManager(
             db_path=temp_db,
             scan_id="test-scan-008",
             github_repo="owner/repo",
-            github_token="ghp_test_token"
+            github_token="ghp_test_token",
         )
 
         manager.create_issue(
@@ -425,14 +430,14 @@ class TestIssueManager:
             body="## Description\nCascading failures...",
             source_log_ids=[8001, 8002],
             source_files=["auth/validator.py", "db/connection.py"],
-            error_codes=["AUTH-TOKEN-001", "DB-CONN-002", "CACHE-MISS-003"]
+            error_codes=["AUTH-TOKEN-001", "DB-CONN-002", "CACHE-MISS-003"],
         )
 
         # Verify multiple error codes stored
         conn = sqlite3.connect(temp_db)
         cursor = conn.execute(
             "SELECT error_codes FROM self_monitoring_issues WHERE github_issue_number = ?",
-            (999,)
+            (999,),
         )
         row = cursor.fetchone()
         conn.close()
@@ -462,20 +467,23 @@ class TestIssueManager:
                 status_code=201,
                 json=lambda: {
                     "number": 777,
-                    "html_url": "https://github.com/owner/repo/issues/777"
+                    "html_url": "https://github.com/owner/repo/issues/777",
                 },
                 headers={},
-                raise_for_status=lambda: None
+                raise_for_status=lambda: None,
             )
 
-        with patch("code_indexer.server.self_monitoring.issue_manager.httpx.post", side_effect=mock_post_side_effect):
+        with patch(
+            "code_indexer.server.self_monitoring.issue_manager.httpx.post",
+            side_effect=mock_post_side_effect,
+        ):
             # Create manager WITH server_name parameter
             manager = IssueManager(
                 db_path=temp_db,
                 scan_id="test-scan-010",
                 github_repo="owner/repo",
                 github_token="ghp_test_token",
-                server_name="Production CIDX Server"
+                server_name="Production CIDX Server",
             )
 
             original_body = "## Problem\nDatabase connection timeout occurred."
@@ -486,7 +494,7 @@ class TestIssueManager:
                 body=original_body,
                 source_log_ids=[10001],
                 source_files=["db/connection.py"],
-                error_codes=["DB-CONN-001"]
+                error_codes=["DB-CONN-001"],
             )
 
         # Verify body was captured
@@ -496,7 +504,10 @@ class TestIssueManager:
         assert "**Created by CIDX Server**" in captured_body
         assert "Production CIDX Server" in captured_body
         assert "test-scan-010" in captured_body
-        assert socket.gethostbyname(socket.gethostname()) in captured_body or "Server IP:" in captured_body
+        assert (
+            socket.gethostbyname(socket.gethostname()) in captured_body
+            or "Server IP:" in captured_body
+        )
 
         # Verify original body is still present after the identity section
         assert original_body in captured_body
@@ -514,7 +525,7 @@ class TestIssueManager:
             db_path=temp_db,
             scan_id="test-scan-011",
             github_repo="owner/repo",
-            github_token="ghp_test_token"
+            github_token="ghp_test_token",
         )
 
         # Call the helper method
@@ -552,19 +563,22 @@ class TestIssueManager:
                 status_code=201,
                 json=lambda: {
                     "number": 888,
-                    "html_url": "https://github.com/owner/repo/issues/888"
+                    "html_url": "https://github.com/owner/repo/issues/888",
                 },
                 headers={},
-                raise_for_status=lambda: None
+                raise_for_status=lambda: None,
             )
 
-        with patch("code_indexer.server.self_monitoring.issue_manager.httpx.post", side_effect=mock_post_side_effect):
+        with patch(
+            "code_indexer.server.self_monitoring.issue_manager.httpx.post",
+            side_effect=mock_post_side_effect,
+        ):
             manager = IssueManager(
                 db_path=temp_db,
                 scan_id="test-scan-012",
                 github_repo="owner/repo",
                 github_token="ghp_test_token",
-                server_name="Test Server"
+                server_name="Test Server",
             )
 
             # Body that might be generated by Claude with its own identity section
@@ -581,7 +595,7 @@ class TestIssueManager:
                 body=original_body,
                 source_log_ids=[12001],
                 source_files=["auth/validator.py"],
-                error_codes=["AUTH-001"]
+                error_codes=["AUTH-001"],
             )
 
         # Verify body was captured
@@ -589,7 +603,9 @@ class TestIssueManager:
 
         # Count occurrences of "Created by CIDX Server"
         identity_count = captured_body.count("**Created by CIDX Server**")
-        assert identity_count == 1, f"Expected exactly 1 server identity section, found {identity_count}"
+        assert (
+            identity_count == 1
+        ), f"Expected exactly 1 server identity section, found {identity_count}"
 
         # Verify Scan ID appears exactly once
         scan_id_count = captured_body.count("test-scan-012")
@@ -598,5 +614,9 @@ class TestIssueManager:
         # Verify no duplicate "Server Name" or "Server IP" fields
         server_name_count = captured_body.count("Server Name:")
         server_ip_count = captured_body.count("Server IP:")
-        assert server_name_count == 1, f"Expected 'Server Name:' once, found {server_name_count} times"
-        assert server_ip_count == 1, f"Expected 'Server IP:' once, found {server_ip_count} times"
+        assert (
+            server_name_count == 1
+        ), f"Expected 'Server Name:' once, found {server_name_count} times"
+        assert (
+            server_ip_count == 1
+        ), f"Expected 'Server IP:' once, found {server_ip_count} times"

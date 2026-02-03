@@ -22,14 +22,12 @@ class TestLogScannerModelParameter:
             github_repo="org/repo",
             log_db_path="/fake/logs.db",
             prompt_template="Test",
-            model="opus"
+            model="opus",
         )
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout='{"status": "SUCCESS"}',
-                stderr=""
+                returncode=0, stdout='{"status": "SUCCESS"}', stderr=""
             )
 
             scanner._invoke_claude_cli("test prompt")
@@ -50,14 +48,12 @@ class TestLogScannerModelParameter:
             github_repo="org/repo",
             log_db_path="/fake/logs.db",
             prompt_template="Test",
-            model="sonnet"
+            model="sonnet",
         )
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout='{"status": "SUCCESS"}',
-                stderr=""
+                returncode=0, stdout='{"status": "SUCCESS"}', stderr=""
             )
 
             scanner._invoke_claude_cli("test prompt")
@@ -78,14 +74,12 @@ class TestLogScannerModelParameter:
             github_repo="org/repo",
             log_db_path="/fake/logs.db",
             prompt_template="Test",
-            model="opus"
+            model="opus",
         )
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout='{"status": "SUCCESS"}',
-                stderr=""
+                returncode=0, stdout='{"status": "SUCCESS"}', stderr=""
             )
 
             scanner._invoke_claude_cli("test prompt")
@@ -106,7 +100,7 @@ class TestLogScannerModelParameter:
             github_repo="org/repo",
             log_db_path="/fake/logs.db",
             prompt_template="Test",
-            model="sonnet"
+            model="sonnet",
         )
 
         assert scanner.model == "sonnet"
@@ -118,7 +112,7 @@ class TestLogScannerModelParameter:
             scan_id="scan-123",
             github_repo="org/repo",
             log_db_path="/fake/logs.db",
-            prompt_template="Test"
+            prompt_template="Test",
         )
 
         # Should default to opus
@@ -132,14 +126,12 @@ class TestLogScannerModelParameter:
             github_repo="org/repo",
             log_db_path="/fake/logs.db",
             prompt_template="Test",
-            model="opus"
+            model="opus",
         )
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout='{"status": "SUCCESS"}',
-                stderr=""
+                returncode=0, stdout='{"status": "SUCCESS"}', stderr=""
             )
 
             scanner._invoke_claude_cli("test prompt")

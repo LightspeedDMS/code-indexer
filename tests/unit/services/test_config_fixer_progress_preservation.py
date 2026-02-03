@@ -74,7 +74,9 @@ class TestConfigFixerProgressPreservation:
         config_fixer = ConfigurationRepairer(config_dir)
 
         # Mock GitStateDetector to return stable git state
-        with patch("code_indexer.services.config_fixer.GitStateDetector.detect_git_state") as mock_git:
+        with patch(
+            "code_indexer.services.config_fixer.GitStateDetector.detect_git_state"
+        ) as mock_git:
             mock_git.return_value = {
                 "git_available": True,
                 "current_branch": "main",
@@ -85,7 +87,9 @@ class TestConfigFixerProgressPreservation:
             corrected_metadata = config_fixer._apply_metadata_fixes(
                 metadata=original_metadata.copy(),
                 fixes=[],  # No fixes needed for this test
-                config=Mock(embedding_provider="voyage-3", codebase_dir=str(project_dir)),
+                config=Mock(
+                    embedding_provider="voyage-3", codebase_dir=str(project_dir)
+                ),
             )
 
         # CRITICAL: Indexing progress MUST be preserved
@@ -107,19 +111,23 @@ class TestConfigFixerProgressPreservation:
         # Modify metadata to simulate interrupted indexing
         metadata_file = config_dir / "metadata.json"
         metadata = json.loads(metadata_file.read_text())
-        metadata.update({
-            "files_processed": 20,
-            "chunks_indexed": 60,
-            "status": "in_progress",
-            "current_file_index": 20,
-            "total_files_to_index": 42,
-            "files_to_index": ["file21.py", "file22.py"],  # Remaining files
-        })
+        metadata.update(
+            {
+                "files_processed": 20,
+                "chunks_indexed": 60,
+                "status": "in_progress",
+                "current_file_index": 20,
+                "total_files_to_index": 42,
+                "files_to_index": ["file21.py", "file22.py"],  # Remaining files
+            }
+        )
         metadata_file.write_text(json.dumps(metadata, indent=2))
 
         config_fixer = ConfigurationRepairer(config_dir)
 
-        with patch("code_indexer.services.config_fixer.GitStateDetector.detect_git_state") as mock_git:
+        with patch(
+            "code_indexer.services.config_fixer.GitStateDetector.detect_git_state"
+        ) as mock_git:
             mock_git.return_value = {
                 "git_available": True,
                 "current_branch": "main",
@@ -129,7 +137,9 @@ class TestConfigFixerProgressPreservation:
             corrected_metadata = config_fixer._apply_metadata_fixes(
                 metadata=metadata.copy(),
                 fixes=[],  # No fixes needed for this test
-                config=Mock(embedding_provider="voyage-3", codebase_dir=str(project_dir)),
+                config=Mock(
+                    embedding_provider="voyage-3", codebase_dir=str(project_dir)
+                ),
             )
 
         # CRITICAL: In-progress state MUST be preserved
@@ -147,7 +157,9 @@ class TestConfigFixerProgressPreservation:
 
         config_fixer = ConfigurationRepairer(config_dir)
 
-        with patch("code_indexer.services.config_fixer.GitStateDetector.detect_git_state") as mock_git:
+        with patch(
+            "code_indexer.services.config_fixer.GitStateDetector.detect_git_state"
+        ) as mock_git:
             mock_git.return_value = {
                 "git_available": True,
                 "current_branch": "feature",  # Different branch
@@ -157,7 +169,9 @@ class TestConfigFixerProgressPreservation:
             corrected_metadata = config_fixer._apply_metadata_fixes(
                 metadata=original_metadata.copy(),
                 fixes=[],  # No fixes needed for this test
-                config=Mock(embedding_provider="voyage-3-large", codebase_dir=str(project_dir)),
+                config=Mock(
+                    embedding_provider="voyage-3-large", codebase_dir=str(project_dir)
+                ),
             )
 
         # Configuration fields SHOULD be updated
@@ -172,7 +186,9 @@ class TestConfigFixerProgressPreservation:
         assert corrected_metadata["completed_files"] == ["file1.py", "file2.py"]
         assert corrected_metadata["failed_files"] == []
 
-    def test_fix_config_preserves_interrupted_operation_state(self, temp_indexed_project):
+    def test_fix_config_preserves_interrupted_operation_state(
+        self, temp_indexed_project
+    ):
         """Verify fix-config preserves files_to_index for resumable operations.
 
         files_to_index contains paths for resuming interrupted indexing.
@@ -185,20 +201,24 @@ class TestConfigFixerProgressPreservation:
         # Simulate interrupted indexing with specific file paths
         metadata_file = config_dir / "metadata.json"
         metadata = json.loads(metadata_file.read_text())
-        metadata.update({
-            "status": "in_progress",
-            "files_to_index": [
-                "/old/path/file1.py",  # Potentially invalid path (from old location)
-                "/old/path/file2.py",
-            ],
-            "current_file_index": 10,
-            "total_files_to_index": 12,
-        })
+        metadata.update(
+            {
+                "status": "in_progress",
+                "files_to_index": [
+                    "/old/path/file1.py",  # Potentially invalid path (from old location)
+                    "/old/path/file2.py",
+                ],
+                "current_file_index": 10,
+                "total_files_to_index": 12,
+            }
+        )
         metadata_file.write_text(json.dumps(metadata, indent=2))
 
         config_fixer = ConfigurationRepairer(config_dir)
 
-        with patch("code_indexer.services.config_fixer.GitStateDetector.detect_git_state") as mock_git:
+        with patch(
+            "code_indexer.services.config_fixer.GitStateDetector.detect_git_state"
+        ) as mock_git:
             mock_git.return_value = {
                 "git_available": True,
                 "current_branch": "main",
@@ -208,7 +228,9 @@ class TestConfigFixerProgressPreservation:
             corrected_metadata = config_fixer._apply_metadata_fixes(
                 metadata=metadata.copy(),
                 fixes=[],  # No fixes needed for this test
-                config=Mock(embedding_provider="voyage-3", codebase_dir=str(project_dir)),
+                config=Mock(
+                    embedding_provider="voyage-3", codebase_dir=str(project_dir)
+                ),
             )
 
         # CRITICAL: files_to_index MUST be preserved even with invalid paths
@@ -237,7 +259,9 @@ class TestConfigFixerProgressPreservation:
         # Ensure collection_analyzer is None (simulates filesystem backend)
         assert config_fixer.collection_analyzer is None
 
-        with patch("code_indexer.services.config_fixer.GitStateDetector.detect_git_state") as mock_git:
+        with patch(
+            "code_indexer.services.config_fixer.GitStateDetector.detect_git_state"
+        ) as mock_git:
             mock_git.return_value = {
                 "git_available": True,
                 "current_branch": "main",
@@ -247,7 +271,9 @@ class TestConfigFixerProgressPreservation:
             corrected_metadata = config_fixer._apply_metadata_fixes(
                 metadata=original_metadata.copy(),
                 fixes=[],  # No fixes needed for this test
-                config=Mock(embedding_provider="voyage-3", codebase_dir=str(project_dir)),
+                config=Mock(
+                    embedding_provider="voyage-3", codebase_dir=str(project_dir)
+                ),
             )
 
         # CRITICAL: Indexing progress preserved even without collection_analyzer

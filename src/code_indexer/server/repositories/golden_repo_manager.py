@@ -1696,12 +1696,14 @@ class GoldenRepoManager:
                         valid_versions.append((v_dir, timestamp))
                     except (ValueError, IndexError) as e:
                         # Skip malformed version directories gracefully
-                        logger.warning(format_error_log(
-                            "REPO-GENERAL-040",
-                            f"Skipping malformed version directory: {v_dir} "
-                            f"(expected format: v_TIMESTAMP, error: {e})",
-                            extra={"correlation_id": get_correlation_id()},
-                        ))
+                        logger.warning(
+                            format_error_log(
+                                "REPO-GENERAL-040",
+                                f"Skipping malformed version directory: {v_dir} "
+                                f"(expected format: v_TIMESTAMP, error: {e})",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
                         continue
 
                 if valid_versions:
@@ -1736,9 +1738,7 @@ class GoldenRepoManager:
         # Golden repositories are accessible to all authenticated users
         return user is not None
 
-    def get_golden_repo_branches(
-        self, alias: str
-    ) -> List["GoldenRepoBranchInfo"]:
+    def get_golden_repo_branches(self, alias: str) -> List["GoldenRepoBranchInfo"]:
         """
         Get branches for a golden repository.
 
@@ -1763,9 +1763,9 @@ class GoldenRepoManager:
             raise GoldenRepoError(f"Golden repository '{alias}' not found")
 
         branch_service = GoldenRepoBranchService(self)
-        branches: List[
-            "GoldenRepoBranchInfo"
-        ] = branch_service.get_golden_repo_branches(alias)
+        branches: List["GoldenRepoBranchInfo"] = (
+            branch_service.get_golden_repo_branches(alias)
+        )
         return branches
 
     def add_index_to_golden_repo(

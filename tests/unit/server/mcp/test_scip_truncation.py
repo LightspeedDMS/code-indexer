@@ -260,9 +260,7 @@ class TestApplyScipPayloadTruncation:
         assert "context_cache_handle" not in result[0]
         assert "context_has_more" not in result[0]
 
-    def test_cache_error_returns_unchanged_with_metadata(
-        self, mock_payload_cache
-    ):
+    def test_cache_error_returns_unchanged_with_metadata(self, mock_payload_cache):
         """Test that cache errors leave context unchanged but add metadata."""
         from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
 
@@ -318,9 +316,7 @@ class TestScipDefinitionPayloadTruncation:
     PayloadCache.store() is now sync, so use Mock() not AsyncMock().
     """
 
-    def test_scip_definition_applies_truncation(
-        self, mock_user, mock_payload_cache
-    ):
+    def test_scip_definition_applies_truncation(self, mock_user, mock_payload_cache):
         """Test that scip_definition applies payload truncation to results."""
         from code_indexer.server.mcp.handlers import scip_definition
 
@@ -378,9 +374,7 @@ class TestScipReferencesPayloadTruncation:
     PayloadCache.store() is now sync, so use Mock() not AsyncMock().
     """
 
-    def test_scip_references_applies_truncation(
-        self, mock_user, mock_payload_cache
-    ):
+    def test_scip_references_applies_truncation(self, mock_user, mock_payload_cache):
         """Test that scip_references applies payload truncation to results."""
         from code_indexer.server.mcp.handlers import scip_references
 
@@ -436,9 +430,7 @@ class TestScipDependenciesPayloadTruncation:
     PayloadCache.store() is now sync, so use Mock() not AsyncMock().
     """
 
-    def test_scip_dependencies_applies_truncation(
-        self, mock_user, mock_payload_cache
-    ):
+    def test_scip_dependencies_applies_truncation(self, mock_user, mock_payload_cache):
         """Test that scip_dependencies applies payload truncation to results."""
         from code_indexer.server.mcp.handlers import scip_dependencies
 
@@ -492,9 +484,7 @@ class TestScipDependentsPayloadTruncation:
     PayloadCache.store() is now sync, so use Mock() not AsyncMock().
     """
 
-    def test_scip_dependents_applies_truncation(
-        self, mock_user, mock_payload_cache
-    ):
+    def test_scip_dependents_applies_truncation(self, mock_user, mock_payload_cache):
         """Test that scip_dependents applies payload truncation to results."""
         from code_indexer.server.mcp.handlers import scip_dependents
 

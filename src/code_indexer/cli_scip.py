@@ -54,7 +54,10 @@ def _extract_display_name(full_symbol: str) -> str:
 
 def _is_remote_mode() -> bool:
     """Check if we are in remote mode."""
-    from .mode_detection.command_mode_detector import CommandModeDetector, find_project_root
+    from .mode_detection.command_mode_detector import (
+        CommandModeDetector,
+        find_project_root,
+    )
 
     project_root = find_project_root(Path.cwd())
     detector = CommandModeDetector(project_root)
@@ -744,7 +747,12 @@ def scip_verify(ctx, database_path: str):
 )
 @click.pass_context
 def scip_definition(
-    ctx, symbol: str, limit: int, exact: bool, project: Optional[str], repository: Optional[str]
+    ctx,
+    symbol: str,
+    limit: int,
+    exact: bool,
+    project: Optional[str],
+    repository: Optional[str],
 ):
     """Find where a symbol is defined.
 
@@ -844,7 +852,10 @@ def _run_remote_definition(symbol: str, repository: str, project: Optional[str])
     if not server_url:
         raise click.ClickException("server_url not found in config")
 
-    credentials = {"username": config.get("username"), "password": config.get("password")}
+    credentials = {
+        "username": config.get("username"),
+        "password": config.get("password"),
+    }
 
     async def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())
@@ -882,7 +893,12 @@ def _run_remote_definition(symbol: str, repository: str, project: Optional[str])
 )
 @click.pass_context
 def scip_references(
-    ctx, symbol: str, limit: int, exact: bool, project: Optional[str], repository: Optional[str]
+    ctx,
+    symbol: str,
+    limit: int,
+    exact: bool,
+    project: Optional[str],
+    repository: Optional[str],
 ):
     """Find all references to a symbol.
 
@@ -975,7 +991,9 @@ def scip_references(
     sys.exit(0)
 
 
-def _run_remote_references(symbol: str, repository: str, limit: int, project: Optional[str]):
+def _run_remote_references(
+    symbol: str, repository: str, limit: int, project: Optional[str]
+):
     """Execute remote SCIP references query via SCIPAPIClient."""
     import asyncio
     from code_indexer.api_clients.scip_client import SCIPAPIClient
@@ -985,7 +1003,10 @@ def _run_remote_references(symbol: str, repository: str, limit: int, project: Op
     if not server_url:
         raise click.ClickException("server_url not found in config")
 
-    credentials = {"username": config.get("username"), "password": config.get("password")}
+    credentials = {
+        "username": config.get("username"),
+        "password": config.get("password"),
+    }
     api_limit = limit if limit > 0 else 100
 
     async def run_query():
@@ -1030,7 +1051,13 @@ def _run_remote_references(symbol: str, repository: str, limit: int, project: Op
 )
 @click.pass_context
 def scip_dependencies(
-    ctx, symbol: str, limit: int, depth: int, exact: bool, project: Optional[str], repository: Optional[str]
+    ctx,
+    symbol: str,
+    limit: int,
+    depth: int,
+    exact: bool,
+    project: Optional[str],
+    repository: Optional[str],
 ):
     """Get symbols that this symbol depends on.
 
@@ -1125,7 +1152,9 @@ def scip_dependencies(
     sys.exit(0)
 
 
-def _run_remote_dependencies(symbol: str, repository: str, depth: int, project: Optional[str]):
+def _run_remote_dependencies(
+    symbol: str, repository: str, depth: int, project: Optional[str]
+):
     """Execute remote SCIP dependencies query via SCIPAPIClient."""
     import asyncio
     from code_indexer.api_clients.scip_client import SCIPAPIClient
@@ -1135,7 +1164,10 @@ def _run_remote_dependencies(symbol: str, repository: str, depth: int, project: 
     if not server_url:
         raise click.ClickException("server_url not found in config")
 
-    credentials = {"username": config.get("username"), "password": config.get("password")}
+    credentials = {
+        "username": config.get("username"),
+        "password": config.get("password"),
+    }
 
     async def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())
@@ -1179,7 +1211,13 @@ def _run_remote_dependencies(symbol: str, repository: str, depth: int, project: 
 )
 @click.pass_context
 def scip_dependents(
-    ctx, symbol: str, limit: int, depth: int, exact: bool, project: Optional[str], repository: Optional[str]
+    ctx,
+    symbol: str,
+    limit: int,
+    depth: int,
+    exact: bool,
+    project: Optional[str],
+    repository: Optional[str],
 ):
     """Get symbols that depend on this symbol.
 
@@ -1273,7 +1311,9 @@ def scip_dependents(
     sys.exit(0)
 
 
-def _run_remote_dependents(symbol: str, repository: str, depth: int, project: Optional[str]):
+def _run_remote_dependents(
+    symbol: str, repository: str, depth: int, project: Optional[str]
+):
     """Execute remote SCIP dependents query via SCIPAPIClient."""
     import asyncio
     from code_indexer.api_clients.scip_client import SCIPAPIClient
@@ -1283,7 +1323,10 @@ def _run_remote_dependents(symbol: str, repository: str, depth: int, project: Op
     if not server_url:
         raise click.ClickException("server_url not found in config")
 
-    credentials = {"username": config.get("username"), "password": config.get("password")}
+    credentials = {
+        "username": config.get("username"),
+        "password": config.get("password"),
+    }
 
     async def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())
@@ -1408,7 +1451,9 @@ def scip_impact(
     sys.exit(0)
 
 
-def _run_remote_impact(symbol: str, repository: str, depth: int, project: Optional[str]):
+def _run_remote_impact(
+    symbol: str, repository: str, depth: int, project: Optional[str]
+):
     """Execute remote SCIP impact query via SCIPAPIClient."""
     import asyncio
     from code_indexer.api_clients.scip_client import SCIPAPIClient
@@ -1418,7 +1463,10 @@ def _run_remote_impact(symbol: str, repository: str, depth: int, project: Option
     if not server_url:
         raise click.ClickException("server_url not found in config")
 
-    credentials = {"username": config.get("username"), "password": config.get("password")}
+    credentials = {
+        "username": config.get("username"),
+        "password": config.get("password"),
+    }
 
     async def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())
@@ -1647,7 +1695,11 @@ def scip_callchain(
 
 
 def _run_remote_callchain(
-    from_symbol: str, to_symbol: str, repository: str, max_depth: int, project: Optional[str]
+    from_symbol: str,
+    to_symbol: str,
+    repository: str,
+    max_depth: int,
+    project: Optional[str],
 ):
     """Execute remote SCIP callchain query via SCIPAPIClient."""
     import asyncio
@@ -1658,12 +1710,17 @@ def _run_remote_callchain(
     if not server_url:
         raise click.ClickException("server_url not found in config")
 
-    credentials = {"username": config.get("username"), "password": config.get("password")}
+    credentials = {
+        "username": config.get("username"),
+        "password": config.get("password"),
+    }
 
     async def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())
         try:
-            result = client.callchain(from_symbol, to_symbol, repository, max_depth, project)
+            result = client.callchain(
+                from_symbol, to_symbol, repository, max_depth, project
+            )
             return result
         finally:
             await client.close()
@@ -1704,7 +1761,9 @@ def _display_callchain_results(result: dict, from_symbol: str, to_symbol: str):
             symbol_name = step.get("symbol", "")
             if not symbol_name:
                 symbol_name = step.get("name", "")
-            display_name = _extract_display_name(symbol_name) if symbol_name else "(unknown)"
+            display_name = (
+                _extract_display_name(symbol_name) if symbol_name else "(unknown)"
+            )
             file_path = step.get("file_path", step.get("path", ""))
             line = step.get("line", 0)
             console.print(f"  {j}. {display_name} ({file_path}:{line})", style="dim")
@@ -1725,7 +1784,12 @@ def _display_callchain_results(result: dict, from_symbol: str, to_symbol: str):
 )
 @click.pass_context
 def scip_context(
-    ctx, symbol: str, limit: int, min_score: float, project: Optional[str], repository: Optional[str]
+    ctx,
+    symbol: str,
+    limit: int,
+    min_score: float,
+    project: Optional[str],
+    repository: Optional[str],
 ):
     """Get smart context for a symbol - curated file list with relevance.
 
@@ -1807,7 +1871,9 @@ def scip_context(
     sys.exit(0)
 
 
-def _run_remote_context(symbol: str, repository: str, limit: int, project: Optional[str]):
+def _run_remote_context(
+    symbol: str, repository: str, limit: int, project: Optional[str]
+):
     """Execute remote SCIP context query via SCIPAPIClient."""
     import asyncio
     from code_indexer.api_clients.scip_client import SCIPAPIClient
@@ -1817,7 +1883,10 @@ def _run_remote_context(symbol: str, repository: str, limit: int, project: Optio
     if not server_url:
         raise click.ClickException("server_url not found in config")
 
-    credentials = {"username": config.get("username"), "password": config.get("password")}
+    credentials = {
+        "username": config.get("username"),
+        "password": config.get("password"),
+    }
 
     async def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())

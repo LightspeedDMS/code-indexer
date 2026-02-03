@@ -140,10 +140,13 @@ class GitStateManager:
             )
         except subprocess.CalledProcessError as e:
             error_msg = f"git reset --hard failed: {e.stderr if hasattr(e, 'stderr') else str(e)}"
-            logger.error(format_error_log(
-                "CACHE-GENERAL-020",
-                error_msg, extra={"correlation_id": get_correlation_id()}
-            ))
+            logger.error(
+                format_error_log(
+                    "CACHE-GENERAL-020",
+                    error_msg,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise GitStateError(error_msg)
 
         # Execute git clean -fd
@@ -157,10 +160,13 @@ class GitStateManager:
             error_msg = (
                 f"git clean -fd failed: {e.stderr if hasattr(e, 'stderr') else str(e)}"
             )
-            logger.error(format_error_log(
-                "CACHE-GENERAL-021",
-                error_msg, extra={"correlation_id": get_correlation_id()}
-            ))
+            logger.error(
+                format_error_log(
+                    "CACHE-GENERAL-021",
+                    error_msg,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise GitStateError(error_msg)
 
         # Verify clean state
@@ -174,10 +180,13 @@ class GitStateManager:
         if final_status.stdout.strip():
             # Still dirty after reset/clean - should never happen
             error_msg = f"Repository not clean after reset/clean: {final_status.stdout}"
-            logger.error(format_error_log(
-                "CACHE-GENERAL-022",
-                error_msg, extra={"correlation_id": get_correlation_id()}
-            ))
+            logger.error(
+                format_error_log(
+                    "CACHE-GENERAL-022",
+                    error_msg,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise GitStateError(error_msg)
 
         logger.info(
@@ -548,11 +557,13 @@ class GitStateManager:
                 extra={"correlation_id": get_correlation_id()},
             )
         except subprocess.CalledProcessError as e:
-            logger.error(format_error_log(
-                "CACHE-GENERAL-023",
-                f"Failed to return to branch {branch_name}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "CACHE-GENERAL-023",
+                    f"Failed to return to branch {branch_name}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
 
 class TokenAuthenticator:
@@ -618,18 +629,22 @@ class TokenAuthenticator:
                 )
                 return token_data.token
         except Exception as e:
-            logger.warning(format_error_log(
-                "DEPLOY-GENERAL-022",
-                f"Failed to load token from encrypted storage: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-022",
+                    f"Failed to load token from encrypted storage: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # No token found
-        logger.warning(format_error_log(
-            "DEPLOY-GENERAL-023",
-            f"No {platform} token found in environment or file storage",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "DEPLOY-GENERAL-023",
+                f"No {platform} token found in environment or file storage",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return None
 
 

@@ -320,7 +320,9 @@ class TestContentLimitsConfigValidation:
         config.content_limits_config = ContentLimitsConfig(chars_per_token=11)
 
         manager = ServerConfigManager(str(tmp_path))
-        with pytest.raises(ValueError, match="chars_per_token must be between 1 and 10"):
+        with pytest.raises(
+            ValueError, match="chars_per_token must be between 1 and 10"
+        ):
             manager.validate_config(config)
 
     def test_chars_per_token_validation_minimum(self, tmp_path):
@@ -335,7 +337,9 @@ class TestContentLimitsConfigValidation:
         config.content_limits_config = ContentLimitsConfig(chars_per_token=0)
 
         manager = ServerConfigManager(str(tmp_path))
-        with pytest.raises(ValueError, match="chars_per_token must be between 1 and 10"):
+        with pytest.raises(
+            ValueError, match="chars_per_token must be between 1 and 10"
+        ):
             manager.validate_config(config)
 
     def test_file_content_max_tokens_validation_range(self, tmp_path):

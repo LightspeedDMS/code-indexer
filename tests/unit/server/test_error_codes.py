@@ -22,7 +22,7 @@ def test_error_definition_structure():
         code="TEST-001",
         description="Test error",
         severity=Severity.ERROR,
-        action="Test action"
+        action="Test action",
     )
 
     # Verify fields exist and have correct values

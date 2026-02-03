@@ -225,9 +225,7 @@ class TestQueryRoutingErrorHandling:
             manager = SemanticQueryManager()
 
             # Act: Query repo without config
-            results = manager.search(
-                repo_path=repo_path, query="test query", limit=10
-            )
+            results = manager.search(repo_path=repo_path, query="test query", limit=10)
 
             # Assert: Should default to single handler
             mock_single.assert_called_once()

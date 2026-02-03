@@ -204,12 +204,17 @@ class TestGitPullUpdaterDefenseInDepth:
             updater.update()
 
         # Verify sequence: status check -> reset -> pull
-        assert ["git", "status", "--porcelain"] in call_sequence, (
-            "Should check for modifications first"
-        )
-        assert ["git", "reset", "--hard", "HEAD"] in call_sequence, (
-            "Should reset modifications"
-        )
+        assert [
+            "git",
+            "status",
+            "--porcelain",
+        ] in call_sequence, "Should check for modifications first"
+        assert [
+            "git",
+            "reset",
+            "--hard",
+            "HEAD",
+        ] in call_sequence, "Should reset modifications"
         assert ["git", "pull"] in call_sequence, "Should execute git pull"
 
         # Verify order: reset comes before pull
@@ -295,9 +300,12 @@ class TestGitPullUpdaterDefenseInDepth:
             updater.update()
 
         # Verify reset was NOT called
-        assert ["git", "reset", "--hard", "HEAD"] not in call_sequence, (
-            "Should NOT reset when working tree is clean"
-        )
+        assert [
+            "git",
+            "reset",
+            "--hard",
+            "HEAD",
+        ] not in call_sequence, "Should NOT reset when working tree is clean"
 
         # Verify pull was still called
         assert ["git", "pull"] in call_sequence, "Should still execute git pull"
@@ -325,9 +333,7 @@ class TestGitPullUpdaterDefenseInDepth:
             call_sequence.append(cmd)
 
             if cmd == ["git", "status", "--porcelain"]:
-                return MagicMock(
-                    returncode=0, stdout=modification_output, stderr=""
-                )
+                return MagicMock(returncode=0, stdout=modification_output, stderr="")
 
             if cmd == ["git", "reset", "--hard", "HEAD"]:
                 return MagicMock(

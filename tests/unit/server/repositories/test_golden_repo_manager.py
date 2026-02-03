@@ -1178,7 +1178,10 @@ class TestGoldenRepoManager:
                 # First call should be cidx init
                 first_call = mock_run.call_args_list[0]
                 first_command = first_call[0][0]
-                assert first_command == ["cidx", "init"], f"Expected first command to be ['cidx', 'init'], got {first_command}"
+                assert first_command == [
+                    "cidx",
+                    "init",
+                ], f"Expected first command to be ['cidx', 'init'], got {first_command}"
 
                 # Second call should be cidx index
                 second_call = mock_run.call_args_list[1]
@@ -1233,7 +1236,9 @@ class TestGoldenRepoManager:
                     )
                 else:
                     # cidx index succeeds
-                    return MagicMock(returncode=0, stdout="Indexed successfully", stderr="")
+                    return MagicMock(
+                        returncode=0, stdout="Indexed successfully", stderr=""
+                    )
 
             with patch("subprocess.run", side_effect=mock_subprocess_run) as mock_run:
                 # Should NOT raise an error - "already exists" is acceptable
@@ -1297,7 +1302,9 @@ class TestGoldenRepoManager:
                 with pytest.raises(GoldenRepoError) as exc_info:
                     background_worker()
 
-                assert "Failed to initialize repo before indexing" in str(exc_info.value)
+                assert "Failed to initialize repo before indexing" in str(
+                    exc_info.value
+                )
                 assert "Permission denied" in str(exc_info.value)
 
 

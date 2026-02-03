@@ -373,7 +373,9 @@ class TestFileIdentifier:
         git_dir.mkdir()
         subprocess.run(["git", "init"], cwd=git_dir, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.name", "Test"], cwd=git_dir, check=True)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=git_dir, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"], cwd=git_dir, check=True
+        )
         subprocess.run(
             ["git", "remote", "add", "origin", "https://github.com/user/evolution.git"],
             cwd=git_dir,

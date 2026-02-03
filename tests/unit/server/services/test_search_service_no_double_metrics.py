@@ -165,6 +165,6 @@ class TestSearchServiceNoDoubleMetrics:
                     search_service.search_repository("test-repo", search_request)
 
         # Verify no metrics calls from search_repository() itself
-        assert mock_api_metrics.increment_semantic_search.call_count == 0, (
-            "search_repository() should NOT call api_metrics_service.increment_semantic_search()!"
-        )
+        assert (
+            mock_api_metrics.increment_semantic_search.call_count == 0
+        ), "search_repository() should NOT call api_metrics_service.increment_semantic_search()!"

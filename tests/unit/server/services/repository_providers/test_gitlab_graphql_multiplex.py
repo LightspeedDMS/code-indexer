@@ -48,7 +48,7 @@ class TestBuildMultiplexQuery:
         query = gitlab_provider._build_multiplex_query(full_paths)
 
         assert "query {" in query
-        assert "project0: project(fullPath: \"group/repo1\")" in query
+        assert 'project0: project(fullPath: "group/repo1")' in query
         assert "repository {" in query
         assert "tree {" in query
         assert "lastCommit {" in query
@@ -62,9 +62,9 @@ class TestBuildMultiplexQuery:
 
         query = gitlab_provider._build_multiplex_query(full_paths)
 
-        assert "project0: project(fullPath: \"group/repo1\")" in query
-        assert "project1: project(fullPath: \"group/repo2\")" in query
-        assert "project2: project(fullPath: \"group/repo3\")" in query
+        assert 'project0: project(fullPath: "group/repo1")' in query
+        assert 'project1: project(fullPath: "group/repo2")' in query
+        assert 'project2: project(fullPath: "group/repo3")' in query
 
     def test_handles_special_characters_in_paths(self, gitlab_provider):
         """Should properly escape special characters in project paths."""
@@ -83,7 +83,7 @@ class TestBuildMultiplexQuery:
 
         # Verify all 50 projects included
         for i in range(50):
-            assert f"project{i}: project(fullPath: \"group/repo{i}\")" in query
+            assert f'project{i}: project(fullPath: "group/repo{i}")' in query
 
 
 class TestParseMultiplexResponse:
@@ -157,13 +157,7 @@ class TestParseMultiplexResponse:
         """Should return None values when commit data is missing."""
         full_paths = ["group/repo1"]
         graphql_response = {
-            "data": {
-                "project0": {
-                    "repository": {
-                        "tree": None  # No commits
-                    }
-                }
-            }
+            "data": {"project0": {"repository": {"tree": None}}}  # No commits
         }
 
         result = gitlab_provider._parse_multiplex_response(graphql_response, full_paths)

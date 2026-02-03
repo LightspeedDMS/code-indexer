@@ -119,8 +119,9 @@ class TestCredentialHandlersNoAttributeError:
             content = json.loads(result["content"][0]["text"])
             # Response should have either success or error, not AttributeError message
             if "error" in content:
-                assert "has no attribute 'api_key_manager'" not in content["error"], \
-                    "Should not have AttributeError for api_key_manager"
+                assert (
+                    "has no attribute 'api_key_manager'" not in content["error"]
+                ), "Should not have AttributeError for api_key_manager"
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
@@ -137,8 +138,9 @@ class TestCredentialHandlersNoAttributeError:
             assert "content" in result, "Handler should return MCP-compliant response"
             content = json.loads(result["content"][0]["text"])
             if "error" in content:
-                assert "has no attribute 'mcp_credential_manager'" not in content["error"], \
-                    "Should not have AttributeError for mcp_credential_manager"
+                assert (
+                    "has no attribute 'mcp_credential_manager'" not in content["error"]
+                ), "Should not have AttributeError for mcp_credential_manager"
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
@@ -155,8 +157,9 @@ class TestCredentialHandlersNoAttributeError:
             assert "content" in result, "Handler should return MCP-compliant response"
             content = json.loads(result["content"][0]["text"])
             if "error" in content:
-                assert "has no attribute 'mcp_credential_manager'" not in content["error"], \
-                    "Should not have AttributeError for mcp_credential_manager"
+                assert (
+                    "has no attribute 'mcp_credential_manager'" not in content["error"]
+                ), "Should not have AttributeError for mcp_credential_manager"
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
@@ -173,8 +176,9 @@ class TestCredentialHandlersNoAttributeError:
             assert "content" in result, "Handler should return MCP-compliant response"
             content = json.loads(result["content"][0]["text"])
             if "error" in content:
-                assert "has no attribute 'mcp_credential_manager'" not in content["error"], \
-                    "Should not have AttributeError for mcp_credential_manager"
+                assert (
+                    "has no attribute 'mcp_credential_manager'" not in content["error"]
+                ), "Should not have AttributeError for mcp_credential_manager"
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
@@ -203,8 +207,9 @@ class TestAdminCredentialHandlersNoAttributeError:
             assert "content" in result, "Handler should return MCP-compliant response"
             content = json.loads(result["content"][0]["text"])
             if "error" in content:
-                assert "has no attribute 'mcp_credential_manager'" not in content["error"], \
-                    "Should not have AttributeError for mcp_credential_manager"
+                assert (
+                    "has no attribute 'mcp_credential_manager'" not in content["error"]
+                ), "Should not have AttributeError for mcp_credential_manager"
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
@@ -213,12 +218,15 @@ class TestAdminCredentialHandlersNoAttributeError:
         handler = HANDLER_REGISTRY["admin_create_user_mcp_credential"]
 
         try:
-            result = handler({"username": "testuser", "description": "Test"}, admin_user)
+            result = handler(
+                {"username": "testuser", "description": "Test"}, admin_user
+            )
             assert "content" in result, "Handler should return MCP-compliant response"
             content = json.loads(result["content"][0]["text"])
             if "error" in content:
-                assert "has no attribute 'mcp_credential_manager'" not in content["error"], \
-                    "Should not have AttributeError for mcp_credential_manager"
+                assert (
+                    "has no attribute 'mcp_credential_manager'" not in content["error"]
+                ), "Should not have AttributeError for mcp_credential_manager"
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
@@ -227,12 +235,15 @@ class TestAdminCredentialHandlersNoAttributeError:
         handler = HANDLER_REGISTRY["admin_delete_user_mcp_credential"]
 
         try:
-            result = handler({"username": "testuser", "credential_id": "cred-123"}, admin_user)
+            result = handler(
+                {"username": "testuser", "credential_id": "cred-123"}, admin_user
+            )
             assert "content" in result, "Handler should return MCP-compliant response"
             content = json.loads(result["content"][0]["text"])
             if "error" in content:
-                assert "has no attribute 'mcp_credential_manager'" not in content["error"], \
-                    "Should not have AttributeError for mcp_credential_manager"
+                assert (
+                    "has no attribute 'mcp_credential_manager'" not in content["error"]
+                ), "Should not have AttributeError for mcp_credential_manager"
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
@@ -245,7 +256,8 @@ class TestAdminCredentialHandlersNoAttributeError:
             assert "content" in result, "Handler should return MCP-compliant response"
             content = json.loads(result["content"][0]["text"])
             if "error" in content:
-                assert "has no attribute 'mcp_credential_manager'" not in content["error"], \
-                    "Should not have AttributeError for mcp_credential_manager"
+                assert (
+                    "has no attribute 'mcp_credential_manager'" not in content["error"]
+                ), "Should not have AttributeError for mcp_credential_manager"
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")

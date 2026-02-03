@@ -59,9 +59,9 @@ class TestNoDuplicateFindScipFiles:
         Then zero matches are found
         """
         scip_queries_path = SERVER_DIR / "routers" / "scip_queries.py"
-        assert scip_queries_path.exists(), (
-            f"scip_queries.py not found at {scip_queries_path}"
-        )
+        assert (
+            scip_queries_path.exists()
+        ), f"scip_queries.py not found at {scip_queries_path}"
 
         content = scip_queries_path.read_text()
 
@@ -90,9 +90,9 @@ class TestNoDuplicateFindScipFiles:
         Then exactly one implementation is found
         """
         service_path = SERVER_DIR / "services" / "scip_query_service.py"
-        assert service_path.exists(), (
-            f"scip_query_service.py not found at {service_path}"
-        )
+        assert (
+            service_path.exists()
+        ), f"scip_query_service.py not found at {service_path}"
 
         content = service_path.read_text()
 
@@ -212,9 +212,9 @@ class TestSCIPQueryServiceExists:
         ]
 
         for method_name in required_methods:
-            assert hasattr(SCIPQueryService, method_name), (
-                f"SCIPQueryService must have '{method_name}' method"
-            )
+            assert hasattr(
+                SCIPQueryService, method_name
+            ), f"SCIPQueryService must have '{method_name}' method"
 
     def test_scip_query_service_has_access_control_method(self):
         """Verify SCIPQueryService has get_accessible_repos method."""

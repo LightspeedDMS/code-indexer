@@ -323,9 +323,9 @@ class TestGetFileContent:
             )
 
         # Verify content_hash is in metadata
-        assert "content_hash" in result["metadata"], (
-            "content_hash must be present in metadata for optimistic locking"
-        )
+        assert (
+            "content_hash" in result["metadata"]
+        ), "content_hash must be present in metadata for optimistic locking"
 
         # Verify hash matches expected SHA-256 of full file content
         assert result["metadata"]["content_hash"] == expected_hash, (

@@ -71,7 +71,7 @@ class TestGetRepositoryMetadataBugFix:
 
         # Verify it uses alias_name for lookup (GlobalRegistry field), not alias (GoldenRepoManager field)
         assert (
-            'alias_name' in source
+            "alias_name" in source
         ), "get_repository_metadata should look up by 'alias_name' (GlobalRegistry field)"
 
     def test_get_repository_metadata_error_message_says_global_not_golden(self):
@@ -137,15 +137,19 @@ class TestGetRepositoryMetadataFunctional:
         golden_repos_dir = str(tmp_path / "golden-repos")
 
         # Patch at the origin locations (since imports are lazy inside the method)
-        with patch(
-            "code_indexer.server.utils.registry_factory.get_server_global_registry",
-            return_value=mock_registry,
-        ), patch(
-            "code_indexer.global_repos.alias_manager.AliasManager",
-            return_value=mock_alias_manager_instance,
-        ), patch(
-            "code_indexer.server.services.stats_service._get_golden_repos_dir",
-            return_value=golden_repos_dir,
+        with (
+            patch(
+                "code_indexer.server.utils.registry_factory.get_server_global_registry",
+                return_value=mock_registry,
+            ),
+            patch(
+                "code_indexer.global_repos.alias_manager.AliasManager",
+                return_value=mock_alias_manager_instance,
+            ),
+            patch(
+                "code_indexer.server.services.stats_service._get_golden_repos_dir",
+                return_value=golden_repos_dir,
+            ),
         ):
             # This should find the repo using alias_name lookup
             result = service.get_repository_metadata("my-repo-global")
@@ -159,7 +163,9 @@ class TestGetRepositoryMetadataFunctional:
 
             # Verify correct methods were called
             mock_registry.list_global_repos.assert_called_once()
-            mock_alias_manager_instance.read_alias.assert_called_once_with("my-repo-global")
+            mock_alias_manager_instance.read_alias.assert_called_once_with(
+                "my-repo-global"
+            )
 
     def test_get_repository_metadata_raises_for_nonexistent_global_repo(self, tmp_path):
         """
@@ -177,12 +183,15 @@ class TestGetRepositoryMetadataFunctional:
         golden_repos_dir = str(tmp_path / "golden-repos")
 
         # Patch at origin location
-        with patch(
-            "code_indexer.server.utils.registry_factory.get_server_global_registry",
-            return_value=mock_registry,
-        ), patch(
-            "code_indexer.server.services.stats_service._get_golden_repos_dir",
-            return_value=golden_repos_dir,
+        with (
+            patch(
+                "code_indexer.server.utils.registry_factory.get_server_global_registry",
+                return_value=mock_registry,
+            ),
+            patch(
+                "code_indexer.server.services.stats_service._get_golden_repos_dir",
+                return_value=golden_repos_dir,
+            ),
         ):
             with pytest.raises(FileNotFoundError) as exc_info:
                 service.get_repository_metadata("nonexistent-global")
@@ -225,15 +234,19 @@ class TestGetRepositoryMetadataFunctional:
         golden_repos_dir = str(tmp_path / "golden-repos")
 
         # Patch at origin locations
-        with patch(
-            "code_indexer.server.utils.registry_factory.get_server_global_registry",
-            return_value=mock_registry,
-        ), patch(
-            "code_indexer.global_repos.alias_manager.AliasManager",
-            return_value=mock_alias_manager_instance,
-        ), patch(
-            "code_indexer.server.services.stats_service._get_golden_repos_dir",
-            return_value=golden_repos_dir,
+        with (
+            patch(
+                "code_indexer.server.utils.registry_factory.get_server_global_registry",
+                return_value=mock_registry,
+            ),
+            patch(
+                "code_indexer.global_repos.alias_manager.AliasManager",
+                return_value=mock_alias_manager_instance,
+            ),
+            patch(
+                "code_indexer.server.services.stats_service._get_golden_repos_dir",
+                return_value=golden_repos_dir,
+            ),
         ):
             with pytest.raises(FileNotFoundError) as exc_info:
                 service.get_repository_metadata("orphan-repo-global")
@@ -241,7 +254,8 @@ class TestGetRepositoryMetadataFunctional:
             # Error message should mention alias
             error_msg = str(exc_info.value)
             assert (
-                "alias" in error_msg.lower() or "orphan-repo-global" in error_msg.lower()
+                "alias" in error_msg.lower()
+                or "orphan-repo-global" in error_msg.lower()
             ), f"Error should mention alias or repo name, got: {error_msg}"
 
     def test_get_repository_metadata_returns_correct_structure(self, tmp_path):
@@ -277,15 +291,19 @@ class TestGetRepositoryMetadataFunctional:
         golden_repos_dir = str(tmp_path / "golden-repos")
 
         # Patch at the origin locations
-        with patch(
-            "code_indexer.server.utils.registry_factory.get_server_global_registry",
-            return_value=mock_registry,
-        ), patch(
-            "code_indexer.global_repos.alias_manager.AliasManager",
-            return_value=mock_alias_manager_instance,
-        ), patch(
-            "code_indexer.server.services.stats_service._get_golden_repos_dir",
-            return_value=golden_repos_dir,
+        with (
+            patch(
+                "code_indexer.server.utils.registry_factory.get_server_global_registry",
+                return_value=mock_registry,
+            ),
+            patch(
+                "code_indexer.global_repos.alias_manager.AliasManager",
+                return_value=mock_alias_manager_instance,
+            ),
+            patch(
+                "code_indexer.server.services.stats_service._get_golden_repos_dir",
+                return_value=golden_repos_dir,
+            ),
         ):
             result = service.get_repository_metadata("test-repo-global")
 
@@ -298,9 +316,9 @@ class TestGetRepositoryMetadataFunctional:
                 "default_branch",
                 "clone_path",
             }
-            assert set(result.keys()) == expected_keys, (
-                f"Expected keys {expected_keys}, got {set(result.keys())}"
-            )
+            assert (
+                set(result.keys()) == expected_keys
+            ), f"Expected keys {expected_keys}, got {set(result.keys())}"
 
             # Verify specific values
             assert result["created_at"] == "2024-06-15T10:30:00Z"

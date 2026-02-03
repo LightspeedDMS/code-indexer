@@ -48,12 +48,18 @@ class TestDashboardApiMetricsIntegration:
         mock_activated_manager.list_activated_repositories.return_value = []
 
         # Patch the service methods
-        with patch.object(
-            service, "_get_background_job_manager", return_value=mock_job_manager
-        ), patch.object(
-            service, "_get_golden_repo_manager", return_value=mock_golden_manager
-        ), patch.object(
-            service, "_get_activated_repo_manager", return_value=mock_activated_manager
+        with (
+            patch.object(
+                service, "_get_background_job_manager", return_value=mock_job_manager
+            ),
+            patch.object(
+                service, "_get_golden_repo_manager", return_value=mock_golden_manager
+            ),
+            patch.object(
+                service,
+                "_get_activated_repo_manager",
+                return_value=mock_activated_manager,
+            ),
         ):
             stats_data = service.get_stats_partial("testuser", "24h", "30d")
 

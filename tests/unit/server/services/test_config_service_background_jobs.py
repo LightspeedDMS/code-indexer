@@ -26,6 +26,7 @@ class TestConfigServiceBackgroundJobsSettings:
         """Clean up test environment."""
         import shutil
         import os
+
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
@@ -105,4 +106,6 @@ class TestConfigServiceBackgroundJobsSettings:
 
         settings = self.config_service.get_all_settings()
         assert settings["background_jobs"]["max_concurrent_background_jobs"] == 12
-        assert isinstance(settings["background_jobs"]["max_concurrent_background_jobs"], int)
+        assert isinstance(
+            settings["background_jobs"]["max_concurrent_background_jobs"], int
+        )

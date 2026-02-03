@@ -43,7 +43,7 @@ class IssueManager:
         scan_id: str,
         github_repo: str,
         github_token: Optional[str] = None,
-        server_name: Optional[str] = None
+        server_name: Optional[str] = None,
     ):
         """
         Initialize IssueManager.
@@ -94,7 +94,7 @@ class IssueManager:
             # Method 2: Determine local IP by checking which interface would route to external address
             # This doesn't actually connect, just determines the local endpoint
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(('8.8.8.8', 80))
+            s.connect(("8.8.8.8", 80))
             local_ip = s.getsockname()[0]
             s.close()
 
@@ -117,7 +117,7 @@ class IssueManager:
         body: str,
         source_log_ids: List[int],
         source_files: List[str],
-        error_codes: List[str]
+        error_codes: List[str],
     ) -> Dict:
         """
         Create GitHub issue and store metadata in database.
@@ -156,8 +156,7 @@ class IssueManager:
 
         # Create issue via GitHub REST API
         github_issue_number, github_issue_url = self._create_github_issue_via_api(
-            title=title,
-            body=body
+            title=title, body=body
         )
 
         # Compute fingerprint for deduplication
@@ -165,7 +164,7 @@ class IssueManager:
         fingerprint = self.compute_fingerprint(
             classification=classification,
             source_files=source_files,
-            error_type=error_type
+            error_type=error_type,
         )
 
         # Store metadata in database
@@ -177,20 +176,16 @@ class IssueManager:
             error_codes=error_codes,
             fingerprint=fingerprint,
             source_log_ids=source_log_ids,
-            source_files=source_files
+            source_files=source_files,
         )
 
         return {
             "github_issue_number": github_issue_number,
             "github_issue_url": github_issue_url,
-            "classification": classification
+            "classification": classification,
         }
 
-    def _create_github_issue_via_api(
-        self,
-        title: str,
-        body: str
-    ) -> tuple:
+    def _create_github_issue_via_api(self, title: str, body: str) -> tuple:
         """
         Create GitHub issue via REST API.
 
@@ -210,7 +205,9 @@ class IssueManager:
         # Parse github_repo to extract owner and repo
         parts = self.github_repo.split("/")
         if len(parts) != 2:
-            raise RuntimeError(f"Invalid github_repo format: {self.github_repo} (expected owner/repo)")
+            raise RuntimeError(
+                f"Invalid github_repo format: {self.github_repo} (expected owner/repo)"
+            )
 
         owner, repo = parts
 
@@ -266,7 +263,7 @@ class IssueManager:
         error_codes: List[str],
         fingerprint: str,
         source_log_ids: List[int],
-        source_files: List[str]
+        source_files: List[str],
     ) -> None:
         """
         Store issue metadata in SQLite database.
@@ -303,18 +300,15 @@ class IssueManager:
                     source_log_ids_str,
                     source_files_str,
                     title,
-                    datetime.utcnow().isoformat()
-                )
+                    datetime.utcnow().isoformat(),
+                ),
             )
             conn.commit()
         finally:
             conn.close()
 
     def compute_fingerprint(
-        self,
-        classification: str,
-        source_files: List[str],
-        error_type: str
+        self, classification: str, source_files: List[str], error_type: str
     ) -> str:
         """
         Compute deterministic fingerprint for Tier 2 deduplication.
@@ -334,9 +328,7 @@ class IssueManager:
 
         # Concatenate components
         fingerprint_input = (
-            f"{classification}|"
-            f"{','.join(sorted_files)}|"
-            f"{error_type}"
+            f"{classification}|" f"{','.join(sorted_files)}|" f"{error_type}"
         )
 
         # Compute SHA256 hash
@@ -356,7 +348,7 @@ class IssueManager:
             Error type string (e.g., "ValidationError", "ConnectionError")
         """
         # Pattern for common error types (matches IOError, FileNotFoundError, etc.)
-        error_pattern = r'\b(\w+Error|\w+Exception|\w+Failure)\b'
+        error_pattern = r"\b(\w+Error|\w+Exception|\w+Failure)\b"
 
         # Try title first
         match = re.search(error_pattern, title)
@@ -364,7 +356,7 @@ class IssueManager:
             return match.group(1)
 
         # Try body (limited search to avoid performance issues)
-        match = re.search(error_pattern, body[:self._ERROR_SEARCH_LIMIT])
+        match = re.search(error_pattern, body[: self._ERROR_SEARCH_LIMIT])
         if match:
             return match.group(1)
 
@@ -384,7 +376,7 @@ class IssueManager:
             List of error codes found (may be empty)
         """
         # Error code pattern: [XXX-YYY-NNN]
-        pattern = r'\[([A-Z]+-[A-Z]+-\d+)\]'
+        pattern = r"\[([A-Z]+-[A-Z]+-\d+)\]"
         matches = re.findall(pattern, text)
         return matches
 
@@ -415,20 +407,22 @@ class IssueManager:
                 "FROM self_monitoring_issues "
                 "WHERE datetime(created_at) >= datetime('now', '-' || ? || ' days') "
                 "ORDER BY created_at DESC",
-                (days,)
+                (days,),
             )
 
             results = []
             for row in cursor.fetchall():
-                results.append({
-                    "github_issue_number": row[0],
-                    "github_issue_url": row[1],
-                    "classification": row[2],
-                    "error_codes": row[3],  # CSV string
-                    "fingerprint": row[4],
-                    "title": row[5],
-                    "created_at": row[6]
-                })
+                results.append(
+                    {
+                        "github_issue_number": row[0],
+                        "github_issue_url": row[1],
+                        "classification": row[2],
+                        "error_codes": row[3],  # CSV string
+                        "fingerprint": row[4],
+                        "title": row[5],
+                        "created_at": row[6],
+                    }
+                )
 
             return results
         finally:

@@ -197,6 +197,14 @@ class ConfigService:
                 "trace_sample_rate": config.telemetry_config.trace_sample_rate,
                 "deployment_environment": config.telemetry_config.deployment_environment,
             },
+            # Langfuse configuration (Story #136)
+            "langfuse": {
+                "enabled": config.langfuse_config.enabled if config.langfuse_config else False,
+                "public_key": config.langfuse_config.public_key if config.langfuse_config else "",
+                "secret_key": config.langfuse_config.secret_key if config.langfuse_config else "",
+                "host": config.langfuse_config.host if config.langfuse_config else "https://cloud.langfuse.com",
+                "auto_trace_enabled": config.langfuse_config.auto_trace_enabled if config.langfuse_config else False,
+            },
             # Claude Delegation configuration (Story #721)
             "claude_delegation": self._get_delegation_settings(),
             # Story #3 - Configuration Consolidation: Migrated settings
@@ -343,6 +351,8 @@ class ConfigService:
             self._update_scip_cleanup_setting(config, key, value)
         elif category == "telemetry":
             self._update_telemetry_setting(config, key, value)
+        elif category == "langfuse":
+            self._update_langfuse_setting(config, key, value)
         # Story #3 - Configuration Consolidation: New categories
         elif category == "search_limits":
             self._update_search_limits_setting(config, key, value)
@@ -597,6 +607,29 @@ class ConfigService:
             telemetry.deployment_environment = str(value)
         else:
             raise ValueError(f"Unknown telemetry setting: {key}")
+
+    def _update_langfuse_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a langfuse setting (Story #136)."""
+        from ..utils.config_manager import LangfuseConfig
+
+        # Initialize langfuse_config if None
+        if config.langfuse_config is None:
+            config.langfuse_config = LangfuseConfig()
+        langfuse = config.langfuse_config
+        if key == "enabled":
+            langfuse.enabled = value in ["true", True, "True", "1"]
+        elif key == "public_key":
+            langfuse.public_key = str(value)
+        elif key == "secret_key":
+            langfuse.secret_key = str(value)
+        elif key == "host":
+            langfuse.host = str(value)
+        elif key == "auto_trace_enabled":
+            langfuse.auto_trace_enabled = value in ["true", True, "True", "1"]
+        else:
+            raise ValueError(f"Unknown langfuse setting: {key}")
 
     def _update_search_limits_setting(
         self, config: ServerConfig, key: str, value: Any

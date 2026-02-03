@@ -65,6 +65,7 @@ class ToolDocLoader:
         "ssh",
         "guides",
         "cicd",
+        "tracing",
     }
 
     def __init__(self, docs_dir: Path):
@@ -268,10 +269,7 @@ class ToolDocLoader:
                 continue  # Skip non-tool docs (guides without schema)
             if doc.category not in by_category:
                 by_category[doc.category] = []
-            by_category[doc.category].append({
-                "name": doc.name,
-                "tl_dr": doc.tl_dr
-            })
+            by_category[doc.category].append({"name": doc.name, "tl_dr": doc.tl_dr})
         return by_category
 
     def get_category_overview(self) -> List[Dict[str, Any]]:
@@ -321,12 +319,14 @@ class ToolDocLoader:
             else:
                 key_tools = sorted([t.name for t in tools])[:3]
 
-            overview.append({
-                "name": category_name,
-                "description": description,
-                "key_tools": key_tools,
-                "tool_count": len(tools),
-            })
+            overview.append(
+                {
+                    "name": category_name,
+                    "description": description,
+                    "key_tools": key_tools,
+                    "tool_count": len(tools),
+                }
+            )
 
         # Sort by category name
         return sorted(overview, key=lambda x: x["name"])

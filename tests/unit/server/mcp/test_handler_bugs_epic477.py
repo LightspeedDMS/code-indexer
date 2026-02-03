@@ -23,9 +23,7 @@ def mock_user():
 class TestListFilesBug:
     """Test list_files handler bug - wrong method parameters."""
 
-    def test_list_files_expects_query_params_object_not_primitives(
-        self, mock_user
-    ):
+    def test_list_files_expects_query_params_object_not_primitives(self, mock_user):
         """
         BUG FIX VERIFICATION: Handler must pass FileListQueryParams object.
 
@@ -99,9 +97,7 @@ class TestGetFileContentBug:
             file_service.get_file_content
         ), "get_file_content should be callable"
 
-    def test_get_file_content_handler_needs_working_service_method(
-        self, mock_user
-    ):
+    def test_get_file_content_handler_needs_working_service_method(self, mock_user):
         """
         Test that handler can call get_file_content successfully when implemented.
 

@@ -18,7 +18,10 @@ from typing import Dict, Any, Optional, Callable, TYPE_CHECKING, List
 from dataclasses import dataclass, asdict
 
 if TYPE_CHECKING:
-    from code_indexer.server.utils.config_manager import ServerResourceConfig, BackgroundJobsConfig
+    from code_indexer.server.utils.config_manager import (
+        ServerResourceConfig,
+        BackgroundJobsConfig,
+    )
     from code_indexer.server.storage.sqlite_backends import BackgroundJobsSqliteBackend
 
 
@@ -251,7 +254,9 @@ class BackgroundJobManager:
             # Bug #133: Check for duplicate operation on same repo
             # This check MUST be inside the lock to prevent TOCTOU race conditions
             if repo_alias:
-                conflict_job_id = self._check_operation_conflict(operation_type, repo_alias)
+                conflict_job_id = self._check_operation_conflict(
+                    operation_type, repo_alias
+                )
                 if conflict_job_id:
                     raise DuplicateJobError(operation_type, repo_alias, conflict_job_id)
 
@@ -441,7 +446,9 @@ class BackgroundJobManager:
         """
         # Story #26: Wait for a slot in the semaphore (blocks if limit reached)
         # Job remains in PENDING state while waiting
-        logging.debug(f"Job {job_id} waiting for execution slot (current limit: {self.max_concurrent_jobs})")
+        logging.debug(
+            f"Job {job_id} waiting for execution slot (current limit: {self.max_concurrent_jobs})"
+        )
         self._job_semaphore.acquire()
 
         try:

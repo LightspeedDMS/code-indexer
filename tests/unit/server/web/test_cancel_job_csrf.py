@@ -42,18 +42,20 @@ class TestCancelJobCSRFRemoval:
             "message": "Job cancelled successfully",
         }
 
-        with patch(
-            "src.code_indexer.server.web.routes._require_admin_session",
-            return_value=mock_session,
-        ), patch(
-            "src.code_indexer.server.web.routes._get_background_job_manager",
-            return_value=mock_job_manager,
-        ), patch(
-            "src.code_indexer.server.web.routes._create_jobs_page_response"
-        ) as mock_response:
-            mock_response.return_value = HTMLResponse(
-                content="<html>Success</html>"
-            )
+        with (
+            patch(
+                "src.code_indexer.server.web.routes._require_admin_session",
+                return_value=mock_session,
+            ),
+            patch(
+                "src.code_indexer.server.web.routes._get_background_job_manager",
+                return_value=mock_job_manager,
+            ),
+            patch(
+                "src.code_indexer.server.web.routes._create_jobs_page_response"
+            ) as mock_response,
+        ):
+            mock_response.return_value = HTMLResponse(content="<html>Success</html>")
 
             # Call cancel_job (no CSRF token parameter needed)
             result = cancel_job(
@@ -63,9 +65,7 @@ class TestCancelJobCSRFRemoval:
 
             # Should succeed without CSRF validation
             assert result is not None
-            mock_job_manager.cancel_job.assert_called_once_with(
-                "test-job-123", "admin"
-            )
+            mock_job_manager.cancel_job.assert_called_once_with("test-job-123", "admin")
             mock_response.assert_called_once()
             # Verify success_message passed (not error_message)
             call_kwargs = mock_response.call_args[1]
@@ -86,12 +86,15 @@ class TestCancelJobCSRFRemoval:
         mock_request.cookies = {}
 
         # Mock _require_admin_session returns None (not authenticated)
-        with patch(
-            "src.code_indexer.server.web.routes._require_admin_session",
-            return_value=None,
-        ), patch(
-            "src.code_indexer.server.web.routes._create_login_redirect"
-        ) as mock_redirect:
+        with (
+            patch(
+                "src.code_indexer.server.web.routes._require_admin_session",
+                return_value=None,
+            ),
+            patch(
+                "src.code_indexer.server.web.routes._create_login_redirect"
+            ) as mock_redirect,
+        ):
             mock_redirect.return_value = HTMLResponse(
                 content="<html>Redirect to login</html>"
             )

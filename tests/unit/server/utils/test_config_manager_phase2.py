@@ -230,9 +230,7 @@ class TestConfigServicePhase2Integration:
             service = ConfigService(tmpdir)
 
             # Update memory thresholds
-            service.update_setting(
-                "health", "memory_warning_threshold_percent", 75.0
-            )
+            service.update_setting("health", "memory_warning_threshold_percent", 75.0)
             settings = service.get_all_settings()
             assert settings["health"]["memory_warning_threshold_percent"] == 75.0
 

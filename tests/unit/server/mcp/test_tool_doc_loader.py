@@ -13,7 +13,17 @@ def temp_docs_dir(tmp_path):
     """Create a temporary tool_docs directory with category subdirectories."""
     docs_dir = tmp_path / "tool_docs"
     docs_dir.mkdir()
-    for category in ["search", "git", "scip", "files", "admin", "repos", "ssh", "guides", "cicd"]:
+    for category in [
+        "search",
+        "git",
+        "scip",
+        "files",
+        "admin",
+        "repos",
+        "ssh",
+        "guides",
+        "cicd",
+    ]:
         (docs_dir / category).mkdir()
     return docs_dir
 
@@ -58,7 +68,10 @@ class TestToolDocLoaderBasicLoading:
 
     def test_get_description_raises_for_missing_tool(self, temp_docs_dir):
         """get_description() should raise ToolDocNotFoundError for missing tool."""
-        from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader, ToolDocNotFoundError
+        from code_indexer.server.mcp.tool_doc_loader import (
+            ToolDocLoader,
+            ToolDocNotFoundError,
+        )
 
         loader = ToolDocLoader(temp_docs_dir)
         loader._loaded = True
@@ -109,7 +122,10 @@ class TestToolDocLoaderPermissionAndParams:
         loader = ToolDocLoader(temp_docs_dir)
         loader.load_all_docs()
 
-        assert loader.get_param_description("param_tool", "query_text") == "The search query."
+        assert (
+            loader.get_param_description("param_tool", "query_text")
+            == "The search query."
+        )
         assert loader.get_param_description("param_tool", "limit") == "Max results."
 
     def test_get_param_description_returns_none_for_missing(self, temp_docs_dir):

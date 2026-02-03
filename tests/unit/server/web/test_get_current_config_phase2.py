@@ -29,12 +29,19 @@ class TestGetCurrentConfigPhase2Sections:
             "password_security": {},
         }
 
-        with patch('src.code_indexer.server.services.config_service.get_config_service', return_value=mock_config_service):
+        with patch(
+            "src.code_indexer.server.services.config_service.get_config_service",
+            return_value=mock_config_service,
+        ):
             config = _get_current_config()
 
         assert "mcp_session" in config, "mcp_session section should exist in config"
-        assert "session_ttl_seconds" in config["mcp_session"], "session_ttl_seconds should exist"
-        assert "cleanup_interval_seconds" in config["mcp_session"], "cleanup_interval_seconds should exist"
+        assert (
+            "session_ttl_seconds" in config["mcp_session"]
+        ), "session_ttl_seconds should exist"
+        assert (
+            "cleanup_interval_seconds" in config["mcp_session"]
+        ), "cleanup_interval_seconds should exist"
         # Check default values
         assert config["mcp_session"]["session_ttl_seconds"] == 3600
         assert config["mcp_session"]["cleanup_interval_seconds"] == 900
@@ -52,7 +59,10 @@ class TestGetCurrentConfigPhase2Sections:
             "password_security": {},
         }
 
-        with patch('src.code_indexer.server.services.config_service.get_config_service', return_value=mock_config_service):
+        with patch(
+            "src.code_indexer.server.services.config_service.get_config_service",
+            return_value=mock_config_service,
+        ):
             config = _get_current_config()
 
         assert "health" in config, "health section should exist in config"
@@ -78,7 +88,10 @@ class TestGetCurrentConfigPhase2Sections:
             "password_security": {},
         }
 
-        with patch('src.code_indexer.server.services.config_service.get_config_service', return_value=mock_config_service):
+        with patch(
+            "src.code_indexer.server.services.config_service.get_config_service",
+            return_value=mock_config_service,
+        ):
             config = _get_current_config()
 
         assert "scip" in config, "scip section should exist in config"
@@ -103,7 +116,10 @@ class TestGetCurrentConfigPhase2Sections:
             "password_security": {},
         }
 
-        with patch('src.code_indexer.server.services.config_service.get_config_service', return_value=mock_config_service):
+        with patch(
+            "src.code_indexer.server.services.config_service.get_config_service",
+            return_value=mock_config_service,
+        ):
             config = _get_current_config()
 
         assert "git_timeouts" in config, "git_timeouts section should exist in config"
@@ -126,10 +142,15 @@ class TestGetCurrentConfigPhase2Sections:
             "password_security": {},
         }
 
-        with patch('src.code_indexer.server.services.config_service.get_config_service', return_value=mock_config_service):
+        with patch(
+            "src.code_indexer.server.services.config_service.get_config_service",
+            return_value=mock_config_service,
+        ):
             config = _get_current_config()
 
-        assert "error_handling" in config, "error_handling section should exist in config"
+        assert (
+            "error_handling" in config
+        ), "error_handling section should exist in config"
         assert "max_retry_attempts" in config["error_handling"]
         assert "base_retry_delay_seconds" in config["error_handling"]
         assert "max_retry_delay_seconds" in config["error_handling"]
@@ -151,7 +172,10 @@ class TestGetCurrentConfigPhase2Sections:
             "password_security": {},
         }
 
-        with patch('src.code_indexer.server.services.config_service.get_config_service', return_value=mock_config_service):
+        with patch(
+            "src.code_indexer.server.services.config_service.get_config_service",
+            return_value=mock_config_service,
+        ):
             config = _get_current_config()
 
         assert "api_limits" in config, "api_limits section should exist in config"
@@ -182,7 +206,10 @@ class TestGetCurrentConfigPhase2Sections:
             "password_security": {},
         }
 
-        with patch('src.code_indexer.server.services.config_service.get_config_service', return_value=mock_config_service):
+        with patch(
+            "src.code_indexer.server.services.config_service.get_config_service",
+            return_value=mock_config_service,
+        ):
             config = _get_current_config()
 
         assert "web_security" in config, "web_security section should exist in config"
@@ -204,15 +231,45 @@ class TestGetCurrentConfigPhase2Sections:
             "timeouts": {},
             "password_security": {},
             # Persisted Phase 2 values
-            "mcp_session": {"session_ttl_seconds": 7200, "cleanup_interval_seconds": 600},
-            "health": {"memory_warning_threshold_percent": 75.0, "memory_critical_threshold_percent": 85.0, "disk_warning_threshold_percent": 75.0, "disk_critical_threshold_percent": 85.0, "cpu_sustained_threshold_percent": 90.0},
-            "scip": {"indexing_timeout_seconds": 7200, "scip_generation_timeout_seconds": 1200, "temporal_stale_threshold_days": 14},
-            "error_handling": {"max_retry_attempts": 5, "base_retry_delay_seconds": 0.2, "max_retry_delay_seconds": 120.0},
-            "api_limits": {"default_file_read_lines": 1000, "max_file_read_lines": 10000, "default_diff_lines": 1000, "max_diff_lines": 10000, "default_log_commits": 100, "max_log_commits": 1000},
-            "web_security": {"csrf_max_age_seconds": 1200, "web_session_timeout_seconds": 43200},
+            "mcp_session": {
+                "session_ttl_seconds": 7200,
+                "cleanup_interval_seconds": 600,
+            },
+            "health": {
+                "memory_warning_threshold_percent": 75.0,
+                "memory_critical_threshold_percent": 85.0,
+                "disk_warning_threshold_percent": 75.0,
+                "disk_critical_threshold_percent": 85.0,
+                "cpu_sustained_threshold_percent": 90.0,
+            },
+            "scip": {
+                "indexing_timeout_seconds": 7200,
+                "scip_generation_timeout_seconds": 1200,
+                "temporal_stale_threshold_days": 14,
+            },
+            "error_handling": {
+                "max_retry_attempts": 5,
+                "base_retry_delay_seconds": 0.2,
+                "max_retry_delay_seconds": 120.0,
+            },
+            "api_limits": {
+                "default_file_read_lines": 1000,
+                "max_file_read_lines": 10000,
+                "default_diff_lines": 1000,
+                "max_diff_lines": 10000,
+                "default_log_commits": 100,
+                "max_log_commits": 1000,
+            },
+            "web_security": {
+                "csrf_max_age_seconds": 1200,
+                "web_session_timeout_seconds": 43200,
+            },
         }
 
-        with patch('src.code_indexer.server.services.config_service.get_config_service', return_value=mock_config_service):
+        with patch(
+            "src.code_indexer.server.services.config_service.get_config_service",
+            return_value=mock_config_service,
+        ):
             config = _get_current_config()
 
         # Verify persisted values are used
@@ -237,7 +294,10 @@ class TestGetCurrentConfigPhase2Sections:
             "password_security": {},
         }
 
-        with patch('src.code_indexer.server.services.config_service.get_config_service', return_value=mock_config_service):
+        with patch(
+            "src.code_indexer.server.services.config_service.get_config_service",
+            return_value=mock_config_service,
+        ):
             config = _get_current_config()
 
         # All P0/P1 Phase 2 sections
@@ -267,7 +327,10 @@ class TestGetCurrentConfigPhase2Sections:
             "password_security": {},
         }
 
-        with patch('src.code_indexer.server.services.config_service.get_config_service', return_value=mock_config_service):
+        with patch(
+            "src.code_indexer.server.services.config_service.get_config_service",
+            return_value=mock_config_service,
+        ):
             config = _get_current_config()
 
         assert "auth" in config, "auth section should exist in config"
@@ -284,20 +347,28 @@ class TestValidateConfigSectionPhase2:
         from src.code_indexer.server.web.routes import _validate_config_section
 
         # Valid value within range (1-24 hours)
-        result = _validate_config_section("auth", {"oauth_extension_threshold_hours": 4})
+        result = _validate_config_section(
+            "auth", {"oauth_extension_threshold_hours": 4}
+        )
         assert result is None, "Valid oauth threshold should pass validation"
 
-        result = _validate_config_section("auth", {"oauth_extension_threshold_hours": 1})
+        result = _validate_config_section(
+            "auth", {"oauth_extension_threshold_hours": 1}
+        )
         assert result is None, "Min oauth threshold (1) should pass validation"
 
-        result = _validate_config_section("auth", {"oauth_extension_threshold_hours": 24})
+        result = _validate_config_section(
+            "auth", {"oauth_extension_threshold_hours": 24}
+        )
         assert result is None, "Max oauth threshold (24) should pass validation"
 
     def test_auth_section_rejects_oauth_threshold_below_min(self):
         """Test auth section validation rejects oauth_extension_threshold_hours below minimum."""
         from src.code_indexer.server.web.routes import _validate_config_section
 
-        result = _validate_config_section("auth", {"oauth_extension_threshold_hours": 0})
+        result = _validate_config_section(
+            "auth", {"oauth_extension_threshold_hours": 0}
+        )
         assert result is not None, "OAuth threshold below min should fail validation"
         assert "1" in result and "24" in result, "Error should mention valid range"
 
@@ -305,7 +376,9 @@ class TestValidateConfigSectionPhase2:
         """Test auth section validation rejects oauth_extension_threshold_hours above maximum."""
         from src.code_indexer.server.web.routes import _validate_config_section
 
-        result = _validate_config_section("auth", {"oauth_extension_threshold_hours": 25})
+        result = _validate_config_section(
+            "auth", {"oauth_extension_threshold_hours": 25}
+        )
         assert result is not None, "OAuth threshold above max should fail validation"
         assert "1" in result and "24" in result, "Error should mention valid range"
 
@@ -313,7 +386,9 @@ class TestValidateConfigSectionPhase2:
         """Test auth section validation rejects non-numeric oauth_extension_threshold_hours."""
         from src.code_indexer.server.web.routes import _validate_config_section
 
-        result = _validate_config_section("auth", {"oauth_extension_threshold_hours": "invalid"})
+        result = _validate_config_section(
+            "auth", {"oauth_extension_threshold_hours": "invalid"}
+        )
         assert result is not None, "Non-numeric oauth threshold should fail validation"
         assert "valid number" in result.lower(), "Error should mention valid number"
 
@@ -351,6 +426,10 @@ class TestValidateConfigSectionPhase2:
         """Test health section validation rejects non-numeric metrics_cache_ttl_seconds."""
         from src.code_indexer.server.web.routes import _validate_config_section
 
-        result = _validate_config_section("health", {"metrics_cache_ttl_seconds": "invalid"})
-        assert result is not None, "Non-numeric metrics cache TTL should fail validation"
+        result = _validate_config_section(
+            "health", {"metrics_cache_ttl_seconds": "invalid"}
+        )
+        assert (
+            result is not None
+        ), "Non-numeric metrics cache TTL should fail validation"
         assert "valid number" in result.lower(), "Error should mention valid number"

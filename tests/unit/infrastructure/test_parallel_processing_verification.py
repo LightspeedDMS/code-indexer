@@ -406,8 +406,8 @@ class TestParallelProcessingPerformance:
         assert not errors, f"Atomic operations failed: {errors}"
 
         successful_operations = [r for r in results if r[0] in ["hide", "visible"]]
-        assert (
-            len(successful_operations) == len(threads)
+        assert len(successful_operations) == len(
+            threads
         ), f"Expected {len(threads)} successful operations, got {len(successful_operations)}"
 
         print(

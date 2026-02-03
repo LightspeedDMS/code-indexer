@@ -152,10 +152,9 @@ class RepositoryDiscoveryService:
             raise
         except Exception as e:
             error_msg = f"Unexpected error during repository discovery: {str(e)}"
-            logger.error(format_error_log(
-                "GIT-GENERAL-055",
-                error_msg),
-                extra=get_log_extra("GIT-GENERAL-055")
+            logger.error(
+                format_error_log("GIT-GENERAL-055", error_msg),
+                extra=get_log_extra("GIT-GENERAL-055"),
             )
             raise RepositoryDiscoveryError(error_msg) from e
 
@@ -208,10 +207,9 @@ class RepositoryDiscoveryService:
             raise
         except Exception as e:
             error_msg = f"Failed to validate repository access: {str(e)}"
-            logger.error(format_error_log(
-                "GIT-GENERAL-056",
-                error_msg),
-                extra=get_log_extra("GIT-GENERAL-056")
+            logger.error(
+                format_error_log("GIT-GENERAL-056", error_msg),
+                extra=get_log_extra("GIT-GENERAL-056"),
             )
             raise RepositoryDiscoveryError(error_msg) from e
 
@@ -258,9 +256,8 @@ class RepositoryDiscoveryService:
             raise
         except Exception as e:
             error_msg = f"Failed to get repository suggestions: {str(e)}"
-            logger.error(format_error_log(
-                "GIT-GENERAL-057",
-                error_msg),
-                extra=get_log_extra("GIT-GENERAL-057")
+            logger.error(
+                format_error_log("GIT-GENERAL-057", error_msg),
+                extra=get_log_extra("GIT-GENERAL-057"),
             )
             raise RepositoryDiscoveryError(error_msg) from e

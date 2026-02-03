@@ -13,7 +13,6 @@ import threading
 from pathlib import Path
 
 
-
 class TestClaudeCliManagerSingleton:
     """Tests for AC1: Create Global ClaudeCliManager Singleton with Getter Function."""
 
@@ -173,9 +172,7 @@ class TestClaudeCliManagerSingleton:
                 errors.append(e)
 
         # Start multiple threads trying to initialize concurrently
-        threads = [
-            threading.Thread(target=initialize_manager) for _ in range(10)
-        ]
+        threads = [threading.Thread(target=initialize_manager) for _ in range(10)]
         for t in threads:
             t.start()
         for t in threads:

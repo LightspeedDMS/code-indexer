@@ -133,11 +133,13 @@ class RipgrepInstaller:
 
         # Check architecture
         if platform.machine() != "x86_64":
-            logger.warning(format_error_log(
-                "REPO-GENERAL-045",
-                f"Ripgrep binary only available for x86_64, found {platform.machine()}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "REPO-GENERAL-045",
+                    f"Ripgrep binary only available for x86_64, found {platform.machine()}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return False
 
         try:
@@ -162,7 +164,10 @@ class RipgrepInstaller:
                     self._safe_extract_tar(tar, temp_dir)
 
                 # Find rg binary in extracted files
-                extracted_dir = Path(temp_dir) / f"ripgrep-{self.RIPGREP_VERSION}-x86_64-unknown-linux-musl"
+                extracted_dir = (
+                    Path(temp_dir)
+                    / f"ripgrep-{self.RIPGREP_VERSION}-x86_64-unknown-linux-musl"
+                )
                 rg_binary = extracted_dir / "rg"
 
                 # Create ~/.local/bin directory
@@ -191,21 +196,25 @@ class RipgrepInstaller:
                 )
                 return True
             else:
-                logger.error(format_error_log(
-                    "REPO-GENERAL-046",
-                    "Ripgrep installation verification failed",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "REPO-GENERAL-046",
+                        "Ripgrep installation verification failed",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return False
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-047",
-                f"Ripgrep installation failed: {e}",
-                extra={
-                    "correlation_id": get_correlation_id(),
-                    "error": str(e),
-                    "manual_install_url": f"https://github.com/BurntSushi/ripgrep/releases/tag/{self.RIPGREP_VERSION}",
-                },
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-047",
+                    f"Ripgrep installation failed: {e}",
+                    extra={
+                        "correlation_id": get_correlation_id(),
+                        "error": str(e),
+                        "manual_install_url": f"https://github.com/BurntSushi/ripgrep/releases/tag/{self.RIPGREP_VERSION}",
+                    },
+                )
+            )
             return False

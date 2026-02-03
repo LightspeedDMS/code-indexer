@@ -150,6 +150,7 @@ class SSHKeyManager:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         with self._get_lock():
@@ -214,6 +215,7 @@ class SSHKeyManager:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         with self._get_lock():
@@ -287,6 +289,7 @@ class SSHKeyManager:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         with self._get_lock():
@@ -353,6 +356,7 @@ class SSHKeyManager:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         return self._list_keys_internal()
@@ -405,6 +409,7 @@ class SSHKeyManager:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         if self._use_sqlite and self._sqlite_backend is not None:

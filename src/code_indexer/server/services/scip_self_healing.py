@@ -261,12 +261,14 @@ Status values:
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
-            logger.error(format_error_log(
-                "MCP-GENERAL-147",
-                f"Job {job_id}: Claude Code timed out after "
-                f"{self.CLAUDE_TIMEOUT_SECONDS}s for {project_path}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-147",
+                    f"Job {job_id}: Claude Code timed out after "
+                    f"{self.CLAUDE_TIMEOUT_SECONDS}s for {project_path}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise
 
     def _parse_claude_response(
@@ -278,12 +280,14 @@ Status values:
 
         status = response_data.get("status")
         if status not in ("progress", "no_progress", "unresolvable"):
-            logger.error(format_error_log(
-                "MCP-GENERAL-148",
-                f"Job {job_id}: Invalid status '{status}' in Claude response "
-                f"for {project_path}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-148",
+                    f"Job {job_id}: Invalid status '{status}' in Claude response "
+                    f"for {project_path}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return ClaudeResponse(
                 status="unresolvable",
                 actions_taken=[],
@@ -376,22 +380,26 @@ Status values:
                 reasoning=f"Claude Code timed out after {self.CLAUDE_TIMEOUT_SECONDS}s",
             )
         except json.JSONDecodeError as e:
-            logger.error(format_error_log(
-                "MCP-GENERAL-149",
-                f"Job {job_id}: Failed to parse Claude response for {project_path}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-149",
+                    f"Job {job_id}: Failed to parse Claude response for {project_path}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return ClaudeResponse(
                 status="unresolvable",
                 actions_taken=[],
                 reasoning=f"Failed to parse Claude response: {str(e)}",
             )
         except (OSError, IOError) as e:
-            logger.error(format_error_log(
-                "MCP-GENERAL-150",
-                f"Job {job_id}: I/O error invoking Claude Code for {project_path}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-150",
+                    f"Job {job_id}: I/O error invoking Claude Code for {project_path}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return ClaudeResponse(
                 status="unresolvable",
                 actions_taken=[],
@@ -436,11 +444,13 @@ Status values:
                 or job.language_resolution_status is None
                 or project_path not in job.language_resolution_status
             ):
-                logger.error(format_error_log(
-                    "MCP-GENERAL-151",
-                    f"Job {job_id}: Cannot handle response for unknown project {project_path}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "MCP-GENERAL-151",
+                        f"Job {job_id}: Cannot handle response for unknown project {project_path}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return False
 
             project_status = job.language_resolution_status[project_path]
@@ -476,12 +486,14 @@ Status values:
             else:
                 job.language_resolution_status[project_path]["attempts"] += 1
                 job.language_resolution_status[project_path]["status"] = "resolving"
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-152",
-                    f"Job {job_id}: SCIP retry failed for {project_path}, "
-                    f"attempt {job.language_resolution_status[project_path]['attempts']}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-152",
+                        f"Job {job_id}: SCIP retry failed for {project_path}, "
+                        f"attempt {job.language_resolution_status[project_path]['attempts']}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
             self.job_manager._persist_jobs()
 
         if not scip_success:
@@ -503,12 +515,14 @@ Status values:
             # Check if already at max attempts BEFORE incrementing
             if project_status["attempts"] >= self.MAX_RESOLUTION_ATTEMPTS:
                 project_status["status"] = "unresolvable"
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-153",
-                    f"Job {job_id}: Project {project_path} marked unresolvable "
-                    f"after {project_status['attempts']} attempts",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-153",
+                        f"Job {job_id}: Project {project_path} marked unresolvable "
+                        f"after {project_status['attempts']} attempts",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
             else:
                 project_status["attempts"] += 1
                 project_status["status"] = "resolving"
@@ -533,11 +547,13 @@ Status values:
                 return
 
             job.language_resolution_status[project_path]["status"] = "unresolvable"
-            logger.warning(format_error_log(
-                "MCP-GENERAL-154",
-                f"Job {job_id}: Project {project_path} marked unresolvable: {reasoning}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-154",
+                    f"Job {job_id}: Project {project_path} marked unresolvable: {reasoning}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             self.job_manager._persist_jobs()
 
     def _retry_scip_for_project(self, job_id: str, project_path: str) -> bool:
@@ -559,11 +575,13 @@ Status values:
                 or job.language_resolution_status is None
                 or project_path not in job.language_resolution_status
             ):
-                logger.error(format_error_log(
-                    "MCP-GENERAL-155",
-                    f"Job {job_id}: Cannot retry SCIP for unknown project {project_path}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "MCP-GENERAL-155",
+                        f"Job {job_id}: Cannot retry SCIP for unknown project {project_path}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return False
 
             project_status = job.language_resolution_status[project_path]
@@ -586,11 +604,13 @@ Status values:
             # Get project directory (remove trailing slash for Path operations)
             project_dir = self.repo_root / project_path.rstrip("/")
             if not project_dir.exists():
-                logger.error(format_error_log(
-                    "MCP-GENERAL-156",
-                    f"Job {job_id}: Project directory not found: {project_dir}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "MCP-GENERAL-156",
+                        f"Job {job_id}: Project directory not found: {project_dir}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return False
 
             # SCIP output directory
@@ -600,11 +620,13 @@ Status values:
             # Get appropriate indexer for language
             indexer = generator._indexers.get(language)
             if not indexer:
-                logger.error(format_error_log(
-                    "MCP-GENERAL-157",
-                    f"Job {job_id}: No SCIP indexer available for {language}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "MCP-GENERAL-157",
+                        f"Job {job_id}: No SCIP indexer available for {language}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return False
 
             # Generate SCIP index for this specific project
@@ -617,21 +639,25 @@ Status values:
                 )
                 return True
             else:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-158",
-                    f"Job {job_id}: SCIP retry failed for {project_path}: "
-                    f"{indexer_result.stderr}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-158",
+                        f"Job {job_id}: SCIP retry failed for {project_path}: "
+                        f"{indexer_result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return False
 
         except Exception as e:
-            logger.error(format_error_log(
-                "MCP-GENERAL-159",
-                f"Job {job_id}: Exception during SCIP retry for {project_path}: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-159",
+                    f"Job {job_id}: Exception during SCIP retry for {project_path}: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return False
 
     async def _enqueue_project_for_retry(self, job_id: str, project_path: str) -> None:
@@ -643,11 +669,13 @@ Status values:
             project_path: Project relative path
         """
         if not self.resolution_queue:
-            logger.warning(format_error_log(
-                "MCP-GENERAL-160",
-                f"Job {job_id}: Resolution queue not available, cannot re-queue {project_path}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-160",
+                    f"Job {job_id}: Resolution queue not available, cannot re-queue {project_path}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return
 
         # Get project details from job for re-queuing
@@ -658,11 +686,13 @@ Status values:
                 or job.language_resolution_status is None
                 or project_path not in job.language_resolution_status
             ):
-                logger.error(format_error_log(
-                    "MCP-GENERAL-161",
-                    f"Job {job_id}: Cannot re-queue unknown project {project_path}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "MCP-GENERAL-161",
+                        f"Job {job_id}: Cannot re-queue unknown project {project_path}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return
 
             project_status = job.language_resolution_status[project_path]
@@ -683,12 +713,14 @@ Status values:
                 extra={"correlation_id": get_correlation_id()},
             )
         except Exception as e:
-            logger.error(format_error_log(
-                "MCP-GENERAL-162",
-                f"Job {job_id}: Failed to re-queue {project_path}: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-162",
+                    f"Job {job_id}: Failed to re-queue {project_path}: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
     def _record_partial_success_details(
         self, job, resolved: int, total_projects: int
@@ -738,19 +770,23 @@ Status values:
         with self.job_manager._lock:
             job = self.job_manager.jobs.get(job_id)
             if not job:
-                logger.error(format_error_log(
-                    "MCP-GENERAL-163",
-                    f"Job {job_id} not found for completion determination",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "MCP-GENERAL-163",
+                        f"Job {job_id} not found for completion determination",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return JobStatus.FAILED
 
             if not job.language_resolution_status:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-164",
-                    f"Job {job_id} has no language_resolution_status",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-164",
+                        f"Job {job_id} has no language_resolution_status",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return JobStatus.FAILED
 
             # Count outcomes
@@ -769,12 +805,14 @@ Status values:
 
             # Warn if projects still pending
             if pending > 0:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-165",
-                    f"Job {job_id}: {pending} projects still in non-terminal state "
-                    "(should not happen at completion)",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-165",
+                        f"Job {job_id}: {pending} projects still in non-terminal state "
+                        "(should not happen at completion)",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
 
             logger.info(
                 f"Job {job_id}: Resolution summary - "
@@ -801,11 +839,13 @@ Status values:
 
             else:
                 job.failure_reason = "No projects could be resolved"
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-166",
-                    f"Job {job_id}: {job.failure_reason}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-166",
+                        f"Job {job_id}: {job.failure_reason}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 final_status = JobStatus.FAILED
 
             # Story #659 Priority 4: Trigger PR creation on successful resolution
@@ -882,11 +922,13 @@ Status values:
             # Get repo_alias from job
             repo_alias = job.repo_alias
             if not repo_alias:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-167",
-                    f"Job {job_id}: Cannot create PR - no repo_alias in job params",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-167",
+                        f"Job {job_id}: Cannot create PR - no repo_alias in job params",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return
 
             # Load server config and create GitStateManager
@@ -918,9 +960,11 @@ Status values:
 
         except Exception as e:
             # PR creation errors should NOT block job completion
-            logger.error(format_error_log(
-                "MCP-GENERAL-168",
-                f"Job {job_id}: Failed to create PR (non-blocking): {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-168",
+                    f"Job {job_id}: Failed to create PR (non-blocking): {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )

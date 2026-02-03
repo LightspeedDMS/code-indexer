@@ -62,11 +62,13 @@ class DescriptionRefreshScheduler:
     def start(self) -> None:
         """Start the refresh scheduler background thread."""
         if self._timer_thread is not None and self._timer_thread.is_alive():
-            logger.warning(format_error_log(
-                "CACHE-GENERAL-006",
-                "Description refresh scheduler already running",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "CACHE-GENERAL-006",
+                    "Description refresh scheduler already running",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return
 
         self._stop_event.clear()
@@ -95,12 +97,14 @@ class DescriptionRefreshScheduler:
             try:
                 self._check_and_refresh()
             except Exception as e:
-                logger.error(format_error_log(
-                    "CACHE-GENERAL-007",
-                    f"Error in description refresh check: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "CACHE-GENERAL-007",
+                        f"Error in description refresh check: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
 
             # Wait for next check, but allow early exit via stop_event
             self._stop_event.wait(timeout=self._check_interval_seconds)
@@ -129,23 +133,27 @@ class DescriptionRefreshScheduler:
             try:
                 repo_path = self._get_repo_path(alias)
                 if repo_path is None:
-                    logger.warning(format_error_log(
-                        "CACHE-GENERAL-008",
-                        f"Could not resolve repo path for {alias}, skipping",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "CACHE-GENERAL-008",
+                            f"Could not resolve repo path for {alias}, skipping",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                     continue
                 self._cli_manager.submit_work(
                     repo_path,
                     partial(self._on_refresh_complete, alias),
                 )
             except Exception as e:
-                logger.error(format_error_log(
-                    "CACHE-GENERAL-009",
-                    f"Failed to submit refresh work for {alias}: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "CACHE-GENERAL-009",
+                        f"Failed to submit refresh work for {alias}: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
 
     def _get_repos_needing_refresh(self, interval_hours: int) -> List[tuple]:
         """
@@ -208,8 +216,10 @@ class DescriptionRefreshScheduler:
                 extra={"correlation_id": get_correlation_id()},
             )
         else:
-            logger.warning(format_error_log(
-                "CACHE-GENERAL-010",
-                f"Description refresh failed for {alias}: {result}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "CACHE-GENERAL-010",
+                    f"Description refresh failed for {alias}: {result}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )

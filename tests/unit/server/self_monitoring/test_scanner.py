@@ -38,7 +38,7 @@ CREATE TABLE logs (
 @pytest.fixture
 def temp_logs_db():
     """Create temporary logs database with schema for testing."""
-    with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
 
     conn = sqlite3.connect(db_path)
@@ -75,7 +75,7 @@ def scanner(temp_db):
         scan_id="scan-123",
         github_repo="org/repo",
         log_db_path="/path/to/logs.db",
-        prompt_template="Analyze logs from {log_db_path} where id > {last_scan_log_id}. Context: {dedup_context}"
+        prompt_template="Analyze logs from {log_db_path} where id > {last_scan_log_id}. Context: {dedup_context}",
     )
 
 
@@ -89,7 +89,7 @@ class TestLogScannerInit:
             scan_id="scan-123",
             github_repo="org/repo",
             log_db_path="/path/to/logs.db",
-            prompt_template="Analyze logs: {context}"
+            prompt_template="Analyze logs: {context}",
         )
 
         assert scanner.db_path == temp_db
@@ -107,7 +107,7 @@ class TestLogScannerInit:
             log_db_path="/path/to/logs.db",
             prompt_template="Analyze logs: {context}",
             github_token="ghp_test_token",
-            server_name="Test Server"
+            server_name="Test Server",
         )
 
         assert scanner.github_token == "ghp_test_token"
@@ -122,7 +122,7 @@ class TestLogScannerInit:
             log_db_path="/path/to/logs.db",
             prompt_template="Test",
             github_token="ghp_token_123",
-            server_name="Production Server"
+            server_name="Production Server",
         )
 
         # Verify scanner stores the parameters that will be passed to IssueManager
@@ -156,10 +156,12 @@ class TestPromptAssembly:
         """Test that prompt includes existing issues for duplicate checking."""
         existing_issues = [
             {"number": 101, "title": "[BUG] Auth failure", "labels": ["bug"]},
-            {"number": 102, "title": "[CLIENT] Invalid request", "labels": ["client"]}
+            {"number": 102, "title": "[CLIENT] Invalid request", "labels": ["client"]},
         ]
 
-        prompt = scanner.assemble_prompt(last_scan_log_id=100, existing_issues=existing_issues)
+        prompt = scanner.assemble_prompt(
+            last_scan_log_id=100, existing_issues=existing_issues
+        )
 
         assert "101" in prompt
         assert "[BUG] Auth failure" in prompt
@@ -185,7 +187,7 @@ class TestDeduplicationContext:
                 "title": "[BUG] Auth failure",
                 "body": "Error during authentication...",
                 "labels": ["bug"],
-                "created_at": "2026-01-20T10:00:00Z"
+                "created_at": "2026-01-20T10:00:00Z",
             }
         ]
 
@@ -204,7 +206,7 @@ class TestDeduplicationContext:
                 "INSERT INTO self_monitoring_scans "
                 "(scan_id, started_at, status, log_id_start, log_id_end) "
                 "VALUES (?, ?, ?, ?, ?)",
-                ("scan-previous", "2026-01-20T10:00:00", "SUCCESS", 1, 50)
+                ("scan-previous", "2026-01-20T10:00:00", "SUCCESS", 1, 50),
             )
             conn.execute(
                 "INSERT INTO self_monitoring_issues "
@@ -221,8 +223,8 @@ class TestDeduplicationContext:
                     "abc123def456",
                     "1,2,3",
                     "src/auth.py",
-                    "2026-01-20T10:05:00"
-                )
+                    "2026-01-20T10:05:00",
+                ),
             )
             conn.commit()
         finally:
@@ -256,7 +258,7 @@ class TestScanRecordManagement:
         try:
             row = conn.execute(
                 "SELECT scan_id, status, log_id_start, log_id_end, issues_created FROM self_monitoring_scans WHERE scan_id = ?",
-                (scanner.scan_id,)
+                (scanner.scan_id,),
             ).fetchone()
 
             assert row is not None
@@ -281,7 +283,7 @@ class TestScanRecordManagement:
         try:
             row = conn.execute(
                 "SELECT started_at FROM self_monitoring_scans WHERE scan_id = ?",
-                (scanner.scan_id,)
+                (scanner.scan_id,),
             ).fetchone()
 
             assert row is not None
@@ -308,7 +310,7 @@ class TestLogDeltaTracking:
                 "INSERT INTO self_monitoring_scans "
                 "(scan_id, started_at, status, log_id_start, log_id_end) "
                 "VALUES (?, ?, ?, ?, ?)",
-                ("scan-001", "2026-01-20T10:00:00", "SUCCESS", 0, 100)
+                ("scan-001", "2026-01-20T10:00:00", "SUCCESS", 0, 100),
             )
             conn.commit()
         finally:
@@ -326,13 +328,13 @@ class TestLogDeltaTracking:
                 "INSERT INTO self_monitoring_scans "
                 "(scan_id, started_at, status, log_id_start, log_id_end) "
                 "VALUES (?, ?, ?, ?, ?)",
-                ("scan-001", "2026-01-20T10:00:00", "SUCCESS", 0, 100)
+                ("scan-001", "2026-01-20T10:00:00", "SUCCESS", 0, 100),
             )
             conn.execute(
                 "INSERT INTO self_monitoring_scans "
                 "(scan_id, started_at, status, log_id_start, log_id_end) "
                 "VALUES (?, ?, ?, ?, ?)",
-                ("scan-002", "2026-01-20T11:00:00", "FAILURE", 100, None)
+                ("scan-002", "2026-01-20T11:00:00", "FAILURE", 100, None),
             )
             conn.commit()
         finally:
@@ -351,25 +353,21 @@ class TestLogDeltaTracking:
                 "INSERT INTO self_monitoring_scans "
                 "(scan_id, started_at, status, log_id_start) "
                 "VALUES (?, ?, ?, ?)",
-                ("scan-123", "2026-01-20T10:00:00", "running", 100)
+                ("scan-123", "2026-01-20T10:00:00", "running", 100),
             )
             conn.commit()
         finally:
             conn.close()
 
         # Update to SUCCESS with log_id_end
-        scanner.update_scan_record(
-            status="SUCCESS",
-            log_id_end=200,
-            issues_created=3
-        )
+        scanner.update_scan_record(status="SUCCESS", log_id_end=200, issues_created=3)
 
         # Verify update
         conn = sqlite3.connect(temp_db)
         try:
             row = conn.execute(
                 "SELECT status, log_id_end, issues_created FROM self_monitoring_scans WHERE scan_id = ?",
-                ("scan-123",)
+                ("scan-123",),
             ).fetchone()
             assert row[0] == "SUCCESS"
             assert row[1] == 200
@@ -386,24 +384,21 @@ class TestLogDeltaTracking:
                 "INSERT INTO self_monitoring_scans "
                 "(scan_id, started_at, status, log_id_start, log_id_end) "
                 "VALUES (?, ?, ?, ?, ?)",
-                ("scan-123", "2026-01-20T10:00:00", "running", 100, None)
+                ("scan-123", "2026-01-20T10:00:00", "running", 100, None),
             )
             conn.commit()
         finally:
             conn.close()
 
         # Update to FAILURE without log_id_end
-        scanner.update_scan_record(
-            status="FAILURE",
-            error_message="Claude CLI error"
-        )
+        scanner.update_scan_record(status="FAILURE", error_message="Claude CLI error")
 
         # Verify log_id_end is still None
         conn = sqlite3.connect(temp_db)
         try:
             row = conn.execute(
                 "SELECT status, log_id_end FROM self_monitoring_scans WHERE scan_id = ?",
-                ("scan-123",)
+                ("scan-123",),
             ).fetchone()
             assert row[0] == "FAILURE"
             assert row[1] is None
@@ -421,10 +416,10 @@ class TestClaudeResponseParsing:
             "max_log_id_processed": 250,
             "issues_created": [
                 {"number": 101, "classification": "server_bug"},
-                {"number": 102, "classification": "client_misuse"}
+                {"number": 102, "classification": "client_misuse"},
             ],
             "duplicates_skipped": 1,
-            "potential_duplicates_commented": 0
+            "potential_duplicates_commented": 0,
         }
 
         result = scanner.parse_claude_response(json.dumps(response_json))
@@ -437,10 +432,7 @@ class TestClaudeResponseParsing:
 
     def test_parse_claude_response_failure(self, scanner):
         """Test parsing FAILURE response."""
-        response_json = {
-            "status": "FAILURE",
-            "error": "Database connection timeout"
-        }
+        response_json = {"status": "FAILURE", "error": "Database connection timeout"}
 
         result = scanner.parse_claude_response(json.dumps(response_json))
 
@@ -495,7 +487,7 @@ class TestFetchExistingIssues:
             github_repo="org/repo",
             log_db_path="/path/to/logs.db",
             prompt_template="Test",
-            github_token="ghp_token_123"
+            github_token="ghp_token_123",
         )
 
         # Mock GitHub API response
@@ -505,15 +497,15 @@ class TestFetchExistingIssues:
                 "title": "[BUG] Test issue",
                 "body": "Test body",
                 "labels": [{"name": "bug"}, {"name": "self-monitoring"}],
-                "created_at": "2026-01-20T10:00:00Z"
+                "created_at": "2026-01-20T10:00:00Z",
             },
             {
                 "number": 102,
                 "title": "[CLIENT] Client error",
                 "body": "Client body",
                 "labels": [{"name": "client"}],
-                "created_at": "2026-01-21T10:00:00Z"
-            }
+                "created_at": "2026-01-21T10:00:00Z",
+            },
         ]
 
         with patch("code_indexer.server.self_monitoring.scanner.httpx.get") as mock_get:
@@ -522,7 +514,7 @@ class TestFetchExistingIssues:
                 json=lambda: api_response,
                 headers={},
                 text=json.dumps(api_response),
-                raise_for_status=lambda: None
+                raise_for_status=lambda: None,
             )
 
             issues = scanner._fetch_existing_github_issues()
@@ -561,7 +553,7 @@ class TestFetchExistingIssues:
             github_repo="org/repo",
             log_db_path="/path/to/logs.db",
             prompt_template="Test",
-            github_token="ghp_token_123"
+            github_token="ghp_token_123",
         )
 
         with patch("code_indexer.server.self_monitoring.scanner.httpx.get") as mock_get:
@@ -571,7 +563,9 @@ class TestFetchExistingIssues:
 
             # Create proper HTTPStatusError
             def raise_http_error():
-                raise httpx.HTTPStatusError("Server error", request=MagicMock(), response=mock_response)
+                raise httpx.HTTPStatusError(
+                    "Server error", request=MagicMock(), response=mock_response
+                )
 
             mock_response.raise_for_status = raise_http_error
             mock_get.return_value = mock_response
@@ -589,7 +583,7 @@ class TestFetchExistingIssues:
             github_repo="org/repo",
             log_db_path="/path/to/logs.db",
             prompt_template="Test",
-            github_token=None  # No token
+            github_token=None,  # No token
         )
 
         issues = scanner._fetch_existing_github_issues()
@@ -605,14 +599,14 @@ class TestFetchExistingIssues:
             github_repo="org/repo",
             log_db_path="/path/to/logs.db",
             prompt_template="Test",
-            github_token="ghp_token_123"
+            github_token="ghp_token_123",
         )
 
         with patch("code_indexer.server.self_monitoring.scanner.httpx.get") as mock_get:
             mock_get.return_value = MagicMock(
                 status_code=403,
                 headers={"X-RateLimit-Remaining": "0"},
-                raise_for_status=lambda: None
+                raise_for_status=lambda: None,
             )
 
             issues = scanner._fetch_existing_github_issues()
@@ -630,7 +624,7 @@ class TestFetchExistingIssues:
             github_repo="org/repo",
             log_db_path="/path/to/logs.db",
             prompt_template="Test",
-            github_token="ghp_token_123"
+            github_token="ghp_token_123",
         )
 
         with patch("code_indexer.server.self_monitoring.scanner.httpx.get") as mock_get:
@@ -655,7 +649,7 @@ class TestExecuteScan:
             scan_id="scan-test",
             github_repo="org/repo",
             log_db_path=temp_logs_db,
-            prompt_template="Analyze logs from {log_db_path} where id > {last_scan_log_id}. Context: {dedup_context}"
+            prompt_template="Analyze logs from {log_db_path} where id > {last_scan_log_id}. Context: {dedup_context}",
         )
 
         # No need to manually insert scan record - execute_scan creates it automatically (Bug #87 issue #6)
@@ -672,19 +666,17 @@ class TestExecuteScan:
                     "body": "...",
                     "error_codes": ["AUTH-001"],
                     "source_log_ids": [101, 102],
-                    "source_files": ["src/auth.py"]
+                    "source_files": ["src/auth.py"],
                 }
             ],
             "duplicates_skipped": 0,
-            "potential_duplicates_commented": 0
+            "potential_duplicates_commented": 0,
         }
 
         # Mock subprocess call to Claude CLI
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout=json.dumps(claude_response),
-                stderr=""
+                returncode=0, stdout=json.dumps(claude_response), stderr=""
             )
 
             # Mock IssueManager.create_issue - returns dict with github_issue_number
@@ -692,7 +684,7 @@ class TestExecuteScan:
                 mock_create.return_value = {
                     "github_issue_number": 101,
                     "github_issue_url": "https://github.com/org/repo/issues/101",
-                    "classification": "server_bug"
+                    "classification": "server_bug",
                 }
 
                 # Execute scan
@@ -708,7 +700,7 @@ class TestExecuteScan:
                 try:
                     row = conn.execute(
                         "SELECT status, log_id_end, issues_created FROM self_monitoring_scans WHERE scan_id = ?",
-                        ("scan-test",)
+                        ("scan-test",),
                     ).fetchone()
                     assert row[0] == "SUCCESS"
                     assert row[1] == 150
@@ -723,7 +715,7 @@ class TestExecuteScan:
             scan_id="scan-fail",
             github_repo="org/repo",
             log_db_path=temp_logs_db,
-            prompt_template="Analyze logs from {log_db_path} where id > {last_scan_log_id}. Context: {dedup_context}"
+            prompt_template="Analyze logs from {log_db_path} where id > {last_scan_log_id}. Context: {dedup_context}",
         )
 
         # No need to manually insert scan record - execute_scan creates it automatically (Bug #87 issue #6)
@@ -731,9 +723,7 @@ class TestExecuteScan:
         # Mock subprocess failure
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
-                returncode=1,
-                stdout="",
-                stderr="Claude CLI error: timeout"
+                returncode=1, stdout="", stderr="Claude CLI error: timeout"
             )
 
             # Execute scan
@@ -748,7 +738,7 @@ class TestExecuteScan:
             try:
                 row = conn.execute(
                     "SELECT status, log_id_end FROM self_monitoring_scans WHERE scan_id = ?",
-                    ("scan-fail",)
+                    ("scan-fail",),
                 ).fetchone()
                 assert row[0] == "FAILURE"
                 assert row[1] is None  # log_id_end NOT advanced on failure

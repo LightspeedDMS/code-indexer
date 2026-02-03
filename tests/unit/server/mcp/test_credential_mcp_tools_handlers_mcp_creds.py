@@ -59,9 +59,7 @@ class TestListMCPCredentialsHandler:
         self, normal_user, mock_mcp_credential_manager
     ):
         """list_mcp_credentials handler returns success=True on valid call."""
-        with patch(
-            "code_indexer.server.mcp.handlers.dependencies"
-        ) as mock_deps:
+        with patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["list_mcp_credentials"]
@@ -75,9 +73,7 @@ class TestListMCPCredentialsHandler:
         self, normal_user, mock_mcp_credential_manager
     ):
         """list_mcp_credentials handler returns credentials array."""
-        with patch(
-            "code_indexer.server.mcp.handlers.dependencies"
-        ) as mock_deps:
+        with patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["list_mcp_credentials"]
@@ -114,9 +110,7 @@ class TestCreateMCPCredentialHandler:
         self, normal_user, mock_mcp_credential_manager
     ):
         """create_mcp_credential handler returns success on valid creation."""
-        with patch(
-            "code_indexer.server.mcp.handlers.dependencies"
-        ) as mock_deps:
+        with patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["create_mcp_credential"]
@@ -129,9 +123,7 @@ class TestCreateMCPCredentialHandler:
         self, normal_user, mock_mcp_credential_manager
     ):
         """create_mcp_credential handler returns credential_id."""
-        with patch(
-            "code_indexer.server.mcp.handlers.dependencies"
-        ) as mock_deps:
+        with patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["create_mcp_credential"]
@@ -144,9 +136,7 @@ class TestCreateMCPCredentialHandler:
         self, normal_user, mock_mcp_credential_manager
     ):
         """create_mcp_credential returns full credential (one-time display)."""
-        with patch(
-            "code_indexer.server.mcp.handlers.dependencies"
-        ) as mock_deps:
+        with patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["create_mcp_credential"]
@@ -176,9 +166,7 @@ class TestDeleteMCPCredentialHandler:
         self, normal_user, mock_mcp_credential_manager
     ):
         """delete_mcp_credential handler returns success=True on valid deletion."""
-        with patch(
-            "code_indexer.server.mcp.handlers.dependencies"
-        ) as mock_deps:
+        with patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["delete_mcp_credential"]

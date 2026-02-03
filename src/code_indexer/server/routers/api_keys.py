@@ -57,11 +57,13 @@ def trigger_catchup_on_api_key_save(api_key: Optional[str]) -> bool:
     # Get global manager
     manager = get_claude_cli_manager()
     if manager is None:
-        logger.warning(format_error_log(
-            "STORE-GENERAL-012",
-            "Cannot trigger catch-up: ClaudeCliManager not initialized",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "STORE-GENERAL-012",
+                "Cannot trigger catch-up: ClaudeCliManager not initialized",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return False
 
     # Update the manager's API key
@@ -81,23 +83,27 @@ def trigger_catchup_on_api_key_save(api_key: Optional[str]) -> bool:
                     extra={"correlation_id": get_correlation_id()},
                 )
             elif result.error:
-                logger.warning(format_error_log(
-                    "STORE-GENERAL-013",
-                    f"Catch-up partially completed: {result.error}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "STORE-GENERAL-013",
+                        f"Catch-up partially completed: {result.error}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
             else:
                 logger.info(
                     "Catch-up completed: no repos needed processing",
                     extra={"correlation_id": get_correlation_id()},
                 )
         except Exception as e:
-            logger.error(format_error_log(
-                "STORE-GENERAL-014",
-                f"Catch-up processing failed: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "STORE-GENERAL-014",
+                    f"Catch-up processing failed: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
     catchup_thread = threading.Thread(
         target=run_catchup,
@@ -193,10 +199,12 @@ def _clear_from_claude_config(key_to_clear: str) -> Optional[str]:
                     json.dump(claude_config, f, indent=2)
                 return "~/.claude.json"
     except Exception as e:
-        logger.warning(format_error_log(
-            "STORE-GENERAL-015",
-            f"Could not check/clear apiKey from ~/.claude.json: {e}"
-        ))
+        logger.warning(
+            format_error_log(
+                "STORE-GENERAL-015",
+                f"Could not check/clear apiKey from ~/.claude.json: {e}",
+            )
+        )
     return None
 
 
@@ -210,16 +218,17 @@ def _clear_from_rc_files(key_to_clear: str, env_var_name: str) -> List[str]:
                 content = rc_path.read_text()
                 # Match export VAR="key" or export VAR='key' or export VAR=key
                 pattern = rf'^export\s+{env_var_name}=["\']?{re.escape(key_to_clear)}["\']?\s*$'
-                new_content, count = re.subn(pattern, '', content, flags=re.MULTILINE)
+                new_content, count = re.subn(pattern, "", content, flags=re.MULTILINE)
                 if count > 0:
-                    new_content = re.sub(r'\n{3,}', '\n\n', new_content)
+                    new_content = re.sub(r"\n{3,}", "\n\n", new_content)
                     rc_path.write_text(new_content)
                     cleared.append(f"~/{rc_file}")
         except Exception as e:
-            logger.warning(format_error_log(
-                "STORE-GENERAL-016",
-                f"Could not check/clear from ~/{rc_file}: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "STORE-GENERAL-016", f"Could not check/clear from ~/{rc_file}: {e}"
+                )
+            )
     return cleared
 
 
@@ -447,12 +456,8 @@ def get_api_keys_status(
     config = config_service.load_config()
 
     return ApiKeysStatusResponse(
-        anthropic_configured=bool(
-            config.claude_integration_config.anthropic_api_key
-        ),
-        voyageai_configured=bool(
-            config.claude_integration_config.voyageai_api_key
-        ),
+        anthropic_configured=bool(config.claude_integration_config.anthropic_api_key),
+        voyageai_configured=bool(config.claude_integration_config.voyageai_api_key),
     )
 
 
@@ -499,7 +504,9 @@ def clear_anthropic_key(
 
     logger.info(f"Cleared Anthropic API key from: {', '.join(cleared)}")
     return ClearApiKeyResponse(
-        success=True, provider="anthropic", message=f"Cleared from: {', '.join(cleared)}"
+        success=True,
+        provider="anthropic",
+        message=f"Cleared from: {', '.join(cleared)}",
     )
 
 

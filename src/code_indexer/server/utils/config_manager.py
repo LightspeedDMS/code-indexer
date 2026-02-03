@@ -108,8 +108,12 @@ class OIDCProviderConfig:
     default_role: str = "normal_user"
 
     # Group mapping configuration
-    groups_claim: str = "groups"  # Claim name containing user's groups (e.g., "groups", "roles")
-    group_mappings: Optional[Union[Dict[str, str], List[Dict[str, str]]]] = None  # Map external groups to CIDX groups
+    groups_claim: str = (
+        "groups"  # Claim name containing user's groups (e.g., "groups", "roles")
+    )
+    group_mappings: Optional[Union[Dict[str, str], List[Dict[str, str]]]] = (
+        None  # Map external groups to CIDX groups
+    )
 
     def __post_init__(self):
         if self.scopes is None:
@@ -553,6 +557,28 @@ class SelfMonitoringConfig:
 
 
 @dataclass
+class LangfuseConfig:
+    """
+    Langfuse integration configuration (Story #136).
+
+    Controls Langfuse tracing integration for research session observability.
+    When enabled, captures user prompts, tool usage patterns, and performance
+    metrics for analysis.
+    """
+
+    # Enable/disable Langfuse tracing
+    enabled: bool = False
+    # Langfuse public key (required when enabled)
+    public_key: str = ""
+    # Langfuse secret key (required when enabled)
+    secret_key: str = ""
+    # Langfuse host URL (defaults to cloud, can be self-hosted)
+    host: str = "https://cloud.langfuse.com"
+    # Auto-trace: automatically create trace on first tool call if no trace exists
+    auto_trace_enabled: bool = False
+
+
+@dataclass
 class ServerConfig:
     """
     Server configuration data structure.
@@ -616,6 +642,9 @@ class ServerConfig:
     # Story #72 - Self-monitoring configuration
     self_monitoring_config: Optional[SelfMonitoringConfig] = None
 
+    # Story #136 - Langfuse integration configuration
+    langfuse_config: Optional[LangfuseConfig] = None
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:
@@ -677,6 +706,9 @@ class ServerConfig:
         # Story #72 - Initialize self-monitoring config
         if self.self_monitoring_config is None:
             self.self_monitoring_config = SelfMonitoringConfig()
+        # Story #136 - Initialize Langfuse config
+        if self.langfuse_config is None:
+            self.langfuse_config = LangfuseConfig()
 
 
 class ServerConfigManager:
@@ -781,9 +813,9 @@ class ServerConfigManager:
                                 "chars_per_token"
                             ]
                         if "max_tokens_per_request" in old_file_limits:
-                            migrated_config["file_content_max_tokens"] = old_file_limits[
-                                "max_tokens_per_request"
-                            ]
+                            migrated_config["file_content_max_tokens"] = (
+                                old_file_limits["max_tokens_per_request"]
+                            )
 
                 # Migrate from cache_config payload settings
                 if "cache_config" in config_dict:
@@ -828,7 +860,9 @@ class ServerConfigManager:
                     }
                     for old_key, new_key in field_mapping.items():
                         if old_key in old_omni:
-                            config_dict["multi_search_limits_config"][new_key] = old_omni[old_key]
+                            config_dict["multi_search_limits_config"][new_key] = (
+                                old_omni[old_key]
+                            )
 
             # Convert nested oidc_provider_config dict to OIDCProviderConfig
             if "oidc_provider_config" in config_dict and isinstance(
@@ -1061,6 +1095,14 @@ class ServerConfigManager:
             ):
                 config_dict["self_monitoring_config"] = SelfMonitoringConfig(
                     **config_dict["self_monitoring_config"]
+                )
+
+            # Story #136: Convert langfuse_config dict to LangfuseConfig
+            if "langfuse_config" in config_dict and isinstance(
+                config_dict["langfuse_config"], dict
+            ):
+                config_dict["langfuse_config"] = LangfuseConfig(
+                    **config_dict["langfuse_config"]
                 )
 
             # Remove obsolete reindexing_config field (deleted in previous commit)
@@ -1441,22 +1483,32 @@ class ServerConfigManager:
         # Validate multi_search_limits_config (Story #25, Story #29)
         if config.multi_search_limits_config:
             # multi_search_max_workers range 1-50
-            if not (1 <= config.multi_search_limits_config.multi_search_max_workers <= 50):
+            if not (
+                1 <= config.multi_search_limits_config.multi_search_max_workers <= 50
+            ):
                 raise ValueError(
                     f"multi_search_max_workers must be between 1 and 50, got {config.multi_search_limits_config.multi_search_max_workers}"
                 )
             # multi_search_timeout_seconds range 5-600
-            if not (5 <= config.multi_search_limits_config.multi_search_timeout_seconds <= 600):
+            if not (
+                5
+                <= config.multi_search_limits_config.multi_search_timeout_seconds
+                <= 600
+            ):
                 raise ValueError(
                     f"multi_search_timeout_seconds must be between 5 and 600, got {config.multi_search_limits_config.multi_search_timeout_seconds}"
                 )
             # scip_multi_max_workers range 1-50
-            if not (1 <= config.multi_search_limits_config.scip_multi_max_workers <= 50):
+            if not (
+                1 <= config.multi_search_limits_config.scip_multi_max_workers <= 50
+            ):
                 raise ValueError(
                     f"scip_multi_max_workers must be between 1 and 50, got {config.multi_search_limits_config.scip_multi_max_workers}"
                 )
             # scip_multi_timeout_seconds range 5-600
-            if not (5 <= config.multi_search_limits_config.scip_multi_timeout_seconds <= 600):
+            if not (
+                5 <= config.multi_search_limits_config.scip_multi_timeout_seconds <= 600
+            ):
                 raise ValueError(
                     f"scip_multi_timeout_seconds must be between 5 and 600, got {config.multi_search_limits_config.scip_multi_timeout_seconds}"
                 )
@@ -1468,17 +1520,25 @@ class ServerConfigManager:
                     f"omni_max_workers must be between 1 and 100, got {config.multi_search_limits_config.omni_max_workers}"
                 )
             # omni_per_repo_timeout_seconds range 1-3600
-            if not (1 <= config.multi_search_limits_config.omni_per_repo_timeout_seconds <= 3600):
+            if not (
+                1
+                <= config.multi_search_limits_config.omni_per_repo_timeout_seconds
+                <= 3600
+            ):
                 raise ValueError(
                     f"omni_per_repo_timeout_seconds must be between 1 and 3600, got {config.multi_search_limits_config.omni_per_repo_timeout_seconds}"
                 )
             # omni_cache_max_entries range 1-10000
-            if not (1 <= config.multi_search_limits_config.omni_cache_max_entries <= 10000):
+            if not (
+                1 <= config.multi_search_limits_config.omni_cache_max_entries <= 10000
+            ):
                 raise ValueError(
                     f"omni_cache_max_entries must be between 1 and 10000, got {config.multi_search_limits_config.omni_cache_max_entries}"
                 )
             # omni_cache_ttl_seconds range 1-86400
-            if not (1 <= config.multi_search_limits_config.omni_cache_ttl_seconds <= 86400):
+            if not (
+                1 <= config.multi_search_limits_config.omni_cache_ttl_seconds <= 86400
+            ):
                 raise ValueError(
                     f"omni_cache_ttl_seconds must be between 1 and 86400, got {config.multi_search_limits_config.omni_cache_ttl_seconds}"
                 )
@@ -1494,17 +1554,28 @@ class ServerConfigManager:
                 )
             # omni_default_aggregation_mode must be "global" or "per_repo"
             valid_omni_modes = {"global", "per_repo"}
-            if config.multi_search_limits_config.omni_default_aggregation_mode not in valid_omni_modes:
+            if (
+                config.multi_search_limits_config.omni_default_aggregation_mode
+                not in valid_omni_modes
+            ):
                 raise ValueError(
                     f"omni_default_aggregation_mode must be one of {valid_omni_modes}, got {config.multi_search_limits_config.omni_default_aggregation_mode}"
                 )
             # omni_max_results_per_repo range 1-10000
-            if not (1 <= config.multi_search_limits_config.omni_max_results_per_repo <= 10000):
+            if not (
+                1
+                <= config.multi_search_limits_config.omni_max_results_per_repo
+                <= 10000
+            ):
                 raise ValueError(
                     f"omni_max_results_per_repo must be between 1 and 10000, got {config.multi_search_limits_config.omni_max_results_per_repo}"
                 )
             # omni_max_total_results_before_aggregation range 1-100000
-            if not (1 <= config.multi_search_limits_config.omni_max_total_results_before_aggregation <= 100000):
+            if not (
+                1
+                <= config.multi_search_limits_config.omni_max_total_results_before_aggregation
+                <= 100000
+            ):
                 raise ValueError(
                     f"omni_max_total_results_before_aggregation must be between 1 and 100000, got {config.multi_search_limits_config.omni_max_total_results_before_aggregation}"
                 )
@@ -1512,7 +1583,9 @@ class ServerConfigManager:
         # Validate background_jobs_config (Story #26, Story #27)
         if config.background_jobs_config:
             # max_concurrent_background_jobs range 1-100
-            if not (1 <= config.background_jobs_config.max_concurrent_background_jobs <= 100):
+            if not (
+                1 <= config.background_jobs_config.max_concurrent_background_jobs <= 100
+            ):
                 raise ValueError(
                     f"max_concurrent_background_jobs must be between 1 and 100, got {config.background_jobs_config.max_concurrent_background_jobs}"
                 )
@@ -1530,7 +1603,9 @@ class ServerConfigManager:
                     f"chars_per_token must be between 1 and 10, got {config.content_limits_config.chars_per_token}"
                 )
             # file_content_max_tokens range 1000-200000
-            if not (1000 <= config.content_limits_config.file_content_max_tokens <= 200000):
+            if not (
+                1000 <= config.content_limits_config.file_content_max_tokens <= 200000
+            ):
                 raise ValueError(
                     f"file_content_max_tokens must be between 1000 and 200000, got {config.content_limits_config.file_content_max_tokens}"
                 )
@@ -1545,7 +1620,9 @@ class ServerConfigManager:
                     f"git_log_max_tokens must be between 1000 and 200000, got {config.content_limits_config.git_log_max_tokens}"
                 )
             # search_result_max_tokens range 1000-200000
-            if not (1000 <= config.content_limits_config.search_result_max_tokens <= 200000):
+            if not (
+                1000 <= config.content_limits_config.search_result_max_tokens <= 200000
+            ):
                 raise ValueError(
                     f"search_result_max_tokens must be between 1000 and 200000, got {config.content_limits_config.search_result_max_tokens}"
                 )
@@ -1558,6 +1635,14 @@ class ServerConfigManager:
             if not (100 <= config.content_limits_config.cache_max_entries <= 100000):
                 raise ValueError(
                     f"cache_max_entries must be between 100 and 100000, got {config.content_limits_config.cache_max_entries}"
+                )
+
+        # Validate langfuse_config (Story #136)
+        if config.langfuse_config and config.langfuse_config.enabled:
+            # Validate host URL format
+            if not config.langfuse_config.host.startswith(("http://", "https://")):
+                raise ValueError(
+                    f"Langfuse host must start with http:// or https://, got {config.langfuse_config.host}"
                 )
 
     def create_server_directories(self) -> None:

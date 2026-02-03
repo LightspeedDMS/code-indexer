@@ -147,7 +147,9 @@ class GlobalRepoOperations:
             # golden_repos_config is guaranteed non-None by ServerConfig.__post_init__
             return {"refresh_interval": golden_repos_config.refresh_interval_seconds}
         except (RuntimeError, ValueError, IOError) as e:
-            logger.warning(f"Failed to load config from ConfigService, using defaults: {e}")
+            logger.warning(
+                f"Failed to load config from ConfigService, using defaults: {e}"
+            )
             # Return default config on error
             return {"refresh_interval": DEFAULT_REFRESH_INTERVAL}
 

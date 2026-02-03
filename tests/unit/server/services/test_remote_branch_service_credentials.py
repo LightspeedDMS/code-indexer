@@ -12,7 +12,6 @@ Tests cover:
 """
 
 
-
 class TestBuildEffectiveUrl:
     """Tests for URL conversion and credential handling in fetch_remote_branches.
 
@@ -137,7 +136,9 @@ class TestBuildEffectiveUrl:
 
         result = _build_effective_url(clone_url, platform, credentials)
 
-        expected = "https://oauth2:glpat-test-token@gitlab.com/group/subgroup/project/repo.git"
+        expected = (
+            "https://oauth2:glpat-test-token@gitlab.com/group/subgroup/project/repo.git"
+        )
         assert result == expected
 
     def test_ssh_url_without_git_suffix(self):
@@ -216,7 +217,9 @@ class TestBuildEffectiveUrl:
 
         result = _build_effective_url(clone_url, platform, credentials)
 
-        expected = "https://oauth2:glpat-internal-token@gitlab.company.com/team/project.git"
+        expected = (
+            "https://oauth2:glpat-internal-token@gitlab.company.com/team/project.git"
+        )
         assert result == expected
 
 

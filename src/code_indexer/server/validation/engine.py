@@ -204,12 +204,14 @@ class IndexValidationEngine:
             )
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-056",
-                f"Completeness validation failed: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-056",
+                    f"Completeness validation failed: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise ValidationFailedError(f"Completeness validation error: {str(e)}")
 
     def validate_quality(
@@ -361,12 +363,14 @@ class IndexValidationEngine:
         except IndexCorruptionError:
             raise  # Re-raise corruption errors
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-057",
-                f"Quality validation failed: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-057",
+                    f"Quality validation failed: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise ValidationFailedError(f"Quality validation error: {str(e)}")
 
     def validate_consistency(
@@ -466,12 +470,14 @@ class IndexValidationEngine:
             )
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-058",
-                f"Consistency validation failed: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-058",
+                    f"Consistency validation failed: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise ValidationFailedError(f"Consistency validation error: {str(e)}")
 
     def validate_comprehensive(
@@ -626,12 +632,14 @@ class IndexValidationEngine:
             )
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-059",
-                f"Comprehensive validation failed: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-059",
+                    f"Comprehensive validation failed: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise ValidationFailedError(f"Comprehensive validation error: {str(e)}")
 
     def _get_repository_indexable_files(self) -> List[str]:
@@ -648,11 +656,13 @@ class IndexValidationEngine:
             return all_files
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-060",
-                f"Failed to get repository indexable files: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-060",
+                    f"Failed to get repository indexable files: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return []
 
     def _get_indexed_files(self) -> List[str]:
@@ -663,11 +673,13 @@ class IndexValidationEngine:
             return self.vector_store_client.get_all_indexed_files(self.collection_name)
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-061",
-                f"Failed to get indexed files from database: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-061",
+                    f"Failed to get indexed files from database: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return []
 
     def _get_file_index_timestamps(self) -> Dict[str, datetime]:
@@ -678,11 +690,13 @@ class IndexValidationEngine:
             )
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-062",
-                f"Failed to get file index timestamps: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-062",
+                    f"Failed to get file index timestamps: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return {}
 
     def _generate_recommendations(

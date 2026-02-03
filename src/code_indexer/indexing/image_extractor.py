@@ -18,6 +18,7 @@ class ImageValidationResult:
                     Valid reasons: "missing", "remote_url", "oversized",
                                   "unsupported_format", "data_uri"
     """
+
     path: str
     is_valid: bool
     skip_reason: Optional[str] = None
@@ -33,10 +34,7 @@ class ImageExtractor:
     MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024
 
     def _resolve_image_path(
-        self,
-        image_path: str,
-        base_dir: Path,
-        repo_root: Path
+        self, image_path: str, base_dir: Path, repo_root: Path
     ) -> str:
         """Resolve image path to be relative to repo_root.
 
@@ -92,43 +90,35 @@ class ImageExtractor:
         # Check 1: File must exist
         if not full_path.exists() or not full_path.is_file():
             return ImageValidationResult(
-                path=image_path,
-                is_valid=False,
-                skip_reason="missing"
+                path=image_path, is_valid=False, skip_reason="missing"
             )
 
         # Check 2: File extension must be supported (case-insensitive)
         extension = full_path.suffix.lower()
         if extension not in self.SUPPORTED_FORMATS:
             return ImageValidationResult(
-                path=image_path,
-                is_valid=False,
-                skip_reason="unsupported_format"
+                path=image_path, is_valid=False, skip_reason="unsupported_format"
             )
 
         # Check 3: File size must be under limit (Story #64 AC3)
         file_size = full_path.stat().st_size
         if file_size > self.MAX_IMAGE_SIZE_BYTES:
             return ImageValidationResult(
-                path=image_path,
-                is_valid=False,
-                skip_reason="oversized"
+                path=image_path, is_valid=False, skip_reason="oversized"
             )
 
         # Check 4: Path must be within repository (no directory traversal)
         try:
             full_path.resolve().relative_to(repo_root.resolve())
             return ImageValidationResult(
-                path=image_path,
-                is_valid=True,
-                skip_reason=None
+                path=image_path, is_valid=True, skip_reason=None
             )
         except ValueError:
             # Path escapes repository
             return ImageValidationResult(
                 path=image_path,
                 is_valid=False,
-                skip_reason="missing"  # Treat as missing since it's inaccessible
+                skip_reason="missing",  # Treat as missing since it's inaccessible
             )
 
     def validate_image(self, image_path: str, repo_root: Union[str, Path]) -> bool:
@@ -170,16 +160,10 @@ class MarkdownImageExtractor(ImageExtractor):
         """Initialize image extractor."""
         # Regex pattern for markdown images: ![alt text](path)
         # Matches: ![anything](path) but not URLs
-        self.md_image_pattern = re.compile(
-            r'!\[([^\]]*)\]\(([^)]+)\)',
-            re.MULTILINE
-        )
+        self.md_image_pattern = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)", re.MULTILINE)
 
     def extract_images(
-        self,
-        content: str,
-        base_path: Union[str, Path],
-        repo_root: Union[str, Path]
+        self, content: str, base_path: Union[str, Path], repo_root: Union[str, Path]
     ) -> List[str]:
         """Extract image paths from markdown content.
 
@@ -226,10 +210,7 @@ class MarkdownImageExtractor(ImageExtractor):
         return extracted_images
 
     def extract_images_with_validation(
-        self,
-        content: str,
-        base_path: Union[str, Path],
-        repo_root: Union[str, Path]
+        self, content: str, base_path: Union[str, Path], repo_root: Union[str, Path]
     ) -> tuple[List[str], List[ImageValidationResult]]:
         """Extract images and return validation results for all - Story #64 AC2.
 
@@ -261,11 +242,11 @@ class MarkdownImageExtractor(ImageExtractor):
 
             # Check for remote URLs first
             if image_path.startswith(("http://", "https://")):
-                all_results.append(ImageValidationResult(
-                    path=image_path,
-                    is_valid=False,
-                    skip_reason="remote_url"
-                ))
+                all_results.append(
+                    ImageValidationResult(
+                        path=image_path, is_valid=False, skip_reason="remote_url"
+                    )
+                )
                 continue
 
             # Resolve the image path
@@ -273,15 +254,17 @@ class MarkdownImageExtractor(ImageExtractor):
 
             if not resolved_path:
                 # Path escapes repository or couldn't be resolved
-                all_results.append(ImageValidationResult(
-                    path=image_path,
-                    is_valid=False,
-                    skip_reason="missing"
-                ))
+                all_results.append(
+                    ImageValidationResult(
+                        path=image_path, is_valid=False, skip_reason="missing"
+                    )
+                )
                 continue
 
             # Validate the resolved path
-            validation_result = self.validate_image_with_reason(resolved_path, repo_root)
+            validation_result = self.validate_image_with_reason(
+                resolved_path, repo_root
+            )
             all_results.append(validation_result)
 
             if validation_result.is_valid:
@@ -308,10 +291,7 @@ class HtmlImageExtractor(ImageExtractor):
         pass
 
     def extract_images(
-        self,
-        content: str,
-        base_path: Union[str, Path],
-        repo_root: Union[str, Path]
+        self, content: str, base_path: Union[str, Path], repo_root: Union[str, Path]
     ) -> List[str]:
         """Extract image paths from HTML content.
 
@@ -364,10 +344,7 @@ class HtmlImageExtractor(ImageExtractor):
         return extracted_images
 
     def extract_images_with_validation(
-        self,
-        content: str,
-        base_path: Union[str, Path],
-        repo_root: Union[str, Path]
+        self, content: str, base_path: Union[str, Path], repo_root: Union[str, Path]
     ) -> tuple[List[str], List[ImageValidationResult]]:
         """Extract images and return validation results for all - Story #64 AC2.
 
@@ -400,20 +377,20 @@ class HtmlImageExtractor(ImageExtractor):
         for image_path in parser.img_sources:
             # Check for remote URLs
             if image_path.startswith(("http://", "https://")):
-                all_results.append(ImageValidationResult(
-                    path=image_path,
-                    is_valid=False,
-                    skip_reason="remote_url"
-                ))
+                all_results.append(
+                    ImageValidationResult(
+                        path=image_path, is_valid=False, skip_reason="remote_url"
+                    )
+                )
                 continue
 
             # Check for data URIs
             if image_path.startswith("data:"):
-                all_results.append(ImageValidationResult(
-                    path=image_path,
-                    is_valid=False,
-                    skip_reason="data_uri"
-                ))
+                all_results.append(
+                    ImageValidationResult(
+                        path=image_path, is_valid=False, skip_reason="data_uri"
+                    )
+                )
                 continue
 
             # Resolve the image path
@@ -421,15 +398,17 @@ class HtmlImageExtractor(ImageExtractor):
 
             if not resolved_path:
                 # Path escapes repository or couldn't be resolved
-                all_results.append(ImageValidationResult(
-                    path=image_path,
-                    is_valid=False,
-                    skip_reason="missing"
-                ))
+                all_results.append(
+                    ImageValidationResult(
+                        path=image_path, is_valid=False, skip_reason="missing"
+                    )
+                )
                 continue
 
             # Validate the resolved path
-            validation_result = self.validate_image_with_reason(resolved_path, repo_root)
+            validation_result = self.validate_image_with_reason(
+                resolved_path, repo_root
+            )
             all_results.append(validation_result)
 
             if validation_result.is_valid:
@@ -465,10 +444,10 @@ class ImageExtractorFactory:
     """Factory for creating appropriate image extractors based on file extension - Story #63 AC3."""
 
     EXTRACTORS = {
-        '.md': MarkdownImageExtractor,
-        '.html': HtmlImageExtractor,
-        '.htm': HtmlImageExtractor,
-        '.htmx': HtmlImageExtractor,
+        ".md": MarkdownImageExtractor,
+        ".html": HtmlImageExtractor,
+        ".htm": HtmlImageExtractor,
+        ".htmx": HtmlImageExtractor,
     }
 
     @classmethod

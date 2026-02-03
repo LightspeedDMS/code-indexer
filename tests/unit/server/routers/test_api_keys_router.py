@@ -203,9 +203,7 @@ class TestAnthropicConnectivityEndpoint:
         assert response.status_code == 400
 
     @patch("code_indexer.server.routers.api_keys.get_api_key_connectivity_tester")
-    def test_test_anthropic_key_success(
-        self, mock_get_tester, authenticated_client
-    ):
+    def test_test_anthropic_key_success(self, mock_get_tester, authenticated_client):
         """Should return connectivity test result."""
         from code_indexer.server.services.api_key_management import (
             ConnectivityTestResult,
@@ -230,9 +228,7 @@ class TestAnthropicConnectivityEndpoint:
         assert data["response_time_ms"] == 150
 
     @patch("code_indexer.server.routers.api_keys.get_api_key_connectivity_tester")
-    def test_test_anthropic_key_failure(
-        self, mock_get_tester, authenticated_client
-    ):
+    def test_test_anthropic_key_failure(self, mock_get_tester, authenticated_client):
         """Should return error details on connectivity failure."""
         from code_indexer.server.services.api_key_management import (
             ConnectivityTestResult,
@@ -268,9 +264,7 @@ class TestVoyageAIConnectivityEndpoint:
         assert response.status_code == 400
 
     @patch("code_indexer.server.routers.api_keys.get_api_key_connectivity_tester")
-    def test_test_voyageai_key_success(
-        self, mock_get_tester, authenticated_client
-    ):
+    def test_test_voyageai_key_success(self, mock_get_tester, authenticated_client):
         """Should return connectivity test result."""
         from code_indexer.server.services.api_key_management import (
             ConnectivityTestResult,
@@ -319,9 +313,7 @@ class TestApiKeysStatusEndpoint:
         assert data["voyageai_configured"] is False
 
     @patch("code_indexer.server.routers.api_keys.get_config_service")
-    def test_get_status_both_unconfigured(
-        self, mock_get_config, authenticated_client
-    ):
+    def test_get_status_both_unconfigured(self, mock_get_config, authenticated_client):
         """Should return false for both when no keys configured."""
         mock_config_service = MagicMock()
         mock_config = MagicMock()

@@ -120,12 +120,10 @@ class TestConfigServiceUpdateSettingGitTimeouts:
         service = ConfigService(server_dir_path=str(tmp_path))
         service.load_config()
 
-
         config = service.get_config()
 
         service = ConfigService(server_dir_path=str(tmp_path))
         service.load_config()
-
 
         config = service.get_config()
 

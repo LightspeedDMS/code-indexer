@@ -12,7 +12,10 @@ Story #24 changed default max_concurrent_claude_cli from 4 to 2.
 All tests use real components following MESSI Rule #1: No mocks.
 """
 
-from src.code_indexer.server.utils.config_manager import ServerConfig, ClaudeIntegrationConfig
+from src.code_indexer.server.utils.config_manager import (
+    ServerConfig,
+    ClaudeIntegrationConfig,
+)
 
 
 # =============================================================================
@@ -60,7 +63,9 @@ class TestClaudeIntegrationConfigFields:
             config.max_concurrent_claude_cli == 2
         ), "max_concurrent_claude_cli should default to 2"
 
-    def test_claude_integration_config_has_description_refresh_interval_hours_field(self):
+    def test_claude_integration_config_has_description_refresh_interval_hours_field(
+        self,
+    ):
         """
         AC1: ClaudeIntegrationConfig has description_refresh_interval_hours field with default 24.
 
@@ -105,7 +110,9 @@ class TestClaudeIntegrationConfigFields:
             config.max_concurrent_claude_cli == 8
         ), "max_concurrent_claude_cli should accept custom value"
 
-    def test_claude_integration_config_accepts_custom_description_refresh_interval_hours(self):
+    def test_claude_integration_config_accepts_custom_description_refresh_interval_hours(
+        self,
+    ):
         """
         AC1: ClaudeIntegrationConfig accepts custom description_refresh_interval_hours value.
 

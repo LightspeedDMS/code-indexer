@@ -1201,6 +1201,111 @@
     </article>
 </details>
 
+<!-- Langfuse Settings Section -->
+<details class="config-section" id="section-langfuse">
+    <summary>
+        <h2>Langfuse Settings</h2>
+    </summary>
+    <p class="section-description">
+        Configures Langfuse integration for research session tracing and observability. Captures MCP tool usage patterns for analysis. Auto-trace creates implicit traces when users don't explicitly start one.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-langfuse">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Enabled</td>
+                        <td class="config-value">{{ 'Yes' if config.langfuse.enabled else 'No' }}</td>
+                        <td class="config-note">
+                            <small class="read-only-note">Requires server restart</small>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Public Key</td>
+                        <td class="config-value">{{ config.langfuse.public_key if config.langfuse.public_key else 'Not configured' }}</td>
+                        <td class="config-note"><small>Langfuse public key</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Secret Key</td>
+                        <td class="config-value">
+                            {% if config.langfuse.secret_key %}
+                                ********
+                            {% else %}
+                                Not configured
+                            {% endif %}
+                        </td>
+                        <td class="config-note"><small>Langfuse secret key (masked)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Host URL</td>
+                        <td class="config-value">{{ config.langfuse.host }}</td>
+                        <td class="config-note"><small>Langfuse server endpoint</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Auto-Trace Enabled</td>
+                        <td class="config-value">{{ 'Yes' if config.langfuse.auto_trace_enabled else 'No' }}</td>
+                        <td class="config-note"><small>Automatically create traces</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('langfuse')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-langfuse" method="post" action="/admin/config/langfuse" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.langfuse %}
+            <div class="validation-error">{{ validation_errors.langfuse }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="langfuse-enabled">
+                    Enabled
+                    <select id="langfuse-enabled" name="enabled">
+                        <option value="true" {% if config.langfuse.enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.langfuse.enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Enable Langfuse tracing (requires restart)</small>
+                </label>
+                <label for="langfuse-public-key">
+                    Public Key
+                    <input type="text" id="langfuse-public-key" name="public_key"
+                           value="{{ config.langfuse.public_key }}"
+                           placeholder="pk-lf-...">
+                    <small>Langfuse public key (required when enabled)</small>
+                </label>
+                <label for="langfuse-secret-key">
+                    Secret Key
+                    <input type="password" id="langfuse-secret-key" name="secret_key"
+                           value="{{ config.langfuse.secret_key }}"
+                           placeholder="sk-lf-...">
+                    <small>Langfuse secret key (required when enabled)</small>
+                </label>
+                <label for="langfuse-host">
+                    Host URL
+                    <input type="text" id="langfuse-host" name="host"
+                           value="{{ config.langfuse.host }}"
+                           placeholder="https://cloud.langfuse.com">
+                    <small>Langfuse server endpoint (cloud or self-hosted)</small>
+                </label>
+                <label for="langfuse-auto-trace-enabled">
+                    Auto-Trace Enabled
+                    <select id="langfuse-auto-trace-enabled" name="auto_trace_enabled">
+                        <option value="true" {% if config.langfuse.auto_trace_enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.langfuse.auto_trace_enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Automatically create trace on first tool call</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('langfuse')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 <!-- Claude Delegation Settings Section (Story #721) -->
 <details class="config-section" id="section-claude_delegation">
     <summary>

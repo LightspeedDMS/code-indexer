@@ -27,7 +27,9 @@ class TestInstallRipgrepDelegation:
 
     def test_delegates_to_ripgrep_installer(self, installer, tmp_path):
         """Test install_ripgrep creates RipgrepInstaller and calls install()."""
-        with patch("code_indexer.server.installer.RipgrepInstaller") as mock_ripgrep_class:
+        with patch(
+            "code_indexer.server.installer.RipgrepInstaller"
+        ) as mock_ripgrep_class:
             mock_ripgrep_instance = Mock()
             mock_ripgrep_instance.install.return_value = True
             mock_ripgrep_class.return_value = mock_ripgrep_instance
@@ -45,7 +47,9 @@ class TestInstallRipgrepDelegation:
 
     def test_returns_true_when_ripgrep_installer_succeeds(self, installer):
         """Test returns True when RipgrepInstaller.install() returns True."""
-        with patch("code_indexer.server.installer.RipgrepInstaller") as mock_ripgrep_class:
+        with patch(
+            "code_indexer.server.installer.RipgrepInstaller"
+        ) as mock_ripgrep_class:
             mock_ripgrep_instance = Mock()
             mock_ripgrep_instance.install.return_value = True
             mock_ripgrep_class.return_value = mock_ripgrep_instance
@@ -56,7 +60,9 @@ class TestInstallRipgrepDelegation:
 
     def test_returns_false_when_ripgrep_installer_fails(self, installer):
         """Test returns False when RipgrepInstaller.install() returns False."""
-        with patch("code_indexer.server.installer.RipgrepInstaller") as mock_ripgrep_class:
+        with patch(
+            "code_indexer.server.installer.RipgrepInstaller"
+        ) as mock_ripgrep_class:
             mock_ripgrep_instance = Mock()
             mock_ripgrep_instance.install.return_value = False
             mock_ripgrep_class.return_value = mock_ripgrep_instance

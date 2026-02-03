@@ -19,9 +19,7 @@ class TestSelfMonitoringService:
         from code_indexer.server.self_monitoring.service import SelfMonitoringService
 
         service = SelfMonitoringService(
-            enabled=True,
-            cadence_minutes=30,
-            job_manager=Mock()
+            enabled=True, cadence_minutes=30, job_manager=Mock()
         )
 
         assert service.enabled is True
@@ -33,9 +31,7 @@ class TestSelfMonitoringService:
         from code_indexer.server.self_monitoring.service import SelfMonitoringService
 
         service = SelfMonitoringService(
-            enabled=False,
-            cadence_minutes=60,
-            job_manager=Mock()
+            enabled=False, cadence_minutes=60, job_manager=Mock()
         )
 
         service.start()
@@ -47,9 +43,7 @@ class TestSelfMonitoringService:
         from code_indexer.server.self_monitoring.service import SelfMonitoringService
 
         service = SelfMonitoringService(
-            enabled=True,
-            cadence_minutes=60,
-            job_manager=Mock()
+            enabled=True, cadence_minutes=60, job_manager=Mock()
         )
 
         service.start()
@@ -66,9 +60,7 @@ class TestSelfMonitoringService:
         from code_indexer.server.self_monitoring.service import SelfMonitoringService
 
         service = SelfMonitoringService(
-            enabled=True,
-            cadence_minutes=60,
-            job_manager=Mock()
+            enabled=True, cadence_minutes=60, job_manager=Mock()
         )
 
         service.start()
@@ -85,9 +77,7 @@ class TestSelfMonitoringService:
         from code_indexer.server.self_monitoring.service import SelfMonitoringService
 
         service = SelfMonitoringService(
-            enabled=True,
-            cadence_minutes=60,
-            job_manager=Mock()
+            enabled=True, cadence_minutes=60, job_manager=Mock()
         )
 
         # First start/stop cycle
@@ -118,13 +108,16 @@ class TestSelfMonitoringServiceLogScannerIntegration:
             log_db_path="/path/to/logs.db",
             github_repo="owner/repo",
             prompt_template="Custom prompt with {last_scan_log_id} and {dedup_context}",
-            model="sonnet"
+            model="sonnet",
         )
 
         assert service._db_path == "/path/to/cidx_server.db"
         assert service._log_db_path == "/path/to/logs.db"
         assert service._github_repo == "owner/repo"
-        assert service._prompt_template == "Custom prompt with {last_scan_log_id} and {dedup_context}"
+        assert (
+            service._prompt_template
+            == "Custom prompt with {last_scan_log_id} and {dedup_context}"
+        )
         assert service._model == "sonnet"
 
     def test_service_uses_default_prompt_when_template_empty(self):
@@ -145,11 +138,13 @@ class TestSelfMonitoringServiceLogScannerIntegration:
             log_db_path="/path/to/logs.db",
             github_repo="owner/repo",
             prompt_template="",  # Empty - should load default
-            model="opus"
+            model="opus",
         )
 
         # Mock LogScanner to capture constructor args
-        with patch('code_indexer.server.self_monitoring.scanner.LogScanner') as mock_scanner_class:
+        with patch(
+            "code_indexer.server.self_monitoring.scanner.LogScanner"
+        ) as mock_scanner_class:
             mock_scanner_instance = MagicMock()
             mock_scanner_instance.execute_scan.return_value = {"status": "SUCCESS"}
             mock_scanner_class.return_value = mock_scanner_instance
@@ -166,6 +161,7 @@ class TestSelfMonitoringServiceLogScannerIntegration:
 
         # Cleanup
         import os
+
         os.unlink(temp_db.name)
 
     def test_service_execute_scan_creates_log_scanner_with_correct_params(self):
@@ -186,18 +182,20 @@ class TestSelfMonitoringServiceLogScannerIntegration:
             log_db_path="/path/to/logs.db",
             github_repo="owner/repo",
             prompt_template="Custom prompt: {last_scan_log_id}, {dedup_context}",
-            model="opus"
+            model="opus",
         )
 
         # Mock LogScanner to verify constructor calls
-        with patch('code_indexer.server.self_monitoring.scanner.LogScanner') as mock_scanner_class:
+        with patch(
+            "code_indexer.server.self_monitoring.scanner.LogScanner"
+        ) as mock_scanner_class:
             mock_scanner_instance = MagicMock()
             mock_scanner_instance.execute_scan.return_value = {
                 "status": "SUCCESS",
                 "issues_created": 0,
                 "duplicates_skipped": 0,
                 "potential_duplicates_commented": 0,
-                "max_log_id_processed": 100
+                "max_log_id_processed": 100,
             }
             mock_scanner_class.return_value = mock_scanner_instance
 
@@ -211,7 +209,10 @@ class TestSelfMonitoringServiceLogScannerIntegration:
             assert call_kwargs["db_path"] == temp_db.name
             assert call_kwargs["log_db_path"] == "/path/to/logs.db"
             assert call_kwargs["github_repo"] == "owner/repo"
-            assert call_kwargs["prompt_template"] == "Custom prompt: {last_scan_log_id}, {dedup_context}"
+            assert (
+                call_kwargs["prompt_template"]
+                == "Custom prompt: {last_scan_log_id}, {dedup_context}"
+            )
             assert call_kwargs["model"] == "opus"
             assert "scan_id" in call_kwargs
 
@@ -223,6 +224,7 @@ class TestSelfMonitoringServiceLogScannerIntegration:
 
         # Cleanup
         import os
+
         os.unlink(temp_db.name)
 
     def test_service_skips_scan_if_db_paths_not_configured(self):
@@ -237,13 +239,16 @@ class TestSelfMonitoringServiceLogScannerIntegration:
             log_db_path=None,
             github_repo="owner/repo",
             prompt_template="",
-            model="opus"
+            model="opus",
         )
 
         result = service._execute_scan()
 
         assert result["status"] == "FAILURE"
-        assert "not configured" in result["error"].lower() or "missing" in result["error"].lower()
+        assert (
+            "not configured" in result["error"].lower()
+            or "missing" in result["error"].lower()
+        )
 
     def test_submit_scan_job_includes_repo_alias(self):
         """Test _submit_scan_job passes repo_alias parameter to submit_job (Bug #87 - Issue #1)."""
@@ -258,7 +263,7 @@ class TestSelfMonitoringServiceLogScannerIntegration:
             job_manager=mock_job_manager,
             db_path="/path/to/db",
             log_db_path="/path/to/logs",
-            github_repo="owner/repo"
+            github_repo="owner/repo",
         )
 
         # Call _submit_scan_job directly
@@ -283,7 +288,7 @@ class TestSelfMonitoringServiceLogScannerIntegration:
             job_manager=mock_job_manager,
             db_path="/path/to/db",
             log_db_path="/path/to/logs",
-            github_repo="owner/repo"
+            github_repo="owner/repo",
         )
 
         # Call trigger_scan
@@ -308,7 +313,7 @@ class TestSelfMonitoringServiceLogScannerIntegration:
             log_db_path="/path/to/logs",
             github_repo="owner/repo",
             github_token="ghp_test_token",
-            server_name="Production CIDX Server"
+            server_name="Production CIDX Server",
         )
 
         assert service._github_token == "ghp_test_token"
@@ -331,10 +336,12 @@ class TestSelfMonitoringServiceLogScannerIntegration:
             log_db_path="/path/to/logs.db",
             github_repo="owner/repo",
             github_token="ghp_test_token_123",
-            server_name="Test Server"
+            server_name="Test Server",
         )
 
-        with patch('code_indexer.server.self_monitoring.scanner.LogScanner') as mock_scanner_class:
+        with patch(
+            "code_indexer.server.self_monitoring.scanner.LogScanner"
+        ) as mock_scanner_class:
             mock_scanner_instance = MagicMock()
             mock_scanner_instance.execute_scan.return_value = {"status": "SUCCESS"}
             mock_scanner_class.return_value = mock_scanner_instance
@@ -350,6 +357,7 @@ class TestSelfMonitoringServiceLogScannerIntegration:
             assert call_kwargs["server_name"] == "Test Server"
 
         import os
+
         os.unlink(temp_db.name)
 
 
@@ -378,7 +386,8 @@ class TestSelfMonitoringServiceStartupCadence:
 
         conn = sqlite3.connect(temp_db.name)
         cursor = conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             CREATE TABLE self_monitoring_scans (
                 scan_id TEXT PRIMARY KEY,
                 started_at TEXT NOT NULL,
@@ -389,14 +398,22 @@ class TestSelfMonitoringServiceStartupCadence:
                 issues_created INTEGER DEFAULT 0,
                 error_message TEXT
             )
-        """)
+        """
+        )
 
         if last_scan_timestamp:
             cursor.execute(
                 "INSERT INTO self_monitoring_scans "
                 "(scan_id, started_at, status, log_id_start, log_id_end, issues_created) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (f"scan-{id(last_scan_timestamp)}", last_scan_timestamp, "COMPLETED", 1, 100, 0)
+                (
+                    f"scan-{id(last_scan_timestamp)}",
+                    last_scan_timestamp,
+                    "COMPLETED",
+                    1,
+                    100,
+                    0,
+                ),
             )
 
         conn.commit()
@@ -427,7 +444,7 @@ class TestSelfMonitoringServiceStartupCadence:
             job_manager=mock_job_manager,
             db_path=temp_db_path,
             log_db_path="/path/to/logs.db",
-            github_repo="owner/repo"
+            github_repo="owner/repo",
         )
 
         # Mock _stop_event.wait to capture timeout
@@ -443,6 +460,7 @@ class TestSelfMonitoringServiceStartupCadence:
         service.start()
 
         import time
+
         time.sleep(0.5)
 
         service.stop()
@@ -453,14 +471,16 @@ class TestSelfMonitoringServiceStartupCadence:
         first_wait = wait_timeouts[0]
         expected_wait = 300 * 60  # 5 hours in seconds
         assert first_wait is not None, "Expected initial wait timeout"
-        assert abs(first_wait - expected_wait) < self.TIMESTAMP_TOLERANCE_SECONDS, \
-            f"Expected ~{expected_wait}s wait, got {first_wait}s"
+        assert (
+            abs(first_wait - expected_wait) < self.TIMESTAMP_TOLERANCE_SECONDS
+        ), f"Expected ~{expected_wait}s wait, got {first_wait}s"
 
         # Verify: No scan was submitted during initial wait
         mock_job_manager.submit_job.assert_not_called()
 
         # Cleanup
         import os
+
         os.unlink(temp_db_path)
 
     def test_service_runs_immediately_when_no_previous_scans(self):
@@ -485,7 +505,7 @@ class TestSelfMonitoringServiceStartupCadence:
             job_manager=mock_job_manager,
             db_path=temp_db_path,
             log_db_path="/path/to/logs.db",
-            github_repo="owner/repo"
+            github_repo="owner/repo",
         )
 
         # Mock _stop_event.wait to immediately stop after first iteration
@@ -498,6 +518,7 @@ class TestSelfMonitoringServiceStartupCadence:
         service.start()
 
         import time
+
         time.sleep(0.5)
 
         service.stop()
@@ -507,6 +528,7 @@ class TestSelfMonitoringServiceStartupCadence:
 
         # Cleanup
         import os
+
         os.unlink(temp_db_path)
 
     def test_service_runs_immediately_when_elapsed_exceeds_cadence(self):
@@ -533,7 +555,7 @@ class TestSelfMonitoringServiceStartupCadence:
             job_manager=mock_job_manager,
             db_path=temp_db_path,
             log_db_path="/path/to/logs.db",
-            github_repo="owner/repo"
+            github_repo="owner/repo",
         )
 
         # Mock _stop_event.wait to immediately stop after first iteration
@@ -546,6 +568,7 @@ class TestSelfMonitoringServiceStartupCadence:
         service.start()
 
         import time
+
         time.sleep(0.5)
 
         service.stop()
@@ -555,6 +578,7 @@ class TestSelfMonitoringServiceStartupCadence:
 
         # Cleanup
         import os
+
         os.unlink(temp_db_path)
 
     def test_trigger_scan_after_enabled_via_toggle(self):
@@ -586,7 +610,7 @@ class TestSelfMonitoringServiceStartupCadence:
             cadence_minutes=60,
             job_manager=mock_job_manager,
             log_db_path="/path/to/logs.db",
-            github_repo="owner/repo"
+            github_repo="owner/repo",
         )
 
         assert service.enabled is False
@@ -600,6 +624,7 @@ class TestSelfMonitoringServiceStartupCadence:
 
         # Wait for service to start
         import time
+
         time.sleep(0.5)
 
         assert service.is_running is True
@@ -614,10 +639,8 @@ class TestSelfMonitoringServiceStartupCadence:
         result = service.trigger_scan()
 
         # Verify: trigger_scan() succeeds because _enabled was updated
-        assert result["status"] == "queued", \
-            f"Expected 'queued' status, got: {result}"
-        assert "scan_id" in result, \
-            f"Expected 'scan_id' in result, got: {result}"
+        assert result["status"] == "queued", f"Expected 'queued' status, got: {result}"
+        assert "scan_id" in result, f"Expected 'scan_id' in result, got: {result}"
         assert result["scan_id"] == "job-trigger-999"
 
         # Verify job was submitted
@@ -649,7 +672,7 @@ class TestSelfMonitoringServiceStartupCadence:
             cadence_minutes=60,
             job_manager=mock_job_manager,
             log_db_path="/path/to/logs.db",
-            github_repo="owner/repo"
+            github_repo="owner/repo",
         )
 
         assert service.enabled is False
@@ -661,6 +684,7 @@ class TestSelfMonitoringServiceStartupCadence:
 
         # Wait for service to start (it won't because _enabled is False)
         import time
+
         time.sleep(0.5)
 
         # Service did not start because _enabled is False
@@ -670,10 +694,10 @@ class TestSelfMonitoringServiceStartupCadence:
         result = service.trigger_scan()
 
         # Verify: trigger_scan() fails with "not enabled" error (BUG DEMONSTRATED)
-        assert result["status"] == "error", \
-            f"Expected 'error' status, got: {result}"
-        assert "not enabled" in result["error"].lower(), \
-            f"Expected 'not enabled' error, got: {result['error']}"
+        assert result["status"] == "error", f"Expected 'error' status, got: {result}"
+        assert (
+            "not enabled" in result["error"].lower()
+        ), f"Expected 'not enabled' error, got: {result['error']}"
 
         # Verify job was NOT submitted
         mock_job_manager.submit_job.assert_not_called()
@@ -700,7 +724,8 @@ class TestOrphanedScanCleanup:
 
         conn = sqlite3.connect(temp_db.name)
         cursor = conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             CREATE TABLE self_monitoring_scans (
                 scan_id TEXT PRIMARY KEY,
                 started_at TEXT NOT NULL,
@@ -711,7 +736,8 @@ class TestOrphanedScanCleanup:
                 issues_created INTEGER DEFAULT 0,
                 error_message TEXT
             )
-        """)
+        """
+        )
 
         for scan_data in scans_data:
             scan_id, started_at, completed_at, status = scan_data
@@ -719,7 +745,7 @@ class TestOrphanedScanCleanup:
                 "INSERT INTO self_monitoring_scans "
                 "(scan_id, started_at, completed_at, status, log_id_start, log_id_end, issues_created) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (scan_id, started_at, completed_at, status, 1, 100, 0)
+                (scan_id, started_at, completed_at, status, 1, 100, 0),
             )
 
         conn.commit()
@@ -740,16 +766,14 @@ class TestOrphanedScanCleanup:
 
         # Create database with orphaned scan (3 hours ago, completed_at=NULL)
         three_hours_ago = (datetime.utcnow() - timedelta(hours=3)).isoformat()
-        scans_data = [
-            ("orphaned-scan-1", three_hours_ago, None, "RUNNING")
-        ]
+        scans_data = [("orphaned-scan-1", three_hours_ago, None, "RUNNING")]
         temp_db_path = self._create_test_db_with_scans(scans_data)
 
         service = SelfMonitoringService(
             enabled=True,
             cadence_minutes=60,
             job_manager=None,  # Not needed for cleanup test
-            db_path=temp_db_path
+            db_path=temp_db_path,
         )
 
         # Call cleanup method (will be implemented)
@@ -760,7 +784,7 @@ class TestOrphanedScanCleanup:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT completed_at, status, error_message FROM self_monitoring_scans WHERE scan_id = ?",
-            ("orphaned-scan-1",)
+            ("orphaned-scan-1",),
         )
         row = cursor.fetchone()
         conn.close()
@@ -769,11 +793,16 @@ class TestOrphanedScanCleanup:
         completed_at, status, error_message = row
         assert completed_at is not None, "Expected completed_at to be set"
         assert status == "FAILURE", f"Expected status FAILURE, got {status}"
-        assert "orphaned" in error_message.lower(), f"Expected 'orphaned' in error message, got: {error_message}"
-        assert "2 hours" in error_message.lower(), f"Expected '2 hours' in error message, got: {error_message}"
+        assert (
+            "orphaned" in error_message.lower()
+        ), f"Expected 'orphaned' in error message, got: {error_message}"
+        assert (
+            "2 hours" in error_message.lower()
+        ), f"Expected '2 hours' in error message, got: {error_message}"
 
         # Cleanup
         import os
+
         os.unlink(temp_db_path)
 
     def test_cleanup_ignores_recent_scans(self):
@@ -789,16 +818,11 @@ class TestOrphanedScanCleanup:
 
         # Create database with recent scan (1 hour ago, completed_at=NULL)
         one_hour_ago = (datetime.utcnow() - timedelta(hours=1)).isoformat()
-        scans_data = [
-            ("recent-scan-1", one_hour_ago, None, "RUNNING")
-        ]
+        scans_data = [("recent-scan-1", one_hour_ago, None, "RUNNING")]
         temp_db_path = self._create_test_db_with_scans(scans_data)
 
         service = SelfMonitoringService(
-            enabled=True,
-            cadence_minutes=60,
-            job_manager=None,
-            db_path=temp_db_path
+            enabled=True, cadence_minutes=60, job_manager=None, db_path=temp_db_path
         )
 
         # Call cleanup method
@@ -809,7 +833,7 @@ class TestOrphanedScanCleanup:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT completed_at, status FROM self_monitoring_scans WHERE scan_id = ?",
-            ("recent-scan-1",)
+            ("recent-scan-1",),
         )
         row = cursor.fetchone()
         conn.close()
@@ -821,6 +845,7 @@ class TestOrphanedScanCleanup:
 
         # Cleanup
         import os
+
         os.unlink(temp_db_path)
 
     def test_cleanup_ignores_already_completed_scans(self):
@@ -836,16 +861,11 @@ class TestOrphanedScanCleanup:
 
         # Create database with completed scan (3 hours ago, completed_at set)
         three_hours_ago = (datetime.utcnow() - timedelta(hours=3)).isoformat()
-        scans_data = [
-            ("completed-scan-1", three_hours_ago, three_hours_ago, "SUCCESS")
-        ]
+        scans_data = [("completed-scan-1", three_hours_ago, three_hours_ago, "SUCCESS")]
         temp_db_path = self._create_test_db_with_scans(scans_data)
 
         service = SelfMonitoringService(
-            enabled=True,
-            cadence_minutes=60,
-            job_manager=None,
-            db_path=temp_db_path
+            enabled=True, cadence_minutes=60, job_manager=None, db_path=temp_db_path
         )
 
         # Call cleanup method
@@ -856,7 +876,7 @@ class TestOrphanedScanCleanup:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT completed_at, status, error_message FROM self_monitoring_scans WHERE scan_id = ?",
-            ("completed-scan-1",)
+            ("completed-scan-1",),
         )
         row = cursor.fetchone()
         conn.close()
@@ -869,6 +889,7 @@ class TestOrphanedScanCleanup:
 
         # Cleanup
         import os
+
         os.unlink(temp_db_path)
 
     def test_cleanup_logs_count_of_orphaned_scans(self):
@@ -894,14 +915,11 @@ class TestOrphanedScanCleanup:
         temp_db_path = self._create_test_db_with_scans(scans_data)
 
         service = SelfMonitoringService(
-            enabled=True,
-            cadence_minutes=60,
-            job_manager=None,
-            db_path=temp_db_path
+            enabled=True, cadence_minutes=60, job_manager=None, db_path=temp_db_path
         )
 
         # Capture log messages
-        with patch('code_indexer.server.self_monitoring.service.logger') as mock_logger:
+        with patch("code_indexer.server.self_monitoring.service.logger") as mock_logger:
             service._cleanup_orphaned_scans()
 
             # Verify: INFO log message contains count=2
@@ -916,11 +934,14 @@ class TestOrphanedScanCleanup:
                     cleanup_log = msg
                     break
 
-            assert cleanup_log is not None, f"Expected cleanup log with count=2, got: {[call[0][0] for call in info_calls]}"
+            assert (
+                cleanup_log is not None
+            ), f"Expected cleanup log with count=2, got: {[call[0][0] for call in info_calls]}"
             assert "2" in cleanup_log, f"Expected count 2 in log message: {cleanup_log}"
 
         # Cleanup
         import os
+
         os.unlink(temp_db_path)
 
     def test_cleanup_runs_before_each_scan(self):
@@ -943,18 +964,18 @@ class TestOrphanedScanCleanup:
             job_manager=mock_job_manager,
             db_path="/tmp/test.db",
             log_db_path="/tmp/logs.db",
-            github_repo="owner/repo"
+            github_repo="owner/repo",
         )
 
         # Track call order using shared list
         call_order = []
 
         def track_cleanup():
-            call_order.append('cleanup')
+            call_order.append("cleanup")
             # Don't call original to avoid database operations
 
         def track_submit():
-            call_order.append('submit')
+            call_order.append("submit")
             # Don't call original to avoid job submission
 
         service._cleanup_orphaned_scans = track_cleanup
@@ -972,10 +993,13 @@ class TestOrphanedScanCleanup:
         service.stop()
 
         # Verify: Both cleanup and submit were called
-        assert len(call_order) >= 2, f"Expected at least 2 calls (cleanup + submit), got: {call_order}"
-        assert 'cleanup' in call_order, "Expected cleanup to be called"
-        assert 'submit' in call_order, "Expected submit to be called"
+        assert (
+            len(call_order) >= 2
+        ), f"Expected at least 2 calls (cleanup + submit), got: {call_order}"
+        assert "cleanup" in call_order, "Expected cleanup to be called"
+        assert "submit" in call_order, "Expected submit to be called"
 
         # Verify: Cleanup was called before submit
-        assert call_order.index('cleanup') < call_order.index('submit'), \
-            f"Expected cleanup before submit, got order: {call_order}"
+        assert call_order.index("cleanup") < call_order.index(
+            "submit"
+        ), f"Expected cleanup before submit, got order: {call_order}"

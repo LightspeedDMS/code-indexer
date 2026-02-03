@@ -27,7 +27,9 @@ class TestConfigFixerProjectId:
         config_dir.mkdir()
 
         # Initialize git repo
-        subprocess.run(["git", "init"], cwd=project_dir, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "init"], cwd=project_dir, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "config", "user.name", "Test User"],
             cwd=project_dir,
@@ -81,6 +83,7 @@ class TestConfigFixerProjectId:
 
         # Verify it matches what FileIdentifier would return
         from code_indexer.services.file_identifier import FileIdentifier
+
         file_identifier = FileIdentifier(project_dir)
         expected_project_id = file_identifier.get_project_id()
 
@@ -104,6 +107,7 @@ class TestConfigFixerProjectId:
 
         # Verify consistency with FileIdentifier
         from code_indexer.services.file_identifier import FileIdentifier
+
         file_identifier = FileIdentifier(project_dir)
         expected_project_id = file_identifier.get_project_id()
 

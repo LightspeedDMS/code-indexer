@@ -2353,7 +2353,9 @@ class TestAPIMetricsTracking:
                 service.push_to_remote(repo_alias="test-repo", username="testuser")
                 mock_metrics.increment_other_api_call.assert_called_once()
 
-    def test_pull_from_remote_tracks_api_call(self, service, mock_activated_repo_manager):
+    def test_pull_from_remote_tracks_api_call(
+        self, service, mock_activated_repo_manager
+    ):
         """Test pull_from_remote calls api_metrics_service.increment_other_api_call()."""
         service.activated_repo_manager = mock_activated_repo_manager
 
@@ -2410,7 +2412,10 @@ class TestAPIMetricsTracking:
         service.activated_repo_manager = mock_activated_repo_manager
 
         with patch.object(service, "git_clean") as mock_git_clean:
-            mock_git_clean.return_value = {"requires_confirmation": True, "token": "ABC123"}
+            mock_git_clean.return_value = {
+                "requires_confirmation": True,
+                "token": "ABC123",
+            }
             with patch(
                 "code_indexer.server.services.api_metrics_service.api_metrics_service"
             ) as mock_metrics:
@@ -2510,6 +2515,8 @@ class TestAPIMetricsTracking:
                 "code_indexer.server.services.api_metrics_service.api_metrics_service"
             ) as mock_metrics:
                 service.delete_branch(
-                    repo_alias="test-repo", username="testuser", branch_name="old-feature"
+                    repo_alias="test-repo",
+                    username="testuser",
+                    branch_name="old-feature",
                 )
                 mock_metrics.increment_other_api_call.assert_called_once()

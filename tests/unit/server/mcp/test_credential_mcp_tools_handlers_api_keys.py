@@ -56,13 +56,9 @@ class TestListAPIKeysHandler:
         ]
         return manager
 
-    def test_list_api_keys_returns_success_true(
-        self, normal_user, mock_user_manager
-    ):
+    def test_list_api_keys_returns_success_true(self, normal_user, mock_user_manager):
         """list_api_keys handler returns success=True on valid call."""
-        with patch(
-            "code_indexer.server.mcp.handlers.app_module"
-        ) as mock_app:
+        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.user_manager = mock_user_manager
 
             handler = HANDLER_REGISTRY["list_api_keys"]
@@ -73,13 +69,9 @@ class TestListAPIKeysHandler:
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    def test_list_api_keys_returns_keys_array(
-        self, normal_user, mock_user_manager
-    ):
+    def test_list_api_keys_returns_keys_array(self, normal_user, mock_user_manager):
         """list_api_keys handler returns keys array."""
-        with patch(
-            "code_indexer.server.mcp.handlers.app_module"
-        ) as mock_app:
+        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.user_manager = mock_user_manager
 
             handler = HANDLER_REGISTRY["list_api_keys"]
@@ -105,13 +97,9 @@ class TestCreateAPIKeyHandler:
         manager.generate_key.return_value = ("cidx_sk_full_key_value", "key-uuid-123")
         return manager
 
-    def test_create_api_key_returns_success(
-        self, normal_user, mock_api_key_manager
-    ):
+    def test_create_api_key_returns_success(self, normal_user, mock_api_key_manager):
         """create_api_key handler returns success on valid creation."""
-        with patch(
-            "code_indexer.server.mcp.handlers.app_module"
-        ) as mock_app:
+        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.api_key_manager = mock_api_key_manager
 
             handler = HANDLER_REGISTRY["create_api_key"]
@@ -120,13 +108,9 @@ class TestCreateAPIKeyHandler:
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    def test_create_api_key_returns_key_id(
-        self, normal_user, mock_api_key_manager
-    ):
+    def test_create_api_key_returns_key_id(self, normal_user, mock_api_key_manager):
         """create_api_key handler returns key_id."""
-        with patch(
-            "code_indexer.server.mcp.handlers.app_module"
-        ) as mock_app:
+        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.api_key_manager = mock_api_key_manager
 
             handler = HANDLER_REGISTRY["create_api_key"]
@@ -139,9 +123,7 @@ class TestCreateAPIKeyHandler:
         self, normal_user, mock_api_key_manager
     ):
         """create_api_key handler returns full api_key (one-time display)."""
-        with patch(
-            "code_indexer.server.mcp.handlers.app_module"
-        ) as mock_app:
+        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.api_key_manager = mock_api_key_manager
 
             handler = HANDLER_REGISTRY["create_api_key"]
@@ -166,13 +148,9 @@ class TestDeleteAPIKeyHandler:
         manager.delete_api_key.return_value = True
         return manager
 
-    def test_delete_api_key_returns_success(
-        self, normal_user, mock_user_manager
-    ):
+    def test_delete_api_key_returns_success(self, normal_user, mock_user_manager):
         """delete_api_key handler returns success=True on valid deletion."""
-        with patch(
-            "code_indexer.server.mcp.handlers.app_module"
-        ) as mock_app:
+        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.user_manager = mock_user_manager
 
             handler = HANDLER_REGISTRY["delete_api_key"]

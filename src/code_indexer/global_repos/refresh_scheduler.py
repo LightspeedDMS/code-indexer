@@ -357,7 +357,7 @@ class RefreshScheduler:
 
         Complete workflow:
         1. Create .versioned/{repo_name}/v_{timestamp}/ directory structure
-        2. Perform CoW clone using cp --reflink=auto -r
+        2. Perform CoW clone using cp --reflink=auto -a
         3. Fix git status (git update-index --refresh, git restore .)
         4. Run cidx fix-config --force
         5. Run cidx index to create indexes
@@ -410,7 +410,7 @@ class RefreshScheduler:
                     [
                         "cp",
                         "--reflink=auto",
-                        "-r",
+                        "-a",
                         str(source_path),
                         str(versioned_path),
                     ],

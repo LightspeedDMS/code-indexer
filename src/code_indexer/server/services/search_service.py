@@ -258,11 +258,13 @@ class SemanticSearchService:
             return formatted_results
 
         except Exception as e:
-            logger.error(format_error_log(
-                "MCP-GENERAL-170",
-                f"Semantic search failed for repo {repo_path}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-170",
+                    f"Semantic search failed for repo {repo_path}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise RuntimeError(f"Semantic search failed: {e}")
 
     def _detect_language_from_path(self, file_path: str) -> Optional[str]:

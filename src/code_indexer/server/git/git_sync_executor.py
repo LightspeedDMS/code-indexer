@@ -197,12 +197,14 @@ class GitSyncExecutor:
             except Exception as e:
                 # Clearing errors are logged but not propagated
                 # Validation will still fail if repo remains dirty
-                logger.error(format_error_log(
-                    "GIT-GENERAL-025",
-                    f"Pre-pull clearing failed (non-blocking): {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "GIT-GENERAL-025",
+                        f"Pre-pull clearing failed (non-blocking): {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
 
         if not validation.can_pull:
             raise GitSyncError(
@@ -400,11 +402,13 @@ class GitSyncExecutor:
             )
 
         except Exception as e:
-            logger.error(format_error_log(
-                "GIT-GENERAL-026",
-                f"Repository validation failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "GIT-GENERAL-026",
+                    f"Repository validation failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             validation_errors.append(f"Validation error: {str(e)}")
             return RepositoryValidationResult(
                 is_valid=False, can_pull=False, validation_errors=validation_errors
@@ -468,11 +472,13 @@ class GitSyncExecutor:
             )
 
         except Exception as e:
-            logger.error(format_error_log(
-                "GIT-GENERAL-027",
-                f"Backup creation failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "GIT-GENERAL-027",
+                    f"Backup creation failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return BackupResult(
                 success=False,
                 error_message=str(e),
@@ -525,11 +531,13 @@ class GitSyncExecutor:
             env["GIT_SSH_COMMAND"] = f'ssh -i {self.auth_config["ssh"]["key_path"]}'
             if self.auth_config["ssh"].get("passphrase"):
                 # Note: In production, use a proper SSH agent or credential manager
-                logger.warning(format_error_log(
-                    "GIT-GENERAL-028",
-                    "SSH passphrase support requires proper credential management",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "GIT-GENERAL-028",
+                        "SSH passphrase support requires proper credential management",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
 
         # HTTPS authentication
         if self.auth_config["https"].get("token"):
@@ -548,10 +556,13 @@ class GitSyncExecutor:
             )
             return str(result.stdout)
         except subprocess.CalledProcessError as e:
-            logger.error(format_error_log(
-                "GIT-GENERAL-029",
-                f"Git pull failed: {e}", extra={"correlation_id": get_correlation_id()}
-            ))
+            logger.error(
+                format_error_log(
+                    "GIT-GENERAL-029",
+                    f"Git pull failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise
 
     def _analyze_git_error(
@@ -603,11 +614,13 @@ class GitSyncExecutor:
             )
             return [line.strip() for line in result.stdout.split("\n") if line.strip()]
         except subprocess.CalledProcessError as e:
-            logger.warning(format_error_log(
-                "GIT-GENERAL-030",
-                f"Could not get changed files: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "GIT-GENERAL-030",
+                    f"Could not get changed files: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return []
 
     def _count_commits_pulled(self, before_commit: str, after_commit: str) -> int:
@@ -622,11 +635,13 @@ class GitSyncExecutor:
             )
             return int(result.stdout.strip())
         except subprocess.CalledProcessError as e:
-            logger.warning(format_error_log(
-                "GIT-GENERAL-031",
-                f"Could not count commits: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "GIT-GENERAL-031",
+                    f"Could not count commits: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return 0
 
     def _trigger_cidx_index(self) -> bool:
@@ -663,19 +678,23 @@ class GitSyncExecutor:
 
             # Health checks
             if not embedding_provider.health_check():
-                logger.error(format_error_log(
-                    "GIT-GENERAL-032",
-                    "Embedding provider health check failed",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "GIT-GENERAL-032",
+                        "Embedding provider health check failed",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return False
 
             if not vector_store_client.health_check():
-                logger.error(format_error_log(
-                    "GIT-GENERAL-033",
-                    "Vector store client health check failed",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "GIT-GENERAL-033",
+                        "Vector store client health check failed",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return False
 
             # Create SmartIndexer
@@ -708,20 +727,24 @@ class GitSyncExecutor:
                 )
                 return True
             else:
-                logger.warning(format_error_log(
-                    "GIT-GENERAL-034",
-                    "Internal CIDX indexing was cancelled or failed",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "GIT-GENERAL-034",
+                        "Internal CIDX indexing was cancelled or failed",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return False
 
         except Exception as e:
-            logger.error(format_error_log(
-                "GIT-GENERAL-035",
-                f"Internal CIDX indexing failed: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "GIT-GENERAL-035",
+                    f"Internal CIDX indexing failed: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return False
 
     def restore_from_backup(self, backup_path: str) -> bool:
@@ -737,11 +760,13 @@ class GitSyncExecutor:
         try:
             backup_dir = Path(backup_path)
             if not backup_dir.exists():
-                logger.error(format_error_log(
-                    "GIT-GENERAL-036",
-                    f"Backup path does not exist: {backup_path}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "GIT-GENERAL-036",
+                        f"Backup path does not exist: {backup_path}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return False
 
             # Load backup metadata
@@ -781,9 +806,11 @@ class GitSyncExecutor:
             return True
 
         except Exception as e:
-            logger.error(format_error_log(
-                "GIT-GENERAL-037",
-                f"Backup restoration failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "GIT-GENERAL-037",
+                    f"Backup restoration failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return False

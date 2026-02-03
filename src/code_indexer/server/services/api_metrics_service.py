@@ -136,10 +136,12 @@ class ApiMetricsService:
             Gracefully degrades (logs warning, no crash) if all retries fail.
         """
         if not self._db_path:
-            logger.warning(format_error_log(
-                "APP-GENERAL-047",
-                f"ApiMetricsService not initialized, skipping {metric_type} increment"
-            ))
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-047",
+                    f"ApiMetricsService not initialized, skipping {metric_type} increment",
+                )
+            )
             return
 
         now = datetime.now(timezone.utc).isoformat()
@@ -157,13 +159,14 @@ class ApiMetricsService:
                 break  # Success
             except sqlite3.OperationalError as e:
                 if "database is locked" in str(e).lower() and attempt < MAX_RETRIES - 1:
-                    delay = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.01)
+                    delay = RETRY_BASE_DELAY * (2**attempt) + random.uniform(0, 0.01)
                     time.sleep(delay)
                     continue
-                logger.warning(format_error_log(
-                    "APP-GENERAL-048",
-                    f"Failed to insert metric {metric_type}: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "APP-GENERAL-048", f"Failed to insert metric {metric_type}: {e}"
+                    )
+                )
                 return  # Graceful degradation
 
         # Periodic cleanup (not on every insert)

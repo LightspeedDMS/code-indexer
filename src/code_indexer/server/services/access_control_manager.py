@@ -64,19 +64,23 @@ class AccessControlManager:
                 return self._get_activated_repo_access(repo_data, user)
 
             else:
-                logger.warning(format_error_log(
-                    "WEB-GENERAL-041",
-                    f"Unknown repository type for data: {repo_data}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "WEB-GENERAL-041",
+                        f"Unknown repository type for data: {repo_data}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return None
 
         except Exception as e:
-            logger.error(format_error_log(
-                "APP-GENERAL-038",
-                f"Error checking access for user {user.username}: {str(e)}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-038",
+                    f"Error checking access for user {user.username}: {str(e)}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return None
 
     def _is_golden_repository(self, repo_data: Dict[str, Any]) -> bool:

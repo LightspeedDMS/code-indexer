@@ -29,9 +29,7 @@ class TestScipAuditDatabaseInitialization:
         with tempfile.TemporaryDirectory(prefix="cidx_scip_init_test_") as tmp:
             yield Path(tmp)
 
-    def test_initialize_scip_audit_database_creates_file(
-        self, temp_server_dir: Path
-    ):
+    def test_initialize_scip_audit_database_creates_file(self, temp_server_dir: Path):
         """
         AC1: scip_audit.db should be created in server data directory.
 
@@ -49,9 +47,7 @@ class TestScipAuditDatabaseInitialization:
         assert scip_audit_path.name == "scip_audit.db"
         assert scip_audit_path.parent == temp_server_dir
 
-    def test_initialize_scip_audit_database_creates_table(
-        self, temp_server_dir: Path
-    ):
+    def test_initialize_scip_audit_database_creates_table(self, temp_server_dir: Path):
         """
         AC2: scip_audit.db should have the correct schema.
 
@@ -71,9 +67,9 @@ class TestScipAuditDatabaseInitialization:
                 "AND name='scip_dependency_installations'"
             )
             result = cursor.fetchone()
-            assert result is not None, (
-                "scip_dependency_installations table should exist"
-            )
+            assert (
+                result is not None
+            ), "scip_dependency_installations table should exist"
             assert result[0] == "scip_dependency_installations"
 
     def test_initialize_scip_audit_database_creates_indexes(
@@ -109,9 +105,7 @@ class TestScipAuditDatabaseInitialization:
             missing = required_indexes - indexes
             assert not missing, f"Missing indexes: {missing}"
 
-    def test_initialize_scip_audit_database_is_idempotent(
-        self, temp_server_dir: Path
-    ):
+    def test_initialize_scip_audit_database_is_idempotent(self, temp_server_dir: Path):
         """
         AC3: Initialization should be idempotent - running twice is safe.
 
@@ -140,9 +134,7 @@ class TestScipAuditDatabaseInitialization:
 
         # Verify data exists
         with sqlite3.connect(str(scip_audit_path)) as conn:
-            cursor = conn.execute(
-                "SELECT COUNT(*) FROM scip_dependency_installations"
-            )
+            cursor = conn.execute("SELECT COUNT(*) FROM scip_dependency_installations")
             count_before = cursor.fetchone()[0]
             assert count_before == 1
 
@@ -154,9 +146,7 @@ class TestScipAuditDatabaseInitialization:
 
         # Verify data is preserved
         with sqlite3.connect(str(scip_audit_path)) as conn:
-            cursor = conn.execute(
-                "SELECT COUNT(*) FROM scip_dependency_installations"
-            )
+            cursor = conn.execute("SELECT COUNT(*) FROM scip_dependency_installations")
             count_after = cursor.fetchone()[0]
             assert count_after == 1, "Existing data should be preserved"
 
@@ -218,8 +208,7 @@ class TestScipAuditDatabaseInitialization:
         assert result is None, "Should return None on initialization failure"
         # Should log a warning
         assert any(
-            "scip_audit" in record.message.lower() or
-            "failed" in record.message.lower()
+            "scip_audit" in record.message.lower() or "failed" in record.message.lower()
             for record in caplog.records
         ), "Should log warning about initialization failure"
 
@@ -342,15 +331,12 @@ class TestHealthServiceWithEagerInitialization:
         initialize_scip_audit_database(str(temp_server_dir_with_all_dbs))
 
         # Check health
-        service = DatabaseHealthService(
-            server_dir=str(temp_server_dir_with_all_dbs)
-        )
+        service = DatabaseHealthService(server_dir=str(temp_server_dir_with_all_dbs))
         health_results = service.get_all_database_health()
 
         # Find SCIP Audit result
         scip_audit_result = next(
-            (r for r in health_results if r.file_name == "scip_audit.db"),
-            None
+            (r for r in health_results if r.file_name == "scip_audit.db"), None
         )
 
         assert scip_audit_result is not None, "Should have SCIP Audit health result"
@@ -381,13 +367,13 @@ class TestHealthServiceWithEagerInitialization:
         initialize_scip_audit_database(str(temp_server_dir_with_all_dbs))
 
         # Check health of all databases
-        service = DatabaseHealthService(
-            server_dir=str(temp_server_dir_with_all_dbs)
-        )
+        service = DatabaseHealthService(server_dir=str(temp_server_dir_with_all_dbs))
         health_results = service.get_all_database_health()
 
         # Verify all 7 databases are healthy
-        assert len(health_results) == 7, f"Expected 7 databases, got {len(health_results)}"
+        assert (
+            len(health_results) == 7
+        ), f"Expected 7 databases, got {len(health_results)}"
 
         for result in health_results:
             assert result.status == DatabaseHealthStatus.HEALTHY, (

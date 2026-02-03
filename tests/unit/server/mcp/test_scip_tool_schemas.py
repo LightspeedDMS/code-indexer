@@ -36,9 +36,9 @@ class TestSCIPToolSchemasRepositoryAlias:
         assert "inputSchema" in schema, f"Tool {tool_name} missing inputSchema"
 
         properties = schema["inputSchema"].get("properties", {})
-        assert "repository_alias" in properties, (
-            f"Tool {tool_name} missing repository_alias in inputSchema.properties"
-        )
+        assert (
+            "repository_alias" in properties
+        ), f"Tool {tool_name} missing repository_alias in inputSchema.properties"
 
     @pytest.mark.parametrize("tool_name", SCIP_TOOLS)
     def test_repository_alias_accepts_string_type(self, tool_name: str):
@@ -49,20 +49,20 @@ class TestSCIPToolSchemasRepositoryAlias:
         # Should accept string type
         type_def = repo_alias_schema.get("type")
         if isinstance(type_def, list):
-            assert "string" in type_def, (
-                f"Tool {tool_name}: repository_alias should accept string type"
-            )
+            assert (
+                "string" in type_def
+            ), f"Tool {tool_name}: repository_alias should accept string type"
         elif isinstance(type_def, str):
-            assert type_def == "string", (
-                f"Tool {tool_name}: repository_alias should be string type"
-            )
+            assert (
+                type_def == "string"
+            ), f"Tool {tool_name}: repository_alias should be string type"
         else:
             # Could be using oneOf pattern
             one_of = repo_alias_schema.get("oneOf", [])
             types = [opt.get("type") for opt in one_of]
-            assert "string" in types, (
-                f"Tool {tool_name}: repository_alias should accept string type"
-            )
+            assert (
+                "string" in types
+            ), f"Tool {tool_name}: repository_alias should accept string type"
 
     @pytest.mark.parametrize("tool_name", SCIP_TOOLS)
     def test_repository_alias_accepts_null_type(self, tool_name: str):
@@ -73,18 +73,18 @@ class TestSCIPToolSchemasRepositoryAlias:
         # Should accept null type
         type_def = repo_alias_schema.get("type")
         if isinstance(type_def, list):
-            assert "null" in type_def, (
-                f"Tool {tool_name}: repository_alias should accept null type"
-            )
+            assert (
+                "null" in type_def
+            ), f"Tool {tool_name}: repository_alias should accept null type"
         else:
             # Could be using oneOf pattern
             one_of = repo_alias_schema.get("oneOf", [])
             types = [opt.get("type") for opt in one_of]
             # Check if null is in types or if default is None
             has_null = "null" in types or repo_alias_schema.get("default") is None
-            assert has_null, (
-                f"Tool {tool_name}: repository_alias should accept null or have null default"
-            )
+            assert (
+                has_null
+            ), f"Tool {tool_name}: repository_alias should accept null or have null default"
 
     @pytest.mark.parametrize("tool_name", SCIP_TOOLS)
     def test_repository_alias_has_null_default(self, tool_name: str):
@@ -93,9 +93,9 @@ class TestSCIPToolSchemasRepositoryAlias:
         repo_alias_schema = schema["properties"]["repository_alias"]
 
         # Default should be None/null for all repos behavior
-        assert repo_alias_schema.get("default") is None, (
-            f"Tool {tool_name}: repository_alias default should be null/None"
-        )
+        assert (
+            repo_alias_schema.get("default") is None
+        ), f"Tool {tool_name}: repository_alias default should be null/None"
 
     @pytest.mark.parametrize("tool_name", SCIP_TOOLS)
     def test_repository_alias_has_description(self, tool_name: str):
@@ -103,18 +103,18 @@ class TestSCIPToolSchemasRepositoryAlias:
         schema = TOOL_REGISTRY[tool_name]["inputSchema"]
         repo_alias_schema = schema["properties"]["repository_alias"]
 
-        assert "description" in repo_alias_schema, (
-            f"Tool {tool_name}: repository_alias should have description"
-        )
+        assert (
+            "description" in repo_alias_schema
+        ), f"Tool {tool_name}: repository_alias should have description"
 
         description = repo_alias_schema["description"]
-        assert len(description) > 10, (
-            f"Tool {tool_name}: repository_alias description too short"
-        )
+        assert (
+            len(description) > 10
+        ), f"Tool {tool_name}: repository_alias description too short"
         # Description should mention filtering/repo
-        assert "repo" in description.lower(), (
-            f"Tool {tool_name}: description should mention repository"
-        )
+        assert (
+            "repo" in description.lower()
+        ), f"Tool {tool_name}: description should mention repository"
 
     @pytest.mark.parametrize("tool_name", SCIP_TOOLS)
     def test_repository_alias_not_required(self, tool_name: str):
@@ -122,9 +122,9 @@ class TestSCIPToolSchemasRepositoryAlias:
         schema = TOOL_REGISTRY[tool_name]["inputSchema"]
         required = schema.get("required", [])
 
-        assert "repository_alias" not in required, (
-            f"Tool {tool_name}: repository_alias should be optional, not required"
-        )
+        assert (
+            "repository_alias" not in required
+        ), f"Tool {tool_name}: repository_alias should be optional, not required"
 
 
 class TestSCIPToolSchemasExistence:
@@ -133,9 +133,9 @@ class TestSCIPToolSchemasExistence:
     def test_all_scip_tools_registered(self):
         """All 7 SCIP tools exist in TOOL_REGISTRY."""
         for tool_name in SCIP_TOOLS:
-            assert tool_name in TOOL_REGISTRY, (
-                f"SCIP tool {tool_name} not found in TOOL_REGISTRY"
-            )
+            assert (
+                tool_name in TOOL_REGISTRY
+            ), f"SCIP tool {tool_name} not found in TOOL_REGISTRY"
 
     def test_scip_tools_count(self):
         """Exactly 7 SCIP tools expected."""
@@ -167,6 +167,6 @@ class TestSCIPToolSchemaBackwardCompatibility:
         properties = schema["properties"]
 
         # All SCIP tools should have project filter (existing functionality)
-        assert "project" in properties, (
-            f"Tool {tool_name}: existing project filter should be preserved"
-        )
+        assert (
+            "project" in properties
+        ), f"Tool {tool_name}: existing project filter should be preserved"

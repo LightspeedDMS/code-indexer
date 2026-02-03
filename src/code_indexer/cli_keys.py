@@ -153,7 +153,11 @@ def keys_list(json_output: bool):
                 table.add_row(
                     key.get("name", ""),
                     key.get("key_type", ""),
-                    key.get("fingerprint", "")[:20] + "..." if key.get("fingerprint") else "",
+                    (
+                        key.get("fingerprint", "")[:20] + "..."
+                        if key.get("fingerprint")
+                        else ""
+                    ),
                     key.get("created_at", "")[:10] if key.get("created_at") else "",
                 )
 

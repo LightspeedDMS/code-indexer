@@ -70,9 +70,7 @@ class TestIsInstalled:
 
     def test_returns_false_on_timeout(self, installer):
         """Test returns False when command times out."""
-        with patch(
-            "subprocess.run", side_effect=subprocess.TimeoutExpired("rg", 10)
-        ):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("rg", 10)):
             result = installer.is_installed()
 
         assert result is False
@@ -185,7 +183,9 @@ class TestDownloadFile:
         mock_response.__enter__.return_value = mock_response
         mock_response.__exit__.return_value = None
 
-        with patch("urllib.request.urlopen", return_value=mock_response) as mock_urlopen:
+        with patch(
+            "urllib.request.urlopen", return_value=mock_response
+        ) as mock_urlopen:
             with patch("builtins.open", mock_open()) as mock_file:
                 installer._download_file(url, dest_path)
 
@@ -193,7 +193,7 @@ class TestDownloadFile:
         mock_urlopen.assert_called_once()
         call_args = mock_urlopen.call_args
         assert call_args[0][0] == url
-        assert call_args.kwargs.get('timeout') == 60
+        assert call_args.kwargs.get("timeout") == 60
 
         mock_file.assert_called_once_with(dest_path, "wb")
         mock_file().write.assert_called_once_with(b"file contents")
@@ -240,7 +240,14 @@ class TestInstall:
     @patch("tarfile.open")
     @patch("platform.machine", return_value="x86_64")
     def test_installs_successfully(
-        self, mock_machine, mock_tarfile, mock_mkdtemp, mock_rmtree, mock_copy, installer, tmp_path
+        self,
+        mock_machine,
+        mock_tarfile,
+        mock_mkdtemp,
+        mock_rmtree,
+        mock_copy,
+        installer,
+        tmp_path,
     ):
         """Test successful installation flow."""
         temp_dir = str(tmp_path / "temp")
@@ -261,7 +268,9 @@ class TestInstall:
 
         with patch.object(installer, "is_installed", side_effect=install_check_results):
             with patch.object(installer, "_download_file") as mock_download:
-                with patch.object(installer, "get_install_path", return_value=install_path):
+                with patch.object(
+                    installer, "get_install_path", return_value=install_path
+                ):
                     result = installer.install()
 
         assert result is True
@@ -286,7 +295,14 @@ class TestInstall:
     @patch("tarfile.open")
     @patch("platform.machine", return_value="x86_64")
     def test_returns_false_when_verification_fails(
-        self, mock_machine, mock_tarfile, mock_mkdtemp, mock_rmtree, mock_copy, installer, tmp_path
+        self,
+        mock_machine,
+        mock_tarfile,
+        mock_mkdtemp,
+        mock_rmtree,
+        mock_copy,
+        installer,
+        tmp_path,
     ):
         """Test returns False when post-install verification fails."""
         temp_dir = str(tmp_path / "temp")
@@ -302,7 +318,9 @@ class TestInstall:
 
         with patch.object(installer, "is_installed", return_value=False):
             with patch.object(installer, "_download_file"):
-                with patch.object(installer, "get_install_path", return_value=install_path):
+                with patch.object(
+                    installer, "get_install_path", return_value=install_path
+                ):
                     result = installer.install()
 
         assert result is False
@@ -312,7 +330,9 @@ class TestInstall:
         """Test returns False when installation raises unexpected exception."""
         with patch.object(installer, "is_installed", return_value=False):
             with patch.object(
-                installer, "_download_file", side_effect=RuntimeError("unexpected error")
+                installer,
+                "_download_file",
+                side_effect=RuntimeError("unexpected error"),
             ):
                 result = installer.install()
 

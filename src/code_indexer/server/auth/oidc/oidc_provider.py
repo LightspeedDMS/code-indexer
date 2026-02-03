@@ -138,16 +138,18 @@ class OIDCProvider:
             raise Exception("ID token is required but was not provided")
 
         try:
-            parts = id_token.split('.')
+            parts = id_token.split(".")
             if len(parts) != 3:
-                raise Exception(f"Invalid ID token format: expected 3 parts, got {len(parts)}")
+                raise Exception(
+                    f"Invalid ID token format: expected 3 parts, got {len(parts)}"
+                )
 
             # Decode payload (base64url decode with padding)
             payload = parts[1]
             # Add padding if needed (base64 requires length to be multiple of 4)
             padding = 4 - (len(payload) % 4)
             if padding != 4:
-                payload += '=' * padding
+                payload += "=" * padding
 
             data = json.loads(base64.urlsafe_b64decode(payload))
             logger.info(
@@ -159,9 +161,7 @@ class OIDCProvider:
 
         # Validate ID token has required fields
         if "sub" not in data or not data["sub"]:
-            raise Exception(
-                "Invalid ID token: missing or empty sub (subject) claim"
-            )
+            raise Exception("Invalid ID token: missing or empty sub (subject) claim")
 
         # Log claim extraction for debugging
         logger.info(

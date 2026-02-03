@@ -13,7 +13,6 @@ TDD methodology: Tests written BEFORE any implementation changes.
 """
 
 
-
 class TestMultiRepoContentTruncation:
     """AC1: Multi-repo Content Truncation tests.
 
@@ -155,9 +154,7 @@ class TestPerResultCacheHandleIndependence:
             else:
                 app_module.app.state.payload_cache = original
 
-    def test_same_repo_multiple_results_get_independent_handles(
-        self, cache_100_chars
-    ):
+    def test_same_repo_multiple_results_get_independent_handles(self, cache_100_chars):
         """Multiple results from SAME repo get independent cache handles."""
         from code_indexer.server.mcp.handlers import _apply_payload_truncation
         from code_indexer.server import app as app_module
@@ -213,9 +210,7 @@ class TestRepositoryAttributionPreservation:
     Story #50: _apply_payload_truncation and PayloadCache are now sync.
     """
 
-    def test_all_metadata_fields_preserved_after_truncation(
-        self, cache_100_chars
-    ):
+    def test_all_metadata_fields_preserved_after_truncation(self, cache_100_chars):
         """All metadata fields preserved after truncation (only content fields modified)."""
         from code_indexer.server.mcp.handlers import _apply_payload_truncation
         from code_indexer.server import app as app_module
@@ -354,9 +349,7 @@ class TestMixedResultsTruncation:
     Story #50: _apply_payload_truncation and PayloadCache are now sync.
     """
 
-    def test_mixed_large_and_small_content_from_multiple_repos(
-        self, cache_100_chars
-    ):
+    def test_mixed_large_and_small_content_from_multiple_repos(self, cache_100_chars):
         """Mix of large and small content from multiple repos handled correctly."""
         from code_indexer.server.mcp.handlers import _apply_payload_truncation
         from code_indexer.server import app as app_module

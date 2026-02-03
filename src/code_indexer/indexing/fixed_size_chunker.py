@@ -115,10 +115,12 @@ class FixedSizeChunker:
         # HtmlImageExtractor returns list[str], MarkdownImageExtractor returns list[str]
         images = []
         for path in image_paths:
-            images.append({
-                "alt_text": "",  # HTML extractor doesn't extract alt text
-                "path": path
-            })
+            images.append(
+                {
+                    "alt_text": "",  # HTML extractor doesn't extract alt text
+                    "path": path,
+                }
+            )
 
         return images
 
@@ -148,7 +150,10 @@ class FixedSizeChunker:
         return line_start, line_end
 
     def chunk_text(
-        self, text: str, file_path: Optional[Path] = None, repo_root: Optional[Path] = None
+        self,
+        text: str,
+        file_path: Optional[Path] = None,
+        repo_root: Optional[Path] = None,
     ) -> List[Dict[str, Any]]:
         """Split text into fixed-size chunks using ultra-simple algorithm.
 
@@ -225,7 +230,9 @@ class FixedSizeChunker:
 
         return chunks
 
-    def chunk_file(self, file_path: Path, repo_root: Optional[Path] = None) -> List[Dict[str, Any]]:
+    def chunk_file(
+        self, file_path: Path, repo_root: Optional[Path] = None
+    ) -> List[Dict[str, Any]]:
         """Read and chunk a file using fixed-size algorithm.
 
         Args:
@@ -243,7 +250,9 @@ class FixedSizeChunker:
         except Exception as e:
             raise ValueError(f"Failed to process file {file_path}: {e}")
 
-    def _chunk_file_standard(self, file_path: Path, repo_root: Optional[Path] = None) -> List[Dict[str, Any]]:
+    def _chunk_file_standard(
+        self, file_path: Path, repo_root: Optional[Path] = None
+    ) -> List[Dict[str, Any]]:
         """Standard file chunking - reads entire file into memory."""
         # Try different encodings
         encodings = ["utf-8", "utf-8-sig", "latin-1", "cp1252"]

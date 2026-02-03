@@ -87,13 +87,17 @@ class TestFilesystemVectorStoreSubdirectory:
                     "line_end": 10,
                     "language": "markdown",
                     "type": "content",
-                    "images": [{"path": "images/diagram.png", "alt_text": "Architecture"}],
+                    "images": [
+                        {"path": "images/diagram.png", "alt_text": "Architecture"}
+                    ],
                 },
             }
         ]
 
         store.begin_indexing("test_coll", subdirectory="multimodal_index")
-        result = store.upsert_points("test_coll", points, subdirectory="multimodal_index")
+        result = store.upsert_points(
+            "test_coll", points, subdirectory="multimodal_index"
+        )
         store.end_indexing("test_coll", subdirectory="multimodal_index")
 
         assert result["status"] == "ok", "upsert should succeed"
@@ -140,7 +144,9 @@ class TestFilesystemVectorStoreSubdirectory:
         store = FilesystemVectorStore(base_path=tmp_path)
 
         # Create same collection name in two subdirectories
-        store.create_collection("test_coll", vector_size=1024, subdirectory="code_index")
+        store.create_collection(
+            "test_coll", vector_size=1024, subdirectory="code_index"
+        )
         store.create_collection(
             "test_coll", vector_size=1024, subdirectory="multimodal_index"
         )

@@ -160,6 +160,43 @@ Use when you KNOW which repo to search (or cidx-meta found only ONE relevant rep
 3. get_file_content() to read full files
 4. Use SCIP tools for code navigation
 
+WORKFLOW D - Research Session Tracing (Optional Observability):
+Use when you want to track tool usage, measure performance, or debug issues.
+
+WHY USE TRACING:
+- Track which searches led to successful code discovery
+- Measure query performance and optimize search patterns
+- Create audit trails for compliance or debugging
+- Analyze usage patterns across research sessions
+
+STEPS:
+1. Start a trace at the beginning of your session:
+   start_trace(name='auth-research', metadata={'goal': 'find login flow'})
+
+2. Execute your normal workflow (searches, file reads, SCIP queries):
+   search_code(query_text='authentication', repository_alias='backend-global')
+   get_file_content(repository_alias='backend-global', file_path='src/auth.py')
+   scip_references(symbol='authenticate_user', repository_alias='backend-global')
+   -> Each tool call is automatically recorded as a span within your trace
+
+3. End the trace when your research is complete:
+   end_trace(score=0.8, feedback='Found main auth flow, need to check middleware')
+   -> Score (0.0-1.0) rates session success, feedback provides context
+
+IMPORTANT FOR HTTP CLIENTS:
+If using HTTP-based MCP calls (not stdio), you MUST include session_id for trace persistence:
+  POST /mcp?session_id=your-unique-session-id
+
+Without session_id, each HTTP request has isolated state and traces cannot span multiple requests.
+
+AUTO-TRACING:
+If the server has auto_trace_enabled configured, a trace is created automatically on your first tool call. However, explicit start_trace is recommended for controlled sessions with meaningful names and metadata.
+
+GRACEFUL BEHAVIOR:
+- Tracing is optional - all tools work normally without an active trace
+- If Langfuse is disabled/unavailable, tracing tools succeed but do nothing
+- Langfuse errors never fail your search or file operations
+
 NEXT STEPS:
 - Use get_tool_categories() to discover more tools
 - Use cidx_quick_reference(category='search') for detailed tool selection guidance
@@ -187,3 +224,9 @@ A: Search cidx-meta-global FIRST! It contains descriptions of all repositories. 
 
 Q: cidx-meta returned multiple relevant repos - what now?
 A: Use multi-repo search (WORKFLOW B). Pass all relevant repos as a list: search_code(query_text='topic', repository_alias=['repo1-global', 'repo2-global'], aggregation_mode='global'). DO NOT search them one-by-one.
+
+Q: What is session tracing and do I need it?
+A: Session tracing records your tool calls for observability (performance analysis, debugging, audit trails). It's optional - all tools work without it. Use start_trace() at session start if you want tracking, or enable auto_trace in server config for automatic tracing.
+
+Q: Why did my trace disappear between HTTP requests?
+A: HTTP requests have isolated state by default. Include ?session_id=xxx in your MCP endpoint URL to persist trace state across requests. Stdio-based clients don't have this issue.

@@ -64,9 +64,7 @@ def _extract_response_data(mcp_response: dict) -> dict:
 class TestGitStatusHandler:
     """Test git_status MCP handler."""
 
-    def test_git_status_success(
-        self, mock_user, mock_git_service, mock_repo_manager
-    ):
+    def test_git_status_success(self, mock_user, mock_git_service, mock_repo_manager):
         """Test successful git status operation."""
         from code_indexer.server.mcp import handlers
 
@@ -133,9 +131,7 @@ class TestGitStatusHandler:
 class TestGitDiffHandler:
     """Test git_diff MCP handler."""
 
-    def test_git_diff_success(
-        self, mock_user, mock_git_service, mock_repo_manager
-    ):
+    def test_git_diff_success(self, mock_user, mock_git_service, mock_repo_manager):
         """Test successful git diff operation."""
         from code_indexer.server.mcp import handlers
 
@@ -191,9 +187,7 @@ class TestGitDiffHandler:
 class TestGitLogHandler:
     """Test git_log MCP handler."""
 
-    def test_git_log_success(
-        self, mock_user, mock_git_service, mock_repo_manager
-    ):
+    def test_git_log_success(self, mock_user, mock_git_service, mock_repo_manager):
         """Test successful git log operation."""
         from code_indexer.server.mcp import handlers
 
@@ -275,9 +269,7 @@ class TestGitLogHandler:
 class TestGitStageHandler:
     """Test git_stage MCP handler (F3: Staging/Commit)."""
 
-    def test_git_stage_success(
-        self, mock_user, mock_git_service, mock_repo_manager
-    ):
+    def test_git_stage_success(self, mock_user, mock_git_service, mock_repo_manager):
         """Test successful git stage operation."""
         from code_indexer.server.mcp import handlers
 
@@ -345,9 +337,7 @@ class TestGitStageHandler:
 class TestGitUnstageHandler:
     """Test git_unstage MCP handler (F3: Staging/Commit)."""
 
-    def test_git_unstage_success(
-        self, mock_user, mock_git_service, mock_repo_manager
-    ):
+    def test_git_unstage_success(self, mock_user, mock_git_service, mock_repo_manager):
         """Test successful git unstage operation."""
         from code_indexer.server.mcp import handlers
 

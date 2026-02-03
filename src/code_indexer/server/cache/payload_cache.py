@@ -177,10 +177,9 @@ class PayloadCache:
             try:
                 self.cleanup_expired()
             except Exception as e:
-                logger.warning(format_error_log(
-                    "GIT-GENERAL-014",
-                    f"Cleanup failed: {e}"
-                ))
+                logger.warning(
+                    format_error_log("GIT-GENERAL-014", f"Cleanup failed: {e}")
+                )
 
     def store(self, content: str) -> str:
         """Store content and return a UUID4 handle.

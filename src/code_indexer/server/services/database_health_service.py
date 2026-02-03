@@ -36,7 +36,9 @@ logger = logging.getLogger(__name__)
 _db_health_service_instance: Optional["DatabaseHealthService"] = None
 
 
-def get_database_health_service(server_dir: Optional[str] = None) -> "DatabaseHealthService":
+def get_database_health_service(
+    server_dir: Optional[str] = None,
+) -> "DatabaseHealthService":
     """
     Get the singleton DatabaseHealthService instance.
 

@@ -66,8 +66,9 @@ class TestAC2_WebUIConfigSectionDocumentation:
     def get_config_section_content(self) -> str:
         """Load the config_section.html template content."""
         config_section_path = self.get_config_section_path()
-        assert config_section_path.exists(), \
-            f"Config section template not found at {config_section_path}"
+        assert (
+            config_section_path.exists()
+        ), f"Config section template not found at {config_section_path}"
         return config_section_path.read_text()
 
     @pytest.mark.parametrize("section_id,section_name", CONFIG_SECTIONS)
@@ -76,21 +77,24 @@ class TestAC2_WebUIConfigSectionDocumentation:
         content = self.get_config_section_content()
 
         # Section should exist
-        assert f'id="{section_id}"' in content, \
-            f"{section_name} section should exist (id='{section_id}')"
+        assert (
+            f'id="{section_id}"' in content
+        ), f"{section_name} section should exist (id='{section_id}')"
 
         # Section should have a description paragraph
         section_match = re.search(
             rf'id="{section_id}".*?<p class="section-description">(.*?)</p>',
             content,
-            re.DOTALL
+            re.DOTALL,
         )
-        assert section_match is not None, \
-            f"{section_name} section should have a <p class='section-description'> paragraph"
+        assert (
+            section_match is not None
+        ), f"{section_name} section should have a <p class='section-description'> paragraph"
 
         description = section_match.group(1).strip()
-        assert len(description) >= MIN_DESCRIPTION_LENGTH, \
-            f"{section_name} description should be meaningful (>={MIN_DESCRIPTION_LENGTH} chars), got: {description[:100]}"
+        assert (
+            len(description) >= MIN_DESCRIPTION_LENGTH
+        ), f"{section_name} description should be meaningful (>={MIN_DESCRIPTION_LENGTH} chars), got: {description[:100]}"
 
     def test_all_section_descriptions_have_meaningful_content(self):
         """
@@ -104,19 +108,21 @@ class TestAC2_WebUIConfigSectionDocumentation:
 
         # Find all section descriptions
         descriptions = re.findall(
-            r'<p class="section-description">(.*?)</p>',
-            content,
-            re.DOTALL
+            r'<p class="section-description">(.*?)</p>', content, re.DOTALL
         )
 
-        assert len(descriptions) > 0, \
-            "Should find at least one section-description paragraph"
+        assert (
+            len(descriptions) > 0
+        ), "Should find at least one section-description paragraph"
 
         for i, desc in enumerate(descriptions):
             desc_text = desc.strip()
-            assert len(desc_text) >= MIN_DESCRIPTION_LENGTH, \
-                f"Section description #{i+1} is too short: {desc_text[:100]}"
-            assert "TODO" not in desc_text.upper(), \
-                f"Section description #{i+1} contains placeholder TODO"
-            assert "description here" not in desc_text.lower(), \
-                f"Section description #{i+1} contains placeholder text"
+            assert (
+                len(desc_text) >= MIN_DESCRIPTION_LENGTH
+            ), f"Section description #{i+1} is too short: {desc_text[:100]}"
+            assert (
+                "TODO" not in desc_text.upper()
+            ), f"Section description #{i+1} contains placeholder TODO"
+            assert (
+                "description here" not in desc_text.lower()
+            ), f"Section description #{i+1} contains placeholder text"

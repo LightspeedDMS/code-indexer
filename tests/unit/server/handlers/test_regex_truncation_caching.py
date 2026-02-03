@@ -162,15 +162,9 @@ class TestAC4IndependentFieldCaching:
         result = truncated[0]
 
         # Retrieve each cached content independently (sync calls)
-        line_retrieved = cache.retrieve(
-            result["line_content_cache_handle"], page=0
-        )
-        before_retrieved = cache.retrieve(
-            result["context_before_cache_handle"], page=0
-        )
-        after_retrieved = cache.retrieve(
-            result["context_after_cache_handle"], page=0
-        )
+        line_retrieved = cache.retrieve(result["line_content_cache_handle"], page=0)
+        before_retrieved = cache.retrieve(result["context_before_cache_handle"], page=0)
+        after_retrieved = cache.retrieve(result["context_after_cache_handle"], page=0)
 
         # Verify content is correct for each
         assert line_retrieved.content == large_line

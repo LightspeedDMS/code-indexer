@@ -68,7 +68,9 @@ class TestAnthropicApiKeySync:
             assert claude_json_path.exists()
 
             config = json.loads(claude_json_path.read_text())
-            assert config["apiKey"] == "sk-ant-api03-test123456789012345678901234567890123"
+            assert (
+                config["apiKey"] == "sk-ant-api03-test123456789012345678901234567890123"
+            )
 
     def test_sync_anthropic_key_preserves_existing_fields(self):
         """AC: Sync preserves existing fields in ~/.claude.json."""
@@ -93,7 +95,9 @@ class TestAnthropicApiKeySync:
             )
 
             config = json.loads(claude_json_path.read_text())
-            assert config["apiKey"] == "sk-ant-api03-newkey123456789012345678901234567890"
+            assert (
+                config["apiKey"] == "sk-ant-api03-newkey123456789012345678901234567890"
+            )
             assert config["otherField"] == "preserved-value"
             assert config["nested"] == {"key": "value"}
 
@@ -149,9 +153,9 @@ class TestAnthropicKeyCredentialsRemoval:
                 )
 
                 assert result.success is True
-                assert not credentials_path.exists(), (
-                    "Credentials file should be removed after sync"
-                )
+                assert (
+                    not credentials_path.exists()
+                ), "Credentials file should be removed after sync"
             finally:
                 if original_value is not None:
                     os.environ["ANTHROPIC_API_KEY"] = original_value

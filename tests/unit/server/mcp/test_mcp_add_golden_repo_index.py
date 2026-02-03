@@ -75,14 +75,10 @@ class TestAddGoldenRepoIndex:
                 alias="test-repo", index_type="semantic", submitter_username="admin"
             )
 
-    def test_add_index_success_fts(
-        self, mock_admin_user, mock_golden_repo_manager
-    ):
+    def test_add_index_success_fts(self, mock_admin_user, mock_golden_repo_manager):
         """Test AC1: add_golden_repo_index successfully submits job for fts index."""
         # Setup mock to return job_id
-        mock_golden_repo_manager.add_index_to_golden_repo.return_value = (
-            "job-123-fts"
-        )
+        mock_golden_repo_manager.add_index_to_golden_repo.return_value = "job-123-fts"
 
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
@@ -129,9 +125,7 @@ class TestAddGoldenRepoIndex:
             assert response_data["job_id"] == "job-456-temporal"
             assert "temporal" in response_data["message"]
 
-    def test_add_index_success_scip(
-        self, mock_admin_user, mock_golden_repo_manager
-    ):
+    def test_add_index_success_scip(self, mock_admin_user, mock_golden_repo_manager):
         """Test AC1: add_golden_repo_index successfully submits job for scip index."""
         mock_golden_repo_manager.add_index_to_golden_repo.return_value = "job-789-scip"
 

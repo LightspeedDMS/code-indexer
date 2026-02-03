@@ -231,7 +231,9 @@ class TestSemanticQueryManagerMetrics:
             repository_alias="test-repo",
         )
 
-        with patch.object(manager, "_search_single_repository", return_value=[mock_result]):
+        with patch.object(
+            manager, "_search_single_repository", return_value=[mock_result]
+        ):
             results = manager._perform_search(
                 username="testuser",
                 user_repos=user_repos,
@@ -272,7 +274,9 @@ class TestSemanticQueryManagerMetrics:
             repository_alias="test-repo",
         )
 
-        with patch.object(manager, "_search_single_repository", return_value=[mock_result]):
+        with patch.object(
+            manager, "_search_single_repository", return_value=[mock_result]
+        ):
             results = manager._perform_search(
                 username="testuser",
                 user_repos=user_repos,
@@ -321,9 +325,9 @@ class TestNoDoubleCountingAfterFix:
             "protocol.py should have tools_with_own_metrics set to exclude "
             "search tools from other_api_calls counting"
         )
-        assert "search_code" in source, (
-            "search_code should be in tools_with_own_metrics exclusion"
-        )
-        assert "regex_search" in source, (
-            "regex_search should be in tools_with_own_metrics exclusion"
-        )
+        assert (
+            "search_code" in source
+        ), "search_code should be in tools_with_own_metrics exclusion"
+        assert (
+            "regex_search" in source
+        ), "regex_search should be in tools_with_own_metrics exclusion"

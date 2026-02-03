@@ -1,4 +1,5 @@
 """Prompt templates for self-monitoring log analysis."""
+
 from pathlib import Path
 
 

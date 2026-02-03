@@ -48,19 +48,23 @@ class TestMultiIndexQueryService:
 
         return project_dir
 
-    def test_initialization(self, project_root, mock_vector_store, mock_embedding_provider):
+    def test_initialization(
+        self, project_root, mock_vector_store, mock_embedding_provider
+    ):
         """Test MultiIndexQueryService initialization."""
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
-            embedding_provider=mock_embedding_provider
+            embedding_provider=mock_embedding_provider,
         )
 
         assert service.project_root == project_root
         assert service.vector_store == mock_vector_store
         assert service.embedding_provider == mock_embedding_provider
 
-    def test_has_multimodal_index_when_exists(self, project_root, mock_vector_store, mock_embedding_provider):
+    def test_has_multimodal_index_when_exists(
+        self, project_root, mock_vector_store, mock_embedding_provider
+    ):
         """Test multimodal index detection when directory exists (LEGACY - subdirectory approach)."""
         # Create multimodal_index directory
         multimodal_dir = project_root / ".code-indexer" / "multimodal_index"
@@ -69,15 +73,19 @@ class TestMultiIndexQueryService:
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
-            embedding_provider=mock_embedding_provider
+            embedding_provider=mock_embedding_provider,
         )
 
         assert service.has_multimodal_index() is True
 
-    def test_has_multimodal_collection_when_exists(self, project_root, mock_vector_store, mock_embedding_provider):
+    def test_has_multimodal_collection_when_exists(
+        self, project_root, mock_vector_store, mock_embedding_provider
+    ):
         """Test multimodal collection detection when voyage-multimodal-3 collection exists (NEW architecture)."""
         # Create voyage-multimodal-3 collection directory (same level as voyage-code-3)
-        multimodal_collection = project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        multimodal_collection = (
+            project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        )
         multimodal_collection.mkdir(parents=True)
 
         # Create a metadata file to mark collection as real
@@ -87,22 +95,26 @@ class TestMultiIndexQueryService:
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
-            embedding_provider=mock_embedding_provider
+            embedding_provider=mock_embedding_provider,
         )
 
         assert service.has_multimodal_index() is True
 
-    def test_has_multimodal_index_when_not_exists(self, project_root, mock_vector_store, mock_embedding_provider):
+    def test_has_multimodal_index_when_not_exists(
+        self, project_root, mock_vector_store, mock_embedding_provider
+    ):
         """Test multimodal index detection when directory does not exist."""
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
-            embedding_provider=mock_embedding_provider
+            embedding_provider=mock_embedding_provider,
         )
 
         assert service.has_multimodal_index() is False
 
-    def test_query_single_index_only(self, project_root, mock_vector_store, mock_embedding_provider):
+    def test_query_single_index_only(
+        self, project_root, mock_vector_store, mock_embedding_provider
+    ):
         """Test query when only code_index exists (backward compatibility)."""
         # No multimodal_index directory
 
@@ -114,8 +126,8 @@ class TestMultiIndexQueryService:
                 "payload": {
                     "path": "src/file1.py",
                     "chunk_offset": 0,
-                    "content": "code content"
-                }
+                    "content": "code content",
+                },
             },
             {
                 "id": "doc2",
@@ -123,9 +135,9 @@ class TestMultiIndexQueryService:
                 "payload": {
                     "path": "src/file2.py",
                     "chunk_offset": 0,
-                    "content": "more code"
-                }
-            }
+                    "content": "more code",
+                },
+            },
         ]
 
         mock_vector_store.search.return_value = (code_results, {})
@@ -133,13 +145,11 @@ class TestMultiIndexQueryService:
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
-            embedding_provider=mock_embedding_provider
+            embedding_provider=mock_embedding_provider,
         )
 
         results, timing = service.query(
-            query_text="test query",
-            limit=10,
-            collection_name="code_index"
+            query_text="test query", limit=10, collection_name="code_index"
         )
 
         # Should query code_index only (once)
@@ -150,10 +160,14 @@ class TestMultiIndexQueryService:
         assert results[0]["score"] == 0.9
         assert results[1]["score"] == 0.8
 
-    def test_query_multi_index_sequential(self, project_root, mock_vector_store, mock_embedding_provider):
+    def test_query_multi_index_sequential(
+        self, project_root, mock_vector_store, mock_embedding_provider
+    ):
         """Test sequential query of voyage-code-3 then voyage-multimodal-3 collections."""
         # Create voyage-multimodal-3 collection directory (NEW architecture)
-        multimodal_collection = project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        multimodal_collection = (
+            project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        )
         multimodal_collection.mkdir(parents=True)
 
         # Mock code_index results
@@ -164,8 +178,8 @@ class TestMultiIndexQueryService:
                 "payload": {
                     "path": "src/file1.py",
                     "chunk_offset": 0,
-                    "content": "code content"
-                }
+                    "content": "code content",
+                },
             }
         ]
 
@@ -178,8 +192,8 @@ class TestMultiIndexQueryService:
                     "path": "docs/guide.md",
                     "chunk_offset": 0,
                     "content": "markdown content",
-                    "images": ["diagram.png"]
-                }
+                    "images": ["diagram.png"],
+                },
             }
         ]
 
@@ -197,13 +211,11 @@ class TestMultiIndexQueryService:
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
-            embedding_provider=mock_embedding_provider
+            embedding_provider=mock_embedding_provider,
         )
 
         results, timing = service.query(
-            query_text="test query",
-            limit=10,
-            collection_name="code_index"
+            query_text="test query", limit=10, collection_name="code_index"
         )
 
         # Should query both indexes (2 calls)
@@ -212,10 +224,14 @@ class TestMultiIndexQueryService:
         # Should merge and return both results
         assert len(results) == 2
 
-    def test_result_merging_and_deduplication(self, project_root, mock_vector_store, mock_embedding_provider):
+    def test_result_merging_and_deduplication(
+        self, project_root, mock_vector_store, mock_embedding_provider
+    ):
         """Test result merging with deduplication by (file_path, chunk_offset)."""
         # Create voyage-multimodal-3 collection directory
-        multimodal_collection = project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        multimodal_collection = (
+            project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        )
         multimodal_collection.mkdir(parents=True)
 
         # Mock code_index results - includes duplicate
@@ -226,8 +242,8 @@ class TestMultiIndexQueryService:
                 "payload": {
                     "path": "src/file1.py",
                     "chunk_offset": 0,
-                    "content": "code content"
-                }
+                    "content": "code content",
+                },
             },
             {
                 "id": "doc2",
@@ -235,9 +251,9 @@ class TestMultiIndexQueryService:
                 "payload": {
                     "path": "docs/guide.md",
                     "chunk_offset": 0,
-                    "content": "markdown from code index"
-                }
-            }
+                    "content": "markdown from code index",
+                },
+            },
         ]
 
         # Mock multimodal_index results - includes same file but higher score
@@ -249,8 +265,8 @@ class TestMultiIndexQueryService:
                     "path": "docs/guide.md",
                     "chunk_offset": 0,
                     "content": "markdown from multimodal",
-                    "images": ["diagram.png"]
-                }
+                    "images": ["diagram.png"],
+                },
             },
             {
                 "id": "doc4",
@@ -258,9 +274,9 @@ class TestMultiIndexQueryService:
                 "payload": {
                     "path": "docs/api.md",
                     "chunk_offset": 0,
-                    "content": "api docs"
-                }
-            }
+                    "content": "api docs",
+                },
+            },
         ]
 
         # Set up mock to check collection_name instead of subdirectory
@@ -277,38 +293,60 @@ class TestMultiIndexQueryService:
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
-            embedding_provider=mock_embedding_provider
+            embedding_provider=mock_embedding_provider,
         )
 
         results, timing = service.query(
-            query_text="test query",
-            limit=10,
-            collection_name="code_index"
+            query_text="test query", limit=10, collection_name="code_index"
         )
 
         # Should have 3 unique results (deduplicated docs/guide.md)
         assert len(results) == 3
 
         # Should keep higher score for duplicate
-        guide_result = next(r for r in results if r["payload"]["path"] == "docs/guide.md")
+        guide_result = next(
+            r for r in results if r["payload"]["path"] == "docs/guide.md"
+        )
         assert guide_result["score"] == 0.85  # Higher score from multimodal_index
-        assert "images" in guide_result["payload"]  # Should preserve multimodal metadata
+        assert (
+            "images" in guide_result["payload"]
+        )  # Should preserve multimodal metadata
 
-    def test_result_sorting_by_score_descending(self, project_root, mock_vector_store, mock_embedding_provider):
+    def test_result_sorting_by_score_descending(
+        self, project_root, mock_vector_store, mock_embedding_provider
+    ):
         """Test that merged results are sorted by score descending."""
         # Create voyage-multimodal-3 collection directory
-        multimodal_collection = project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        multimodal_collection = (
+            project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        )
         multimodal_collection.mkdir(parents=True)
 
         # Mock results with different scores
         code_results = [
-            {"id": "doc1", "score": 0.7, "payload": {"path": "file1.py", "chunk_offset": 0}},
-            {"id": "doc2", "score": 0.9, "payload": {"path": "file2.py", "chunk_offset": 0}}
+            {
+                "id": "doc1",
+                "score": 0.7,
+                "payload": {"path": "file1.py", "chunk_offset": 0},
+            },
+            {
+                "id": "doc2",
+                "score": 0.9,
+                "payload": {"path": "file2.py", "chunk_offset": 0},
+            },
         ]
 
         multimodal_results = [
-            {"id": "doc3", "score": 0.95, "payload": {"path": "file3.md", "chunk_offset": 0}},
-            {"id": "doc4", "score": 0.6, "payload": {"path": "file4.md", "chunk_offset": 0}}
+            {
+                "id": "doc3",
+                "score": 0.95,
+                "payload": {"path": "file3.md", "chunk_offset": 0},
+            },
+            {
+                "id": "doc4",
+                "score": 0.6,
+                "payload": {"path": "file4.md", "chunk_offset": 0},
+            },
         ]
 
         def search_side_effect(*args, **kwargs):
@@ -324,13 +362,11 @@ class TestMultiIndexQueryService:
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
-            embedding_provider=mock_embedding_provider
+            embedding_provider=mock_embedding_provider,
         )
 
         results, timing = service.query(
-            query_text="test query",
-            limit=10,
-            collection_name="code_index"
+            query_text="test query", limit=10, collection_name="code_index"
         )
 
         # Should be sorted by score descending
@@ -340,20 +376,32 @@ class TestMultiIndexQueryService:
         assert results[2]["score"] == 0.7
         assert results[3]["score"] == 0.6
 
-    def test_limit_applied_to_merged_results(self, project_root, mock_vector_store, mock_embedding_provider):
+    def test_limit_applied_to_merged_results(
+        self, project_root, mock_vector_store, mock_embedding_provider
+    ):
         """Test that limit is applied to merged results."""
         # Create voyage-multimodal-3 collection directory
-        multimodal_collection = project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        multimodal_collection = (
+            project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        )
         multimodal_collection.mkdir(parents=True)
 
         # Mock multiple results
         code_results = [
-            {"id": f"doc{i}", "score": 0.9 - i*0.1, "payload": {"path": f"file{i}.py", "chunk_offset": 0}}
+            {
+                "id": f"doc{i}",
+                "score": 0.9 - i * 0.1,
+                "payload": {"path": f"file{i}.py", "chunk_offset": 0},
+            }
             for i in range(5)
         ]
 
         multimodal_results = [
-            {"id": f"mdoc{i}", "score": 0.85 - i*0.1, "payload": {"path": f"file{i}.md", "chunk_offset": 0}}
+            {
+                "id": f"mdoc{i}",
+                "score": 0.85 - i * 0.1,
+                "payload": {"path": f"file{i}.md", "chunk_offset": 0},
+            }
             for i in range(5)
         ]
 
@@ -370,13 +418,11 @@ class TestMultiIndexQueryService:
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
-            embedding_provider=mock_embedding_provider
+            embedding_provider=mock_embedding_provider,
         )
 
         results, timing = service.query(
-            query_text="test query",
-            limit=3,
-            collection_name="code_index"
+            query_text="test query", limit=3, collection_name="code_index"
         )
 
         # Should return only top 3 results
@@ -385,10 +431,14 @@ class TestMultiIndexQueryService:
         assert results[1]["score"] == 0.85
         assert results[2]["score"] == 0.8
 
-    def test_filter_conditions_passed_to_both_indexes(self, project_root, mock_vector_store, mock_embedding_provider):
+    def test_filter_conditions_passed_to_both_indexes(
+        self, project_root, mock_vector_store, mock_embedding_provider
+    ):
         """Test that filter conditions are passed to both index queries."""
         # Create voyage-multimodal-3 collection directory
-        multimodal_collection = project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        multimodal_collection = (
+            project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        )
         multimodal_collection.mkdir(parents=True)
 
         mock_vector_store.search.return_value = ([], {})
@@ -396,7 +446,7 @@ class TestMultiIndexQueryService:
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
-            embedding_provider=mock_embedding_provider
+            embedding_provider=mock_embedding_provider,
         )
 
         filter_conditions = {
@@ -407,7 +457,7 @@ class TestMultiIndexQueryService:
             query_text="test query",
             limit=10,
             collection_name="code_index",
-            filter_conditions=filter_conditions
+            filter_conditions=filter_conditions,
         )
 
         # Should have called search twice
@@ -424,7 +474,9 @@ class TestMultiIndexQueryService:
     ):
         """Test that both index queries execute in parallel, not sequentially."""
         # Create voyage-multimodal-3 collection directory
-        multimodal_collection = project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        multimodal_collection = (
+            project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        )
         multimodal_collection.mkdir(parents=True)
 
         def slow_search(*args, **kwargs):
@@ -433,9 +485,27 @@ class TestMultiIndexQueryService:
 
             collection = kwargs.get("collection_name")
             if collection == "code_index" or collection == "voyage-code-3":
-                return ([{"id": "code", "score": 0.9, "payload": {"path": "a.py", "chunk_offset": 0}}], {})
+                return (
+                    [
+                        {
+                            "id": "code",
+                            "score": 0.9,
+                            "payload": {"path": "a.py", "chunk_offset": 0},
+                        }
+                    ],
+                    {},
+                )
             elif collection == "voyage-multimodal-3":
-                return ([{"id": "mm", "score": 0.8, "payload": {"path": "b.md", "chunk_offset": 0}}], {})
+                return (
+                    [
+                        {
+                            "id": "mm",
+                            "score": 0.8,
+                            "payload": {"path": "b.md", "chunk_offset": 0},
+                        }
+                    ],
+                    {},
+                )
             return ([], {})
 
         mock_vector_store.search.side_effect = slow_search
@@ -443,19 +513,19 @@ class TestMultiIndexQueryService:
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
-            embedding_provider=mock_embedding_provider
+            embedding_provider=mock_embedding_provider,
         )
 
         start_time = time.time()
         results, timing = service.query(
-            query_text="test query",
-            limit=10,
-            collection_name="code_index"
+            query_text="test query", limit=10, collection_name="code_index"
         )
         total_time = time.time() - start_time
 
         # Parallel execution: total time should be ~0.1s (max of both), not ~0.2s (sum)
-        assert total_time < 0.15, f"Expected parallel execution (~0.1s), got {total_time:.3f}s"
+        assert (
+            total_time < 0.15
+        ), f"Expected parallel execution (~0.1s), got {total_time:.3f}s"
 
         # Both queries should have been called
         assert mock_vector_store.search.call_count == 2
@@ -469,18 +539,36 @@ class TestMultiIndexQueryService:
     ):
         """Test that merge produces consistent results regardless of which query finishes first."""
         # Create voyage-multimodal-3 collection directory
-        multimodal_collection = project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        multimodal_collection = (
+            project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        )
         multimodal_collection.mkdir(parents=True)
 
         # Same duplicate result in both indexes
         code_results = [
-            {"id": "c1", "score": 0.9, "payload": {"path": "file.py", "chunk_offset": 0}},
-            {"id": "c2", "score": 0.75, "payload": {"path": "dup.md", "chunk_offset": 0}},
+            {
+                "id": "c1",
+                "score": 0.9,
+                "payload": {"path": "file.py", "chunk_offset": 0},
+            },
+            {
+                "id": "c2",
+                "score": 0.75,
+                "payload": {"path": "dup.md", "chunk_offset": 0},
+            },
         ]
 
         multimodal_results = [
-            {"id": "m1", "score": 0.85, "payload": {"path": "dup.md", "chunk_offset": 0}},
-            {"id": "m2", "score": 0.8, "payload": {"path": "guide.md", "chunk_offset": 0}},
+            {
+                "id": "m1",
+                "score": 0.85,
+                "payload": {"path": "dup.md", "chunk_offset": 0},
+            },
+            {
+                "id": "m2",
+                "score": 0.8,
+                "payload": {"path": "guide.md", "chunk_offset": 0},
+            },
         ]
 
         def search_side_effect(*args, **kwargs):
@@ -496,13 +584,11 @@ class TestMultiIndexQueryService:
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
-            embedding_provider=mock_embedding_provider
+            embedding_provider=mock_embedding_provider,
         )
 
         results, timing = service.query(
-            query_text="test query",
-            limit=10,
-            collection_name="code_index"
+            query_text="test query", limit=10, collection_name="code_index"
         )
 
         # Should return list (backward compatible)
@@ -525,11 +611,17 @@ class TestMultiIndexQueryService:
     ):
         """Test that timeout on one index returns partial results from successful index."""
         # Create voyage-multimodal-3 collection directory
-        multimodal_collection = project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        multimodal_collection = (
+            project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        )
         multimodal_collection.mkdir(parents=True)
 
         code_results = [
-            {"id": "c1", "score": 0.9, "payload": {"path": "file.py", "chunk_offset": 0}}
+            {
+                "id": "c1",
+                "score": 0.9,
+                "payload": {"path": "file.py", "chunk_offset": 0},
+            }
         ]
 
         def search_side_effect(*args, **kwargs):
@@ -540,6 +632,7 @@ class TestMultiIndexQueryService:
             elif collection == "voyage-multimodal-3":
                 # Multimodal index times out - simulate with exception
                 from concurrent.futures import TimeoutError
+
                 raise TimeoutError("Query timeout")
             return ([], {})
 
@@ -548,14 +641,12 @@ class TestMultiIndexQueryService:
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
-            embedding_provider=mock_embedding_provider
+            embedding_provider=mock_embedding_provider,
         )
 
         # Query should return code results even if multimodal times out
         results, timing = service.query(
-            query_text="test query",
-            limit=10,
-            collection_name="code_index"
+            query_text="test query", limit=10, collection_name="code_index"
         )
 
         # Should return list (backward compatible)
@@ -570,11 +661,17 @@ class TestMultiIndexQueryService:
     ):
         """Test that when code_index times out, multimodal results are still returned."""
         # Create voyage-multimodal-3 collection directory
-        multimodal_collection = project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        multimodal_collection = (
+            project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        )
         multimodal_collection.mkdir(parents=True)
 
         multimodal_results = [
-            {"id": "m1", "score": 0.85, "payload": {"path": "guide.md", "chunk_offset": 0}}
+            {
+                "id": "m1",
+                "score": 0.85,
+                "payload": {"path": "guide.md", "chunk_offset": 0},
+            }
         ]
 
         def search_side_effect(*args, **kwargs):
@@ -582,6 +679,7 @@ class TestMultiIndexQueryService:
             if collection == "code_index" or collection == "voyage-code-3":
                 # Code index times out
                 from concurrent.futures import TimeoutError
+
                 raise TimeoutError("Query timeout")
             elif collection == "voyage-multimodal-3":
                 # Multimodal succeeds
@@ -593,13 +691,11 @@ class TestMultiIndexQueryService:
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
-            embedding_provider=mock_embedding_provider
+            embedding_provider=mock_embedding_provider,
         )
 
         results, timing = service.query(
-            query_text="test query",
-            limit=10,
-            collection_name="code_index"
+            query_text="test query", limit=10, collection_name="code_index"
         )
 
         # Should return list (backward compatible)
@@ -614,17 +710,35 @@ class TestMultiIndexQueryService:
     ):
         """Test that parallel execution produces same results as sequential (backward compatibility)."""
         # Create voyage-multimodal-3 collection directory
-        multimodal_collection = project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        multimodal_collection = (
+            project_root / ".code-indexer" / "index" / "voyage-multimodal-3"
+        )
         multimodal_collection.mkdir(parents=True)
 
         code_results = [
-            {"id": "c1", "score": 0.95, "payload": {"path": "file1.py", "chunk_offset": 0}},
-            {"id": "c2", "score": 0.75, "payload": {"path": "file2.py", "chunk_offset": 0}},
+            {
+                "id": "c1",
+                "score": 0.95,
+                "payload": {"path": "file1.py", "chunk_offset": 0},
+            },
+            {
+                "id": "c2",
+                "score": 0.75,
+                "payload": {"path": "file2.py", "chunk_offset": 0},
+            },
         ]
 
         multimodal_results = [
-            {"id": "m1", "score": 0.85, "payload": {"path": "file3.md", "chunk_offset": 0}},
-            {"id": "m2", "score": 0.65, "payload": {"path": "file4.md", "chunk_offset": 0}},
+            {
+                "id": "m1",
+                "score": 0.85,
+                "payload": {"path": "file3.md", "chunk_offset": 0},
+            },
+            {
+                "id": "m2",
+                "score": 0.65,
+                "payload": {"path": "file4.md", "chunk_offset": 0},
+            },
         ]
 
         def search_side_effect(*args, **kwargs):
@@ -640,13 +754,11 @@ class TestMultiIndexQueryService:
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
-            embedding_provider=mock_embedding_provider
+            embedding_provider=mock_embedding_provider,
         )
 
         results, timing = service.query(
-            query_text="test query",
-            limit=10,
-            collection_name="code_index"
+            query_text="test query", limit=10, collection_name="code_index"
         )
 
         # Should return list (backward compatible)

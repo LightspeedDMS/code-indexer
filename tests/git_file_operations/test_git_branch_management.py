@@ -150,7 +150,9 @@ class TestGitBranchCreate:
         AC2: Create new branch from current HEAD.
         """
         service = GitOperationsService()
-        result = service.git_branch_create(local_test_repo, branch_name=unique_branch_name)
+        result = service.git_branch_create(
+            local_test_repo, branch_name=unique_branch_name
+        )
 
         assert result["success"] is True
         assert result["created_branch"] == unique_branch_name
@@ -175,7 +177,9 @@ class TestGitBranchCreate:
         assert branches_before["current"] == "main"
 
         # Create new branch
-        result = service.git_branch_create(local_test_repo, branch_name=unique_branch_name)
+        result = service.git_branch_create(
+            local_test_repo, branch_name=unique_branch_name
+        )
         assert result["success"] is True
 
         # Verify we're still on main
@@ -192,6 +196,7 @@ class TestGitBranchCreate:
         AC2: Create branch with slashes (feature/name style).
         """
         import uuid
+
         branch_name = f"feature/test-{uuid.uuid4().hex[:6]}"
 
         service = GitOperationsService()
@@ -274,7 +279,9 @@ class TestGitBranchSwitch:
         )
 
         service = GitOperationsService()
-        result = service.git_branch_switch(local_test_repo, branch_name=unique_branch_name)
+        result = service.git_branch_switch(
+            local_test_repo, branch_name=unique_branch_name
+        )
 
         assert result["success"] is True
         assert result["current_branch"] == unique_branch_name
@@ -322,7 +329,9 @@ class TestGitBranchSwitch:
         )
 
         service = GitOperationsService()
-        result = service.git_branch_switch(local_test_repo, branch_name=unique_branch_name)
+        result = service.git_branch_switch(
+            local_test_repo, branch_name=unique_branch_name
+        )
         assert result["previous_branch"] == "main"
         assert result["current_branch"] == unique_branch_name
 
@@ -425,7 +434,9 @@ class TestGitBranchDelete:
         )
 
         service = GitOperationsService()
-        result = service.git_branch_delete(local_test_repo, branch_name=unique_branch_name)
+        result = service.git_branch_delete(
+            local_test_repo, branch_name=unique_branch_name
+        )
 
         assert result["requires_confirmation"] is True
         assert "token" in result
@@ -451,7 +462,9 @@ class TestGitBranchDelete:
         service = GitOperationsService()
 
         # First call - get token
-        token_result = service.git_branch_delete(local_test_repo, branch_name=unique_branch_name)
+        token_result = service.git_branch_delete(
+            local_test_repo, branch_name=unique_branch_name
+        )
         token = token_result["token"]
 
         # Second call - use token to delete
@@ -493,11 +506,15 @@ class TestGitBranchDelete:
         # Get and use token for first branch
         token_result = service.git_branch_delete(local_test_repo, branch_name=branch_1)
         token = token_result["token"]
-        service.git_branch_delete(local_test_repo, branch_name=branch_1, confirmation_token=token)
+        service.git_branch_delete(
+            local_test_repo, branch_name=branch_1, confirmation_token=token
+        )
 
         # Try to use same token again - should fail
         with pytest.raises(ValueError) as exc_info:
-            service.git_branch_delete(local_test_repo, branch_name=branch_2, confirmation_token=token)
+            service.git_branch_delete(
+                local_test_repo, branch_name=branch_2, confirmation_token=token
+            )
 
         assert "invalid or expired" in str(exc_info.value).lower()
 

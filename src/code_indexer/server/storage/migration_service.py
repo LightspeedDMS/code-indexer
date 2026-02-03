@@ -95,10 +95,11 @@ class MigrationService:
             with open(source_file, "r") as f:
                 registry_data = json.load(f)
         except (json.JSONDecodeError, IOError) as e:
-            logger.error(format_error_log(
-                "MCP-GENERAL-197",
-                f"Failed to read global_registry.json: {e}"
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-197", f"Failed to read global_registry.json: {e}"
+                )
+            )
             return {"migrated": 0, "errors": 1, "skipped": False}
 
         backend = GlobalReposSqliteBackend(self.db_path)
@@ -123,10 +124,12 @@ class MigrationService:
                     already_exists += 1
                     logger.debug(f"Repo already exists, skipping: {alias_name}")
                 except Exception as e:
-                    logger.error(format_error_log(
-                        "MCP-GENERAL-198",
-                        f"Failed to migrate repo {alias_name}: {e}"
-                    ))
+                    logger.error(
+                        format_error_log(
+                            "MCP-GENERAL-198",
+                            f"Failed to migrate repo {alias_name}: {e}",
+                        )
+                    )
                     errors += 1
         finally:
             backend.close()
@@ -143,10 +146,12 @@ class MigrationService:
                 os.rename(str(source_file), str(source_file) + ".migrated")
                 logger.info(f"Renamed {source_file} to {source_file}.migrated")
             except OSError as e:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-199",
-                    f"Failed to rename {source_file} to .migrated: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-199",
+                        f"Failed to rename {source_file} to .migrated: {e}",
+                    )
+                )
 
         return {
             "migrated": migrated,
@@ -178,10 +183,12 @@ class MigrationService:
             with open(source_file, "r") as f:
                 registry_data = json.load(f)
         except (json.JSONDecodeError, IOError) as e:
-            logger.error(format_error_log(
-                "MCP-GENERAL-200",
-                f"Failed to read global_registry.json from {source_path}: {e}"
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-200",
+                    f"Failed to read global_registry.json from {source_path}: {e}",
+                )
+            )
             return {"migrated": 0, "errors": 1, "skipped": False}
 
         backend = GlobalReposSqliteBackend(self.db_path)
@@ -206,10 +213,12 @@ class MigrationService:
                     already_exists += 1
                     logger.debug(f"Repo already exists, skipping: {alias_name}")
                 except Exception as e:
-                    logger.error(format_error_log(
-                        "MCP-GENERAL-201",
-                        f"Failed to migrate repo {alias_name}: {e}"
-                    ))
+                    logger.error(
+                        format_error_log(
+                            "MCP-GENERAL-201",
+                            f"Failed to migrate repo {alias_name}: {e}",
+                        )
+                    )
                     errors += 1
         finally:
             backend.close()
@@ -225,10 +234,11 @@ class MigrationService:
                 os.rename(str(source_file), str(source_file) + ".migrated")
                 logger.info(f"Renamed {source_file} to {source_file}.migrated")
             except OSError as e:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-202",
-                    f"Failed to rename {source_file}: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-202", f"Failed to rename {source_file}: {e}"
+                    )
+                )
 
         return {
             "migrated": migrated,
@@ -254,10 +264,9 @@ class MigrationService:
             with open(source_file, "r") as f:
                 users_data = json.load(f)
         except (json.JSONDecodeError, IOError) as e:
-            logger.error(format_error_log(
-                "MCP-GENERAL-203",
-                f"Failed to read users.json: {e}"
-            ))
+            logger.error(
+                format_error_log("MCP-GENERAL-203", f"Failed to read users.json: {e}")
+            )
             return {"migrated": 0, "errors": 1, "skipped": False}
 
         backend = UsersSqliteBackend(self.db_path)
@@ -351,10 +360,11 @@ class MigrationService:
                         f"User already exists, updated from migration: {username}"
                     )
                 except Exception as e:
-                    logger.error(format_error_log(
-                        "MCP-GENERAL-204",
-                        f"Failed to migrate user {username}: {e}"
-                    ))
+                    logger.error(
+                        format_error_log(
+                            "MCP-GENERAL-204", f"Failed to migrate user {username}: {e}"
+                        )
+                    )
                     errors += 1
         finally:
             backend.close()
@@ -371,10 +381,12 @@ class MigrationService:
                 os.rename(str(source_file), str(source_file) + ".migrated")
                 logger.info(f"Renamed {source_file} to {source_file}.migrated")
             except OSError as e:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-205",
-                    f"Failed to rename {source_file} to .migrated: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-205",
+                        f"Failed to rename {source_file} to .migrated: {e}",
+                    )
+                )
 
         return {
             "migrated": migrated,
@@ -394,10 +406,9 @@ class MigrationService:
             with open(source_file, "r") as f:
                 jobs_data = json.load(f)
         except (json.JSONDecodeError, IOError) as e:
-            logger.error(format_error_log(
-                "MCP-GENERAL-206",
-                f"Failed to read jobs.json: {e}"
-            ))
+            logger.error(
+                format_error_log("MCP-GENERAL-206", f"Failed to read jobs.json: {e}")
+            )
             return {"migrated": 0, "errors": 1, "skipped": False}
 
         job_records = {k: v for k, v in jobs_data.items() if not k.startswith("_")}
@@ -420,10 +431,12 @@ class MigrationService:
                     already_exists += 1
                     logger.debug(f"Sync job already exists, skipping: {job_id}")
                 except Exception as e:
-                    logger.error(format_error_log(
-                        "MCP-GENERAL-207",
-                        f"Failed to migrate sync job {job_id}: {e}"
-                    ))
+                    logger.error(
+                        format_error_log(
+                            "MCP-GENERAL-207",
+                            f"Failed to migrate sync job {job_id}: {e}",
+                        )
+                    )
                     errors += 1
         finally:
             backend.close()
@@ -436,10 +449,11 @@ class MigrationService:
             try:
                 os.rename(str(source_file), str(source_file) + ".migrated")
             except OSError as e:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-208",
-                    f"Failed to rename {source_file}: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-208", f"Failed to rename {source_file}: {e}"
+                    )
+                )
         return {
             "migrated": migrated,
             "already_exists": already_exists,
@@ -458,10 +472,9 @@ class MigrationService:
             with open(source_file, "r") as f:
                 jobs_data = json.load(f)
         except (json.JSONDecodeError, IOError) as e:
-            logger.error(format_error_log(
-                "MCP-GENERAL-209",
-                f"Failed to read jobs.json: {e}"
-            ))
+            logger.error(
+                format_error_log("MCP-GENERAL-209", f"Failed to read jobs.json: {e}")
+            )
             return {"migrated": 0, "errors": 1, "skipped": False}
 
         # Filter out internal keys prefixed with underscore
@@ -500,10 +513,12 @@ class MigrationService:
                     already_exists += 1
                     logger.debug(f"Background job already exists, skipping: {job_id}")
                 except Exception as e:
-                    logger.error(format_error_log(
-                        "MCP-GENERAL-210",
-                        f"Failed to migrate background job {job_id}: {e}"
-                    ))
+                    logger.error(
+                        format_error_log(
+                            "MCP-GENERAL-210",
+                            f"Failed to migrate background job {job_id}: {e}",
+                        )
+                    )
                     errors += 1
         finally:
             backend.close()
@@ -517,10 +532,11 @@ class MigrationService:
                 os.rename(str(source_file), str(source_file) + ".migrated")
                 logger.info(f"Renamed {source_file} to {source_file}.migrated")
             except OSError as e:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-211",
-                    f"Failed to rename {source_file}: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-211", f"Failed to rename {source_file}: {e}"
+                    )
+                )
         return {
             "migrated": migrated,
             "already_exists": already_exists,
@@ -539,10 +555,11 @@ class MigrationService:
             with open(source_file, "r") as f:
                 tokens_data = json.load(f)
         except (json.JSONDecodeError, IOError) as e:
-            logger.error(format_error_log(
-                "MCP-GENERAL-212",
-                f"Failed to read ci_tokens.json: {e}"
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-212", f"Failed to read ci_tokens.json: {e}"
+                )
+            )
             return {"migrated": 0, "errors": 1, "skipped": False}
 
         backend = CITokensSqliteBackend(self.db_path)
@@ -565,10 +582,12 @@ class MigrationService:
                     already_exists += 1
                     logger.debug(f"CI token already exists, skipping: {platform}")
                 except Exception as e:
-                    logger.error(format_error_log(
-                        "MCP-GENERAL-213",
-                        f"Failed to migrate CI token {platform}: {e}"
-                    ))
+                    logger.error(
+                        format_error_log(
+                            "MCP-GENERAL-213",
+                            f"Failed to migrate CI token {platform}: {e}",
+                        )
+                    )
                     errors += 1
         finally:
             backend.close()
@@ -581,10 +600,11 @@ class MigrationService:
             try:
                 os.rename(str(source_file), str(source_file) + ".migrated")
             except OSError as e:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-214",
-                    f"Failed to rename {source_file}: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-214", f"Failed to rename {source_file}: {e}"
+                    )
+                )
         return {
             "migrated": migrated,
             "already_exists": already_exists,
@@ -603,10 +623,11 @@ class MigrationService:
             with open(source_file, "r") as f:
                 sessions_data = json.load(f)
         except (json.JSONDecodeError, IOError) as e:
-            logger.error(format_error_log(
-                "MCP-GENERAL-215",
-                f"Failed to read invalidated_sessions.json: {e}"
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-215", f"Failed to read invalidated_sessions.json: {e}"
+                )
+            )
             return {"migrated": 0, "errors": 1, "skipped": False}
 
         backend = SessionsSqliteBackend(self.db_path)
@@ -629,10 +650,12 @@ class MigrationService:
                             f"Session already invalidated, skipping: {username}/{token_id}"
                         )
                     except Exception as e:
-                        logger.error(format_error_log(
-                            "QUERY-GENERAL-008",
-                            f"Failed to migrate session {username}/{token_id}: {e}"
-                        ))
+                        logger.error(
+                            format_error_log(
+                                "QUERY-GENERAL-008",
+                                f"Failed to migrate session {username}/{token_id}: {e}",
+                            )
+                        )
                         errors += 1
         finally:
             backend.close()
@@ -645,10 +668,11 @@ class MigrationService:
             try:
                 os.rename(str(source_file), str(source_file) + ".migrated")
             except OSError as e:
-                logger.warning(format_error_log(
-                    "QUERY-GENERAL-009",
-                    f"Failed to rename {source_file}: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "QUERY-GENERAL-009", f"Failed to rename {source_file}: {e}"
+                    )
+                )
         return {
             "migrated": migrated,
             "already_exists": already_exists,
@@ -704,10 +728,12 @@ class MigrationService:
                     except OSError:
                         pass
                 except Exception as e:
-                    logger.error(format_error_log(
-                        "QUERY-GENERAL-010",
-                        f"Failed to migrate SSH key from {json_file}: {e}"
-                    ))
+                    logger.error(
+                        format_error_log(
+                            "QUERY-GENERAL-010",
+                            f"Failed to migrate SSH key from {json_file}: {e}",
+                        )
+                    )
                     errors += 1
         finally:
             backend.close()
@@ -745,10 +771,12 @@ class MigrationService:
             with open(source_file, "r") as f:
                 metadata = json.load(f)
         except (json.JSONDecodeError, IOError) as e:
-            logger.error(format_error_log(
-                "QUERY-GENERAL-011",
-                f"Failed to read golden-repos/metadata.json: {e}"
-            ))
+            logger.error(
+                format_error_log(
+                    "QUERY-GENERAL-011",
+                    f"Failed to read golden-repos/metadata.json: {e}",
+                )
+            )
             return {"migrated": 0, "errors": 1, "skipped": False}
 
         backend = GoldenRepoMetadataSqliteBackend(self.db_path)
@@ -772,10 +800,12 @@ class MigrationService:
                     already_exists += 1
                     logger.debug(f"Golden repo already exists, skipping: {alias}")
                 except Exception as e:
-                    logger.error(format_error_log(
-                        "QUERY-GENERAL-012",
-                        f"Failed to migrate golden repo {alias}: {e}"
-                    ))
+                    logger.error(
+                        format_error_log(
+                            "QUERY-GENERAL-012",
+                            f"Failed to migrate golden repo {alias}: {e}",
+                        )
+                    )
                     errors += 1
         finally:
             backend.close()
@@ -791,10 +821,11 @@ class MigrationService:
                 os.rename(str(source_file), str(source_file) + ".migrated")
                 logger.info(f"Renamed {source_file} to {source_file}.migrated")
             except OSError as e:
-                logger.warning(format_error_log(
-                    "QUERY-GENERAL-013",
-                    f"Failed to rename {source_file}: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "QUERY-GENERAL-013", f"Failed to rename {source_file}: {e}"
+                    )
+                )
 
         return {
             "migrated": migrated,

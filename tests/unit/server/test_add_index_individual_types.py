@@ -44,7 +44,9 @@ class TestValidIndexTypesBackend:
     @pytest.mark.parametrize("index_type", ["semantic", "fts", "temporal", "scip"])
     def test_valid_index_types_accepted(self, manager_with_repo, index_type):
         """AC: Backend accepts individual index types: semantic, fts, temporal, scip."""
-        manager_with_repo.background_job_manager.submit_job.return_value = f"job-{index_type}"
+        manager_with_repo.background_job_manager.submit_job.return_value = (
+            f"job-{index_type}"
+        )
 
         job_id = manager_with_repo.add_index_to_golden_repo(
             alias="test-repo", index_type=index_type, submitter_username="admin"

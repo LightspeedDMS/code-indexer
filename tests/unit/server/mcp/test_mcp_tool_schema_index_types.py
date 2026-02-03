@@ -60,7 +60,9 @@ class TestAddGoldenRepoIndexSchema:
 
         # Description should mention the individual types
         # It should NOT prominently feature semantic_fts as a valid option
-        assert "semantic_fts" not in description or "deprecated" in description.lower(), (
+        assert (
+            "semantic_fts" not in description or "deprecated" in description.lower()
+        ), (
             "Description still references semantic_fts as valid option. "
             "Should describe individual types: semantic, fts, temporal, scip."
         )
@@ -108,9 +110,9 @@ class TestTriggerReindexSchema:
         if "index_types" in properties:
             enum_values = properties["index_types"].get("items", {}).get("enum", [])
             if enum_values:
-                assert "semantic_fts" not in enum_values, (
-                    "trigger_reindex uses old 'semantic_fts' type"
-                )
+                assert (
+                    "semantic_fts" not in enum_values
+                ), "trigger_reindex uses old 'semantic_fts' type"
                 assert "semantic" in enum_values or not enum_values
 
 

@@ -649,10 +649,12 @@ def create_user(
                     f"Auto-assigned new user '{new_username}' to '{target_group.name}' group"
                 )
         except Exception as e:
-            logger.warning(format_error_log(
-                "SCIP-GENERAL-040",
-                f"Failed to auto-assign user '{new_username}' to group: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "SCIP-GENERAL-040",
+                    f"Failed to auto-assign user '{new_username}' to group: {e}",
+                )
+            )
 
         return _create_users_page_response(
             request,
@@ -858,10 +860,12 @@ async def delete_user(
                 logger.info(f"Cleaned up group membership for deleted user: {username}")
         except RuntimeError:
             # group_manager not available - skip cleanup
-            logger.warning(format_error_log(
-                "SCIP-GENERAL-041",
-                f"group_manager not available, skipped group cleanup for: {username}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "SCIP-GENERAL-041",
+                    f"group_manager not available, skipped group cleanup for: {username}",
+                )
+            )
 
         return _create_users_page_response(
             request, session, success_message=f"User '{username}' deleted successfully"
@@ -1499,10 +1503,9 @@ def grant_repo_access(
                 success_message=f"'{group.name}' already has access to '{repo_name}'",
             )
     except Exception as e:
-        logger.error(format_error_log(
-            "SCIP-GENERAL-042",
-            "Failed to grant repo access: %s", e
-        ))
+        logger.error(
+            format_error_log("SCIP-GENERAL-042", "Failed to grant repo access: %s", e)
+        )
         return _create_groups_page_response(
             request, session, active_tab="repos", error_message=str(e)
         )
@@ -1575,10 +1578,9 @@ def revoke_repo_access(
             error_message="cidx-meta access cannot be revoked",
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "SCIP-GENERAL-043",
-            "Failed to revoke repo access: %s", e
-        ))
+        logger.error(
+            format_error_log("SCIP-GENERAL-043", "Failed to revoke repo access: %s", e)
+        )
         return _create_groups_page_response(
             request, session, active_tab="repos", error_message=str(e)
         )
@@ -1729,12 +1731,14 @@ def _get_golden_repos_list():
             registry = get_server_global_registry(str(golden_repos_dir))
             global_repos = {r["repo_name"]: r for r in registry.list_global_repos()}
         except Exception as e:
-            logger.warning(format_error_log(
-                "SCIP-GENERAL-044",
-                "Could not load global registry: %s",
-                e,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "SCIP-GENERAL-044",
+                    "Could not load global registry: %s",
+                    e,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             global_repos = {}
 
         # Get alias info for version and target path
@@ -1778,13 +1782,15 @@ def _get_golden_repos_list():
                             else None
                         )
                     except Exception as e:
-                        logger.warning(format_error_log(
-                            "SCIP-GENERAL-045",
-                            "Could not read alias file %s: %s",
-                            alias_file,
-                            e,
-                            extra={"correlation_id": get_correlation_id()},
-                        ))
+                        logger.warning(
+                            format_error_log(
+                                "SCIP-GENERAL-045",
+                                "Could not read alias file %s: %s",
+                                alias_file,
+                                e,
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
                         repo["version"] = None
                         repo["last_refresh"] = None
                 else:
@@ -1811,13 +1817,15 @@ def _get_golden_repos_list():
                     )
                     repo["temporal_status"] = temporal_status
                 except Exception as e:
-                    logger.warning(format_error_log(
-                        "SCIP-GENERAL-046",
-                        "Failed to get temporal status for %s: %s",
-                        repo.get("alias"),
-                        e,
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "SCIP-GENERAL-046",
+                            "Failed to get temporal status for %s: %s",
+                            repo.get("alias"),
+                            e,
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                     repo["temporal_status"] = {"format": "error", "message": str(e)}
             else:
                 repo["temporal_status"] = {"format": "none"}
@@ -1872,13 +1880,15 @@ def _get_golden_repos_list():
 
         return sorted(repos, key=lambda r: r.get("alias", "").lower())
     except Exception as e:
-        logger.error(format_error_log(
-            "SCIP-GENERAL-047",
-            "Failed to get golden repos list: %s",
-            e,
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "SCIP-GENERAL-047",
+                "Failed to get golden repos list: %s",
+                e,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return []
 
 
@@ -2203,14 +2213,16 @@ def golden_repo_details(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(format_error_log(
-            "STORE-GENERAL-026",
-            "Failed to get golden repo details for '%s': %s",
-            alias,
-            e,
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-026",
+                "Failed to get golden repo details for '%s': %s",
+                alias,
+                e,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=404, detail=f"Repository '{alias}' not found")
 
 
@@ -2302,15 +2314,17 @@ def _get_all_activated_repos() -> list:
                         repo["temporal_status"] = temporal_status
                     except Exception as e:
                         # Honest error handling - indicate failure clearly
-                        logger.error(format_error_log(
-                            "STORE-GENERAL-027",
-                            "Failed to get temporal status for repo %s/%s: %s",
-                            username,
-                            repo.get("user_alias", "unknown"),
-                            e,
-                            exc_info=True,
-                            extra={"correlation_id": get_correlation_id()},
-                        ))
+                        logger.error(
+                            format_error_log(
+                                "STORE-GENERAL-027",
+                                "Failed to get temporal status for repo %s/%s: %s",
+                                username,
+                                repo.get("user_alias", "unknown"),
+                                e,
+                                exc_info=True,
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
                         # Provide error temporal_status with honest error format
                         repo["temporal_status"] = {
                             "error": str(e),
@@ -2327,13 +2341,15 @@ def _get_all_activated_repos() -> list:
         return all_repos
 
     except Exception as e:
-        logger.error(format_error_log(
-            "STORE-GENERAL-028",
-            "Failed to get activated repos: %s",
-            e,
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-028",
+                "Failed to get activated repos: %s",
+                e,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return []
 
 
@@ -2635,13 +2651,15 @@ def _get_background_job_manager():
 
         return background_job_manager
     except Exception as e:
-        logger.error(format_error_log(
-            "STORE-GENERAL-029",
-            "Failed to get background job manager: %s",
-            e,
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-029",
+                "Failed to get background job manager: %s",
+                e,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return None
 
 
@@ -2683,8 +2701,11 @@ def _get_all_jobs(
                 "error_message": job.error,
                 "username": job.username,
                 "user_alias": getattr(job, "user_alias", None),
-                "repository_name": getattr(job, "repo_alias", None) or (
-                    job.result.get("alias") if job.result and isinstance(job.result, dict) else None
+                "repository_name": getattr(job, "repo_alias", None)
+                or (
+                    job.result.get("alias")
+                    if job.result and isinstance(job.result, dict)
+                    else None
                 ),
                 "repository_url": getattr(job, "repository_url", None),
                 "progress_info": getattr(job, "progress_info", None),
@@ -2701,8 +2722,12 @@ def _get_all_jobs(
                     # Handle potential timezone-aware vs timezone-naive mismatch
                     completed = job.completed_at
                     started = job.started_at
-                    completed_aware = hasattr(completed, 'tzinfo') and completed.tzinfo is not None
-                    started_aware = hasattr(started, 'tzinfo') and started.tzinfo is not None
+                    completed_aware = (
+                        hasattr(completed, "tzinfo") and completed.tzinfo is not None
+                    )
+                    started_aware = (
+                        hasattr(started, "tzinfo") and started.tzinfo is not None
+                    )
                     # If one is aware and one is naive, strip timezone info from the aware one
                     if completed_aware and not started_aware:
                         completed = completed.replace(tzinfo=None)
@@ -3054,12 +3079,14 @@ def _get_all_activated_repos_for_query() -> list:
                 }
             )
     except Exception as e:
-        logger.warning(format_error_log(
-            "STORE-GENERAL-030",
-            "Could not load global repos for query: %s",
-            e,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "STORE-GENERAL-030",
+                "Could not load global repos for query: %s",
+                e,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
 
     # Add user-activated repos
     user_repos = _get_all_activated_repos()
@@ -3308,11 +3335,13 @@ def query_submit(
                         if global_repo_meta:
                             repo_path = global_repo_meta.get("index_path")
                     except Exception as e:
-                        logger.warning(format_error_log(
-                            "STORE-GENERAL-031",
-                            f"Failed to resolve global repo path for '{user_alias}': {e}",
-                            extra={"correlation_id": get_correlation_id()},
-                        ))
+                        logger.warning(
+                            format_error_log(
+                                "STORE-GENERAL-031",
+                                f"Failed to resolve global repo path for '{user_alias}': {e}",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
 
                 if not repo_path:
                     error_message = f"Repository '{user_alias}' path not found"
@@ -3457,22 +3486,26 @@ def query_submit(
                                     }
                                 )
                         except FileNotFoundError as e:
-                            logger.error(format_error_log(
-                                "STORE-GENERAL-032",
-                                "SCIP query failed - file not found: %s",
-                                e,
-                                exc_info=True,
-                                extra={"correlation_id": get_correlation_id()},
-                            ))
+                            logger.error(
+                                format_error_log(
+                                    "STORE-GENERAL-032",
+                                    "SCIP query failed - file not found: %s",
+                                    e,
+                                    exc_info=True,
+                                    extra={"correlation_id": get_correlation_id()},
+                                )
+                            )
                             error_message = f"SCIP index not found or corrupted for repository '{user_alias}'. Generate an index with: `cidx scip generate`"
                         except Exception as e:
-                            logger.error(format_error_log(
-                                "STORE-GENERAL-033",
-                                "SCIP query execution failed: %s",
-                                e,
-                                exc_info=True,
-                                extra={"correlation_id": get_correlation_id()},
-                            ))
+                            logger.error(
+                                format_error_log(
+                                    "STORE-GENERAL-033",
+                                    "SCIP query execution failed: %s",
+                                    e,
+                                    exc_info=True,
+                                    extra={"correlation_id": get_correlation_id()},
+                                )
+                            )
                             error_message = f"SCIP query failed for repository '{user_alias}': {str(e)}. Try regenerating the index with: `cidx scip generate`"
 
         else:
@@ -3546,13 +3579,15 @@ def query_submit(
                                 }
                             )
                     except Exception as e:
-                        logger.error(format_error_log(
-                            "STORE-GENERAL-034",
-                            "Global repo query failed: %s",
-                            e,
-                            exc_info=True,
-                            extra={"correlation_id": get_correlation_id()},
-                        ))
+                        logger.error(
+                            format_error_log(
+                                "STORE-GENERAL-034",
+                                "Global repo query failed: %s",
+                                e,
+                                exc_info=True,
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
                         error_message = f"Query failed: {str(e)}"
             else:
                 repo_username = target_repo.get("username", session.username)
@@ -3595,13 +3630,15 @@ def query_submit(
                     )
 
     except Exception as e:
-        logger.error(format_error_log(
-            "STORE-GENERAL-035",
-            "Query execution failed: %s",
-            e,
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-035",
+                "Query execution failed: %s",
+                e,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         error_message = f"Query failed: {str(e)}"
 
     return _create_query_page_response(
@@ -3663,13 +3700,15 @@ def _get_semantic_query_manager():
 
         return semantic_query_manager
     except Exception as e:
-        logger.error(format_error_log(
-            "STORE-GENERAL-036",
-            "Failed to get semantic query manager: %s",
-            e,
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-036",
+                "Failed to get semantic query manager: %s",
+                e,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return None
 
 
@@ -3711,11 +3750,13 @@ def _execute_scip_query(
             if global_repo_meta:
                 repo_path = global_repo_meta.get("index_path")
         except Exception as e:
-            logger.warning(format_error_log(
-                "STORE-GENERAL-037",
-                f"Failed to resolve global repo path for '{user_alias}': {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "STORE-GENERAL-037",
+                    f"Failed to resolve global repo path for '{user_alias}': {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
     if not repo_path:
         return results, f"Repository '{user_alias}' path not found"
@@ -3829,25 +3870,29 @@ def _execute_scip_query(
                 }
             )
     except FileNotFoundError as e:
-        logger.error(format_error_log(
-            "STORE-GENERAL-038",
-            "SCIP query failed - file not found: %s",
-            e,
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-038",
+                "SCIP query failed - file not found: %s",
+                e,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return (
             results,
             f"SCIP index not found or corrupted for repository '{user_alias}'. Generate an index with: `cidx scip generate`",
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "STORE-GENERAL-039",
-            "SCIP query execution failed: %s",
-            e,
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-039",
+                "SCIP query execution failed: %s",
+                e,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return (
             results,
             f"SCIP query failed for repository '{user_alias}': {str(e)}. Try regenerating the index with: `cidx scip generate`",
@@ -4025,13 +4070,15 @@ def query_results_partial_post(
                                 }
                             )
                     except Exception as e:
-                        logger.error(format_error_log(
-                            "STORE-GENERAL-040",
-                            "Global repo query failed: %s",
-                            e,
-                            exc_info=True,
-                            extra={"correlation_id": get_correlation_id()},
-                        ))
+                        logger.error(
+                            format_error_log(
+                                "STORE-GENERAL-040",
+                                "Global repo query failed: %s",
+                                e,
+                                exc_info=True,
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
                         error_message = f"Query failed: {str(e)}"
             else:
                 # Execute query for user-activated repositories
@@ -4074,13 +4121,15 @@ def query_results_partial_post(
                     )
 
     except Exception as e:
-        logger.error(format_error_log(
-            "STORE-GENERAL-041",
-            "Query execution failed: %s",
-            e,
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-041",
+                "Query execution failed: %s",
+                e,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         error_message = f"Query failed: {str(e)}"
 
     csrf_token_new = generate_csrf_token()
@@ -4178,7 +4227,10 @@ async def _reload_oidc_configuration():
     await oidc_manager.initialize()
 
     # Inject GroupAccessManager into OIDCManager for SSO provisioning (Story #708)
-    if hasattr(app_module.app.state, "group_manager") and app_module.app.state.group_manager:
+    if (
+        hasattr(app_module.app.state, "group_manager")
+        and app_module.app.state.group_manager
+    ):
         oidc_manager.group_manager = app_module.app.state.group_manager
         logger.info(
             "GroupAccessManager injected into reloaded OIDCManager for SSO auto-provisioning",
@@ -4205,6 +4257,7 @@ def _get_current_config() -> dict:
     from ..utils.config_manager import (
         OIDCProviderConfig,
         TelemetryConfig,
+        LangfuseConfig,
         SearchLimitsConfig,
         FileContentLimitsConfig,
         GoldenReposConfig,
@@ -4249,6 +4302,12 @@ def _get_current_config() -> dict:
     if not telemetry_config:
         # Provide defaults if telemetry config is missing
         telemetry_config = asdict(TelemetryConfig())
+
+    # Ensure langfuse config has all required fields with defaults
+    langfuse_config = settings.get("langfuse")
+    if not langfuse_config:
+        # Provide defaults if langfuse config is missing
+        langfuse_config = asdict(LangfuseConfig())
 
     # Get claude_delegation config (Story #721)
     claude_delegation_config = settings.get("claude_delegation", {})
@@ -4320,6 +4379,7 @@ def _get_current_config() -> dict:
         "oidc": oidc_config,
         "job_queue": job_queue_config,
         "telemetry": telemetry_config,
+        "langfuse": langfuse_config,
         "claude_delegation": claude_delegation_config,
         "search_limits": search_limits_config,
         "file_content_limits": file_content_limits_config,
@@ -4591,6 +4651,16 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             except (ValueError, TypeError):
                 return "Machine metrics interval must be a valid number"
 
+    elif section == "langfuse":
+        # Validate Langfuse host URL format
+        host = data.get("host")
+        if host is not None:
+            host_str = str(host).strip()
+            if host_str and not (
+                host_str.startswith("http://") or host_str.startswith("https://")
+            ):
+                return "Langfuse host must start with http:// or https://"
+
     elif section == "search_limits":
         # Validate max_result_size_mb (1-100 MB)
         max_size = data.get("max_result_size_mb")
@@ -4700,7 +4770,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if cache_ttl is not None:
             try:
                 ttl_float = float(cache_ttl)
-                if ttl_float < MIN_SYSTEM_METRICS_CACHE_TTL_SECONDS or ttl_float > MAX_SYSTEM_METRICS_CACHE_TTL_SECONDS:
+                if (
+                    ttl_float < MIN_SYSTEM_METRICS_CACHE_TTL_SECONDS
+                    or ttl_float > MAX_SYSTEM_METRICS_CACHE_TTL_SECONDS
+                ):
                     return f"System Metrics Cache TTL must be between {MIN_SYSTEM_METRICS_CACHE_TTL_SECONDS} and {MAX_SYSTEM_METRICS_CACHE_TTL_SECONDS} seconds"
             except (ValueError, TypeError):
                 return "System Metrics Cache TTL must be a valid number"
@@ -4751,7 +4824,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if scip_ref_limit is not None:
             try:
                 limit_int = int(scip_ref_limit)
-                if limit_int < MIN_SCIP_REFERENCE_LIMIT or limit_int > MAX_SCIP_REFERENCE_LIMIT:
+                if (
+                    limit_int < MIN_SCIP_REFERENCE_LIMIT
+                    or limit_int > MAX_SCIP_REFERENCE_LIMIT
+                ):
                     return f"SCIP Reference Limit must be between {MIN_SCIP_REFERENCE_LIMIT} and {MAX_SCIP_REFERENCE_LIMIT}"
             except (ValueError, TypeError):
                 return "SCIP Reference Limit must be a valid number"
@@ -4760,7 +4836,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if scip_dep_depth is not None:
             try:
                 depth_int = int(scip_dep_depth)
-                if depth_int < MIN_SCIP_DEPENDENCY_DEPTH or depth_int > MAX_SCIP_DEPENDENCY_DEPTH:
+                if (
+                    depth_int < MIN_SCIP_DEPENDENCY_DEPTH
+                    or depth_int > MAX_SCIP_DEPENDENCY_DEPTH
+                ):
                     return f"SCIP Dependency Depth must be between {MIN_SCIP_DEPENDENCY_DEPTH} and {MAX_SCIP_DEPENDENCY_DEPTH}"
             except (ValueError, TypeError):
                 return "SCIP Dependency Depth must be a valid number"
@@ -4769,7 +4848,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if scip_callchain_depth is not None:
             try:
                 depth_int = int(scip_callchain_depth)
-                if depth_int < MIN_SCIP_CALLCHAIN_MAX_DEPTH or depth_int > MAX_SCIP_CALLCHAIN_MAX_DEPTH:
+                if (
+                    depth_int < MIN_SCIP_CALLCHAIN_MAX_DEPTH
+                    or depth_int > MAX_SCIP_CALLCHAIN_MAX_DEPTH
+                ):
                     return f"SCIP Callchain Max Depth must be between {MIN_SCIP_CALLCHAIN_MAX_DEPTH} and {MAX_SCIP_CALLCHAIN_MAX_DEPTH}"
             except (ValueError, TypeError):
                 return "SCIP Callchain Max Depth must be a valid number"
@@ -4778,7 +4860,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if scip_callchain_limit is not None:
             try:
                 limit_int = int(scip_callchain_limit)
-                if limit_int < MIN_SCIP_CALLCHAIN_LIMIT or limit_int > MAX_SCIP_CALLCHAIN_LIMIT:
+                if (
+                    limit_int < MIN_SCIP_CALLCHAIN_LIMIT
+                    or limit_int > MAX_SCIP_CALLCHAIN_LIMIT
+                ):
                     return f"SCIP Callchain Limit must be between {MIN_SCIP_CALLCHAIN_LIMIT} and {MAX_SCIP_CALLCHAIN_LIMIT}"
             except (ValueError, TypeError):
                 return "SCIP Callchain Limit must be a valid number"
@@ -4818,7 +4903,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if github_api is not None:
             try:
                 timeout_int = int(github_api)
-                if timeout_int < MIN_GITHUB_API_TIMEOUT_SECONDS or timeout_int > MAX_GITHUB_API_TIMEOUT_SECONDS:
+                if (
+                    timeout_int < MIN_GITHUB_API_TIMEOUT_SECONDS
+                    or timeout_int > MAX_GITHUB_API_TIMEOUT_SECONDS
+                ):
                     return f"GitHub API Timeout must be between {MIN_GITHUB_API_TIMEOUT_SECONDS} and {MAX_GITHUB_API_TIMEOUT_SECONDS} seconds"
             except (ValueError, TypeError):
                 return "GitHub API Timeout must be a valid number"
@@ -4827,7 +4915,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if gitlab_api is not None:
             try:
                 timeout_int = int(gitlab_api)
-                if timeout_int < MIN_GITLAB_API_TIMEOUT_SECONDS or timeout_int > MAX_GITLAB_API_TIMEOUT_SECONDS:
+                if (
+                    timeout_int < MIN_GITLAB_API_TIMEOUT_SECONDS
+                    or timeout_int > MAX_GITLAB_API_TIMEOUT_SECONDS
+                ):
                     return f"GitLab API Timeout must be between {MIN_GITLAB_API_TIMEOUT_SECONDS} and {MAX_GITLAB_API_TIMEOUT_SECONDS} seconds"
             except (ValueError, TypeError):
                 return "GitLab API Timeout must be a valid number"
@@ -4856,7 +4947,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if base_delay is not None:
             try:
                 delay_float = float(base_delay)
-                if delay_float < MIN_BASE_RETRY_DELAY_SECONDS or delay_float > MAX_BASE_RETRY_DELAY_SECONDS:
+                if (
+                    delay_float < MIN_BASE_RETRY_DELAY_SECONDS
+                    or delay_float > MAX_BASE_RETRY_DELAY_SECONDS
+                ):
                     return f"Base Retry Delay must be between {MIN_BASE_RETRY_DELAY_SECONDS} and {MAX_BASE_RETRY_DELAY_SECONDS} seconds"
             except (ValueError, TypeError):
                 return "Base Retry Delay must be a valid number"
@@ -4865,7 +4959,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if max_delay is not None:
             try:
                 delay_float = float(max_delay)
-                if delay_float < MIN_MAX_RETRY_DELAY_SECONDS or delay_float > MAX_MAX_RETRY_DELAY_SECONDS:
+                if (
+                    delay_float < MIN_MAX_RETRY_DELAY_SECONDS
+                    or delay_float > MAX_MAX_RETRY_DELAY_SECONDS
+                ):
                     return f"Max Retry Delay must be between {MIN_MAX_RETRY_DELAY_SECONDS} and {MAX_MAX_RETRY_DELAY_SECONDS} seconds"
             except (ValueError, TypeError):
                 return "Max Retry Delay must be a valid number"
@@ -4898,7 +4995,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if default_file_lines is not None:
             try:
                 lines_int = int(default_file_lines)
-                if lines_int < MIN_DEFAULT_FILE_READ_LINES or lines_int > MAX_DEFAULT_FILE_READ_LINES:
+                if (
+                    lines_int < MIN_DEFAULT_FILE_READ_LINES
+                    or lines_int > MAX_DEFAULT_FILE_READ_LINES
+                ):
                     return f"Default File Read Lines must be between {MIN_DEFAULT_FILE_READ_LINES} and {MAX_DEFAULT_FILE_READ_LINES}"
             except (ValueError, TypeError):
                 return "Default File Read Lines must be a valid number"
@@ -4907,7 +5007,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if max_file_lines is not None:
             try:
                 lines_int = int(max_file_lines)
-                if lines_int < MIN_MAX_FILE_READ_LINES or lines_int > MAX_MAX_FILE_READ_LINES:
+                if (
+                    lines_int < MIN_MAX_FILE_READ_LINES
+                    or lines_int > MAX_MAX_FILE_READ_LINES
+                ):
                     return f"Max File Read Lines must be between {MIN_MAX_FILE_READ_LINES} and {MAX_MAX_FILE_READ_LINES}"
             except (ValueError, TypeError):
                 return "Max File Read Lines must be a valid number"
@@ -4916,7 +5019,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if default_diff_lines is not None:
             try:
                 lines_int = int(default_diff_lines)
-                if lines_int < MIN_DEFAULT_DIFF_LINES or lines_int > MAX_DEFAULT_DIFF_LINES:
+                if (
+                    lines_int < MIN_DEFAULT_DIFF_LINES
+                    or lines_int > MAX_DEFAULT_DIFF_LINES
+                ):
                     return f"Default Diff Lines must be between {MIN_DEFAULT_DIFF_LINES} and {MAX_DEFAULT_DIFF_LINES}"
             except (ValueError, TypeError):
                 return "Default Diff Lines must be a valid number"
@@ -4934,7 +5040,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if default_log is not None:
             try:
                 commits_int = int(default_log)
-                if commits_int < MIN_DEFAULT_LOG_COMMITS or commits_int > MAX_DEFAULT_LOG_COMMITS:
+                if (
+                    commits_int < MIN_DEFAULT_LOG_COMMITS
+                    or commits_int > MAX_DEFAULT_LOG_COMMITS
+                ):
                     return f"Default Log Commits must be between {MIN_DEFAULT_LOG_COMMITS} and {MAX_DEFAULT_LOG_COMMITS}"
             except (ValueError, TypeError):
                 return "Default Log Commits must be a valid number"
@@ -4943,7 +5052,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if max_log is not None:
             try:
                 commits_int = int(max_log)
-                if commits_int < MIN_MAX_LOG_COMMITS or commits_int > MAX_MAX_LOG_COMMITS:
+                if (
+                    commits_int < MIN_MAX_LOG_COMMITS
+                    or commits_int > MAX_MAX_LOG_COMMITS
+                ):
                     return f"Max Log Commits must be between {MIN_MAX_LOG_COMMITS} and {MAX_MAX_LOG_COMMITS}"
             except (ValueError, TypeError):
                 return "Max Log Commits must be a valid number"
@@ -4953,7 +5065,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if audit_limit is not None:
             try:
                 limit_int = int(audit_limit)
-                if limit_int < MIN_AUDIT_LOG_DEFAULT_LIMIT or limit_int > MAX_AUDIT_LOG_DEFAULT_LIMIT:
+                if (
+                    limit_int < MIN_AUDIT_LOG_DEFAULT_LIMIT
+                    or limit_int > MAX_AUDIT_LOG_DEFAULT_LIMIT
+                ):
                     return f"Audit Log Default Limit must be between {MIN_AUDIT_LOG_DEFAULT_LIMIT} and {MAX_AUDIT_LOG_DEFAULT_LIMIT}"
             except (ValueError, TypeError):
                 return "Audit Log Default Limit must be a valid number"
@@ -4962,7 +5077,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if log_page_default is not None:
             try:
                 size_int = int(log_page_default)
-                if size_int < MIN_LOG_PAGE_SIZE_DEFAULT or size_int > MAX_LOG_PAGE_SIZE_DEFAULT:
+                if (
+                    size_int < MIN_LOG_PAGE_SIZE_DEFAULT
+                    or size_int > MAX_LOG_PAGE_SIZE_DEFAULT
+                ):
                     return f"Log Page Size Default must be between {MIN_LOG_PAGE_SIZE_DEFAULT} and {MAX_LOG_PAGE_SIZE_DEFAULT}"
             except (ValueError, TypeError):
                 return "Log Page Size Default must be a valid number"
@@ -4989,7 +5107,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if csrf_max_age is not None:
             try:
                 age_int = int(csrf_max_age)
-                if age_int < MIN_CSRF_MAX_AGE_SECONDS or age_int > MAX_CSRF_MAX_AGE_SECONDS:
+                if (
+                    age_int < MIN_CSRF_MAX_AGE_SECONDS
+                    or age_int > MAX_CSRF_MAX_AGE_SECONDS
+                ):
                     return f"CSRF Max Age must be between {MIN_CSRF_MAX_AGE_SECONDS} and {MAX_CSRF_MAX_AGE_SECONDS} seconds"
             except (ValueError, TypeError):
                 return "CSRF Max Age must be a valid number"
@@ -4998,7 +5119,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if session_timeout is not None:
             try:
                 timeout_int = int(session_timeout)
-                if timeout_int < MIN_WEB_SESSION_TIMEOUT_SECONDS or timeout_int > MAX_WEB_SESSION_TIMEOUT_SECONDS:
+                if (
+                    timeout_int < MIN_WEB_SESSION_TIMEOUT_SECONDS
+                    or timeout_int > MAX_WEB_SESSION_TIMEOUT_SECONDS
+                ):
                     return f"Web Session Timeout must be between {MIN_WEB_SESSION_TIMEOUT_SECONDS} and {MAX_WEB_SESSION_TIMEOUT_SECONDS} seconds"
             except (ValueError, TypeError):
                 return "Web Session Timeout must be a valid number"
@@ -5014,7 +5138,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if oauth_threshold is not None:
             try:
                 threshold_int = int(oauth_threshold)
-                if threshold_int < MIN_OAUTH_EXTENSION_THRESHOLD_HOURS or threshold_int > MAX_OAUTH_EXTENSION_THRESHOLD_HOURS:
+                if (
+                    threshold_int < MIN_OAUTH_EXTENSION_THRESHOLD_HOURS
+                    or threshold_int > MAX_OAUTH_EXTENSION_THRESHOLD_HOURS
+                ):
                     return f"OAuth Extension Threshold must be between {MIN_OAUTH_EXTENSION_THRESHOLD_HOURS} and {MAX_OAUTH_EXTENSION_THRESHOLD_HOURS} hours"
             except (ValueError, TypeError):
                 return "OAuth Extension Threshold must be a valid number"
@@ -5422,11 +5549,13 @@ def gitlab_repos_partial(
             search_term=search_term,
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "STORE-GENERAL-042",
-            f"Unexpected error in GitLab discovery: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-042",
+                f"Unexpected error in GitLab discovery: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _build_gitlab_repos_response(
             request,
             page=page,
@@ -5488,11 +5617,13 @@ def github_repos_partial(
             search_term=search_term,
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "STORE-GENERAL-043",
-            f"Unexpected error in GitHub discovery: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-043",
+                f"Unexpected error in GitHub discovery: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _build_github_repos_response(
             request,
             page=page,
@@ -5611,12 +5742,14 @@ async def fetch_discovery_branches(request: Request):
             content={"error": "Invalid JSON in request body"},
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "STORE-GENERAL-044",
-            f"Error fetching discovery branches: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-044",
+                f"Error fetching discovery branches: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return JSONResponse(
             status_code=500,
             content={"error": f"Internal server error: {str(e)}"},
@@ -5647,7 +5780,9 @@ async def update_claude_delegation_config(
         return _create_login_redirect(request)
 
     if not validate_login_csrf_token(request, csrf_token):
-        return _create_config_page_response(request, session, error_message="Invalid CSRF token")
+        return _create_config_page_response(
+            request, session, error_message="Invalid CSRF token"
+        )
 
     form_data = await request.form()
     config_service = get_config_service()
@@ -5664,32 +5799,48 @@ async def update_claude_delegation_config(
 
     if not url or not username or not credential:
         return _create_config_page_response(
-            request, session, error_message="URL, username, and credential are required",
-            validation_errors={"claude_delegation": "Missing required fields"})
+            request,
+            session,
+            error_message="URL, username, and credential are required",
+            validation_errors={"claude_delegation": "Missing required fields"},
+        )
 
     # Validate connectivity before saving
     cred_type = form_data.get("claude_server_credential_type", "password")
-    result = delegation_manager.validate_connectivity(url, username, credential, cred_type)
+    result = delegation_manager.validate_connectivity(
+        url, username, credential, cred_type
+    )
 
     if not result.success:
         return _create_config_page_response(
-            request, session, error_message=f"Connection failed: {result.error_message}",
-            validation_errors={"claude_delegation": result.error_message})
+            request,
+            session,
+            error_message=f"Connection failed: {result.error_message}",
+            validation_errors={"claude_delegation": result.error_message},
+        )
 
     # Save configuration with encrypted credential
     from ..config.delegation_config import DEFAULT_FUNCTION_REPO_ALIAS
+
     cidx_callback_url = form_data.get("cidx_callback_url", "").strip()  # Story #720
     skip_ssl_verify = form_data.get("skip_ssl_verify", "false").lower() == "true"
     config = ClaudeDelegationConfig(
-        function_repo_alias=form_data.get("function_repo_alias", "").strip() or DEFAULT_FUNCTION_REPO_ALIAS,
-        claude_server_url=url, claude_server_username=username,
-        claude_server_credential_type=cred_type, claude_server_credential=credential,
+        function_repo_alias=form_data.get("function_repo_alias", "").strip()
+        or DEFAULT_FUNCTION_REPO_ALIAS,
+        claude_server_url=url,
+        claude_server_username=username,
+        claude_server_credential_type=cred_type,
+        claude_server_credential=credential,
         cidx_callback_url=cidx_callback_url,
-        skip_ssl_verify=skip_ssl_verify)
+        skip_ssl_verify=skip_ssl_verify,
+    )
     delegation_manager.save_config(config)
 
     return _create_config_page_response(
-        request, session, success_message="Claude Delegation configuration saved and verified")
+        request,
+        session,
+        success_message="Claude Delegation configuration saved and verified",
+    )
 
 
 # NOTE: This specific route MUST come BEFORE /config/{section} to avoid being
@@ -5726,12 +5877,14 @@ def reset_config(
             success_message="Configuration reset to defaults successfully",
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "STORE-GENERAL-045",
-            "Failed to reset config: %s",
-            e,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-045",
+                "Failed to reset config: %s",
+                e,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _create_config_page_response(
             request,
             session,
@@ -5767,6 +5920,7 @@ async def update_config_section(
         "oidc",
         "job_queue",
         "telemetry",
+        "langfuse",
         "search_limits",
         "file_content_limits",
         "golden_repos",
@@ -5813,11 +5967,13 @@ async def update_config_section(
     # via SyncJobConfig which returns hardcoded defaults. Dynamic updates would require
     # extending SyncJobConfig with persistence support.
     if section == "job_queue":
-        logger.warning(format_error_log(
-            "STORE-GENERAL-046",
-            "Job queue configuration save attempted but settings are read-only defaults from SyncJobConfig.",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "STORE-GENERAL-046",
+                "Job queue configuration save attempted but settings are read-only defaults from SyncJobConfig.",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _create_config_page_response(
             request,
             session,
@@ -5847,12 +6003,14 @@ async def update_config_section(
                 )
             except Exception as e:
                 # Reload failed - reload original config from file to restore working state
-                logger.error(format_error_log(
-                    "STORE-GENERAL-047",
-                    f"Failed to reload OIDC configuration: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "STORE-GENERAL-047",
+                        f"Failed to reload OIDC configuration: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 config_service.load_config()  # Reload from file to undo in-memory changes
                 return _create_config_page_response(
                     request,
@@ -5879,13 +6037,15 @@ async def update_config_section(
             error_message=f"Failed to save configuration: {str(e)}",
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "STORE-GENERAL-048",
-            "Failed to save config section %s: %s",
-            section,
-            e,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-048",
+                "Failed to save config section %s: %s",
+                section,
+                e,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _create_config_page_response(
             request,
             session,
@@ -5925,12 +6085,14 @@ def reset_config(
             success_message="Configuration reset to defaults successfully",
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "STORE-GENERAL-049",
-            "Failed to reset config: %s",
-            e,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-049",
+                "Failed to reset config: %s",
+                e,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _create_config_page_response(
             request,
             session,
@@ -6036,13 +6198,15 @@ def save_api_key(
             validation_errors={"api_keys": str(e)},
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "STORE-GENERAL-050",
-            "Failed to save %s API key: %s",
-            platform,
-            e,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-050",
+                "Failed to save %s API key: %s",
+                platform,
+                e,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _create_config_page_response(
             request,
             session,
@@ -6094,13 +6258,15 @@ def delete_api_key(
             status_code=200,
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "SVC-GENERAL-015",
-            "Failed to delete %s API key: %s",
-            platform,
-            e,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-015",
+                "Failed to delete %s API key: %s",
+                platform,
+                e,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete API key: {str(e)}",
@@ -6257,12 +6423,14 @@ def update_file_content_limits(
             success_message="File content limits updated successfully",
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "SVC-GENERAL-016",
-            "Failed to update file content limits: %s",
-            e,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-016",
+                "Failed to update file content limits: %s",
+                e,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _create_file_content_limits_response(
             request,
             session,
@@ -6607,11 +6775,13 @@ def ssh_keys_page(request: Request):
         managed_keys = key_list.managed
         unmanaged_keys = key_list.unmanaged
     except Exception as e:
-        logger.error(format_error_log(
-            "SVC-GENERAL-017",
-            f"Failed to list SSH keys: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-017",
+                f"Failed to list SSH keys: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
 
     response = templates.TemplateResponse(
         request,
@@ -6653,11 +6823,13 @@ def _create_ssh_keys_page_response(
         managed_keys = key_list.managed
         unmanaged_keys = key_list.unmanaged
     except Exception as e:
-        logger.error(format_error_log(
-            "SVC-GENERAL-018",
-            f"Failed to list SSH keys: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-018",
+                f"Failed to list SSH keys: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
 
     response = templates.TemplateResponse(
         request,
@@ -6729,11 +6901,13 @@ def create_ssh_key(
             request, session, error_message=f"Key already exists: {e}"
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "SVC-GENERAL-019",
-            f"Failed to create SSH key: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-019",
+                f"Failed to create SSH key: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _create_ssh_keys_page_response(
             request, session, error_message=f"Failed to create key: {e}"
         )
@@ -6766,11 +6940,13 @@ def delete_ssh_key(
             success_message=f"SSH key '{key_name}' deleted successfully.",
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "SVC-GENERAL-020",
-            f"Failed to delete SSH key: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-020",
+                f"Failed to delete SSH key: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _create_ssh_keys_page_response(
             request, session, error_message=f"Failed to delete key: {e}"
         )
@@ -6810,11 +6986,13 @@ def assign_host_to_key(
             request, session, error_message=f"Host conflict: {e}"
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "SVC-GENERAL-021",
-            f"Failed to assign host to SSH key: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-021",
+                f"Failed to assign host to SSH key: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _create_ssh_keys_page_response(
             request, session, error_message=f"Failed to assign host: {e}"
         )
@@ -7266,11 +7444,13 @@ async def unified_login_sso(
     try:
         await oidc_routes.oidc_manager.ensure_provider_initialized()
     except Exception as e:
-        logger.error(format_error_log(
-            "SVC-GENERAL-022",
-            f"Failed to initialize OIDC provider: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-022",
+                f"Failed to initialize OIDC provider: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="SSO provider is currently unavailable",
@@ -7337,7 +7517,9 @@ async def unified_login_sso(
 # ==============================================================================
 
 
-def _load_self_monitoring_data(db_path: Path, session: SessionData) -> Tuple[List[Dict], List[Dict]]:
+def _load_self_monitoring_data(
+    db_path: Path, session: SessionData
+) -> Tuple[List[Dict], List[Dict]]:
     """
     Load self-monitoring scans and issues from database (Story #74 AC4, AC5).
 
@@ -7371,24 +7553,25 @@ def _load_self_monitoring_data(db_path: Path, session: SessionData) -> Tuple[Lis
 
             # Add duration calculation for each scan
             from datetime import datetime
+
             for scan in scans:
-                if scan['completed_at'] and scan['started_at']:
+                if scan["completed_at"] and scan["started_at"]:
                     # Parse timestamps and calculate duration
                     try:
-                        started = datetime.fromisoformat(scan['started_at'])
-                        completed = datetime.fromisoformat(scan['completed_at'])
+                        started = datetime.fromisoformat(scan["started_at"])
+                        completed = datetime.fromisoformat(scan["completed_at"])
                         duration_seconds = (completed - started).total_seconds()
 
                         # Format as "Xm Ys"
                         minutes = int(duration_seconds // 60)
                         seconds = int(duration_seconds % 60)
-                        scan['duration'] = f"{minutes}m {seconds}s"
+                        scan["duration"] = f"{minutes}m {seconds}s"
                     except (ValueError, TypeError):
-                        scan['duration'] = 'N/A'
-                elif scan['status'] == 'RUNNING':
-                    scan['duration'] = 'In progress'
+                        scan["duration"] = "N/A"
+                elif scan["status"] == "RUNNING":
+                    scan["duration"] = "In progress"
                 else:
-                    scan['duration'] = 'N/A'
+                    scan["duration"] = "N/A"
 
             # Load issues (most recent first)
             cursor.execute(
@@ -7639,8 +7822,14 @@ def self_monitoring_page(request: Request):
     scans, issues = _load_self_monitoring_data(db_path, session)
 
     return _create_self_monitoring_page_response(
-        request, session, self_monitoring_config, default_prompt,
-        current_prompt, scans, issues, db_path
+        request,
+        session,
+        self_monitoring_config,
+        default_prompt,
+        current_prompt,
+        scans,
+        issues,
+        db_path,
     )
 
 
@@ -7673,8 +7862,15 @@ async def save_self_monitoring_config(
         scans, issues = _load_self_monitoring_data(db_path, session)
         current_prompt = config.self_monitoring_config.prompt_template or default_prompt
         return _create_self_monitoring_page_response(
-            request, session, config.self_monitoring_config, default_prompt,
-            current_prompt, scans, issues, db_path, error_message="Invalid CSRF token"
+            request,
+            session,
+            config.self_monitoring_config,
+            default_prompt,
+            current_prompt,
+            scans,
+            issues,
+            db_path,
+            error_message="Invalid CSRF token",
         )
 
     # Parse form data
@@ -7728,9 +7924,15 @@ async def save_self_monitoring_config(
     scans, issues = _load_self_monitoring_data(db_path, session)
 
     return _create_self_monitoring_page_response(
-        request, session, config.self_monitoring_config, default_prompt,
-        current_prompt, scans, issues, db_path,
-        success_message="Self-monitoring configuration saved successfully"
+        request,
+        session,
+        config.self_monitoring_config,
+        default_prompt,
+        current_prompt,
+        scans,
+        issues,
+        db_path,
+        success_message="Self-monitoring configuration saved successfully",
     )
 
 
@@ -7758,16 +7960,14 @@ async def trigger_manual_scan(
     if not session:
         logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: No admin session found")
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required"
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required"
         )
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
         logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: Invalid CSRF token")
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid CSRF token"
+            status_code=status.HTTP_403_FORBIDDEN, detail="Invalid CSRF token"
         )
 
     logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: Auth validated, loading config")
@@ -7781,11 +7981,15 @@ async def trigger_manual_scan(
     config_service = get_config_service()
     config = config_service.get_config()
 
-    logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: Config loaded - enabled={config.self_monitoring_config.enabled}, cadence_minutes={config.self_monitoring_config.cadence_minutes}, model={config.self_monitoring_config.model}")
+    logger.debug(
+        f"[SELF-MON-DEBUG] trigger_manual_scan: Config loaded - enabled={config.self_monitoring_config.enabled}, cadence_minutes={config.self_monitoring_config.cadence_minutes}, model={config.self_monitoring_config.model}"
+    )
 
     # Get background job manager from app state
     job_manager = getattr(request.app.state, "background_job_manager", None)
-    logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: job_manager={job_manager is not None}")
+    logger.debug(
+        f"[SELF-MON-DEBUG] trigger_manual_scan: job_manager={job_manager is not None}"
+    )
 
     # Get database paths from app state and config (Bug #87)
     server_data_dir = os.environ.get(
@@ -7796,17 +8000,23 @@ async def trigger_manual_scan(
     if log_db_path:
         log_db_path = str(log_db_path)
 
-    logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: Database paths - db_path={db_path}, log_db_path={log_db_path}")
+    logger.debug(
+        f"[SELF-MON-DEBUG] trigger_manual_scan: Database paths - db_path={db_path}, log_db_path={log_db_path}"
+    )
 
     # Get repo_root and github_repo from app.state (auto-detected at startup)
     # Bug Fix: MONITOR-GENERAL-011 - CIDX_REPO_ROOT env var ensures reliable detection
     repo_root = getattr(request.app.state, "self_monitoring_repo_root", None)
     github_repo = getattr(request.app.state, "self_monitoring_github_repo", None)
 
-    logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: Repo config - repo_root={repo_root}, github_repo={github_repo}")
+    logger.debug(
+        f"[SELF-MON-DEBUG] trigger_manual_scan: Repo config - repo_root={repo_root}, github_repo={github_repo}"
+    )
 
     if not github_repo:
-        logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: github_repo is None - returning error")
+        logger.debug(
+            "[SELF-MON-DEBUG] trigger_manual_scan: github_repo is None - returning error"
+        )
         logger.error(
             format_error_log(
                 "MONITOR-GENERAL-011",
@@ -7819,8 +8029,8 @@ async def trigger_manual_scan(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={
                 "status": "error",
-                "error": "GitHub repository auto-detection failed. Check server logs."
-            }
+                "error": "GitHub repository auto-detection failed. Check server logs.",
+            },
         )
 
     # Get GitHub token for authentication (Bug #87)
@@ -7828,7 +8038,9 @@ async def trigger_manual_scan(
     github_token_data = token_manager.get_token("github")
     github_token = github_token_data.token if github_token_data else None
 
-    logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: GitHub token retrieved - has_token={github_token is not None}")
+    logger.debug(
+        f"[SELF-MON-DEBUG] trigger_manual_scan: GitHub token retrieved - has_token={github_token is not None}"
+    )
 
     # Get server name for issue identification (Bug #87)
     server_name = config.service_display_name or "Neo"
@@ -7836,7 +8048,9 @@ async def trigger_manual_scan(
     logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: server_name={server_name}")
 
     # Create service instance with current configuration (Bug #87)
-    logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: Creating SelfMonitoringService instance")
+    logger.debug(
+        "[SELF-MON-DEBUG] trigger_manual_scan: Creating SelfMonitoringService instance"
+    )
     service = SelfMonitoringService(
         enabled=config.self_monitoring_config.enabled,
         cadence_minutes=config.self_monitoring_config.cadence_minutes,
@@ -7848,27 +8062,27 @@ async def trigger_manual_scan(
         model=config.self_monitoring_config.model,
         repo_root=str(repo_root) if repo_root else None,
         github_token=github_token,
-        server_name=server_name
+        server_name=server_name,
     )
 
     # Trigger the scan
     logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: Calling service.trigger_scan()")
     result = service.trigger_scan()
-    logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: trigger_scan returned - result={result}")
+    logger.debug(
+        f"[SELF-MON-DEBUG] trigger_manual_scan: trigger_scan returned - result={result}"
+    )
 
     # Return JSON response
     if result["status"] == "error":
-        logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: Returning error response - {result}")
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=result
+        logger.debug(
+            f"[SELF-MON-DEBUG] trigger_manual_scan: Returning error response - {result}"
         )
+        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content=result)
 
-    logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: Returning success response - {result}")
-    return JSONResponse(
-        status_code=status.HTTP_200_OK,
-        content=result
+    logger.debug(
+        f"[SELF-MON-DEBUG] trigger_manual_scan: Returning success response - {result}"
     )
+    return JSONResponse(status_code=status.HTTP_200_OK, content=result)
 
 
 # ==============================================================================

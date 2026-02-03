@@ -127,9 +127,7 @@ class TestSCIPAuditLogAPI:
         assert data["success"] is True
         assert data["filters"]["job_id"] == "job-1"
 
-    def test_get_audit_log_filter_by_repo_alias(
-        self, admin_user, mock_audit_repo
-    ):
+    def test_get_audit_log_filter_by_repo_alias(self, admin_user, mock_audit_repo):
         """Test filtering audit log by repo_alias."""
         mock_audit_repo.query_audit_records.return_value = ([], 0)
 
@@ -159,9 +157,7 @@ class TestSCIPAuditLogAPI:
         data = json.loads(response["content"][0]["text"])
         assert data["filters"]["project_language"] == "python"
 
-    def test_get_audit_log_filter_by_build_system(
-        self, admin_user, mock_audit_repo
-    ):
+    def test_get_audit_log_filter_by_build_system(self, admin_user, mock_audit_repo):
         """Test filtering audit log by project_build_system."""
         mock_audit_repo.query_audit_records.return_value = ([], 0)
 

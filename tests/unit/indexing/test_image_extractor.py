@@ -8,7 +8,7 @@ from src.code_indexer.indexing.image_extractor import (
     MarkdownImageExtractor,
     HtmlImageExtractor,
     ImageExtractorFactory,
-    ImageValidationResult
+    ImageValidationResult,
 )
 
 
@@ -285,8 +285,7 @@ class TestMarkdownImageExtractorIntegration:
 
         # Now validate and filter
         valid_images = [
-            img for img in images
-            if self.extractor.validate_image(img, self.repo_root)
+            img for img in images if self.extractor.validate_image(img, self.repo_root)
         ]
 
         # Only 2 should be valid
@@ -365,11 +364,11 @@ class TestHtmlImageExtractorParsing:
 
     def test_extract_src_ignores_srcset(self):
         """Test that srcset attribute is ignored, only src is extracted."""
-        content = '''
+        content = """
 <img src="images/api-flow.jpg"
      srcset="images/api-flow-2x.jpg 2x, images/api-flow-3x.jpg 3x"
      alt="API Flow">
-'''
+"""
         base_path = self.repo_root / "docs" / "page.html"
 
         images = self.extractor.extract_images(content, base_path, self.repo_root)
@@ -382,11 +381,11 @@ class TestHtmlImageExtractorParsing:
 
     def test_extract_src_ignores_data_src(self):
         """Test that data-src attribute is ignored, only src is extracted."""
-        content = '''
+        content = """
 <img src="images/config.webp"
      data-src="images/config-lazy.webp"
      alt="Lazy Loaded">
-'''
+"""
         base_path = self.repo_root / "docs" / "page.html"
 
         images = self.extractor.extract_images(content, base_path, self.repo_root)
@@ -398,11 +397,11 @@ class TestHtmlImageExtractorParsing:
 
     def test_filter_remote_url_https(self):
         """Test that https:// URLs are filtered out."""
-        content = '''
+        content = """
 <img src="images/local.png" alt="Local">
 <img src="https://example.com/remote.png" alt="Remote">
 <img src="assets/another.jpg" alt="Another">
-'''
+"""
         base_path = self.repo_root / "page.html"
 
         images = self.extractor.extract_images(content, base_path, self.repo_root)
@@ -414,10 +413,10 @@ class TestHtmlImageExtractorParsing:
 
     def test_filter_remote_url_http(self):
         """Test that http:// URLs are filtered out."""
-        content = '''
+        content = """
 <img src="images/local.png" alt="Local">
 <img src="http://example.com/remote.png" alt="Remote">
-'''
+"""
         base_path = self.repo_root / "page.html"
 
         images = self.extractor.extract_images(content, base_path, self.repo_root)
@@ -427,11 +426,11 @@ class TestHtmlImageExtractorParsing:
 
     def test_filter_data_uri(self):
         """Test that data URIs are filtered out."""
-        content = '''
+        content = """
 <img src="images/real.png" alt="Real">
 <img src="data:image/png;base64,iVBORw0KGgo..." alt="Data URI">
 <img src="images/another.jpg" alt="Another">
-'''
+"""
         base_path = self.repo_root / "page.html"
 
         images = self.extractor.extract_images(content, base_path, self.repo_root)
@@ -503,8 +502,12 @@ class TestHtmlImageExtractorValidation:
         """Test all supported formats validate correctly."""
         assert self.extractor.validate_image("images/valid.png", self.repo_root) is True
         assert self.extractor.validate_image("images/valid.jpg", self.repo_root) is True
-        assert self.extractor.validate_image("images/valid.jpeg", self.repo_root) is True
-        assert self.extractor.validate_image("images/valid.webp", self.repo_root) is True
+        assert (
+            self.extractor.validate_image("images/valid.jpeg", self.repo_root) is True
+        )
+        assert (
+            self.extractor.validate_image("images/valid.webp", self.repo_root) is True
+        )
         assert self.extractor.validate_image("images/valid.gif", self.repo_root) is True
 
     def test_reject_unsupported_format(self):
@@ -550,7 +553,14 @@ class TestHtmlImageExtractorIntegration:
         # Read the html-variants.html file using relative path from test file
         test_file_dir = Path(__file__).parent
         project_root = test_file_dir.parent.parent.parent
-        html_variants_path = project_root / "test-fixtures" / "multimodal-mock-repo" / "docs" / "edge-cases" / "html-variants.html"
+        html_variants_path = (
+            project_root
+            / "test-fixtures"
+            / "multimodal-mock-repo"
+            / "docs"
+            / "edge-cases"
+            / "html-variants.html"
+        )
 
         with open(html_variants_path, "r") as f:
             content = f.read()

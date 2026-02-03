@@ -164,10 +164,13 @@ class RepositoryMatcher:
 
         except Exception as e:
             error_msg = f"Failed to find matching golden repositories: {str(e)}"
-            logger.error(format_error_log(
-                "GIT-GENERAL-058",
-                error_msg, extra={"correlation_id": get_correlation_id()}
-            ))
+            logger.error(
+                format_error_log(
+                    "GIT-GENERAL-058",
+                    error_msg,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise MatchingError(error_msg) from e
 
     def find_matching_activated_repositories(
@@ -234,10 +237,13 @@ class RepositoryMatcher:
 
         except Exception as e:
             error_msg = f"Failed to find matching activated repositories: {str(e)}"
-            logger.error(format_error_log(
-                "GIT-GENERAL-059",
-                error_msg, extra={"correlation_id": get_correlation_id()}
-            ))
+            logger.error(
+                format_error_log(
+                    "GIT-GENERAL-059",
+                    error_msg,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise MatchingError(error_msg) from e
 
     def find_all_matching_repositories(
@@ -260,9 +266,7 @@ class RepositoryMatcher:
         """
         try:
             # Find both types concurrently
-            golden_repos = self.find_matching_golden_repositories(
-                canonical_url, user
-            )
+            golden_repos = self.find_matching_golden_repositories(canonical_url, user)
             activated_repos = self.find_matching_activated_repositories(
                 canonical_url, user
             )
@@ -273,10 +277,13 @@ class RepositoryMatcher:
             raise
         except Exception as e:
             error_msg = f"Failed to find all matching repositories: {str(e)}"
-            logger.error(format_error_log(
-                "GIT-GENERAL-060",
-                error_msg, extra={"correlation_id": get_correlation_id()}
-            ))
+            logger.error(
+                format_error_log(
+                    "GIT-GENERAL-060",
+                    error_msg,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise MatchingError(error_msg) from e
 
     def _convert_golden_repo_to_match_result(
@@ -305,11 +312,13 @@ class RepositoryMatcher:
                         repo_data["last_indexed"].replace("Z", "+00:00")
                     )
                 except ValueError:
-                    logger.warning(format_error_log(
-                        "GIT-GENERAL-061",
-                        f"Invalid last_indexed timestamp: {repo_data['last_indexed']}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "GIT-GENERAL-061",
+                            f"Invalid last_indexed timestamp: {repo_data['last_indexed']}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
 
         created_at = None
         if repo_data.get("created_at"):
@@ -321,11 +330,13 @@ class RepositoryMatcher:
                         repo_data["created_at"].replace("Z", "+00:00")
                     )
                 except ValueError:
-                    logger.warning(format_error_log(
-                        "GIT-GENERAL-062",
-                        f"Invalid created_at timestamp: {repo_data['created_at']}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "GIT-GENERAL-062",
+                            f"Invalid created_at timestamp: {repo_data['created_at']}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
 
         return RepositoryMatchResult(
             repository_id=repo_data.get("id", repo_data.get("alias", "unknown")),
@@ -369,11 +380,13 @@ class RepositoryMatcher:
                         repo_data["last_accessed"].replace("Z", "+00:00")
                     )
                 except ValueError:
-                    logger.warning(format_error_log(
-                        "GIT-GENERAL-063",
-                        f"Invalid last_accessed timestamp: {repo_data['last_accessed']}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "GIT-GENERAL-063",
+                            f"Invalid last_accessed timestamp: {repo_data['last_accessed']}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
 
         activated_at = None
         if repo_data.get("activated_at"):
@@ -385,11 +398,13 @@ class RepositoryMatcher:
                         repo_data["activated_at"].replace("Z", "+00:00")
                     )
                 except ValueError:
-                    logger.warning(format_error_log(
-                        "GIT-GENERAL-064",
-                        f"Invalid activated_at timestamp: {repo_data['activated_at']}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "GIT-GENERAL-064",
+                            f"Invalid activated_at timestamp: {repo_data['activated_at']}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
 
         # Create composite alias for activated repositories
         user_alias = repo_data.get("user_alias", "unknown")

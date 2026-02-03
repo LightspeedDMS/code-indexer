@@ -13,7 +13,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 
-
 class TestGracefulHandlingWhenManagerNotInitialized:
     """Tests for AC5: Graceful Handling When Manager Not Initialized."""
 
@@ -53,8 +52,7 @@ class TestGracefulHandlingWhenManagerNotInitialized:
 
         assert result is False
         assert any(
-            "not initialized" in record.message.lower()
-            for record in caplog.records
+            "not initialized" in record.message.lower() for record in caplog.records
         )
 
     def test_on_repo_added_graceful_when_no_manager(self, tmp_path: Path, caplog):
@@ -88,8 +86,7 @@ class TestGracefulHandlingWhenManagerNotInitialized:
 
         # Should log about manager not being initialized
         assert any(
-            "not initialized" in record.message.lower()
-            for record in caplog.records
+            "not initialized" in record.message.lower() for record in caplog.records
         )
 
     def test_on_repo_added_no_crash_when_no_readme_and_no_manager(
@@ -142,10 +139,7 @@ class TestGracefulHandlingWhenManagerNotInitialized:
 
         # Should return False, not raise
         assert result is False
-        assert any(
-            "failed" in record.message.lower()
-            for record in caplog.records
-        )
+        assert any("failed" in record.message.lower() for record in caplog.records)
 
 
 class TestGracefulHandlingLogging:
@@ -173,18 +167,14 @@ class TestGracefulHandlingLogging:
             trigger_catchup_on_api_key_save("sk-ant-test-key-12345678901234567890")
 
         # Should have WARNING level log about manager not initialized
-        warning_records = [
-            r for r in caplog.records if r.levelno == logging.WARNING
-        ]
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warning_records) > 0
         assert any(
             "ClaudeCliManager" in r.message and "not initialized" in r.message
             for r in warning_records
         )
 
-    def test_on_repo_added_logs_info_when_using_fallback(
-        self, tmp_path: Path, caplog
-    ):
+    def test_on_repo_added_logs_info_when_using_fallback(self, tmp_path: Path, caplog):
         """on_repo_added should log INFO when using fallback."""
         from code_indexer.global_repos.meta_description_hook import on_repo_added
 
@@ -207,9 +197,7 @@ class TestGracefulHandlingLogging:
             )
 
         # Should have INFO level log about not initialized
-        info_records = [
-            r for r in caplog.records if r.levelno == logging.INFO
-        ]
+        info_records = [r for r in caplog.records if r.levelno == logging.INFO]
         assert any(
             "not initialized" in r.message.lower() or "fallback" in r.message.lower()
             for r in info_records

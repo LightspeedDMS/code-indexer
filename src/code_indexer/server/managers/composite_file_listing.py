@@ -59,11 +59,13 @@ def _walk_directory(
                         )
                     )
                 except (OSError, ValueError) as e:
-                    logger.warning(format_error_log(
-                        "MCP-GENERAL-019",
-                        f"Cannot access file {item}: {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "MCP-GENERAL-019",
+                            f"Cannot access file {item}: {e}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                     continue
     else:
         # Single level listing
@@ -88,18 +90,22 @@ def _walk_directory(
                         )
                     )
                 except (OSError, ValueError) as e:
-                    logger.warning(format_error_log(
-                        "MCP-GENERAL-020",
-                        f"Cannot access item {item}: {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "MCP-GENERAL-020",
+                            f"Cannot access item {item}: {e}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                     continue
         except OSError as e:
-            logger.warning(format_error_log(
-                "MCP-GENERAL-021",
-                f"Cannot access directory {directory}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-021",
+                    f"Cannot access directory {directory}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
     return files
 
@@ -125,11 +131,13 @@ def _list_composite_files(
         proxy_config = ProxyConfigManager(repo.path)
         discovered_repos = proxy_config.get_repositories()
     except Exception as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-022",
-            f"Failed to get discovered repos from {repo.path}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-022",
+                f"Failed to get discovered repos from {repo.path}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return []
 
     # Walk each component repository

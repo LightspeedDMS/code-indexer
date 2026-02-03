@@ -95,7 +95,11 @@ class TestConcurrentExecutionBasics:
         from code_indexer.server.mcp.handlers import _omni_search_code
 
         mock_user = create_mock_user()
-        params = {"query_text": "test", "repository_alias": ["repo1-global"], "limit": 10}
+        params = {
+            "query_text": "test",
+            "repository_alias": ["repo1-global"],
+            "limit": 10,
+        }
 
         results = []
         errors = []
@@ -128,7 +132,11 @@ class TestConcurrentExecutionBasics:
         from code_indexer.server.mcp.handlers import _omni_search_code
 
         mock_user = create_mock_user()
-        params = {"query_text": "test", "repository_alias": ["repo1-global"], "limit": 10}
+        params = {
+            "query_text": "test",
+            "repository_alias": ["repo1-global"],
+            "limit": 10,
+        }
 
         def slow_search(*args, **kwargs):
             """Simulate some processing time."""
@@ -152,7 +160,9 @@ class TestConcurrentExecutionBasics:
         # Patch ONCE with the slow_search side effect, then run all threads
         with mock_omni_search_dependencies(search_side_effect=slow_search):
             with ThreadPoolExecutor(max_workers=5) as executor:
-                futures = [executor.submit(run_handler_with_delay) for _ in range(num_requests)]
+                futures = [
+                    executor.submit(run_handler_with_delay) for _ in range(num_requests)
+                ]
                 for future in as_completed(futures):
                     future.result()
         total_time = time.time() - overall_start
@@ -192,7 +202,11 @@ class TestConcurrentExecutionNoRaceConditions:
             """Generate unique response based on request parameters."""
             # Extract the repository alias from the request to determine query_id
             request = args[0] if args else kwargs.get("request")
-            repos = request.repositories if hasattr(request, "repositories") else ["unknown"]
+            repos = (
+                request.repositories
+                if hasattr(request, "repositories")
+                else ["unknown"]
+            )
             # Parse query_id from repo name like "repo5-global" -> 5
             repo_name = repos[0] if repos else "repo0-global"
             try:
@@ -223,10 +237,13 @@ class TestConcurrentExecutionNoRaceConditions:
 
         num_requests = 10
         # Patch ONCE with a shared response generator, then run all threads
-        with mock_omni_search_dependencies(search_side_effect=shared_response_generator):
+        with mock_omni_search_dependencies(
+            search_side_effect=shared_response_generator
+        ):
             with ThreadPoolExecutor(max_workers=10) as executor:
                 futures = [
-                    executor.submit(run_handler_with_unique_query, i) for i in range(num_requests)
+                    executor.submit(run_handler_with_unique_query, i)
+                    for i in range(num_requests)
                 ]
                 for future in as_completed(futures):
                     future.result()

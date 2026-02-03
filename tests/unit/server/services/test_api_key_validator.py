@@ -23,7 +23,9 @@ class TestAnthropicApiKeyValidation:
     def test_valid_anthropic_api_key(self):
         """AC: Valid Anthropic API key starting with 'sk-ant-' passes validation."""
         # Typical Anthropic API key format
-        api_key = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz123456789012345678901234567890"
+        api_key = (
+            "sk-ant-api03-abcdefghijklmnopqrstuvwxyz123456789012345678901234567890"
+        )
         result = ApiKeyValidator.validate_anthropic_format(api_key)
 
         assert result.valid is True

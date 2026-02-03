@@ -41,12 +41,7 @@ QUERY_TIMEOUT = 30
 class MultiIndexQueryService:
     """Service for querying multiple indexes sequentially and merging results."""
 
-    def __init__(
-        self,
-        project_root: Path,
-        vector_store,
-        embedding_provider
-    ):
+    def __init__(self, project_root: Path, vector_store, embedding_provider):
         """
         Initialize MultiIndexQueryService.
 
@@ -69,10 +64,13 @@ class MultiIndexQueryService:
         """
         if self._multimodal_provider is None:
             from .voyage_multimodal import VoyageMultimodalClient
+
             # Create config for multimodal model
             multimodal_config = VoyageAIConfig(model=VOYAGE_MULTIMODAL_MODEL)
             self._multimodal_provider = VoyageMultimodalClient(multimodal_config)
-            logger.debug(f"Initialized multimodal embedding provider: {VOYAGE_MULTIMODAL_MODEL}")
+            logger.debug(
+                f"Initialized multimodal embedding provider: {VOYAGE_MULTIMODAL_MODEL}"
+            )
         return self._multimodal_provider
 
     def has_multimodal_index(self) -> bool:
@@ -86,12 +84,16 @@ class MultiIndexQueryService:
             True if voyage-multimodal-3 collection OR legacy multimodal_index/ exists
         """
         # NEW: Check for voyage-multimodal-3 collection (primary approach)
-        multimodal_collection = self.project_root / ".code-indexer" / "index" / VOYAGE_MULTIMODAL_MODEL
+        multimodal_collection = (
+            self.project_root / ".code-indexer" / "index" / VOYAGE_MULTIMODAL_MODEL
+        )
         if multimodal_collection.exists() and multimodal_collection.is_dir():
             return True
 
         # LEGACY: Check for old multimodal_index/ subdirectory (backward compatibility)
-        legacy_multimodal_path = self.project_root / ".code-indexer" / "multimodal_index"
+        legacy_multimodal_path = (
+            self.project_root / ".code-indexer" / "multimodal_index"
+        )
         return legacy_multimodal_path.exists() and legacy_multimodal_path.is_dir()
 
     def _query_code_index(
@@ -100,7 +102,7 @@ class MultiIndexQueryService:
         limit: int,
         collection_name: str,
         filter_conditions: Optional[Dict[str, Any]] = None,
-        **kwargs
+        **kwargs,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
         Query code_index.
@@ -126,7 +128,7 @@ class MultiIndexQueryService:
             filter_conditions=filter_conditions,
             subdirectory=None,  # Default code_index location
             return_timing=True,
-            **kwargs
+            **kwargs,
         )
         # Add actual wall-clock elapsed time (this is what we display)
         timing["elapsed_ms"] = (time.time() - query_start) * 1000
@@ -138,7 +140,7 @@ class MultiIndexQueryService:
         limit: int,
         collection_name: str,
         filter_conditions: Optional[Dict[str, Any]] = None,
-        **kwargs
+        **kwargs,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
         Query voyage-multimodal-3 collection.
@@ -166,7 +168,9 @@ class MultiIndexQueryService:
         query_start = time.time()
 
         # Check if legacy subdirectory exists, use it for backward compatibility
-        legacy_multimodal_path = self.project_root / ".code-indexer" / "multimodal_index"
+        legacy_multimodal_path = (
+            self.project_root / ".code-indexer" / "multimodal_index"
+        )
         if legacy_multimodal_path.exists() and legacy_multimodal_path.is_dir():
             # LEGACY: Use subdirectory approach
             logger.debug("Using legacy multimodal_index subdirectory")
@@ -178,7 +182,7 @@ class MultiIndexQueryService:
                 filter_conditions=filter_conditions,
                 subdirectory="multimodal_index",
                 return_timing=True,
-                **kwargs
+                **kwargs,
             )
         else:
             # NEW: Query voyage-multimodal-3 collection directly
@@ -191,7 +195,7 @@ class MultiIndexQueryService:
                 filter_conditions=filter_conditions,
                 subdirectory=None,  # No subdirectory - same level as voyage-code-3
                 return_timing=True,
-                **kwargs
+                **kwargs,
             )
         # Add actual wall-clock elapsed time (this is what we display)
         timing["elapsed_ms"] = (time.time() - query_start) * 1000
@@ -201,7 +205,7 @@ class MultiIndexQueryService:
         self,
         code_results: List[Dict[str, Any]],
         multimodal_results: List[Dict[str, Any]],
-        limit: int
+        limit: int,
     ) -> List[Dict[str, Any]]:
         """
         Merge and deduplicate results from both indexes.
@@ -228,9 +232,7 @@ class MultiIndexQueryService:
 
         # Sort by score descending
         sorted_results = sorted(
-            deduplicated,
-            key=lambda x: x.get("score", 0.0),
-            reverse=True
+            deduplicated, key=lambda x: x.get("score", 0.0), reverse=True
         )
 
         # Apply limit to final results
@@ -242,7 +244,7 @@ class MultiIndexQueryService:
         limit: int,
         collection_name: str,
         filter_conditions: Optional[Dict[str, Any]] = None,
-        **kwargs
+        **kwargs,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
         Execute parallel multi-index query.
@@ -293,7 +295,7 @@ class MultiIndexQueryService:
                 limit,
                 collection_name,
                 filter_conditions,
-                **kwargs
+                **kwargs,
             )
             futures[code_future] = "code"
 
@@ -305,7 +307,7 @@ class MultiIndexQueryService:
                     limit,
                     collection_name,
                     filter_conditions,
-                    **kwargs
+                    **kwargs,
                 )
                 futures[multimodal_future] = "multimodal"
 
@@ -328,7 +330,9 @@ class MultiIndexQueryService:
                         timing_dict["multimodal_index_ms"] = elapsed_time
 
                 except TimeoutError:
-                    logger.warning(f"{index_type}_index query timed out after {QUERY_TIMEOUT}s")
+                    logger.warning(
+                        f"{index_type}_index query timed out after {QUERY_TIMEOUT}s"
+                    )
                     if index_type == "code":
                         timing_dict["code_timed_out"] = True
                     else:
@@ -351,9 +355,7 @@ class MultiIndexQueryService:
         # Merge results from both indexes with timing
         merge_start = time.time()
         merged_results = self._merge_results(
-            results["code"],
-            results["multimodal"],
-            limit
+            results["code"], results["multimodal"], limit
         )
         merge_end = time.time()
 
@@ -363,8 +365,7 @@ class MultiIndexQueryService:
         return merged_results, timing_dict
 
     def _deduplicate_results(
-        self,
-        results: List[Dict[str, Any]]
+        self, results: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """
         Deduplicate results by (file_path, chunk_offset), keeping highest score.

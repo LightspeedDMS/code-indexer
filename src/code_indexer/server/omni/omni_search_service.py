@@ -119,7 +119,9 @@ class OmniSearchService:
                 repo_alias = future_to_repo[future]
 
                 try:
-                    result = future.result(timeout=self.config.omni_per_repo_timeout_seconds)
+                    result = future.result(
+                        timeout=self.config.omni_per_repo_timeout_seconds
+                    )
                     if result and "results" in result:
                         repo_results[repo_alias] = result["results"][
                             : self.config.omni_max_results_per_repo
@@ -130,18 +132,22 @@ class OmniSearchService:
                     errors[repo_alias] = (
                         f"Search timeout after {self.config.omni_per_repo_timeout_seconds}s"
                     )
-                    logger.warning(format_error_log(
-                        "REPO-GENERAL-038",
-                        f"Search timeout for repo {repo_alias}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "REPO-GENERAL-038",
+                            f"Search timeout for repo {repo_alias}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                 except Exception as e:
                     errors[repo_alias] = str(e)
-                    logger.error(format_error_log(
-                        "REPO-GENERAL-039",
-                        f"Search error for repo {repo_alias}: {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.error(
+                        format_error_log(
+                            "REPO-GENERAL-039",
+                            f"Search error for repo {repo_alias}: {e}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
 
         # Aggregate results
         aggregator = ResultAggregator(mode=aggregation_mode, limit=limit)

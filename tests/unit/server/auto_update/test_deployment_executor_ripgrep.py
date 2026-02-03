@@ -22,12 +22,14 @@ class TestEnsureRipgrepDelegation:
         return DeploymentExecutor(
             repo_path=tmp_path / "repo",
             service_name="cidx-server",
-            server_url="http://localhost:8000"
+            server_url="http://localhost:8000",
         )
 
     def test_delegates_to_ripgrep_installer(self, executor):
         """Test ensure_ripgrep creates RipgrepInstaller and calls install()."""
-        with patch("code_indexer.server.auto_update.deployment_executor.RipgrepInstaller") as mock_ripgrep_class:
+        with patch(
+            "code_indexer.server.auto_update.deployment_executor.RipgrepInstaller"
+        ) as mock_ripgrep_class:
             mock_ripgrep_instance = Mock()
             mock_ripgrep_instance.install.return_value = True
             mock_ripgrep_class.return_value = mock_ripgrep_instance
@@ -45,7 +47,9 @@ class TestEnsureRipgrepDelegation:
 
     def test_returns_true_when_ripgrep_installer_succeeds(self, executor):
         """Test returns True when RipgrepInstaller.install() returns True."""
-        with patch("code_indexer.server.auto_update.deployment_executor.RipgrepInstaller") as mock_ripgrep_class:
+        with patch(
+            "code_indexer.server.auto_update.deployment_executor.RipgrepInstaller"
+        ) as mock_ripgrep_class:
             mock_ripgrep_instance = Mock()
             mock_ripgrep_instance.install.return_value = True
             mock_ripgrep_class.return_value = mock_ripgrep_instance
@@ -56,7 +60,9 @@ class TestEnsureRipgrepDelegation:
 
     def test_returns_false_when_ripgrep_installer_fails(self, executor):
         """Test returns False when RipgrepInstaller.install() returns False."""
-        with patch("code_indexer.server.auto_update.deployment_executor.RipgrepInstaller") as mock_ripgrep_class:
+        with patch(
+            "code_indexer.server.auto_update.deployment_executor.RipgrepInstaller"
+        ) as mock_ripgrep_class:
             mock_ripgrep_instance = Mock()
             mock_ripgrep_instance.install.return_value = False
             mock_ripgrep_class.return_value = mock_ripgrep_instance
@@ -75,7 +81,7 @@ class TestExecuteMethodIntegration:
         return DeploymentExecutor(
             repo_path=tmp_path / "repo",
             service_name="cidx-server",
-            server_url="http://localhost:8000"
+            server_url="http://localhost:8000",
         )
 
     def test_execute_calls_ensure_ripgrep(self, executor, tmp_path):

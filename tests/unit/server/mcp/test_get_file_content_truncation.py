@@ -50,9 +50,7 @@ class TestGetFileContentTruncation:
             mock_app.file_service = mock_service
             yield mock_service, mock_app
 
-    def test_truncated_content_returns_cache_handle(
-        self, mock_user, mock_file_service
-    ):
+    def test_truncated_content_returns_cache_handle(self, mock_user, mock_file_service):
         """AC1: Truncated content returns cache_handle field."""
         from code_indexer.server.mcp import handlers
 
@@ -79,7 +77,9 @@ class TestGetFileContentTruncation:
         # Mock payload cache for truncation (sync after Epic #48)
         mock_cache = MagicMock()
         mock_cache.store = Mock(return_value="cache_handle_abc123")
-        mock_cache.config.max_fetch_size_chars = 500  # Required for total_pages calculation
+        mock_cache.config.max_fetch_size_chars = (
+            500  # Required for total_pages calculation
+        )
         mock_app.app.state.payload_cache = mock_cache
 
         # Mock content limits config
@@ -90,7 +90,9 @@ class TestGetFileContentTruncation:
             mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
                 100  # 400 chars max with default 4 chars/token
             )
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
+                4
+            )
             mock_config_service.return_value = mock_config
 
             params = {
@@ -144,7 +146,9 @@ class TestGetFileContentTruncation:
             mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
                 50000
             )
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
+                4
+            )
             mock_config_service.return_value = mock_config
 
             params = {
@@ -284,7 +288,11 @@ class TestGetFileContentGlobalRepoTruncation:
         # Mock global registry
         mock_registry = MagicMock()
         mock_registry.list_global_repos.return_value = [
-            {"alias_name": "test-global", "repo_name": "test", "index_path": "/mock/path"}
+            {
+                "alias_name": "test-global",
+                "repo_name": "test",
+                "index_path": "/mock/path",
+            }
         ]
 
         # Mock alias manager
@@ -294,7 +302,9 @@ class TestGetFileContentGlobalRepoTruncation:
         # Mock payload cache
         mock_cache = MagicMock()
         mock_cache.store = Mock(return_value="global_cache_handle_xyz")
-        mock_cache.config.max_fetch_size_chars = 500  # Required for total_pages calculation
+        mock_cache.config.max_fetch_size_chars = (
+            500  # Required for total_pages calculation
+        )
         mock_app.app.state.payload_cache = mock_cache
 
         with (
@@ -314,7 +324,9 @@ class TestGetFileContentGlobalRepoTruncation:
             mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
                 100
             )
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
+                4
+            )
             mock_config_service.return_value = mock_config
 
             params = {
@@ -358,7 +370,11 @@ class TestGetFileContentGlobalRepoTruncation:
 
         mock_registry = MagicMock()
         mock_registry.list_global_repos.return_value = [
-            {"alias_name": "test-global", "repo_name": "test", "index_path": "/mock/path"}
+            {
+                "alias_name": "test-global",
+                "repo_name": "test",
+                "index_path": "/mock/path",
+            }
         ]
 
         mock_alias_manager = MagicMock()
@@ -384,7 +400,9 @@ class TestGetFileContentGlobalRepoTruncation:
             mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
                 50000
             )
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
+                4
+            )
             mock_config_service.return_value = mock_config
 
             params = {
@@ -398,7 +416,9 @@ class TestGetFileContentGlobalRepoTruncation:
             assert data.get("success") is True
 
             # Small file should not be truncated
-            truncated = data.get("truncated") or data.get("metadata", {}).get("truncated")
+            truncated = data.get("truncated") or data.get("metadata", {}).get(
+                "truncated"
+            )
             assert truncated is False
 
             # No cache_handle for small files

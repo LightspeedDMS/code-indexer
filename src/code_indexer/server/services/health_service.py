@@ -68,16 +68,28 @@ def _load_thresholds_from_config() -> None:
         config_service = get_config_service()
         config = config_service.get_config()
         if config.health_config is not None:
-            MEMORY_WARNING_THRESHOLD = config.health_config.memory_warning_threshold_percent
-            MEMORY_CRITICAL_THRESHOLD = config.health_config.memory_critical_threshold_percent
-            DISK_WARNING_THRESHOLD_PERCENT = config.health_config.disk_warning_threshold_percent
-            DISK_CRITICAL_THRESHOLD_PERCENT = config.health_config.disk_critical_threshold_percent
-            CPU_SUSTAINED_THRESHOLD = config.health_config.cpu_sustained_threshold_percent
+            MEMORY_WARNING_THRESHOLD = (
+                config.health_config.memory_warning_threshold_percent
+            )
+            MEMORY_CRITICAL_THRESHOLD = (
+                config.health_config.memory_critical_threshold_percent
+            )
+            DISK_WARNING_THRESHOLD_PERCENT = (
+                config.health_config.disk_warning_threshold_percent
+            )
+            DISK_CRITICAL_THRESHOLD_PERCENT = (
+                config.health_config.disk_critical_threshold_percent
+            )
+            CPU_SUSTAINED_THRESHOLD = (
+                config.health_config.cpu_sustained_threshold_percent
+            )
     except Exception as e:
-        logger.warning(format_error_log(
-            "DEPLOY-GENERAL-039",
-            f"Could not read health config, using defaults: {e}"
-        ))
+        logger.warning(
+            format_error_log(
+                "DEPLOY-GENERAL-039",
+                f"Could not read health config, using defaults: {e}",
+            )
+        )
 
 
 class HealthCheckService:
@@ -109,17 +121,21 @@ class HealthCheckService:
             # CPU history for sustained threshold detection (Story #727 AC4)
             # List of (timestamp, cpu_percent) tuples for rolling 60s window
             self._cpu_history: List[Tuple[float, float]] = []
-            self._cpu_history_lock = threading.Lock()  # Thread safety for concurrent requests
+            self._cpu_history_lock = (
+                threading.Lock()
+            )  # Thread safety for concurrent requests
 
             # Story #3 Phase 2: Load thresholds from ConfigService (AC4-AC8)
             _load_thresholds_from_config()
 
         except Exception as e:
-            logger.error(format_error_log(
-                "DEPLOY-GENERAL-040",
-                f"Failed to initialize real dependencies: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-040",
+                    f"Failed to initialize real dependencies: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise RuntimeError(f"Cannot initialize health check service: {e}")
 
     def get_system_health(self) -> HealthCheckResponse:
@@ -210,11 +226,13 @@ class HealthCheckService:
 
         except Exception as e:
             response_time = int((time.time() - start_time) * 1000)
-            logger.error(format_error_log(
-                "DEPLOY-GENERAL-041",
-                f"Database health check failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-041",
+                    f"Database health check failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
             return ServiceHealthInfo(
                 status=HealthStatus.UNHEALTHY,
@@ -271,11 +289,13 @@ class HealthCheckService:
 
         except Exception as e:
             response_time = int((time.time() - start_time) * 1000)
-            logger.error(format_error_log(
-                "GIT-GENERAL-043",
-                f"Storage health check failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "GIT-GENERAL-043",
+                    f"Storage health check failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
             return ServiceHealthInfo(
                 status=HealthStatus.UNHEALTHY,
@@ -528,15 +548,13 @@ class HealthCheckService:
         readings_60s = [c for t, c in history_snapshot]
 
         # Degraded: CPU >95% sustained for 30+ seconds
-        is_degraded = (
-            len(readings_30s) >= MIN_CPU_READINGS_FOR_DEGRADED
-            and all(c > CPU_SUSTAINED_THRESHOLD for c in readings_30s)
+        is_degraded = len(readings_30s) >= MIN_CPU_READINGS_FOR_DEGRADED and all(
+            c > CPU_SUSTAINED_THRESHOLD for c in readings_30s
         )
 
         # Unhealthy: CPU >95% sustained for 60+ seconds
-        is_unhealthy = (
-            len(readings_60s) >= MIN_CPU_READINGS_FOR_UNHEALTHY
-            and all(c > CPU_SUSTAINED_THRESHOLD for c in readings_60s)
+        is_unhealthy = len(readings_60s) >= MIN_CPU_READINGS_FOR_UNHEALTHY and all(
+            c > CPU_SUSTAINED_THRESHOLD for c in readings_60s
         )
 
         return is_degraded, is_unhealthy
@@ -569,7 +587,9 @@ class HealthCheckService:
         failure_reasons.extend(db_reasons)
 
         # AC2: Volume health
-        vol_warn, vol_err, vol_reasons = self._collect_volume_failures(system_info.volumes)
+        vol_warn, vol_err, vol_reasons = self._collect_volume_failures(
+            system_info.volumes
+        )
         has_warning = has_warning or vol_warn
         has_error = has_error or vol_err
         failure_reasons.extend(vol_reasons)
@@ -605,7 +625,9 @@ class HealthCheckService:
         # AC5: Limit to MAX_FAILURE_REASONS with "+N more" indicator
         if len(failure_reasons) > MAX_FAILURE_REASONS:
             extra_count = len(failure_reasons) - MAX_FAILURE_REASONS
-            failure_reasons = failure_reasons[:MAX_FAILURE_REASONS] + [f"+{extra_count} more"]
+            failure_reasons = failure_reasons[:MAX_FAILURE_REASONS] + [
+                f"+{extra_count} more"
+            ]
 
         return status, failure_reasons
 
@@ -706,11 +728,13 @@ class HealthCheckService:
                     continue
 
         except Exception as e:
-            logger.warning(format_error_log(
-                "GIT-GENERAL-044",
-                f"Failed to get mounted volumes: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "GIT-GENERAL-044",
+                    f"Failed to get mounted volumes: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         return volumes
 
@@ -730,11 +754,13 @@ class HealthCheckService:
             if background_job_manager:
                 return background_job_manager.get_active_job_count()
         except Exception as e:
-            logger.warning(format_error_log(
-                "GIT-GENERAL-045",
-                f"Failed to get active job count: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "GIT-GENERAL-045",
+                    f"Failed to get active job count: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Return 0 if job manager not available or failed to query
         return 0

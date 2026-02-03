@@ -311,12 +311,12 @@ class TestGetFileContentSkipTruncation:
         sig = inspect.signature(self.service.get_file_content)
         param_names = list(sig.parameters.keys())
 
-        assert "skip_truncation" in param_names, (
-            "get_file_content should accept skip_truncation parameter"
-        )
+        assert (
+            "skip_truncation" in param_names
+        ), "get_file_content should accept skip_truncation parameter"
 
         # Verify default value is False
         skip_truncation_param = sig.parameters["skip_truncation"]
-        assert skip_truncation_param.default is False, (
-            "skip_truncation should default to False"
-        )
+        assert (
+            skip_truncation_param.default is False
+        ), "skip_truncation should default to False"

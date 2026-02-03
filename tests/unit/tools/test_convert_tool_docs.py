@@ -13,7 +13,17 @@ def temp_output_dir(tmp_path):
     """Create a temporary output directory."""
     output_dir = tmp_path / "tool_docs"
     output_dir.mkdir()
-    for category in ["search", "git", "scip", "files", "admin", "repos", "ssh", "guides", "cicd"]:
+    for category in [
+        "search",
+        "git",
+        "scip",
+        "files",
+        "admin",
+        "repos",
+        "ssh",
+        "guides",
+        "cicd",
+    ]:
         (output_dir / category).mkdir()
     return output_dir
 

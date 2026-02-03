@@ -238,9 +238,7 @@ def index_add_type(repository: str, type: str, json_output: bool):
         if json_output:
             console.print(format_json_success(result))
         else:
-            console.print(
-                f"[green]Index type '{type}' added to '{repository}'[/green]"
-            )
+            console.print(f"[green]Index type '{type}' added to '{repository}'[/green]")
             if result.get("job_id"):
                 console.print(f"[dim]Job ID:[/dim] {result['job_id']}")
 

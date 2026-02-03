@@ -152,8 +152,10 @@ class SearchResultFileManager:
                     extra={"correlation_id": get_correlation_id()},
                 )
         except Exception as e:
-            logger.warning(format_error_log(
-                "MCP-GENERAL-169",
-                f"Failed to cleanup temp file {file_path}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-169",
+                    f"Failed to cleanup temp file {file_path}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )

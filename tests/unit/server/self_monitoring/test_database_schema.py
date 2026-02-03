@@ -79,7 +79,7 @@ class TestSelfMonitoringSchema:
                 "INSERT INTO self_monitoring_scans "
                 "(scan_id, started_at, status, log_id_start, log_id_end) "
                 "VALUES (?, ?, ?, ?, ?)",
-                ("scan-123", "2026-01-30T12:00:00", "SUCCESS", 1, 10)
+                ("scan-123", "2026-01-30T12:00:00", "SUCCESS", 1, 10),
             )
 
             # Insert issue with all deduplication fields
@@ -98,8 +98,8 @@ class TestSelfMonitoringSchema:
                     "abc123def456",
                     "1,2,3",
                     "src/auth.py,src/git.py",
-                    "2026-01-30T12:05:00"
-                )
+                    "2026-01-30T12:05:00",
+                ),
             )
             conn.commit()
 
@@ -107,7 +107,7 @@ class TestSelfMonitoringSchema:
             cursor = conn.execute(
                 "SELECT error_codes, fingerprint, source_files "
                 "FROM self_monitoring_issues WHERE github_issue_number = ?",
-                (101,)
+                (101,),
             )
             row = cursor.fetchone()
 

@@ -95,13 +95,22 @@ class ActivatedRepoIndexManager:
             config_service = get_config_service()
             config = config_service.get_config()
             if config.scip_config is not None:
-                self.INDEXING_TIMEOUT_SECONDS = config.scip_config.indexing_timeout_seconds
-                self.SCIP_TIMEOUT_SECONDS = config.scip_config.scip_generation_timeout_seconds
-                self.STALE_THRESHOLD_DAYS = config.scip_config.temporal_stale_threshold_days
+                self.INDEXING_TIMEOUT_SECONDS = (
+                    config.scip_config.indexing_timeout_seconds
+                )
+                self.SCIP_TIMEOUT_SECONDS = (
+                    config.scip_config.scip_generation_timeout_seconds
+                )
+                self.STALE_THRESHOLD_DAYS = (
+                    config.scip_config.temporal_stale_threshold_days
+                )
         except Exception as e:
             logger.warning(
-                format_error_log("SVC-MIGRATE-001", f"Could not read SCIP config, using defaults: {e}"),
-                extra=get_log_extra("SVC-MIGRATE-001")
+                format_error_log(
+                    "SVC-MIGRATE-001",
+                    f"Could not read SCIP config, using defaults: {e}",
+                ),
+                extra=get_log_extra("SVC-MIGRATE-001"),
             )
 
     def trigger_reindex(
@@ -322,7 +331,7 @@ class ActivatedRepoIndexManager:
             error_msg = f"Failed to execute reindex job for '{repo_alias}': {str(e)}"
             self.logger.error(
                 format_error_log("SVC-MIGRATE-009", error_msg),
-                extra=get_log_extra("SVC-MIGRATE-009")
+                extra=get_log_extra("SVC-MIGRATE-009"),
             )
 
             if progress_callback:
@@ -372,14 +381,17 @@ class ActivatedRepoIndexManager:
                 if not result.get("success", False):
                     error_msg = result.get("error", "Unknown error")
                     logger.error(
-                        format_error_log("SVC-MIGRATE-003", "Failed to index {index_type}: {error_msg}"),
-                        extra=get_log_extra("SVC-MIGRATE-003")
+                        format_error_log(
+                            "SVC-MIGRATE-003",
+                            "Failed to index {index_type}: {error_msg}",
+                        ),
+                        extra=get_log_extra("SVC-MIGRATE-003"),
                     )
             except Exception as e:
                 error_msg = f"Exception during {index_type} indexing: {str(e)}"
                 self.logger.error(
                     format_error_log("SVC-MIGRATE-010", error_msg),
-                    extra=get_log_extra("SVC-MIGRATE-010")
+                    extra=get_log_extra("SVC-MIGRATE-010"),
                 )
                 results[index_type] = {"success": False, "error": error_msg}
 
@@ -561,8 +573,10 @@ class ActivatedRepoIndexManager:
             }
         except Exception:
             logger.warning(
-                format_error_log("SVC-MIGRATE-005", "Failed to read semantic index metadata: {e}"),
-                extra=get_log_extra("SVC-MIGRATE-005")
+                format_error_log(
+                    "SVC-MIGRATE-005", "Failed to read semantic index metadata: {e}"
+                ),
+                extra=get_log_extra("SVC-MIGRATE-005"),
             )
             return {"status": "not_indexed"}
 
@@ -599,8 +613,10 @@ class ActivatedRepoIndexManager:
             }
         except Exception:
             logger.warning(
-                format_error_log("SVC-MIGRATE-006", "Failed to read FTS index status: {e}"),
-                extra=get_log_extra("SVC-MIGRATE-006")
+                format_error_log(
+                    "SVC-MIGRATE-006", "Failed to read FTS index status: {e}"
+                ),
+                extra=get_log_extra("SVC-MIGRATE-006"),
             )
             return {"status": "not_indexed"}
 
@@ -638,8 +654,10 @@ class ActivatedRepoIndexManager:
             }
         except Exception:
             logger.warning(
-                format_error_log("SVC-MIGRATE-007", "Failed to read temporal index metadata: {e}"),
-                extra=get_log_extra("SVC-MIGRATE-007")
+                format_error_log(
+                    "SVC-MIGRATE-007", "Failed to read temporal index metadata: {e}"
+                ),
+                extra=get_log_extra("SVC-MIGRATE-007"),
             )
             return {"status": "not_indexed"}
 
@@ -675,7 +693,9 @@ class ActivatedRepoIndexManager:
             }
         except Exception as e:
             logger.warning(
-                format_error_log("SVC-MIGRATE-008", "Failed to read SCIP index status: {e}"),
-                extra=get_log_extra("SVC-MIGRATE-008")
+                format_error_log(
+                    "SVC-MIGRATE-008", "Failed to read SCIP index status: {e}"
+                ),
+                extra=get_log_extra("SVC-MIGRATE-008"),
             )
             return {"status": "FAILED", "project_count": 0, "error": str(e)}

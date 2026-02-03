@@ -251,12 +251,24 @@ class TestOIDCProviderErrorHandling:
         )
 
         # Create a mock ID token WITHOUT 'sub' claim
-        header = base64.urlsafe_b64encode(json.dumps({"alg": "RS256"}).encode()).decode().rstrip("=")
-        payload = base64.urlsafe_b64encode(json.dumps({
-            "email": "user@example.com",
-            "email_verified": True,
-            # Missing 'sub' claim
-        }).encode()).decode().rstrip("=")
+        header = (
+            base64.urlsafe_b64encode(json.dumps({"alg": "RS256"}).encode())
+            .decode()
+            .rstrip("=")
+        )
+        payload = (
+            base64.urlsafe_b64encode(
+                json.dumps(
+                    {
+                        "email": "user@example.com",
+                        "email_verified": True,
+                        # Missing 'sub' claim
+                    }
+                ).encode()
+            )
+            .decode()
+            .rstrip("=")
+        )
         signature = "fake_signature"
         id_token_without_sub = f"{header}.{payload}.{signature}"
 

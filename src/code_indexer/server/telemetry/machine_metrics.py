@@ -139,10 +139,12 @@ class MachineMetricsExporter:
             )
 
         except Exception as e:
-            logger.warning(format_error_log(
-                "QUERY-GENERAL-018",
-                f"Failed to register machine metrics gauges: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "QUERY-GENERAL-018",
+                    f"Failed to register machine metrics gauges: {e}",
+                )
+            )
             self._is_active = False
 
     def _get_attributes(self) -> Dict[str, str]:
@@ -170,10 +172,11 @@ class MachineMetricsExporter:
             value = collector.get_cpu_usage()
             yield (value, self._get_attributes())
         except Exception as e:
-            logger.warning(format_error_log(
-                "QUERY-GENERAL-019",
-                f"Failed to collect CPU metrics: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "QUERY-GENERAL-019", f"Failed to collect CPU metrics: {e}"
+                )
+            )
 
     def _memory_callback(self, options) -> Iterable[Tuple[float, Dict[str, str]]]:
         """Callback for memory usage gauge."""
@@ -182,10 +185,11 @@ class MachineMetricsExporter:
             memory = collector.get_memory_usage()
             yield (memory["percent"], self._get_attributes())
         except Exception as e:
-            logger.warning(format_error_log(
-                "QUERY-GENERAL-020",
-                f"Failed to collect memory metrics: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "QUERY-GENERAL-020", f"Failed to collect memory metrics: {e}"
+                )
+            )
 
     def _disk_free_callback(self, options) -> Iterable[Tuple[int, Dict[str, str]]]:
         """Callback for disk free space gauge."""
@@ -194,10 +198,11 @@ class MachineMetricsExporter:
             disk = collector.get_disk_metrics()
             yield (disk["free_bytes"], self._get_attributes())
         except Exception as e:
-            logger.warning(format_error_log(
-                "QUERY-GENERAL-021",
-                f"Failed to collect disk free metrics: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "QUERY-GENERAL-021", f"Failed to collect disk free metrics: {e}"
+                )
+            )
 
     def _disk_read_callback(self, options) -> Iterable[Tuple[int, Dict[str, str]]]:
         """Callback for disk read bytes gauge."""
@@ -206,10 +211,11 @@ class MachineMetricsExporter:
             disk = collector.get_disk_metrics()
             yield (disk["read_bytes"], self._get_attributes())
         except Exception as e:
-            logger.warning(format_error_log(
-                "QUERY-GENERAL-022",
-                f"Failed to collect disk read metrics: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "QUERY-GENERAL-022", f"Failed to collect disk read metrics: {e}"
+                )
+            )
 
     def _disk_write_callback(self, options) -> Iterable[Tuple[int, Dict[str, str]]]:
         """Callback for disk write bytes gauge."""
@@ -218,10 +224,11 @@ class MachineMetricsExporter:
             disk = collector.get_disk_metrics()
             yield (disk["write_bytes"], self._get_attributes())
         except Exception as e:
-            logger.warning(format_error_log(
-                "QUERY-GENERAL-023",
-                f"Failed to collect disk write metrics: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "QUERY-GENERAL-023", f"Failed to collect disk write metrics: {e}"
+                )
+            )
 
     def _network_receive_callback(
         self, options
@@ -232,10 +239,12 @@ class MachineMetricsExporter:
             network = collector.get_network_metrics()
             yield (network["receive_bytes"], self._get_attributes())
         except Exception as e:
-            logger.warning(format_error_log(
-                "QUERY-GENERAL-024",
-                f"Failed to collect network receive metrics: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "QUERY-GENERAL-024",
+                    f"Failed to collect network receive metrics: {e}",
+                )
+            )
 
     def _network_transmit_callback(
         self, options
@@ -246,10 +255,12 @@ class MachineMetricsExporter:
             network = collector.get_network_metrics()
             yield (network["transmit_bytes"], self._get_attributes())
         except Exception as e:
-            logger.warning(format_error_log(
-                "QUERY-GENERAL-025",
-                f"Failed to collect network transmit metrics: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "QUERY-GENERAL-025",
+                    f"Failed to collect network transmit metrics: {e}",
+                )
+            )
 
     @property
     def is_active(self) -> bool:

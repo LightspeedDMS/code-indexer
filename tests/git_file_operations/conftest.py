@@ -43,7 +43,7 @@ def requires_ssh_access(func):
     """Decorator to skip tests that require SSH access to external repos."""
     return pytest.mark.skipif(
         os.environ.get(SKIP_SSH_TESTS_ENV, "").lower() in ("1", "true", "yes"),
-        reason=f"Skipped: {SKIP_SSH_TESTS_ENV} is set (no SSH access in CI)"
+        reason=f"Skipped: {SKIP_SSH_TESTS_ENV} is set (no SSH access in CI)",
     )(func)
 
 
@@ -169,9 +169,13 @@ def local_test_repo() -> Generator[Path, None, None]:
 
         # Create initial commit
         readme = repo_path / "README.md"
-        readme.write_text("# Test Repository\n\nCreated for CIDX git operations testing.\n")
+        readme.write_text(
+            "# Test Repository\n\nCreated for CIDX git operations testing.\n"
+        )
 
-        subprocess.run(["git", "add", "."], cwd=repo_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=repo_path, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Initial commit"],
             cwd=repo_path,
@@ -225,6 +229,7 @@ def test_app(mock_user):
     Yields:
         FastAPI application with auth dependency overridden
     """
+
     def mock_get_current_user_dep():
         return mock_user
 
@@ -262,7 +267,9 @@ def state_manager(local_test_repo: Path) -> GitRepoStateManager:
 
 
 @pytest.fixture(scope="function")
-def captured_state(state_manager: GitRepoStateManager) -> Generator[GitRepoState, None, None]:
+def captured_state(
+    state_manager: GitRepoStateManager,
+) -> Generator[GitRepoState, None, None]:
     """
     Capture repository state before test and restore after.
 
@@ -343,7 +350,7 @@ def activated_local_repo(local_test_repo: Path) -> Generator[str, None, None]:
     with patch.object(
         ActivatedRepoManager,
         "get_activated_repo_path",
-        return_value=str(local_test_repo)
+        return_value=str(local_test_repo),
     ):
         yield alias
 
@@ -367,7 +374,7 @@ def activated_external_repo(external_repo_dir: Path) -> Generator[str, None, Non
     with patch.object(
         ActivatedRepoManager,
         "get_activated_repo_path",
-        return_value=str(external_repo_dir)
+        return_value=str(external_repo_dir),
     ):
         yield alias
 
@@ -388,7 +395,7 @@ def external_state_manager(external_repo_dir: Path) -> GitRepoStateManager:
 
 @pytest.fixture(scope="function")
 def external_captured_state(
-    external_state_manager: GitRepoStateManager
+    external_state_manager: GitRepoStateManager,
 ) -> Generator[GitRepoState, None, None]:
     """
     Capture external repository state before test and restore after.
@@ -427,6 +434,7 @@ def get_confirmation_token(client):
                 json={"mode": "hard", "confirmation_token": token}
             )
     """
+
     def _get_token(test_client: TestClient, endpoint: str, payload: dict) -> str:
         """
         Request a confirmation token for a destructive operation.
@@ -452,9 +460,9 @@ def get_confirmation_token(client):
 
         data = response.json()
         assert "token" in data, f"No token in response: {data}"
-        assert data.get("requires_confirmation") is True, (
-            f"Expected requires_confirmation=True: {data}"
-        )
+        assert (
+            data.get("requires_confirmation") is True
+        ), f"Expected requires_confirmation=True: {data}"
 
         return data["token"]
 
@@ -476,6 +484,7 @@ def test_file_content() -> str:
 def unique_filename() -> str:
     """Generate a unique filename for test files."""
     import uuid
+
     return f"test_file_{uuid.uuid4().hex[:8]}.txt"
 
 
@@ -483,4 +492,5 @@ def unique_filename() -> str:
 def unique_branch_name() -> str:
     """Generate a unique branch name for test branches."""
     import uuid
+
     return f"cidx-test-branch-{uuid.uuid4().hex[:8]}"

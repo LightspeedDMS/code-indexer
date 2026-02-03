@@ -84,8 +84,12 @@ class TestGetFileContentPaginationInfo:
             "code_indexer.server.mcp.handlers.get_config_service"
         ) as mock_config_service:
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 100
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
+                100
+            )
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
+                4
+            )
             mock_config_service.return_value = mock_config
 
             params = {
@@ -99,7 +103,9 @@ class TestGetFileContentPaginationInfo:
             # Verify metadata includes total_pages
             metadata = data.get("metadata", {})
             assert "total_pages" in metadata, "metadata must include total_pages"
-            assert metadata["total_pages"] > 0, "total_pages must be > 0 for truncated content"
+            assert (
+                metadata["total_pages"] > 0
+            ), "total_pages must be > 0 for truncated content"
 
     def test_truncated_content_returns_has_more_in_metadata(
         self, mock_user, mock_file_service
@@ -126,8 +132,12 @@ class TestGetFileContentPaginationInfo:
             "code_indexer.server.mcp.handlers.get_config_service"
         ) as mock_config_service:
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 100
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
+                100
+            )
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
+                4
+            )
             mock_config_service.return_value = mock_config
 
             params = {
@@ -140,7 +150,9 @@ class TestGetFileContentPaginationInfo:
 
             metadata = data.get("metadata", {})
             assert "has_more" in metadata, "metadata must include has_more"
-            assert metadata["has_more"] is True, "has_more must be True for truncated content"
+            assert (
+                metadata["has_more"] is True
+            ), "has_more must be True for truncated content"
 
     def test_truncated_content_returns_total_pages_at_top_level(
         self, mock_user, mock_file_service
@@ -167,8 +179,12 @@ class TestGetFileContentPaginationInfo:
             "code_indexer.server.mcp.handlers.get_config_service"
         ) as mock_config_service:
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 100
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
+                100
+            )
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
+                4
+            )
             mock_config_service.return_value = mock_config
 
             params = {
@@ -208,8 +224,12 @@ class TestGetFileContentPaginationInfo:
             "code_indexer.server.mcp.handlers.get_config_service"
         ) as mock_config_service:
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 100
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
+                100
+            )
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
+                4
+            )
             mock_config_service.return_value = mock_config
 
             params = {
@@ -245,8 +265,12 @@ class TestGetFileContentPaginationInfo:
             "code_indexer.server.mcp.handlers.get_config_service"
         ) as mock_config_service:
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 50000
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
+                50000
+            )
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
+                4
+            )
             mock_config_service.return_value = mock_config
 
             params = {
@@ -258,7 +282,9 @@ class TestGetFileContentPaginationInfo:
             data = _extract_response_data(mcp_response)
 
             # Non-truncated should have total_pages=0
-            total_pages = data.get("total_pages") or data.get("metadata", {}).get("total_pages")
+            total_pages = data.get("total_pages") or data.get("metadata", {}).get(
+                "total_pages"
+            )
             assert total_pages == 0, "Non-truncated content should have total_pages=0"
 
     def test_small_content_has_more_false(self, mock_user, mock_file_service):
@@ -283,8 +309,12 @@ class TestGetFileContentPaginationInfo:
             "code_indexer.server.mcp.handlers.get_config_service"
         ) as mock_config_service:
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 50000
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
+                50000
+            )
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
+                4
+            )
             mock_config_service.return_value = mock_config
 
             params = {
@@ -324,8 +354,12 @@ class TestGetFileContentPaginationInfo:
             "code_indexer.server.mcp.handlers.get_config_service"
         ) as mock_config_service:
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 100
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
+                100
+            )
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
+                4
+            )
             mock_config_service.return_value = mock_config
 
             params = {
@@ -336,5 +370,9 @@ class TestGetFileContentPaginationInfo:
             mcp_response = handlers.get_file_content(params, mock_user)
             data = _extract_response_data(mcp_response)
 
-            total_pages = data.get("total_pages") or data.get("metadata", {}).get("total_pages")
-            assert total_pages == 5, f"Expected 5 pages for 2500 chars with 500 chars/page, got {total_pages}"
+            total_pages = data.get("total_pages") or data.get("metadata", {}).get(
+                "total_pages"
+            )
+            assert (
+                total_pages == 5
+            ), f"Expected 5 pages for 2500 chars with 500 chars/page, got {total_pages}"

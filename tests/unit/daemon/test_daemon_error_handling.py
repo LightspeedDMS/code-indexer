@@ -9,7 +9,6 @@ from unittest.mock import patch
 from io import StringIO
 
 
-
 class TestExecuteSemanticSearchErrorPropagation:
     """Test that _execute_semantic_search propagates errors in timing_info."""
 

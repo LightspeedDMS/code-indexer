@@ -2,653 +2,344 @@
 
 ## 0. DOCUMENTATION STANDARDS
 
-**NO EMOJI/ICONOGRAPHY**: Never use emoji, unicode icons, or decorative symbols in any documentation files (README.md, CLAUDE.md, CHANGELOG.md, docs/*.md). Use plain text headers and formatting only. This applies to all project documentation.
+**NO EMOJI/ICONOGRAPHY** in documentation (README.md, CLAUDE.md, CHANGELOG.md, docs/*.md).
 
-**Examples of forbidden iconography:**
-- Emoji: 🔍 🕰️ ⚡ 🎯 🔄 🤖 ✅ ❌ 👍 🚀 🔧 🔐
-- Unicode symbols: ✓ ✗ ★ ● ◆ → ←
-- Decorative characters
+Forbidden: 🔍 🕰️ ⚡ 🎯 🔄 🤖 ✅ ❌ 👍 🚀 🔧 🔐 | ✓ ✗ ★ ● ◆ → ← | decorative characters
 
-**Correct heading format**: Use plain text only
-```markdown
-### Performance Improvements
-### Git History Search
-```
+Use plain text headers: `### Performance Improvements`
 
 ---
 
 ## CRITICAL: SSH CONNECTION POLICY
 
-**ABSOLUTE PROHIBITION**: NEVER use `ssh` command directly via Bash tool.
+**NEVER** use `ssh` command via Bash tool. Causes authentication failures.
 
-**MANDATORY**: ALWAYS use MCP SSH server tools for ALL remote connections:
-- `mcp__ssh__ssh_connect` - Establish SSH connection
-- `mcp__ssh__ssh_exec` - Execute commands on remote server
-- `mcp__ssh__ssh_disconnect` - Close SSH connection
-- `mcp__ssh__ssh_upload_file` - Upload files via SFTP
-- `mcp__ssh__ssh_download_file` - Download files via SFTP
-
-**WHY**: Direct `ssh` command causes authentication failures. MCP SSH server provides proper connection management.
-
-**VIOLATION = FUNDAMENTAL FAILURE**: Using direct `ssh` command breaks remote operations.
+**USE** MCP SSH tools for ALL remote connections:
+- `mcp__ssh__ssh_connect` / `ssh_disconnect` - Session management
+- `mcp__ssh__ssh_exec` - Remote commands
+- `mcp__ssh__ssh_upload_file` / `ssh_download_file` - SFTP transfers
 
 ---
 
 ## CRITICAL: LOCAL TESTING BEFORE DEPLOYMENT
 
-**ABSOLUTE PROHIBITION**: NEVER deploy to or test on the production CIDX server until work is approved.
+**NEVER** deploy/test on production until user explicitly approves.
 
-**MANDATORY WORKFLOW**:
-1. **ALL development and testing happens LOCALLY** on the development machine
-2. CIDX server runs locally at localhost:8000
-3. For callbacks, use the development machine's external IP (reachable from Claude Server)
-4. The development machine and Claude Server can see each other - use this for E2E testing
-5. The production server is in a special firewalled network area - DO NOT TOUCH
+**Local workflow**:
+- Development/testing: localhost:8000
+- Callbacks: dev machine's external IP (visible to Claude Server)
+- Production (.30): firewalled, DO NOT TOUCH
 
-**DEPLOYMENT ONLY WHEN**:
-- User explicitly approves the work
-- User tells you to "commit and push to master" (triggers auto-deployment), OR
-- User tells you to "deploy manually to production server"
-
-**WHY**: The production server is production. Test everything locally first with full E2E validation before any deployment.
-
-**VIOLATION = FUNDAMENTAL FAILURE**: Touching production server without explicit user approval breaks the development workflow.
+**Deploy ONLY when** user says: "commit and push to master" OR "deploy manually to production server"
 
 ---
 
 ## CRITICAL: ADMIN PASSWORD - NEVER CHANGE
 
-**ABSOLUTE PROHIBITION**: NEVER change the admin user password during local development or testing.
+**NEVER** change admin password during local dev. Causes "session_expired" failures.
 
-**DEFAULT CREDENTIALS** (localhost:8000):
-- Username: `admin`
-- Password: `admin`
+**Credentials** (localhost:8000): `admin` / `admin`
 
-**WHY**: The admin/admin credentials are the standard for local development. Changing them breaks manual testing workflows and causes "session_expired" login failures that are difficult to debug.
-
-**IF YOU BROKE IT** (login returns "session_expired" with correct credentials):
+**Recovery** (if broken):
 ```bash
-# Generate new hash for 'admin' password
-python3 -c "
-from src.code_indexer.server.auth.password_manager import PasswordManager
-pm = PasswordManager()
-print(pm.hash_password('admin'))
-"
+# Generate hash
+python3 -c "from src.code_indexer.server.auth.password_manager import PasswordManager; print(PasswordManager().hash_password('admin'))"
 
-# Update database with new hash (replace HASH with output above)
+# Update DB (replace HASH)
 sqlite3 ~/.cidx-server/data/cidx_server.db "UPDATE users SET password_hash='HASH' WHERE username='admin';"
 ```
-
-**VIOLATION = WASTED TIME**: Changing admin password causes login failures that require database surgery to fix.
-
-**RECORDED**: 2026-01-26 - After admin password was changed causing "session_expired" errors on localhost:8000 login.
+*Recorded 2026-01-26*
 
 ---
 
 ## SSH SERVER RESTART - CRITICAL PROCEDURE
 
-**ABSOLUTE PROHIBITION**: NEVER use `kill -15 && nohup python3 -m ... &` for server restarts.
+**NEVER** use `kill -15 && nohup ...` for restarts. Causes SSH lockups.
 
-**WHY**: Manual process management with nohup causes SSH session lockups. You MUST use systemd service management.
-
-**CORRECT PROCEDURE** for cidx-server restarts:
+**Use systemd**:
 ```bash
-# Connect via MCP SSH tools
 mcp__ssh__ssh_connect(...)
-
-# Restart using systemd
 echo "PASSWORD" | sudo -S systemctl restart cidx-server
-
-# Verify service status
 systemctl status cidx-server --no-pager
 ```
-
-**VIOLATION = SSH LOCKUP**: Using manual kill/nohup will freeze the SSH session indefinitely, requiring session termination and reconnection.
-
-**RECORDED**: 2025-11-29 - After multiple instances of SSH lockups caused by manual process management instead of systemd service control.
+*Recorded 2025-11-29*
 
 ---
 
-## CRITICAL: AUTO-UPDATER IDEMPOTENT DEPLOYMENT - MANDATORY
+## CRITICAL: AUTO-UPDATER IDEMPOTENT DEPLOYMENT
 
-**ABSOLUTE PROHIBITION**: NEVER implement server environment changes that require manual intervention on production servers.
+**NEVER** require manual intervention on production. All systemd/env/config changes via auto-updater.
 
-**MANDATORY APPROACH**: ALL changes to systemd service files, environment variables, or server configuration MUST be implemented through the auto-updater in an idempotent fashion.
+**Auto-updater workflow**: `git pull` → `pip install` → `DeploymentExecutor.execute()` → `systemctl restart`
 
-**WHY**: Production servers use the auto-updater workflow:
-1. `git pull` - gets new code
-2. `pip install` - installs new code
-3. `DeploymentExecutor.execute()` - runs idempotent configuration updates
-4. `systemctl restart` - restarts with new code AND new config
-
-The auto-updater is the ONLY mechanism that touches production servers. If you add a new environment variable, service file change, or configuration requirement, the auto-updater MUST handle it automatically.
-
-**IMPLEMENTATION PATTERN** (see `deployment_executor.py`):
+**Pattern** (in `deployment_executor.py`):
 ```python
-# Add idempotent method like _ensure_workers_config() or _ensure_cidx_repo_root()
 def _ensure_new_config(self) -> bool:
-    """Idempotently ensure new configuration is present."""
+    """Idempotent: check if configured, if not add it, daemon-reload."""
     # 1. Check if already configured - return True if so
     # 2. If not, add the configuration
     # 3. Run sudo systemctl daemon-reload
     # 4. Return True on success, False on error
 
-# Call it in execute() method
 def execute(self) -> bool:
-    # ... git pull, pip install ...
     self._ensure_workers_config()
     self._ensure_cidx_repo_root()
-    self._ensure_new_config()  # ADD YOUR NEW CONFIG HERE
+    self._ensure_new_config()  # ADD NEW CONFIG HERE
 ```
 
-**EXAMPLES**:
-- Adding `CIDX_REPO_ROOT` env var: Added `_ensure_cidx_repo_root()` to auto-updater
-- Adding `--workers 1` flag: Added `_ensure_workers_config()` to auto-updater
-- Adding new systemd setting: Add new `_ensure_*()` method to auto-updater
+**Examples**: `CIDX_REPO_ROOT` → `_ensure_cidx_repo_root()`, `--workers 1` → `_ensure_workers_config()`
 
-**VIOLATION = BROKEN PRODUCTION**: Expecting manual server intervention means the fix will NEVER reach production servers that rely on auto-update.
-
-**RECORDED**: 2026-01-30 - Bug #87 fix required adding CIDX_REPO_ROOT to auto-updater because production servers don't re-run deploy-server.sh.
+*Recorded 2026-01-30 (Bug #87)*
 
 ---
 
 ## CIDX SERVER PORT CONFIGURATION - DO NOT CHANGE
 
-**ABSOLUTE PROHIBITION**: NEVER change the port configuration for cidx-server, HAProxy, or firewall.
+**NEVER** change port config for cidx-server, HAProxy, or firewall.
 
-**LOCKED CONFIGURATION** (verified working 2025-11-30):
-- cidx-server systemd service: port 8000
-- HAProxy backend: forwards to production server on port 8000
-- Firewall: allows port 8000 from HAProxy server
+**Locked config** (verified 2025-11-30):
+- cidx-server systemd: port 8000
+- HAProxy backend: forwards to .30 on port 8000
+- Firewall: allows 8000 from HAProxy
 
-**WHY**: These three components must be synchronized. Changing any one breaks external HTTPS access.
-
-**VIOLATION = SERVER INACCESSIBLE**: Any port change will cause HAProxy 503 errors.
-
-**RECORDED**: 2025-11-30 - After port mismatch caused HAProxy backend failure.
+Any port change = HAProxy 503 errors.
 
 ---
 
-## SCIP INDEX FILE LIFECYCLE - CRITICAL KNOWLEDGE
+## SCIP INDEX FILE LIFECYCLE
 
 **SCIP files are DELETED after database conversion.**
 
-When `cidx scip generate` runs:
-1. Language indexer (scip-dotnet, scip-python, etc.) creates `index.scip` (protobuf format)
-2. CIDX converts `index.scip` to `index.scip.db` (SQLite database)
-3. Original `index.scip` file is **DELETED** after successful conversion
+`cidx scip generate` flow:
+1. Language indexer creates `index.scip` (protobuf)
+2. CIDX converts to `index.scip.db` (SQLite)
+3. Original `index.scip` **DELETED**
 
-**NEVER look for .scip files** - they don't exist after generation completes. Only `.scip.db` files remain.
+**NEVER** look for `.scip` files - only `.scip.db` remains after generation.
 
-**Query commands work with .scip.db files**, not raw .scip protobuf files.
-
-**RECORDED**: 2025-12-21 - After repeatedly searching for non-existent .scip files during C# SCIP indexer testing.
+*Recorded 2025-12-21*
 
 ---
 
 ## CIDX SERVER CONFIGURATION - NO ENVIRONMENT VARIABLES
 
-**ABSOLUTE PROHIBITION**: NEVER use environment variables to store settings, configuration, or state within the CIDX server context.
+**NEVER** use env variables for CIDX server settings. They're invisible, not persisted, inconsistent.
 
-**This is NOT negotiable. This is NOT a suggestion. This is a hard rule.**
+**Use Web UI Configuration Screen** (single source of truth):
+1. Add setting to Web UI Config Screen
+2. Store in server's persistence layer
+3. Access via configuration API
 
-**WHY**: Environment variables are:
-- Invisible and hard to debug
-- Not persisted properly across restarts
-- Inconsistent between development and production
-- A source of repeated configuration failures in this project
-
-**CIDX SERVER HAS A DEDICATED CONFIGURATION SYSTEM**:
-
-The CIDX server uses a **Web UI Configuration Screen** for all settings. This is the single source of truth for server configuration.
-
-**MANDATORY**: When adding ANY new configurable setting to CIDX server:
-1. Add it to the Web UI Configuration Screen
-2. Store it in the server's configuration persistence layer
-3. Access it through the configuration API
-4. NEVER use environment variables as a shortcut
-
-**CORRECT APPROACHES** for CIDX server configuration:
-1. **Web UI Config Screen** (PRIMARY - use this for all new settings)
-2. Configuration files (JSON, YAML, TOML)
-3. Command-line arguments (for startup options only)
-4. In-memory configuration objects passed explicitly
-
-**WRONG APPROACH** (NEVER DO THIS):
+**Wrong**:
 ```python
-# WRONG - NEVER DO THIS
-import os
-os.environ["CIDX_SETTING"] = "value"
-setting = os.getenv("CIDX_SETTING")
+os.environ["CIDX_SETTING"] = "value"  # NEVER
 ```
 
-**RIGHT APPROACH**:
+**Right**:
 ```python
-# RIGHT - Use the server's configuration system
 from code_indexer.server.config import get_config
 config = get_config()
 setting = config.some_setting
 ```
 
-**VIOLATION = IMMEDIATE REJECTION**: Any code review that introduces environment variable usage for CIDX server settings MUST be rejected and rewritten.
-
-**RECORDED**: 2025-01-14 - After repeated failures caused by environment variable-based configuration.
+*Recorded 2025-01-14*
 
 ---
 
-## CRITICAL: TESTING WORKFLOW GOLDEN RULES
+## CRITICAL: TESTING WORKFLOW
 
-**ABSOLUTE PROHIBITION**: NEVER run fast-automation.sh after every small change. That's idiotic and wastes time.
+**NEVER** run fast-automation.sh iteratively. Wastes hours.
 
-**THE CORRECT WORKFLOW**:
+**Hierarchy**:
+1. **Targeted tests** (seconds): `pytest tests/unit/.../test_X*.py -v --tb=short`
+2. **Manual testing**: Verify feature works E2E
+3. **fast-automation.sh** (final gate): Must pass before done
 
-1. **During development - TARGETED TESTS ONLY**:
-   - Change `base_client.py` -> run `pytest tests/unit/api_clients/test_base_*.py -v --tb=short`
-   - Change `auth_client.py` -> run `pytest tests/unit/api_clients/test_auth_*.py -v --tb=short`
-   - Change `handlers.py` -> run `pytest tests/unit/server/mcp/test_handlers*.py -v --tb=short`
-   - Targeted tests give fast feedback (seconds, not minutes)
+**Examples**:
+| File Changed | Run |
+|--------------|-----|
+| `base_client.py` | `pytest tests/unit/api_clients/test_base_*.py -v --tb=short` |
+| `auth_client.py` | `pytest tests/unit/api_clients/test_auth_*.py -v --tb=short` |
+| `handlers.py` | `pytest tests/unit/server/mcp/test_handlers*.py -v --tb=short` |
 
-2. **fast-automation.sh - FINAL GATE ONLY**:
-   - Run ONLY after ALL changes are complete
-   - This is the final validation before marking work done
-   - Use 600000ms (10 minute) timeout: `./fast-automation.sh` with Bash timeout parameter
+**Times**: Targeted=seconds, fast-automation=6-7min (865+ tests)
 
-**WHY THIS MATTERS**:
-- Targeted tests: seconds of feedback
-- fast-automation.sh: 6-7 minutes for 865+ tests
-- Running fast-automation after every change = hours wasted waiting
-
-**TESTING HIERARCHY**:
-```
-1. Targeted unit tests (FAST - seconds)
-   |
-   v
-2. Manual testing (verify feature works)
-   |
-   v
-3. fast-automation.sh (FINAL GATE - must pass before done)
-```
-
-**VIOLATION = WASTED TIME**: Running full test suite during iterative development is a fundamental workflow failure.
-
-**RECORDED**: 2026-01-27 - Established as golden rule after repeated time waste from running full suite during development.
+*Recorded 2026-01-27*
 
 ---
 
-## CRITICAL: fast-automation.sh EXECUTION PROCEDURE
+## CRITICAL: fast-automation.sh EXECUTION
 
-**THIS IS NOT OPTIONAL. THIS IS THE LAW.**
+**Goal**: Zero failures, <10 minutes. If not met, fix before marking complete.
 
-### The Goal
-
-**Clean fast-automation.sh run**: Zero failures, completes in under 10 minutes.
-
-If this goal is not met, you MUST fix the problem before considering work complete.
-
-### Step-by-Step Execution Procedure
-
-**STEP 1: Launch with Hard Timeout**
+### Execution
 
 ```bash
-# MANDATORY: Use 600000ms (10 minute) timeout parameter in Bash tool
+# MANDATORY: 600000ms (10 min) timeout
 ./fast-automation.sh
 ```
 
-The Bash tool timeout parameter is the HARD KILL mechanism. When 10 minutes hits, the process dies.
+### Outcomes
 
-**STEP 2: Capture Output**
+| Outcome | Action |
+|---------|--------|
+| SUCCESS (<10min, 0 failures) | Done |
+| TIMEOUT (hit 10min) | Timeout remediation |
+| FAILURES | Failure remediation |
 
-The output MUST contain:
-- Test results (passed/failed counts)
-- `--durations` telemetry (slowest tests) - fast-automation.sh should include this
-- Any failure tracebacks
+### Timeout Remediation
 
-**STEP 3: Analyze Results**
+**NEVER** "continue monitoring" after timeout. Process is DEAD.
 
-Three possible outcomes:
+1. Extract slowest: `pytest tests/ --durations=20 --collect-only -q`
+2. Thresholds: >30s MUST exclude, >10s SHOULD optimize, >5s note
+3. Fix or mark `@pytest.mark.slow` and exclude: `pytest tests/ -m "not slow"`
+4. Re-run with 10min timeout until SUCCESS
 
-| Outcome | What Happened | Required Action |
-|---------|---------------|-----------------|
-| **SUCCESS** | Completed <10min, zero failures | DONE. Work is complete. |
-| **TIMEOUT** | Hit 10 minute limit, killed | Go to TIMEOUT REMEDIATION |
-| **FAILURES** | Completed but tests failed | Go to FAILURE REMEDIATION |
+### Failure Remediation
 
-### TIMEOUT REMEDIATION (Mandatory Procedure)
-
-**ABSOLUTE PROHIBITION**: NEVER "continue monitoring" after timeout. The process is DEAD. Fix the problem.
-
-**Step T1**: Extract slowest tests from output
-- Look for `--durations` section showing slowest tests
-- If not visible, run: `pytest tests/ --durations=20 --collect-only -q` to identify slow tests
-
-**Step T2**: Identify tests exceeding thresholds
-- Tests >30 seconds: MUST be excluded from fast-automation.sh
-- Tests >10 seconds: SHOULD be optimized or excluded
-- Tests >5 seconds: Note for potential optimization
-
-**Step T3**: Fix or exclude slow tests
-
-Option A - Optimize the test:
-```python
-# Before: Slow test doing unnecessary work
-def test_something():
-    expensive_setup()  # Remove if not needed
-    ...
-
-# After: Optimized
-@pytest.fixture(scope="module")  # Cache expensive setup
-def cached_setup():
-    return expensive_setup()
-
-def test_something(cached_setup):
-    ...
-```
-
-Option B - Mark as slow and exclude:
-```python
-@pytest.mark.slow
-def test_inherently_slow_operation():
-    ...
-```
-
-Ensure fast-automation.sh excludes slow tests:
-```bash
-pytest tests/ -m "not slow" --durations=20
-```
-
-**Step T4**: Re-run fast-automation.sh
-- Same 10-minute hard timeout
-- Repeat until SUCCESS outcome
-
-### FAILURE REMEDIATION (Mandatory Procedure)
-
-**Step F1**: Identify all failing tests from output
-
-**Step F2**: Fix each failure
-- Read the test code
-- Read the code being tested
-- Understand what broke
-- Fix the root cause (not symptoms)
-
-**Step F3**: Run targeted tests to verify fix
-```bash
-pytest tests/path/to/failing_test.py -v --tb=short
-```
-
-**Step F4**: Re-run fast-automation.sh
-- Same 10-minute hard timeout
-- Repeat until SUCCESS outcome
+1. Identify all failures from output
+2. Fix root cause (not symptoms)
+3. Verify: `pytest tests/path/to/failing_test.py -v --tb=short`
+4. Re-run fast-automation.sh until SUCCESS
 
 ### Performance Standards
 
-| Metric | Target | Action Threshold | Exclusion Threshold |
-|--------|--------|------------------|---------------------|
-| Individual test | <5 seconds | >10 seconds: investigate | >30 seconds: exclude |
-| Total suite | <10 minutes | >10 minutes: HARD KILL | N/A |
+| Metric | Target | Investigate | Exclude |
+|--------|--------|-------------|---------|
+| Individual test | <5s | >10s | >30s |
+| Total suite | <10min | - | HARD KILL |
 
-### Red Flags Requiring Immediate Investigation
+### Red Flags
 
-- fast-automation.sh exceeds 10 minutes (HARD KILL, fix immediately)
-- Any single test exceeds 30 seconds (exclude from fast suite)
-- Test failures on code you didn't touch (regression - investigate)
-- Flaky tests (pass sometimes, fail sometimes) - fix or exclude
+- fast-automation.sh >10 min (HARD KILL)
+- Any test >30s (exclude)
+- Failures on untouched code (regression)
+- Flaky tests (fix or exclude)
 
-### What "Continue Monitoring" Actually Means
-
-**IT MEANS NOTHING. THERE IS NO SUCH THING.**
-
-- Process hit 10 minutes? It's DEAD. Fix the problem.
-- Process still running at 10 minutes? KILL IT. The timeout should have done this.
-- Want to "see if it finishes"? NO. 10 minutes is the law.
-
-**VIOLATION = FUNDAMENTAL FAILURE**: Allowing fast-automation.sh to run beyond 10 minutes violates the core testing workflow. There are no exceptions.
-
-**RECORDED**: 2026-01-28 - After "continue monitoring" anti-pattern wasted time instead of fixing slow tests.
+*Recorded 2026-01-28*
 
 ---
 
-## GIT BRANCHING AND DEPLOYMENT STRATEGY
+## GIT BRANCHING AND DEPLOYMENT
 
 ### Branch Structure
 
-**Three-tier branching model**:
-- `development` - Active development branch, all work happens here
-- `staging` - Staging environment branch, receives merges from development
-- `master` - Production branch, receives merges from staging
+| Branch | Purpose | Direct Commits |
+|--------|---------|----------------|
+| `development` | Active work, version bumps | YES |
+| `staging` | Staging env (.20 server) | NO (merge only) |
+| `master` | Production env (.30 server) | NO (merge only) |
 
-**Key Principles**:
-- ALL code changes and version bumps happen in `development` branch ONLY
-- `staging` and `master` are merge-only branches (no direct commits)
-- Version tags automatically trigger environment deployments
+### Auto-Deployment
 
-### Auto-Deployment Strategy
+| Branch | Tag | Deploys To |
+|--------|-----|------------|
+| `staging` | v8.x.x | .20 server |
+| `master` | v8.x.x | .30 server |
+| `development` | any | No auto-deploy |
 
-**Deployment triggers** - Version tags on specific branches trigger automatic deployment:
+Tags transfer automatically during merges.
 
-| Branch | Tag Presence | Deployment Target | Server |
-|--------|--------------|-------------------|--------|
-| `master` | v8.x.x tag | Production environment | .30 server |
-| `staging` | v8.x.x tag | Staging environment | .20 server |
-| `development` | Any state | No auto-deployment | localhost only |
+### Deploy to Staging
 
-**How it works**:
-- When you push a commit with a version tag to `staging` branch → .20 server auto-deploys
-- When you push a commit with a version tag to `master` branch → .30 server auto-deploys
-- Tags automatically transfer with commits during merge operations (Git behavior)
-
-### "Deploy to Staging" Workflow
-
-When user says **"deploy to staging"**, execute this workflow:
-
-**Step 1: Ensure version tag exists in development**
 ```bash
-# Check if development HEAD has version tag
+# 1. Ensure version tag in development
 git checkout development
 git describe --exact-match HEAD 2>/dev/null
+# If no tag: bump version, commit, tag vX.Y.Z, push --tags
 
-# If no tag found:
-# - Bump version in development (__init__.py, CHANGELOG.md, README.md)
-# - Commit: "chore: bump version to X.Y.Z"
-# - Create tag: git tag vX.Y.Z
-# - Push: git push origin development --tags
-```
+# 2. Merge to staging
+git checkout staging && git merge development
 
-**Step 2: Merge development to staging**
-```bash
-git checkout staging
-git merge development
-# Version tag automatically transfers with the merge commit
-```
-
-**Step 3: Push staging (triggers auto-deployment)**
-```bash
+# 3. Push (triggers .20 deployment)
 git push origin staging
-# Tag is already present from merge, triggers .20 server deployment
 ```
 
-**Key Notes**:
-- If development HEAD doesn't have a tag, you MUST bump version first
-- Never make code changes directly in staging branch
-- Tags automatically transfer during merge (no manual re-tagging needed)
+### Deploy to Production
 
-### "Deploy to Production" Workflow
-
-When user says **"deploy to production"**, execute this workflow:
-
-**Step 1: Ensure staging HEAD has version tag**
 ```bash
-# Check if staging HEAD has version tag
-git checkout staging
-git describe --exact-match HEAD 2>/dev/null
+# 1. Ensure staging has tag (if not, go back to development first)
+git checkout staging && git describe --exact-match HEAD
 
-# If no tag found:
-# - This means you forgot to deploy to staging properly
-# - Go back to development, bump version, deploy to staging first
-# - NEVER bump version directly in staging
-```
+# 2. Merge to master
+git checkout master && git merge staging
 
-**Step 2: Merge staging to master**
-```bash
-git checkout master
-git merge staging
-# Version tag automatically transfers with the merge commit
-```
-
-**Step 3: Push master (triggers auto-deployment)**
-```bash
+# 3. Push (triggers .30 deployment)
 git push origin master
-# Tag is already present from merge, triggers .30 server deployment
 ```
 
-**Key Notes**:
-- Production deployment ALWAYS goes through staging first
-- If staging doesn't have a tag, go back to development and fix the workflow
-- Never make code changes directly in master branch
-- Tags automatically transfer during merge (no manual re-tagging needed)
+### Branch Verification (MANDATORY)
 
-### Branch Verification Before Development (MANDATORY CHECK)
+Before ANY work: `git branch --show-current`
 
-**CRITICAL SAFETY CHECK**: Before starting ANY development work, verify you're in the correct branch.
+- OK: `development`, `feature/*`, `bugfix/*`
+- WRONG: `staging`, `master` - STOP, ask user before proceeding
 
-**Pre-Development Checklist**:
-```bash
-# Check current branch
-git branch --show-current
-```
+### Version Management
 
-**Required Branches for Development**:
-- `development` - Main development branch (default for all work)
-- `feature/*` - Feature branches (created from development)
-- `bugfix/*` - Bug fix branches (created from development)
-
-**WRONG Branches for Development**:
-- `staging` - Merge-only branch, NO direct commits
-- `master` - Merge-only branch, NO direct commits
-
-**Workflow When Not in Development Branch**:
-1. If in `staging` or `master`: STOP immediately
-2. Ask user: "Currently in [branch]. Do you want to develop in staging/master, or should I switch to development branch?"
-3. Wait for explicit user confirmation before proceeding
-4. If user confirms developing in staging/master: Proceed with WARNING logged
-5. If user wants development branch: Switch to development first
-
-**Example Interaction**:
-```
-Assistant: I notice we're currently in the 'staging' branch. Development work should
-happen in the 'development' branch (or feature branch).
-
-Should I:
-A) Switch to development branch (recommended)
-B) Continue developing in staging branch (not recommended)
-
-Please confirm your choice.
-```
-
-**VIOLATION = BROKEN WORKFLOW**: Making direct commits to staging/master bypasses the merge-based deployment workflow and causes branch divergence.
-
-### Version Management Rules
-
-**ABSOLUTE REQUIREMENTS**:
-- Version bumps ONLY happen in `development` branch
-- Version consists of: `__init__.py`, `CHANGELOG.md`, `README.md` updates + git tag
+- Bumps ONLY in `development`
 - Format: `vX.Y.Z` (e.g., `v8.8.18`)
-- Every deployment MUST have a version tag
+- Files: `__init__.py` + `CHANGELOG.md` + `README.md` + git tag
 
-**Workflow Summary**:
 ```
-development (bump version, create tag)
-    ↓ merge
-staging (tag transfers automatically, push triggers .20 deployment)
-    ↓ merge
-master (tag transfers automatically, push triggers .30 deployment)
+development (bump, tag) → staging (merge, push → .20) → master (merge, push → .30)
 ```
 
-**VIOLATION = BROKEN DEPLOYMENT**: Skipping version tags or making direct commits to staging/master breaks the auto-deployment workflow.
-
-**RECORDED**: 2026-02-01 - Established three-tier branching strategy with tag-based auto-deployment.
+*Recorded 2026-02-01*
 
 ---
 
 ## 1. CRITICAL BUSINESS INSIGHT - Query is Everything
 
-**THE SINGLE MOST IMPORTANT FEATURE**: Query capability is the core value proposition of CIDX. All query features available in CLI MUST be available in MCP/REST APIs with full parity.
+**Query capability = core value**. All CLI query features MUST be in MCP/REST APIs.
 
-**Query Parity is Non-Negotiable**: Any feature gap between CLI and MCP/REST query interfaces represents a critical degradation of the product's primary function. This is not optional - this is the business.
+**Status** (2025-11-18):
+- CLI: 23 params | MCP: 11 params (48% parity)
+- P0 implemented: language, exclude_language, path_filter, exclude_path, file_extensions, accuracy
+- Gap: FTS-specific (8), temporal (4)
 
-**Current Status** (as of 2025-11-18):
-- CLI query parameters: 23 total
-- MCP query parameters: 11 total (48% parity)
-- **P0 filters implemented**: language, exclude_language, path_filter, exclude_path, file_extensions, accuracy
-- **Remaining gap**: FTS-specific options (8 params), temporal options (4 params)
-
-**Never remove or break query functionality** without explicit approval. Query degradation = product failure.
+**NEVER** remove/break query functionality. Query degradation = product failure.
 
 ---
 
-## 2. Operational Modes Overview
+## 2. Operational Modes
 
-CIDX has **two operational modes** (simplified from three in v7.x). Understanding which mode you're working in is critical.
+**Two modes** (simplified from three in v7.x):
 
-### Mode 1: CLI Mode (Direct, Local)
+| Mode | Storage | Use Case | Commands |
+|------|---------|----------|----------|
+| **CLI** | FilesystemVectorStore (`.code-indexer/index/`) | Single dev, local | `cidx init/index/query` |
+| **Daemon** | Same + in-memory cache | Faster queries, watch | `cidx config --daemon`, `start`, `watch` |
 
-**What**: Direct command-line tool for local semantic code search
-**Storage**: FilesystemVectorStore in `.code-indexer/index/` (container-free)
-**Use Case**: Individual developers, single-user workflows
-**Commands**: `cidx init`, `cidx index`, `cidx query`
-
-**Characteristics**:
-- Indexes code locally in project directory
-- No daemon, no server, no network
-- Vectors stored as JSON files on filesystem
-- Each query loads indexes from disk
+**Shared characteristics**:
 - Container-free, instant setup
+- Vectors as JSON in `.code-indexer/index/{collection}/`
+- Git-aware: blob hashes (clean), text content (dirty)
 
-### Mode 2: Daemon Mode (Local, Cached)
-
-**What**: Local RPyC-based background service for faster queries
-**Storage**: Same FilesystemVectorStore + in-memory cache
-**Use Case**: Developers wanting faster repeated queries and watch mode
-**Commands**: `cidx config --daemon`, `cidx start`, `cidx watch`
-
-**Characteristics**:
-- Caches HNSW/FTS indexes in memory (daemon process)
+**Daemon-specific**:
+- Unix socket: `.code-indexer/daemon.sock`
+- ~5ms cached vs ~1s disk
 - Auto-starts on first query when enabled
-- Unix socket communication (`.code-indexer/daemon.sock`)
-- Faster queries (~5ms cached vs ~1s from disk)
-- Watch mode for real-time file change indexing
-- Container-free, runs as local process
 
 ---
 
 ## 3. Architecture Details
 
-**For Full Details**: See `/docs/v5.0.0-architecture-summary.md` and `/docs/v7.2.0-architecture-incremental-updates.md`
+**Full docs**: `/docs/v5.0.0-architecture-summary.md`, `/docs/v7.2.0-architecture-incremental-updates.md`
 
-### Vector Storage (All Modes)
+### Vector Storage (FilesystemVectorStore)
 
-**Current Architecture**: **FilesystemVectorStore** - Container-free, filesystem-based (only backend in v8.0+)
-
-**Key Points**:
-- Vectors as JSON files in `.code-indexer/index/{collection}/`
+- Vectors as JSON in `.code-indexer/index/{collection}/`
 - Quantization: Model dims (1024/1536) → 64-dim → 2-bit → filesystem path
-- Git-aware: Blob hashes (clean files), text content (dirty files)
 - Performance: <1s query, <20ms incremental HNSW updates
-- Thread-safe with atomic writes
-- Supports VoyageAI embedding dimensions (1024 for voyage-3, 1536 for voyage-3-large)
+- Thread-safe, atomic writes
+- VoyageAI dimensions: 1024 (voyage-3), 1536 (voyage-3-large)
 
-### Key Architecture Topics (See Docs)
+### Key Topics (See Docs)
 
-**From `/docs/v7.2.0-architecture-incremental-updates.md`**:
-- Incremental HNSW updates (All Modes)
-- Change tracking system
-- Real-time vs batch updates
-- Performance optimizations
-
-**From `/docs/architecture.md`**:
-- Filesystem vector storage architecture
-- HNSW graph-based indexing
-- Git-aware storage strategies
-- Query performance optimization
+- Incremental HNSW updates, change tracking (`v7.2.0-architecture-incremental-updates.md`)
+- HNSW graph-based indexing, git-aware strategies (`architecture.md`)
 
 ---
 
@@ -656,235 +347,129 @@ CIDX has **two operational modes** (simplified from three in v7.x). Understandin
 
 ### Test Suites
 
-- **fast-automation.sh**: 865+ tests, ~6-7min - Run from Claude, MUST stay fast
-- **server-fast-automation.sh**: Server-specific tests
-- **GitHub Actions CI**: ~814 tests, restricted environment
-- **full-automation.sh**: Complete suite, 10+ min - Ask user to run
+| Script | Tests | Time | Run From |
+|--------|-------|------|----------|
+| fast-automation.sh | 865+ | ~6-7min | Claude (600000ms timeout) |
+| server-fast-automation.sh | Server-specific | varies | Claude |
+| full-automation.sh | Complete | 10+min | User (1200000ms timeout) |
+| GitHub Actions CI | ~814 | varies | Automatic |
 
-**Critical**: Use **600000ms (10 min) timeout** for fast-automation.sh, **1200000ms (20 min) timeout** for full-automation.sh
+**Principles**: Tests don't clean state (perf), container-free, E2E uses `cidx` CLI, slow tests excluded.
 
-**Testing Principles**:
-- Tests don't clean state (performance optimization)
-- Container-free architecture (instant setup, no overhead)
-- E2E tests use `cidx` CLI directly
-- Slow tests excluded from fast suites
+**Order**: Targeted unit tests → Manual testing → fast-automation.sh (final gate)
 
-**MANDATORY Testing Workflow Order**:
+### Test Performance Management
 
-1. **Targeted Unit Tests FIRST**: Write and run specific unit tests for the functionality being added/fixed/modified
-2. **Manual Testing SECOND**: Execute manual testing to verify the functionality works end-to-end
-3. **fast-automation.sh LAST**: Run full regression suite as FINAL validation before marking work complete
+**Thresholds**: <5s target, >10s investigate, >30s exclude
 
-**Why This Order**:
-- fast-automation.sh takes 6-7 minutes - too slow for rapid feedback loops
-- Targeted unit tests provide immediate feedback (seconds, not minutes)
-- Manual testing validates real-world behavior before committing to full suite
-- fast-automation.sh is the FINAL gate, not a development tool
+**Telemetry**: `pytest tests/ --durations=20 --tb=short -v`
 
-**ABSOLUTE PROHIBITION**: NEVER run fast-automation.sh as part of iterative development. Use it ONLY as final validation after unit tests pass and manual testing confirms functionality works.
+**Analysis**:
+1. Review 20 slowest tests
+2. >5s: determine cause (I/O, missing fixtures, inefficient setup, inherent)
+3. Action: optimize OR mark `@pytest.mark.slow` OR move to full-automation.sh
 
-**Definition of Done**: Feature complete when fast-automation.sh passes fully (after targeted unit tests pass AND manual testing confirms functionality)
-
-### Test Performance Management (MANDATORY)
-
-**ABSOLUTE PROHIBITION**: NEVER introduce slow-running tests to fast-automation.sh without explicit justification.
-
-**Performance Standards**:
-- **Individual test target**: <5 seconds per test
-- **Suite total target**: <3 minutes for 865+ tests
-- **Action threshold**: Any test >10 seconds requires investigation
-- **Exclusion threshold**: Tests >30 seconds move to full-automation.sh
-
-**Timing Telemetry (MANDATORY)**:
-
-Every fast-automation.sh execution MUST collect and analyze timing data:
-
-```bash
-# Run with timing telemetry
-pytest tests/ --durations=20 --tb=short -v
-
-# Or use pytest-benchmark for detailed metrics
-pytest tests/ --benchmark-only --benchmark-autosave
-```
-
-**Post-Execution Analysis Workflow**:
-1. Review `--durations=20` output (20 slowest tests)
-2. Identify any tests >5 seconds
-3. For slow tests, determine root cause:
-   - Unnecessary I/O operations
-   - Missing test fixtures/caching
-   - Inefficient setup/teardown
-   - Actual feature complexity (inherent slowness)
-4. Take action based on cause:
-   - **Fixable**: Optimize the test (cache fixtures, reduce I/O, parallelize)
-   - **Inherent slowness**: Move to full-automation.sh ignore list
-   - **Borderline**: Add `@pytest.mark.slow` decorator for conditional execution
-
-**Slow Test Ignore List**:
-
-Maintain explicit ignore list in `pytest.ini` or `pyproject.toml`:
-
+**Slow test config** (`pytest.ini`):
 ```toml
 [tool.pytest.ini_options]
-markers = [
-    "slow: marks tests as slow (deselected by fast-automation.sh)",
-    "integration: marks integration tests (may be slow)",
-]
+markers = ["slow: deselected by fast-automation.sh", "integration: may be slow"]
 ```
 
-**fast-automation.sh MUST exclude slow tests**:
+**Monitoring**:
 ```bash
-pytest tests/ -m "not slow" --durations=20
+pytest tests/ --durations=0 | grep "s call" | sort -rn -k1  # Identify slow
+pytest tests/path/test.py::test_name --durations=0 -v       # Benchmark specific
 ```
 
-**Monitoring Commands**:
-```bash
-# Identify slow tests
-pytest tests/ --durations=0 | grep "s call" | sort -rn -k1
-
-# Benchmark specific test
-pytest tests/path/to/test.py::test_name --durations=0 -v
-
-# Profile test execution
-pytest tests/ --profile --profile-svg
-```
-
-**When Adding New Tests**:
-1. Run test individually with `--durations=0`
-2. If >5 seconds, investigate optimization opportunities FIRST
-3. If inherently slow (>30s), mark with `@pytest.mark.slow` and add to full-automation.sh
-4. Document why test is slow in test docstring
-5. Verify fast-automation.sh total time doesn't exceed 3 minutes
-
-**Red Flags Requiring Immediate Investigation**:
-- fast-automation.sh exceeds 3 minutes total
-- Any single test exceeds 10 seconds
-- Test duration increases >20% without feature changes
-- Timing variance >50% between runs (flaky performance)
+**Red flags**: Suite >3min total, test >10s, duration +20% without changes, >50% variance (flaky)
 
 ### Linting & Quality
 
-**Linting**: Run `./lint.sh` (ruff, black, mypy) after significant changes
-
-**GitHub Actions Monitoring** (MANDATORY):
 ```bash
-git push
-gh run list --limit 5
-gh run view <run-id> --log-failed  # If failed
+./lint.sh                           # ruff, black, mypy
+git push && gh run list --limit 5   # Monitor CI
+gh run view <run-id> --log-failed   # Debug failures
 ruff check --fix src/ tests/        # Fix linting
 ```
 
-**Zero Tolerance**: Never leave GitHub Actions in failed state. Fix within same session.
+**Zero tolerance**: Never leave GitHub Actions failed. Fix same session.
 
 ### Python Compatibility
 
-**CRITICAL**: Always use `python3 -m pip install --break-system-packages` (never bare `pip`)
+Always: `python3 -m pip install --break-system-packages` (never bare `pip`)
 
 ### Documentation Updates
 
-**After Feature Implementation**:
-1. Run `./lint.sh`
-2. Verify README.md accuracy
-3. Verify `--help` matches implementation
-4. Fix errors, second verification run
+After feature: `./lint.sh` → verify README.md → verify `--help` → fix → re-verify
 
-### Version Bump Checklist (MANDATORY - ALL FILES)
+### Version Bump Checklist
 
-**CRITICAL**: When bumping the version, ALL of the following files MUST be updated together. Missing any file causes version inconsistency.
-
-**Primary Source of Truth**:
+**Update together**:
 ```
-src/code_indexer/__init__.py:9    # __version__ = "X.Y.Z" (pyproject.toml reads from here dynamically)
+src/code_indexer/__init__.py:9    # __version__ (source of truth)
+README.md:5                       # Version badge
+CHANGELOG.md                      # New entry at top
+docs/architecture.md:301          # Server response example
+docs/query-guide.md:739,883       # Version references
 ```
 
-**Documentation Files (MUST UPDATE)**:
-```
-README.md:5                       # Version badge in header
-CHANGELOG.md                      # Add new version entry at top (## [X.Y.Z] - YYYY-MM-DD)
-docs/architecture.md:301          # Server response example showing version
-docs/query-guide.md:739           # Verification scope version reference
-docs/query-guide.md:883           # Version Reference line
-```
+**Check for stale**: `docs/mcpb/setup.md`, `docs/server-deployment.md`
 
-**Example Documentation (CHECK FOR OUTDATED VERSIONS)**:
-```
-docs/mcpb/setup.md                # Example JSON responses may show old versions
-docs/server-deployment.md         # Example configurations may show old versions
-```
+**DO NOT change for CIDX bump**:
+- `mcpb/__init__.py` (separate version 1.0.0)
+- `server/app.py` (OpenAPI spec)
+- `test-fixtures/` (test data)
 
-**Files that have SEPARATE versions (DO NOT CHANGE for CIDX version bump)**:
-```
-src/code_indexer/mcpb/__init__.py # MCPB has its own version (1.0.0), independent of CIDX
-src/code_indexer/server/app.py    # FastAPI OpenAPI spec version, not CIDX version
-test-fixtures/                    # Test fixture versions are test data, not release versions
-```
-
-**Version Bump Command Sequence**:
-```bash
-# 1. Update primary source
-# Edit src/code_indexer/__init__.py - change __version__
-
-# 2. Update documentation
-# Edit README.md, CHANGELOG.md, docs/architecture.md, docs/query-guide.md
-
-# 3. Search for any remaining old version references
-grep -r "OLD_VERSION" --include="*.md" --include="*.py" .
-
-# 4. Verify
-python3 -c "from src.code_indexer import __version__; print(__version__)"
-```
-
-**VIOLATION = INCONSISTENT STATE**: Updating only some files creates version mismatch between CLI (`cidx --version`), server responses, and documentation.
+**Verify**: `grep -r "OLD_VERSION" --include="*.md" --include="*.py" .`
 
 ---
 
 ## 5. Critical Rules (NEVER BREAK)
 
-### Performance Prohibitions
+### Performance
 
-⚠️ **NEVER add `time.sleep()` to production code** for UI visibility. Fix display logic, not processing logic.
+**NEVER** add `time.sleep()` to production for UI visibility. Fix display logic.
 
-### Progress Reporting (EXTREMELY DELICATE)
+### Progress Reporting (DELICATE)
 
 **Pattern**:
-- Setup: `progress_callback(0, 0, Path(""), info="Setup")` → ℹ️ scrolling
+- Setup: `progress_callback(0, 0, Path(""), info="Setup")` → scrolling
 - Progress: `progress_callback(current, total, file, info="X/Y files...")` → progress bar
 
 **Rules**:
 - Single line at bottom with progress bar + metrics
 - NO scrolling console feedback EVER
-- DO NOT CHANGE without understanding `cli.py` progress_callback
-- Ask confirmation before ANY changes
-- Files with progress: BranchAwareIndexer, SmartIndexer, HighThroughputProcessor
+- Ask confirmation before ANY changes to progress
+- Files: BranchAwareIndexer, SmartIndexer, HighThroughputProcessor
 
 ### Git-Awareness (CORE FEATURE)
 
-**NEVER remove** these capabilities:
+**NEVER remove**:
 - Git-awareness aspects
 - Branch processing optimization
 - Relationship tracking
 - Deduplication of indexing
 
-This makes CIDX unique. If refactoring removes this, **STOP IMMEDIATELY**.
+This makes CIDX unique. If refactoring removes this, **STOP**.
 
 ### Smart Indexer Consistency
 
-When working on smart indexer, always consider `--reconcile` (non git-aware) and maintain feature parity.
+Always consider `--reconcile` (non git-aware) and maintain feature parity.
 
 ### Configuration
 
-- **Temporary Files**: Use `~/.tmp` (NOT `/tmp`)
-- **Container-free**: No ports, no containers, instant setup
+- Temporary files: `~/.tmp` (NOT `/tmp`)
+- Container-free: No ports, no containers
 
 ---
 
 ## 6. Performance & Optimization
 
-### FTS Lazy Import (CRITICAL)
+### FTS Lazy Import
 
-⚠️ **NEVER import Tantivy/FTS at module level** in files imported during CLI startup
+**NEVER** import Tantivy/FTS at module level in CLI startup files.
 
-**Correct Pattern**:
+**Pattern**:
 ```python
 from __future__ import annotations
 from typing import TYPE_CHECKING
@@ -892,7 +477,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .tantivy_index_manager import TantivyIndexManager
 
-# Inside method where FTS used:
+# Inside method:
 if enable_fts:
     from .tantivy_index_manager import TantivyIndexManager
     fts_manager = TantivyIndexManager(fts_index_dir)
@@ -902,21 +487,17 @@ if enable_fts:
 
 **Verify**: `python3 -c "import sys; from src.code_indexer.cli import cli; print('tantivy' in sys.modules)"` → `False`
 
-### Import Optimization Status
+### Import Optimization
 
-**Completed**:
-- voyageai library: 440-630ms → 0ms (eliminated)
+- voyageai: 440-630ms → 0ms (eliminated)
 - CLI lazy loading: 736ms → 329ms
-
-**Current**: 329ms startup (acceptable, further optimization questionable ROI)
+- Current: 329ms startup (acceptable)
 
 ---
 
 ## 7. Embedding Provider
 
-### VoyageAI (ONLY PROVIDER)
-
-**ONLY supported provider in v8.0+** - Focus EXCLUSIVELY on VoyageAI
+### VoyageAI (ONLY PROVIDER in v8.0+)
 
 **Token Counting**:
 - Use `embedded_voyage_tokenizer.py`, NOT voyageai library
@@ -925,20 +506,19 @@ if enable_fts:
 - 100% identical to `voyageai.Client.count_tokens()`
 - **DO NOT remove/replace** without extensive testing
 
-**Batch Processing**:
-- 120,000 token limit per batch enforced
-- Automatic token-aware batching
-- Transparent batch splitting
+**Batch Processing**: 120,000 token limit enforced, automatic batching, transparent splitting
 
 **Models**:
-- **voyage-3** (default): 1024-dimensional embeddings, best balance of quality and speed
-- **voyage-3-large**: 1536-dimensional embeddings, highest quality
+| Model | Dimensions | Notes |
+|-------|------------|-------|
+| voyage-3 (default) | 1024 | Best balance |
+| voyage-3-large | 1536 | Highest quality |
 
 ---
 
 ## 8. CIDX Usage Quick Reference
 
-### CLI Mode (Most Common)
+### CLI Mode
 
 ```bash
 cidx init                           # Create .code-indexer/
@@ -947,269 +527,168 @@ cidx query "authentication" --quiet # Semantic search
 cidx query "def.*" --fts --regex    # FTS/regex search
 ```
 
-**Key Flags** (ALWAYS use `--quiet`):
-- `--limit N` - Results (default 10, start with 5-10 to conserve context window)
+**Key flags** (ALWAYS use `--quiet`):
+- `--limit N` - Results (start 5-10 to conserve context)
 - `--language python` - Filter by language
 - `--path-filter */tests/*` - Path pattern
 - `--min-score 0.8` - Similarity threshold
 - `--accuracy high` - Higher precision
-- `--quiet` - Minimal output
 
-**Context Conservation**: Start with low `--limit` values (5-10) on initial queries. High limits consume context window rapidly when results contain large code files.
+**Search decision**:
+- "What code does", "Where is X" → CIDX
+- Exact strings (variables, config) → grep/find
 
-**Search Decision**:
-- ✅ "What code does", "Where is X implemented" → CIDX
-- ❌ Exact strings (variable names, config) → grep/find
-
-### Daemon Mode (Optional, Faster)
+### Daemon Mode
 
 ```bash
-cidx config --daemon      # Enable daemon
-cidx start                # Start daemon (auto-starts on first query)
-cidx query "..."          # Uses cached indexes
-cidx watch                # Real-time indexing
-cidx watch-stop           # Stop watch
-cidx stop                 # Stop daemon
+cidx config --daemon   # Enable
+cidx start             # Start (auto-starts on first query)
+cidx query "..."       # Uses cached indexes
+cidx watch             # Real-time indexing
+cidx watch-stop        # Stop watch
+cidx stop              # Stop daemon
 ```
 
 ---
 
-## 9. Mode-Specific Concepts
-
-### CLI Mode Concepts
-- `.code-indexer/` - Project config and index storage
-- FilesystemVectorStore - Vector storage
-- Direct disk I/O per query
-- Container-free, instant setup
-
-### Daemon Mode Concepts
-- RPyC service on Unix socket
-- In-memory HNSW/FTS cache
-- Watch mode for real-time updates
-- `.code-indexer/daemon.sock`
-- Container-free, runs as local process
-
----
-
-## 10. Miscellaneous
+## 9. Miscellaneous
 
 ### Local Testing and Deployment
 
-**Configuration File**: `.local-testing` (gitignored)
-
-Contains sensitive deployment information for test environments:
-- CIDX server credentials and deployment process
-- Mac laptop credentials and MCPB installation process
-- One-liner deployment commands
-
-Consult this file when deploying to test environments.
+**Config file**: `.local-testing` (gitignored) - contains CIDX server credentials, Mac laptop credentials, deployment commands.
 
 ### Running Local CIDX Server
 
-**CORRECT COMMAND** (from project root directory):
-
 ```bash
-# Start server (runs on port 8000)
+# Start (from project root)
 PYTHONPATH=./src python3 -m uvicorn code_indexer.server.app:app --host 0.0.0.0 --port 8000
 
-# Run in background
+# Background
 PYTHONPATH=./src python3 -m uvicorn code_indexer.server.app:app --host 0.0.0.0 --port 8000 &
 ```
 
-**WHY THIS COMMAND**:
-- `PYTHONPATH=./src` - Required because code_indexer is not installed as a package in development
-- `python3 -m uvicorn` - Uses the Python environment that has fastapi/uvicorn installed (system uvicorn may use different Python)
-- `code_indexer.server.app:app` - The FastAPI app object in the server module
-- `--host 0.0.0.0` - Listen on all interfaces (needed for external access)
-- `--port 8000` - Standard port for local development
+**Why this command**:
+- `PYTHONPATH=./src` - code_indexer not installed as package in dev
+- `python3 -m uvicorn` - uses correct Python env
+- `--host 0.0.0.0` - external access
+- `--port 8000` - standard local dev port
 
-**VERIFICATION**:
+**Verify**:
 ```bash
-# Check if server is running
-curl -s http://localhost:8000/docs | head -5  # Should return Swagger HTML
-
-# Test MCP endpoint (public, no auth)
-curl -s -X POST http://localhost:8000/mcp-public \
-  -H "Content-Type: application/json" \
+curl -s http://localhost:8000/docs | head -5
+curl -s -X POST http://localhost:8000/mcp-public -H "Content-Type: application/json" \
   -d '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}'
-# Should return: {"jsonrpc": "2.0", "result": {"serverInfo": {"name": "Neo", ...}}}
 ```
 
-**STOPPING THE SERVER**:
-```bash
-# Find and kill uvicorn process
-pkill -f "uvicorn code_indexer.server.app"
+**Stop**: `pkill -f "uvicorn code_indexer.server.app"`
 
-# Or find PID and kill
-ps aux | grep uvicorn | grep -v grep
-kill <PID>
-```
+**Errors**:
+- `No module named 'code_indexer'` → Missing `PYTHONPATH=./src`
+- `No module named 'fastapi'` → Use `python3 -m uvicorn`
+- Exits immediately → Port 8000 in use
 
-**COMMON ERRORS**:
-- `ModuleNotFoundError: No module named 'code_indexer'` - Missing `PYTHONPATH=./src`
-- `ModuleNotFoundError: No module named 'fastapi'` - Using wrong uvicorn; use `python3 -m uvicorn`
-- Server exits immediately with no output - Check if port 8000 is already in use
-
-**RECORDED**: 2026-01-23 - After repeated trial and error finding correct startup command.
+*Recorded 2026-01-23*
 
 ### Claude CLI Integration
 
-**NO FALLBACKS** - Research and propose solutions, no cheating
-
-**JSON Errors**: Use `_validate_and_debug_prompt()`, check non-ASCII/long lines/quotes
+- NO FALLBACKS - research and propose solutions
+- JSON errors: Use `_validate_and_debug_prompt()`, check non-ASCII/long lines/quotes
 
 ---
 
-## 11. MCP Tool Documentation
+## 10. MCP Tool Documentation
 
-MCP tool documentation is externalized to markdown files for maintainability.
-
-### Directory Structure
+Externalized to markdown files in `src/code_indexer/server/mcp/tool_docs/`:
 
 ```
-src/code_indexer/server/mcp/tool_docs/
-  admin/       # Admin tools (users, groups, auth, maintenance)
-  cicd/        # CI/CD tools (GitHub Actions, GitLab CI)
-  files/       # File CRUD operations
-  git/         # Git operations
-  guides/      # User guides and quick reference
-  repos/       # Repository management
-  scip/        # SCIP code intelligence
-  search/      # Search and browse tools
-  ssh/         # SSH key management
+admin/    # Users, groups, auth, maintenance
+cicd/     # GitHub Actions, GitLab CI
+files/    # File CRUD
+git/      # Git operations
+guides/   # User guides, quick reference
+repos/    # Repository management
+scip/     # SCIP code intelligence
+search/   # Search and browse
+ssh/      # SSH key management
 ```
 
-### Tool Documentation Format
-
-Each `.md` file has YAML frontmatter:
+### Format
 
 ```yaml
 ---
 name: tool_name
 category: search
 required_permission: query_repos
-tl_dr: Brief one-line description.
-quick_reference: true  # Optional, for quick ref inclusion
+tl_dr: Brief description.
+quick_reference: true  # Optional
 ---
-
-Full tool description here.
+Full description here.
 ```
 
 ### Scripts
 
-- **Convert**: `python3 tools/convert_tool_docs.py` - Generates 128 .md files from TOOL_REGISTRY
-- **Verify**: `python3 tools/verify_tool_docs.py` - CI gate validation (file count, frontmatter, coverage)
+- Convert: `python3 tools/convert_tool_docs.py` (generates 128 .md from TOOL_REGISTRY)
+- Verify: `python3 tools/verify_tool_docs.py` (CI gate)
 
-### Adding New Tools
+### Adding Tools
 
-1. Add tool to TOOL_REGISTRY in `src/code_indexer/server/mcp/tools.py`
-2. Run conversion script: `python3 tools/convert_tool_docs.py`
-3. Verify: `python3 tools/verify_tool_docs.py`
-4. Tests will validate backward compatibility
+1. Add to TOOL_REGISTRY in `src/code_indexer/server/mcp/tools.py`
+2. Run convert script
+3. Run verify script
+4. Tests validate backward compatibility
 
 ### Related Files
 
-- `src/code_indexer/server/mcp/tool_doc_loader.py` - Runtime loader with caching
-- `tests/unit/tools/test_convert_tool_docs.py` - Conversion tests
-- `tests/unit/tools/test_verify_tool_docs.py` - Verification tests
-- `tests/unit/server/mcp/test_tool_doc_*.py` - Loader tests
+- `tool_doc_loader.py` - Runtime loader with caching
+- `tests/unit/tools/test_convert_tool_docs.py`, `test_verify_tool_docs.py`
+- `tests/unit/server/mcp/test_tool_doc_*.py`
 
 ---
 
-## 12. CIDX Server E2E Testing Workflow
+## 11. CIDX Server E2E Testing Workflow
 
-When testing against the local CIDX server (localhost:8000), follow this workflow:
+**Prerequisites**: Server at localhost:8000, credentials admin/admin
 
-### Prerequisites
-
-1. Server running: `PYTHONPATH=./src python3 -m uvicorn code_indexer.server.app:app --host 0.0.0.0 --port 8000`
-2. Admin credentials: `admin` / `admin` (local dev - see CLAUDE.md "ADMIN PASSWORD" section)
-
-### Step 1: Login and Get Token
+### Workflow
 
 ```bash
-# Login with JSON content type (NOT form-urlencoded)
-curl -s -X POST http://localhost:8000/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"admin"}' > /tmp/login.json
-
-# Extract token
-cat /tmp/login.json | jq -r '.access_token' > /tmp/token.txt
-TOKEN=$(cat /tmp/token.txt)
-```
-
-### Step 2: List Existing Repositories
-
-```bash
-# Via MCP endpoint (recommended)
-curl -s -X POST http://localhost:8000/mcp \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_repositories","arguments":{}}}' | jq '.'
-```
-
-### Step 3: Add Golden Repository (if needed)
-
-```bash
-# Via admin endpoint with form-urlencoded
-curl -s -X POST http://localhost:8000/admin/golden-repos/add \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "url=git@github.com:org/repo.git&alias=my-repo&description=Description"
-```
-
-### Step 4: Run MCP Query
-
-```bash
-# Query via MCP endpoint
-# IMPORTANT: Use "query_text" NOT "query" as the argument name
-curl -s -X POST http://localhost:8000/mcp \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "tools/call",
-    "params": {
-      "name": "search_code",
-      "arguments": {
-        "query_text": "your search query",
-        "repository_alias": "repo-alias-global",
-        "limit": 5
-      }
-    }
-  }' | jq '.'
-```
-
-### Key Notes
-
-- **Auth endpoint**: `/auth/login` with JSON body (NOT `/admin/login`)
-- **Query argument**: Use `query_text` not `query` for search_code tool
-- **Repository alias**: Global repos have `-global` suffix (e.g., `code-indexer-python-global`)
-- **Timing display**: CLI-only feature, not included in MCP/REST API responses
-- **Token expiry**: Tokens expire after 10 minutes, re-login if needed
-
-### Quick Test Script
-
-Save to `/tmp/test_cidx_server.sh`:
-```bash
-#!/bin/bash
+# 1. Login
 TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"admin"}' | jq -r '.access_token')
 
+# 2. List repos
 curl -s -X POST http://localhost:8000/mcp \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_code","arguments":{"query_text":"vector store","repository_alias":"code-indexer-python-global","limit":3}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_repositories","arguments":{}}}'
+
+# 3. Add golden repo (if needed)
+curl -s -X POST http://localhost:8000/admin/golden-repos/add \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "url=git@github.com:org/repo.git&alias=my-repo&description=Description"
+
+# 4. Query (NOTE: use "query_text" not "query")
+curl -s -X POST http://localhost:8000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_code","arguments":{"query_text":"your query","repository_alias":"repo-alias-global","limit":5}}}'
 ```
 
-**RECORDED**: 2026-01-29 - Documented after manual E2E testing workflow for Story #78.
+### Key Notes
+
+- Auth: `/auth/login` with JSON (NOT form-urlencoded, NOT `/admin/login`)
+- Query param: `query_text` (not `query`)
+- Global repos: `-global` suffix (e.g., `code-indexer-python-global`)
+- Token expiry: 10 minutes
+- Timing display: CLI only, not in MCP/REST
+
+*Recorded 2026-01-29*
 
 ---
 
-## 13. Where to Find More
+## 12. Where to Find More
 
-**Detailed Architecture**: `/docs/v5.0.0-architecture-summary.md`, `/docs/v7.2.0-architecture-incremental-updates.md`
-
-**This File's Purpose**: Day-to-day development essentials and mode-specific context
+- **Architecture**: `/docs/v5.0.0-architecture-summary.md`, `/docs/v7.2.0-architecture-incremental-updates.md`
+- **This file**: Day-to-day development essentials and mode-specific context

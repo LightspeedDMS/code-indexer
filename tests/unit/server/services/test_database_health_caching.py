@@ -186,17 +186,13 @@ class TestDatabaseHealthCaching:
             assert len(service._health_cache) == len(db_paths)
 
             # Record timestamps from cache
-            timestamps1 = {
-                path: ts for path, (_, ts) in service._health_cache.items()
-            }
+            timestamps1 = {path: ts for path, (_, ts) in service._health_cache.items()}
 
             # Second call - should return cached results
             _ = service.get_all_database_health_cached()
 
             # Timestamps should be unchanged (cache hit)
-            timestamps2 = {
-                path: ts for path, (_, ts) in service._health_cache.items()
-            }
+            timestamps2 = {path: ts for path, (_, ts) in service._health_cache.items()}
             assert timestamps1 == timestamps2
 
 

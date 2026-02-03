@@ -87,9 +87,7 @@ class ApiKeySyncService:
         self._claude_config_path = Path(
             claude_config_path or Path.home() / ".claude.json"
         )
-        self._systemd_env_path = Path(
-            systemd_env_path or "/etc/cidx-server/env"
-        )
+        self._systemd_env_path = Path(systemd_env_path or "/etc/cidx-server/env")
         self._claude_credentials_path = (
             Path(claude_credentials_path)
             if claude_credentials_path
@@ -135,10 +133,12 @@ class ApiKeySyncService:
                             f"{self._claude_credentials_path}"
                         )
                     except OSError as e:
-                        logger.warning(format_error_log(
-                            "APP-GENERAL-039",
-                            f"Failed to remove credentials file: {e}"
-                        ))
+                        logger.warning(
+                            format_error_log(
+                                "APP-GENERAL-039",
+                                f"Failed to remove credentials file: {e}",
+                            )
+                        )
 
                 # Step 5: Update ~/.bashrc (for shell persistence)
                 self._update_bashrc("ANTHROPIC_API_KEY", api_key)
@@ -146,10 +146,11 @@ class ApiKeySyncService:
                 return SyncResult(success=True)
 
             except Exception as e:
-                logger.error(format_error_log(
-                    "APP-GENERAL-040",
-                    f"Failed to sync Anthropic API key: {e}"
-                ))
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-040", f"Failed to sync Anthropic API key: {e}"
+                    )
+                )
                 return SyncResult(success=False, error=str(e))
 
     def sync_voyageai_key(self, api_key: str) -> SyncResult:
@@ -184,10 +185,11 @@ class ApiKeySyncService:
                 return SyncResult(success=True)
 
             except Exception as e:
-                logger.error(format_error_log(
-                    "APP-GENERAL-041",
-                    f"Failed to sync VoyageAI API key: {e}"
-                ))
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-041", f"Failed to sync VoyageAI API key: {e}"
+                    )
+                )
                 return SyncResult(success=False, error=str(e))
 
     def _is_voyageai_key_synced(self, api_key: str) -> bool:
@@ -222,10 +224,12 @@ class ApiKeySyncService:
             try:
                 config = json.loads(self._claude_config_path.read_text())
             except json.JSONDecodeError:
-                logger.warning(format_error_log(
-                    "APP-GENERAL-042",
-                    f"Invalid JSON in {self._claude_config_path}, overwriting"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "APP-GENERAL-042",
+                        f"Invalid JSON in {self._claude_config_path}, overwriting",
+                    )
+                )
                 config = {}
 
         # Update apiKey field
@@ -262,16 +266,19 @@ class ApiKeySyncService:
             self._systemd_env_path.write_text("\n".join(lines) + "\n")
 
         except PermissionError:
-            logger.warning(format_error_log(
-                "APP-GENERAL-043",
-                f"Cannot write to systemd env file {self._systemd_env_path}: "
-                "permission denied"
-            ))
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-043",
+                    f"Cannot write to systemd env file {self._systemd_env_path}: "
+                    "permission denied",
+                )
+            )
         except Exception as e:
-            logger.warning(format_error_log(
-                "APP-GENERAL-044",
-                f"Failed to update systemd env file: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-044", f"Failed to update systemd env file: {e}"
+                )
+            )
 
     def _update_bashrc(self, env_var_name: str, value: str) -> None:
         """Update or add an export line in ~/.bashrc (idempotent - skips if value matches)."""
@@ -290,7 +297,9 @@ class ApiKeySyncService:
                 # Check if existing value already matches (idempotent)
                 existing_line = match.group(0).strip()
                 if existing_line == new_line:
-                    logger.debug(f"{env_var_name} already set correctly in ~/.bashrc, skipping")
+                    logger.debug(
+                        f"{env_var_name} already set correctly in ~/.bashrc, skipping"
+                    )
                     return
 
                 # Replace existing export with new value
@@ -305,10 +314,9 @@ class ApiKeySyncService:
             logger.info(f"Updated {env_var_name} in ~/.bashrc")
 
         except Exception as e:
-            logger.warning(format_error_log(
-                "APP-GENERAL-045",
-                f"Failed to update ~/.bashrc: {e}"
-            ))
+            logger.warning(
+                format_error_log("APP-GENERAL-045", f"Failed to update ~/.bashrc: {e}")
+            )
 
 
 class ApiKeyConnectivityTester:
@@ -332,9 +340,7 @@ class ApiKeyConnectivityTester:
         """
         self._timeout_seconds = timeout_seconds
 
-    async def test_anthropic_connectivity(
-        self, api_key: str
-    ) -> ConnectivityTestResult:
+    async def test_anthropic_connectivity(self, api_key: str) -> ConnectivityTestResult:
         """
         Test Anthropic API key connectivity via Claude CLI.
 
@@ -400,9 +406,7 @@ class ApiKeyConnectivityTester:
                 error=f"Connectivity test failed: {str(e)}",
             )
 
-    async def test_voyageai_connectivity(
-        self, api_key: str
-    ) -> ConnectivityTestResult:
+    async def test_voyageai_connectivity(self, api_key: str) -> ConnectivityTestResult:
         """
         Test VoyageAI API key connectivity via embedding API.
 
@@ -417,9 +421,7 @@ class ApiKeyConnectivityTester:
         start_time = time.time()
 
         try:
-            async with httpx.AsyncClient(
-                timeout=self._timeout_seconds
-            ) as client:
+            async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
                 response = await client.post(
                     self.VOYAGEAI_API_ENDPOINT,
                     headers={
@@ -589,9 +591,7 @@ class ApiKeyAutoSeeder:
         Args:
             claude_json_path: Path to ~/.claude.json (default: ~/.claude.json)
         """
-        self._claude_json_path = Path(
-            claude_json_path or Path.home() / ".claude.json"
-        )
+        self._claude_json_path = Path(claude_json_path or Path.home() / ".claude.json")
 
     def get_anthropic_key(self) -> Optional[str]:
         """
@@ -617,10 +617,12 @@ class ApiKeyAutoSeeder:
                 if json_key:
                     return json_key
             except (json.JSONDecodeError, IOError):
-                logger.warning(format_error_log(
-                    "APP-GENERAL-046",
-                    f"Failed to read {self._claude_json_path} for auto-seeding"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "APP-GENERAL-046",
+                        f"Failed to read {self._claude_json_path} for auto-seeding",
+                    )
+                )
 
         return None
 

@@ -59,9 +59,7 @@ def _extract_response_data(mcp_response: dict) -> dict:
 class TestGitPushHandler:
     """Test git_push MCP handler (F4: Remote Operations)."""
 
-    def test_git_push_success(
-        self, mock_user, mock_git_service, mock_repo_manager
-    ):
+    def test_git_push_success(self, mock_user, mock_git_service, mock_repo_manager):
         """Test successful git push operation."""
         # Bug #639: Mock wrapper method instead of low-level git_push
         mock_git_service.push_to_remote.return_value = {
@@ -143,9 +141,7 @@ class TestGitPushHandler:
 class TestGitPullHandler:
     """Test git_pull MCP handler (F4: Remote Operations)."""
 
-    def test_git_pull_success(
-        self, mock_user, mock_git_service, mock_repo_manager
-    ):
+    def test_git_pull_success(self, mock_user, mock_git_service, mock_repo_manager):
         """Test successful git pull operation."""
         # Bug #639: Mock wrapper method instead of low-level git_pull
         mock_git_service.pull_from_remote.return_value = {
@@ -224,9 +220,7 @@ class TestGitPullHandler:
 class TestGitFetchHandler:
     """Test git_fetch MCP handler (F4: Remote Operations)."""
 
-    def test_git_fetch_success(
-        self, mock_user, mock_git_service, mock_repo_manager
-    ):
+    def test_git_fetch_success(self, mock_user, mock_git_service, mock_repo_manager):
         """Test successful git fetch operation."""
         # Bug #639: Mock wrapper method instead of low-level git_fetch
         mock_git_service.fetch_from_remote.return_value = {

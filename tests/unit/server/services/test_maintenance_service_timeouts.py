@@ -24,7 +24,7 @@ class TestMaintenanceServiceMaxJobTimeout:
             server_dir="/tmp/test",
             resource_config=ServerResourceConfig(
                 git_refresh_timeout=3600,  # 1 hour (max)
-                cidx_index_timeout=1800,   # 30 min
+                cidx_index_timeout=1800,  # 30 min
             ),
             scip_config=ScipConfig(
                 indexing_timeout_seconds=1800,  # 30 min

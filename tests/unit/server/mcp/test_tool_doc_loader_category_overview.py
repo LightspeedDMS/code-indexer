@@ -17,7 +17,17 @@ def temp_docs_dir(tmp_path):
     """Create a temporary tool_docs directory with category subdirectories."""
     docs_dir = tmp_path / "tool_docs"
     docs_dir.mkdir()
-    for category in ["search", "git", "scip", "files", "admin", "repos", "ssh", "guides", "cicd"]:
+    for category in [
+        "search",
+        "git",
+        "scip",
+        "files",
+        "admin",
+        "repos",
+        "ssh",
+        "guides",
+        "cicd",
+    ]:
         (docs_dir / category).mkdir()
     return docs_dir
 
@@ -73,8 +83,7 @@ def populated_docs_dir(temp_docs_dir):
 
     # Add _category.yaml to git (no tools - should be excluded from overview)
     (temp_docs_dir / "git" / "_category.yaml").write_text(
-        "name: git\n"
-        "description: Git operations and history exploration\n"
+        "name: git\n" "description: Git operations and history exploration\n"
     )
 
     # Add guides category without _category.yaml (test fallback behavior)
@@ -125,7 +134,9 @@ class TestLoadCategoryMeta:
 
         assert meta is not None
         assert meta.name == "search"
-        assert meta.description == "Semantic and full-text code search across repositories"
+        assert (
+            meta.description == "Semantic and full-text code search across repositories"
+        )
 
     def test_load_category_meta_missing_file_returns_none(self, temp_docs_dir):
         """_load_category_meta should return None when _category.yaml is missing."""
@@ -157,9 +168,7 @@ class TestLoadCategoryMeta:
         from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
 
         # Create _category.yaml with only name
-        (temp_docs_dir / "search" / "_category.yaml").write_text(
-            "name: search\n"
-        )
+        (temp_docs_dir / "search" / "_category.yaml").write_text("name: search\n")
 
         loader = ToolDocLoader(temp_docs_dir)
         meta = loader._load_category_meta(temp_docs_dir / "search")
@@ -233,10 +242,16 @@ class TestGetCategoryOverview:
         overview = loader.get_category_overview()
 
         search_cat = next(cat for cat in overview if cat["name"] == "search")
-        assert search_cat["description"] == "Semantic and full-text code search across repositories"
+        assert (
+            search_cat["description"]
+            == "Semantic and full-text code search across repositories"
+        )
 
         scip_cat = next(cat for cat in overview if cat["name"] == "scip")
-        assert scip_cat["description"] == "Code intelligence - find definitions, references, dependencies"
+        assert (
+            scip_cat["description"]
+            == "Code intelligence - find definitions, references, dependencies"
+        )
 
     def test_get_category_overview_includes_key_tools(self, populated_docs_dir):
         """get_category_overview should include first 3 tools alphabetically."""
@@ -293,7 +308,9 @@ class TestGetCategoryOverview:
         overview = loader.get_category_overview()
 
         search_cat = next(cat for cat in overview if cat["name"] == "search")
-        assert search_cat["tool_count"] == 4  # search_code, regex_search, browse_directory, list_files
+        assert (
+            search_cat["tool_count"] == 4
+        )  # search_code, regex_search, browse_directory, list_files
 
         scip_cat = next(cat for cat in overview if cat["name"] == "scip")
         assert scip_cat["tool_count"] == 2  # scip_definition, scip_references
@@ -310,7 +327,9 @@ class TestGetCategoryOverview:
         assert loader._loaded is True
         assert len(overview) > 0
 
-    def test_get_category_overview_empty_description_for_missing_meta(self, populated_docs_dir):
+    def test_get_category_overview_empty_description_for_missing_meta(
+        self, populated_docs_dir
+    ):
         """Categories without _category.yaml should have empty description."""
         from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
 
@@ -329,8 +348,7 @@ class TestGetCategoryOverview:
 
         # Add _category.yaml to scip
         (temp_docs_dir / "scip" / "_category.yaml").write_text(
-            "name: scip\n"
-            "description: Code intelligence\n"
+            "name: scip\n" "description: Code intelligence\n"
         )
 
         # Add only 1 tool

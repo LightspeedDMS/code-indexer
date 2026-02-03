@@ -13,7 +13,17 @@ def temp_docs_dir(tmp_path):
     """Create a temporary tool_docs directory with category subdirectories."""
     docs_dir = tmp_path / "tool_docs"
     docs_dir.mkdir()
-    for category in ["search", "git", "scip", "files", "admin", "repos", "ssh", "guides", "cicd"]:
+    for category in [
+        "search",
+        "git",
+        "scip",
+        "files",
+        "admin",
+        "repos",
+        "ssh",
+        "guides",
+        "cicd",
+    ]:
         (docs_dir / category).mkdir()
     return docs_dir
 

@@ -47,7 +47,7 @@ class TestChunkerImageValidationLogging:
 
         # Capture stderr (CLI mode logging)
         output = StringIO()
-        with patch('sys.stderr', output):
+        with patch("sys.stderr", output):
             # Enable verbose logging
             chunks = self.chunker.chunk_text_with_logging(
                 content, file_path, repo_root=self.repo_root, verbose=True
@@ -77,7 +77,7 @@ class TestChunkerImageValidationLogging:
         file_path = self.repo_root / "doc.md"
 
         output = StringIO()
-        with patch('sys.stderr', output):
+        with patch("sys.stderr", output):
             chunks = self.chunker.chunk_text_with_logging(
                 content, file_path, repo_root=self.repo_root, verbose=True
             )
@@ -105,7 +105,7 @@ class TestChunkerImageValidationLogging:
         file_path = self.repo_root / "doc.md"
 
         output = StringIO()
-        with patch('sys.stderr', output):
+        with patch("sys.stderr", output):
             chunks = self.chunker.chunk_text_with_logging(
                 content, file_path, repo_root=self.repo_root, verbose=True
             )
@@ -130,7 +130,7 @@ class TestChunkerImageValidationLogging:
         file_path = self.repo_root / "doc.md"
 
         output = StringIO()
-        with patch('sys.stderr', output):
+        with patch("sys.stderr", output):
             chunks = self.chunker.chunk_text_with_logging(
                 content, file_path, repo_root=self.repo_root, verbose=True
             )
@@ -155,7 +155,7 @@ class TestChunkerImageValidationLogging:
         file_path = self.repo_root / "doc.md"
 
         output = StringIO()
-        with patch('sys.stderr', output):
+        with patch("sys.stderr", output):
             # Non-verbose mode (default)
             chunks = self.chunker.chunk_text_with_logging(
                 content, file_path, repo_root=self.repo_root, verbose=False
@@ -186,7 +186,7 @@ class TestChunkerImageValidationLogging:
         file_path = self.repo_root / "doc.md"
 
         output = StringIO()
-        with patch('sys.stderr', output):
+        with patch("sys.stderr", output):
             # Should NOT raise any exceptions
             chunks = self.chunker.chunk_text_with_logging(
                 content, file_path, repo_root=self.repo_root, verbose=True
@@ -216,16 +216,16 @@ class TestChunkerImageValidationLogging:
         # Capture Python logging output
         log_capture = StringIO()
         handler = logging.StreamHandler(log_capture)
-        handler.setFormatter(logging.Formatter('%(message)s'))
+        handler.setFormatter(logging.Formatter("%(message)s"))
 
-        py_logger = logging.getLogger('cidx.image_extractor')
+        py_logger = logging.getLogger("cidx.image_extractor")
         py_logger.addHandler(handler)
         py_logger.setLevel(logging.WARNING)
 
         try:
             # Force server mode - need to create chunker INSIDE the patched environment
             # so AdaptiveLogger detects server context correctly
-            with patch.dict('os.environ', {'FASTAPI_APP': 'true'}):
+            with patch.dict("os.environ", {"FASTAPI_APP": "true"}):
                 # Create new chunker in server mode
                 server_chunker = TextChunker(self.config)
                 chunks = server_chunker.chunk_text_with_logging(

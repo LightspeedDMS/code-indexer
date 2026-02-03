@@ -503,6 +503,43 @@ Scheduled Scan:
 - Scan history: `~/.cidx-server/data/self_monitoring.db`
 - Server logs: `~/.cidx-server/logs.db` (SQLite structured logging)
 
+## Research Session Tracing (Langfuse) (v8.8.23+)
+
+Optional observability integration for tracking MCP tool usage patterns via Langfuse.
+
+**Purpose:**
+- Track research sessions with explicit start/end boundaries
+- Capture all MCP tool calls as spans with timing, inputs, outputs
+- Enable performance analysis and usage pattern discovery
+- Support session scoring and feedback for quality assessment
+
+**MCP Tools:**
+- `start_trace(name, metadata)` - Begin a research session trace
+- `end_trace(score, feedback)` - Complete trace with optional quality score (0.0-1.0)
+
+**Architecture Components:**
+- **LangfuseService** (`langfuse_service.py`) - Facade providing lazy-initialized access to Langfuse components
+- **LangfuseClient** (`langfuse_client.py`) - SDK wrapper using Langfuse 3.7.0 API
+- **TraceStateManager** (`trace_state_manager.py`) - Per-session trace context management
+- **AutoSpanLogger** (`auto_span_logger.py`) - Automatic span creation for MCP tool calls
+
+**Key Design Decisions:**
+- **Graceful degradation**: Langfuse errors never fail upstream MCP operations
+- **Opt-in tracing**: Disabled by default, configurable via Web UI
+- **Auto-trace mode**: Optional automatic trace creation on first tool call
+- **Session persistence**: HTTP clients use `?session_id=xxx` for trace continuity across requests
+- **RLock for thread safety**: Prevents deadlock during lazy initialization of nested components
+
+**Configuration** (Web UI: Admin > Configuration > Langfuse Settings):
+- `enabled` - Enable/disable Langfuse integration
+- `public_key` / `secret_key` - Langfuse API credentials
+- `host` - Langfuse server URL (default: cloud.langfuse.com)
+- `auto_trace_enabled` - Automatically create trace on first tool call
+
+**Storage:**
+- Configuration: `~/.cidx-server/config.json` (langfuse section)
+- Traces: Stored in Langfuse backend (cloud or self-hosted)
+
 ## Related Documentation
 
 - **[v5.0.0 Architecture Summary](v5.0.0-architecture-summary.md)** - Server Mode architecture details

@@ -48,10 +48,10 @@ def clean_submodule_before_tests():
 @pytest.fixture
 def multimodal_repo_path():
     """Return path to test-fixtures/multimodal-mock-repo.
-    
+
     Returns:
         Path: Absolute path to the multimodal test fixture repository
-        
+
     Raises:
         AssertionError: If the test fixture submodule is not initialized
     """
@@ -71,10 +71,10 @@ def multimodal_repo_path():
 @pytest.fixture
 def temp_index_dir(tmp_path):
     """Create temporary .code-indexer directory for test isolation.
-    
+
     Args:
         tmp_path: pytest built-in fixture providing temporary directory
-        
+
     Returns:
         Path: Temporary .code-indexer directory for isolated testing
     """

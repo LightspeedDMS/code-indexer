@@ -59,9 +59,7 @@ class TestAdminListUserMCPCredentialsHandler:
         self, admin_user, mock_mcp_credential_manager
     ):
         """admin_list_user_mcp_credentials returns success for admin user."""
-        with patch(
-            "code_indexer.server.mcp.handlers.dependencies"
-        ) as mock_deps:
+        with patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["admin_list_user_mcp_credentials"]
@@ -106,9 +104,7 @@ class TestAdminCreateUserMCPCredentialHandler:
         self, admin_user, mock_mcp_credential_manager
     ):
         """admin_create_user_mcp_credential returns success for admin user."""
-        with patch(
-            "code_indexer.server.mcp.handlers.dependencies"
-        ) as mock_deps:
+        with patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["admin_create_user_mcp_credential"]
@@ -123,9 +119,7 @@ class TestAdminCreateUserMCPCredentialHandler:
         self, admin_user, mock_mcp_credential_manager
     ):
         """admin_create_user_mcp_credential returns full credential."""
-        with patch(
-            "code_indexer.server.mcp.handlers.dependencies"
-        ) as mock_deps:
+        with patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["admin_create_user_mcp_credential"]
@@ -154,9 +148,7 @@ class TestAdminDeleteUserMCPCredentialHandler:
         self, admin_user, mock_mcp_credential_manager
     ):
         """admin_delete_user_mcp_credential returns success for admin user."""
-        with patch(
-            "code_indexer.server.mcp.handlers.dependencies"
-        ) as mock_deps:
+        with patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["admin_delete_user_mcp_credential"]
@@ -167,9 +159,7 @@ class TestAdminDeleteUserMCPCredentialHandler:
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    def test_admin_delete_user_mcp_credential_requires_both_params(
-        self, admin_user
-    ):
+    def test_admin_delete_user_mcp_credential_requires_both_params(self, admin_user):
         """admin_delete_user_mcp_credential fails when params missing."""
         handler = HANDLER_REGISTRY["admin_delete_user_mcp_credential"]
 
@@ -231,11 +221,10 @@ class TestAdminListAllMCPCredentialsHandler:
         self, admin_user, mock_user_manager, mock_mcp_credential_manager
     ):
         """admin_list_all_mcp_credentials returns success for admin user."""
-        with patch(
-            "code_indexer.server.mcp.handlers.app_module"
-        ) as mock_app, patch(
-            "code_indexer.server.mcp.handlers.dependencies"
-        ) as mock_deps:
+        with (
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps,
+        ):
             mock_app.user_manager = mock_user_manager
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
@@ -249,11 +238,10 @@ class TestAdminListAllMCPCredentialsHandler:
         self, admin_user, mock_user_manager, mock_mcp_credential_manager
     ):
         """admin_list_all_mcp_credentials returns credentials array."""
-        with patch(
-            "code_indexer.server.mcp.handlers.app_module"
-        ) as mock_app, patch(
-            "code_indexer.server.mcp.handlers.dependencies"
-        ) as mock_deps:
+        with (
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps,
+        ):
             mock_app.user_manager = mock_user_manager
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
@@ -268,11 +256,10 @@ class TestAdminListAllMCPCredentialsHandler:
         self, admin_user, mock_user_manager, mock_mcp_credential_manager
     ):
         """admin_list_all_mcp_credentials includes username in each credential."""
-        with patch(
-            "code_indexer.server.mcp.handlers.app_module"
-        ) as mock_app, patch(
-            "code_indexer.server.mcp.handlers.dependencies"
-        ) as mock_deps:
+        with (
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps,
+        ):
             mock_app.user_manager = mock_user_manager
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 

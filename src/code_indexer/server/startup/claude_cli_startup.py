@@ -91,11 +91,13 @@ def initialize_claude_manager_on_startup(
 
     except Exception as e:
         # Log error but don't block server startup
-        logger.error(format_error_log(
-            "MCP-GENERAL-195",
-            "Failed to initialize ClaudeCliManager during server startup",
-            error=str(e)),
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-195",
+                "Failed to initialize ClaudeCliManager during server startup",
+                error=str(e),
+            ),
             extra=get_log_extra("MCP-GENERAL-195"),
-            exc_info=True
+            exc_info=True,
         )
         return False

@@ -23,12 +23,12 @@ class TestClaudeCliManagerDefaultWorkers:
         manager = ClaudeCliManager(api_key="test-key")
         try:
             # Story #24 AC: Default should be 2 for resource-constrained systems
-            assert manager._max_workers == 2, (
-                f"Expected default max_workers=2, got {manager._max_workers}"
-            )
-            assert len(manager._worker_threads) == 2, (
-                f"Expected 2 worker threads, got {len(manager._worker_threads)}"
-            )
+            assert (
+                manager._max_workers == 2
+            ), f"Expected default max_workers=2, got {manager._max_workers}"
+            assert (
+                len(manager._worker_threads) == 2
+            ), f"Expected 2 worker threads, got {len(manager._worker_threads)}"
         finally:
             manager.shutdown()
 
@@ -113,7 +113,9 @@ class TestMetaDescriptionHookConfigIntegration:
 
         # Mock global ClaudeCliManager singleton with configured API key
         mock_cli_manager = MagicMock()
-        mock_cli_manager._api_key = "sk-ant-test-key-abc123"  # Config value from server startup
+        mock_cli_manager._api_key = (
+            "sk-ant-test-key-abc123"  # Config value from server startup
+        )
         mock_cli_manager.check_cli_available.return_value = False  # Force fallback path
 
         with patch(
@@ -142,6 +144,6 @@ class TestClaudeIntegrationConfigDefault:
         from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
 
         config = ClaudeIntegrationConfig()
-        assert config.max_concurrent_claude_cli == 2, (
-            f"Expected default max_concurrent_claude_cli=2, got {config.max_concurrent_claude_cli}"
-        )
+        assert (
+            config.max_concurrent_claude_cli == 2
+        ), f"Expected default max_concurrent_claude_cli=2, got {config.max_concurrent_claude_cli}"

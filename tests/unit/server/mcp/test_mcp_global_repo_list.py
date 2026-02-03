@@ -180,9 +180,7 @@ class TestListRepositoriesWithGlobalRepos:
                             repo.get("is_global") is not True
                         ), "Activated repo should not have is_global=True"
 
-    def test_global_repos_include_metadata(
-        self, mock_user, mock_global_registry_data
-    ):
+    def test_global_repos_include_metadata(self, mock_user, mock_global_registry_data):
         """Test that global repos include repo name, last update time, and index path."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.activated_repo_manager.list_activated_repositories.return_value = (
@@ -347,9 +345,7 @@ class TestListRepositoriesWithGlobalRepos:
                 # Verify: get_server_global_registry was called with app.state.golden_repos_dir
                 mock_registry_factory.assert_called_once_with(str(temp_golden_dir))
 
-    def test_duplicate_alias_names_handled(
-        self, mock_user, mock_global_registry_data
-    ):
+    def test_duplicate_alias_names_handled(self, mock_user, mock_global_registry_data):
         """Test that duplicate alias names between activated and global repos are handled."""
         # Create activated repo with same name as global repo
         duplicate_activated = [

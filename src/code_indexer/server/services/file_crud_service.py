@@ -92,6 +92,7 @@ class FileCRUDService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         # Validate path security
@@ -171,6 +172,7 @@ class FileCRUDService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         # Validate path security
@@ -261,6 +263,7 @@ class FileCRUDService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         # Validate path security

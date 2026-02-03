@@ -53,15 +53,20 @@ class TestOmniSearchMetricsTracking:
         self, mock_user, mock_multi_search_response, valid_multi_search_config
     ):
         """Semantic multi-repo search should increment semantic_searches counter."""
-        with patch(
-            "code_indexer.server.multi.multi_search_service.MultiSearchService"
-        ) as mock_service_class, patch(
-            "code_indexer.server.multi.multi_search_config.MultiSearchConfig.from_config"
-        ) as mock_config_from_config, patch(
-            "code_indexer.server.mcp.handlers.api_metrics_service"
-        ) as mock_metrics, patch(
-            "code_indexer.server.mcp.handlers._expand_wildcard_patterns"
-        ) as mock_expand:
+        with (
+            patch(
+                "code_indexer.server.multi.multi_search_service.MultiSearchService"
+            ) as mock_service_class,
+            patch(
+                "code_indexer.server.multi.multi_search_config.MultiSearchConfig.from_config"
+            ) as mock_config_from_config,
+            patch(
+                "code_indexer.server.mcp.handlers.api_metrics_service"
+            ) as mock_metrics,
+            patch(
+                "code_indexer.server.mcp.handlers._expand_wildcard_patterns"
+            ) as mock_expand,
+        ):
             # Setup mocks - Story #51: handlers are now sync
             mock_service = MagicMock()
             mock_service.search = MagicMock(return_value=mock_multi_search_response)
@@ -94,15 +99,20 @@ class TestOmniSearchMetricsTracking:
         self, mock_user, mock_multi_search_response, valid_multi_search_config
     ):
         """FTS multi-repo search should increment other_index_searches counter."""
-        with patch(
-            "code_indexer.server.multi.multi_search_service.MultiSearchService"
-        ) as mock_service_class, patch(
-            "code_indexer.server.multi.multi_search_config.MultiSearchConfig.from_config"
-        ) as mock_config_from_config, patch(
-            "code_indexer.server.mcp.handlers.api_metrics_service"
-        ) as mock_metrics, patch(
-            "code_indexer.server.mcp.handlers._expand_wildcard_patterns"
-        ) as mock_expand:
+        with (
+            patch(
+                "code_indexer.server.multi.multi_search_service.MultiSearchService"
+            ) as mock_service_class,
+            patch(
+                "code_indexer.server.multi.multi_search_config.MultiSearchConfig.from_config"
+            ) as mock_config_from_config,
+            patch(
+                "code_indexer.server.mcp.handlers.api_metrics_service"
+            ) as mock_metrics,
+            patch(
+                "code_indexer.server.mcp.handlers._expand_wildcard_patterns"
+            ) as mock_expand,
+        ):
             # Setup mocks - Story #51: handlers are now sync
             mock_service = MagicMock()
             mock_service.search = MagicMock(return_value=mock_multi_search_response)
@@ -131,15 +141,20 @@ class TestOmniSearchMetricsTracking:
         self, mock_user, mock_multi_search_response, valid_multi_search_config
     ):
         """Regex multi-repo search should increment regex_searches counter."""
-        with patch(
-            "code_indexer.server.multi.multi_search_service.MultiSearchService"
-        ) as mock_service_class, patch(
-            "code_indexer.server.multi.multi_search_config.MultiSearchConfig.from_config"
-        ) as mock_config_from_config, patch(
-            "code_indexer.server.mcp.handlers.api_metrics_service"
-        ) as mock_metrics, patch(
-            "code_indexer.server.mcp.handlers._expand_wildcard_patterns"
-        ) as mock_expand:
+        with (
+            patch(
+                "code_indexer.server.multi.multi_search_service.MultiSearchService"
+            ) as mock_service_class,
+            patch(
+                "code_indexer.server.multi.multi_search_config.MultiSearchConfig.from_config"
+            ) as mock_config_from_config,
+            patch(
+                "code_indexer.server.mcp.handlers.api_metrics_service"
+            ) as mock_metrics,
+            patch(
+                "code_indexer.server.mcp.handlers._expand_wildcard_patterns"
+            ) as mock_expand,
+        ):
             # Setup mocks - Story #51: handlers are now sync
             mock_service = MagicMock()
             mock_service.search = MagicMock(return_value=mock_multi_search_response)
@@ -168,17 +183,23 @@ class TestOmniSearchMetricsTracking:
         self, mock_user, mock_multi_search_response, valid_multi_search_config
     ):
         """Temporal multi-repo search should increment other_index_searches counter."""
-        with patch(
-            "code_indexer.server.multi.multi_search_service.MultiSearchService"
-        ) as mock_service_class, patch(
-            "code_indexer.server.multi.multi_search_config.MultiSearchConfig.from_config"
-        ) as mock_config_from_config, patch(
-            "code_indexer.server.mcp.handlers.api_metrics_service"
-        ) as mock_metrics, patch(
-            "code_indexer.server.mcp.handlers._expand_wildcard_patterns"
-        ) as mock_expand, patch(
-            "code_indexer.server.mcp.handlers._is_temporal_query"
-        ) as mock_is_temporal:
+        with (
+            patch(
+                "code_indexer.server.multi.multi_search_service.MultiSearchService"
+            ) as mock_service_class,
+            patch(
+                "code_indexer.server.multi.multi_search_config.MultiSearchConfig.from_config"
+            ) as mock_config_from_config,
+            patch(
+                "code_indexer.server.mcp.handlers.api_metrics_service"
+            ) as mock_metrics,
+            patch(
+                "code_indexer.server.mcp.handlers._expand_wildcard_patterns"
+            ) as mock_expand,
+            patch(
+                "code_indexer.server.mcp.handlers._is_temporal_query"
+            ) as mock_is_temporal,
+        ):
             # Setup mocks - Story #51: handlers are now sync
             mock_service = MagicMock()
             mock_service.search = MagicMock(return_value=mock_multi_search_response)
@@ -208,11 +229,14 @@ class TestOmniSearchMetricsTracking:
 
     def test_empty_repos_does_not_track_metrics(self, mock_user):
         """Empty repository list should return early without tracking metrics."""
-        with patch(
-            "code_indexer.server.mcp.handlers.api_metrics_service"
-        ) as mock_metrics, patch(
-            "code_indexer.server.mcp.handlers._expand_wildcard_patterns"
-        ) as mock_expand:
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.api_metrics_service"
+            ) as mock_metrics,
+            patch(
+                "code_indexer.server.mcp.handlers._expand_wildcard_patterns"
+            ) as mock_expand,
+        ):
             # Return empty list
             mock_expand.return_value = []
 

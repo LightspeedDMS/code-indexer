@@ -82,9 +82,7 @@ class GoldenRepoBranchService:
         """
         self.golden_repo_manager = golden_repo_manager
 
-    def get_golden_repo_branches(
-        self, repo_alias: str
-    ) -> List[GoldenRepoBranchInfo]:
+    def get_golden_repo_branches(self, repo_alias: str) -> List[GoldenRepoBranchInfo]:
         """
         Get list of branches for a golden repository.
 
@@ -155,11 +153,13 @@ class GoldenRepoBranchService:
                                     tzinfo=timezone.utc
                                 )
                         except (ValueError, AttributeError) as e:
-                            logger.warning(format_error_log(
-                                "DEPLOY-GENERAL-024",
-                                f"Failed to parse commit date '{commit_date_str}': {e}",
-                                extra={"correlation_id": get_correlation_id()},
-                            ))
+                            logger.warning(
+                                format_error_log(
+                                    "DEPLOY-GENERAL-024",
+                                    f"Failed to parse commit date '{commit_date_str}': {e}",
+                                    extra={"correlation_id": get_correlation_id()},
+                                )
+                            )
 
                         # Classify branch type
                         branch_type = classify_branch_type(branch_name)
@@ -175,11 +175,13 @@ class GoldenRepoBranchService:
                         branches.append(branch_info)
 
                 except (IndexError, ValueError) as e:
-                    logger.warning(format_error_log(
-                        "DEPLOY-GENERAL-025",
-                        f"Failed to parse git output line '{line}': {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-025",
+                            f"Failed to parse git output line '{line}': {e}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                     continue
 
             # Sort branches: default first, then by name
@@ -189,24 +191,34 @@ class GoldenRepoBranchService:
 
         except subprocess.CalledProcessError as e:
             error_msg = f"Git operation failed: {e.stderr or e.stdout or str(e)}"
-            logger.error(format_error_log(
-                "DEPLOY-GENERAL-026",
-                error_msg, extra={"correlation_id": get_correlation_id()}
-            ))
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-026",
+                    error_msg,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise GitOperationError(error_msg)
         except subprocess.TimeoutExpired:
             error_msg = "Git operation timed out - repository may be too large"
-            logger.error(format_error_log(
-                "DEPLOY-GENERAL-027",
-                error_msg, extra={"correlation_id": get_correlation_id()}
-            ))
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-027",
+                    error_msg,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise GitOperationError(error_msg)
         except Exception as e:
             error_msg = f"Unexpected error during git operation: {e}"
-            logger.error(format_error_log(
-                "DEPLOY-GENERAL-028",
-                error_msg, exc_info=True, extra={"correlation_id": get_correlation_id()}
-            ))
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-028",
+                    error_msg,
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise GitOperationError(error_msg)
 
     def _get_default_branch(self, repo_path: Path) -> Optional[str]:

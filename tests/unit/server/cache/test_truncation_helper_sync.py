@@ -134,7 +134,9 @@ class TestTruncationHelperSyncBehavior:
         assert result.truncated is False
         assert result.cache_handle is None
         assert result.preview == small_content
-        assert result.original_tokens == truncation_helper.estimate_tokens(small_content)
+        assert result.original_tokens == truncation_helper.estimate_tokens(
+            small_content
+        )
         assert result.preview_tokens == result.original_tokens
 
     def test_sync_truncate_and_cache_large_content_is_truncated(

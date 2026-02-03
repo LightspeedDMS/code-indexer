@@ -201,9 +201,13 @@ class SemanticQueryManager:
             return is_composite
         except json.JSONDecodeError as e:
             logger.error(
-                format_error_log("QUERY-MIGRATE-001", "Invalid JSON in config file",
-                                 config_file=config_file, error=str(e)),
-                extra=get_log_extra("QUERY-MIGRATE-001")
+                format_error_log(
+                    "QUERY-MIGRATE-001",
+                    "Invalid JSON in config file",
+                    config_file=config_file,
+                    error=str(e),
+                ),
+                extra=get_log_extra("QUERY-MIGRATE-001"),
             )
             raise
 
@@ -262,9 +266,13 @@ class SemanticQueryManager:
             )
         except Exception as e:
             logger.error(
-                format_error_log("QUERY-MIGRATE-002", "Search routing failed for repository",
-                                 repo_path=repo_path, error=str(e)),
-                extra=get_log_extra("QUERY-MIGRATE-002")
+                format_error_log(
+                    "QUERY-MIGRATE-002",
+                    "Search routing failed for repository",
+                    repo_path=repo_path,
+                    error=str(e),
+                ),
+                extra=get_log_extra("QUERY-MIGRATE-002"),
             )
             raise
 
@@ -451,9 +459,10 @@ class SemanticQueryManager:
         except Exception as e:
             # Log but don't fail if global repos can't be loaded
             logger.warning(
-                format_error_log("QUERY-MIGRATE-003", "Failed to load global repos",
-                                 error=str(e)),
-                extra=get_log_extra("QUERY-MIGRATE-003")
+                format_error_log(
+                    "QUERY-MIGRATE-003", "Failed to load global repos", error=str(e)
+                ),
+                extra=get_log_extra("QUERY-MIGRATE-003"),
             )
 
         # Merge user repos and global repos
@@ -538,8 +547,10 @@ class SemanticQueryManager:
         if results and len(results) > 0 and not isinstance(results[0], QueryResult):
             # This shouldn't happen in normal operation, but handle gracefully
             logger.warning(
-                format_error_log("QUERY-MIGRATE-004", "Unexpected result format in query response"),
-                extra=get_log_extra("QUERY-MIGRATE-004")
+                format_error_log(
+                    "QUERY-MIGRATE-004", "Unexpected result format in query response"
+                ),
+                extra=get_log_extra("QUERY-MIGRATE-004"),
             )
 
         # Check if temporal parameters were used but no results (graceful fallback)
@@ -754,9 +765,12 @@ class SemanticQueryManager:
                     target_path = alias_manager.read_alias(repo_alias)
                     if not target_path:
                         logger.warning(
-                            format_error_log("QUERY-MIGRATE-005", "Global repo alias could not be resolved, skipping",
-                                             repo_alias=repo_alias),
-                            extra=get_log_extra("QUERY-MIGRATE-005")
+                            format_error_log(
+                                "QUERY-MIGRATE-005",
+                                "Global repo alias could not be resolved, skipping",
+                                repo_alias=repo_alias,
+                            ),
+                            extra=get_log_extra("QUERY-MIGRATE-005"),
                         )
                         continue  # Skip if alias can't be resolved
 
@@ -814,9 +828,13 @@ class SemanticQueryManager:
                     )
                 # For other errors, log warning and continue with other repos
                 logger.warning(
-                    format_error_log("QUERY-MIGRATE-006", "Failed to search repository",
-                                     repo_alias=repo_info['user_alias'], error=str(e)),
-                    extra=get_log_extra("QUERY-MIGRATE-006")
+                    format_error_log(
+                        "QUERY-MIGRATE-006",
+                        "Failed to search repository",
+                        repo_alias=repo_info["user_alias"],
+                        error=str(e),
+                    ),
+                    extra=get_log_extra("QUERY-MIGRATE-006"),
                 )
                 continue
 
@@ -995,19 +1013,27 @@ class SemanticQueryManager:
             # Story #725: Only warn when non-default filters are explicitly set
             # Note: accuracy="balanced" is the default, so we only warn if accuracy
             # is set to something other than "balanced" or None
-            has_non_default_filters = any([
-                language,           # None is default
-                exclude_language,   # None is default
-                path_filter,        # None is default
-                exclude_path,       # None is default
-                accuracy and accuracy != "balanced"  # "balanced" is default
-            ])
+            has_non_default_filters = any(
+                [
+                    language,  # None is default
+                    exclude_language,  # None is default
+                    path_filter,  # None is default
+                    exclude_path,  # None is default
+                    accuracy and accuracy != "balanced",  # "balanced" is default
+                ]
+            )
             if search_mode in ["semantic", "hybrid"] and has_non_default_filters:
                 logger.warning(
-                    format_error_log("QUERY-MIGRATE-007", "Advanced filter parameters not fully supported for semantic search",
-                                     language=language, exclude_language=exclude_language,
-                                     path_filter=path_filter, exclude_path=exclude_path, accuracy=accuracy),
-                    extra=get_log_extra("QUERY-MIGRATE-007")
+                    format_error_log(
+                        "QUERY-MIGRATE-007",
+                        "Advanced filter parameters not fully supported for semantic search",
+                        language=language,
+                        exclude_language=exclude_language,
+                        path_filter=path_filter,
+                        exclude_path=exclude_path,
+                        accuracy=accuracy,
+                    ),
+                    extra=get_log_extra("QUERY-MIGRATE-007"),
                 )
 
             # SEMANTIC SEARCH
@@ -1062,9 +1088,14 @@ class SemanticQueryManager:
 
         except Exception as e:
             logger.error(
-                format_error_log("QUERY-MIGRATE-008", "Failed to search repository",
-                                 repository_alias=repository_alias, repo_path=str(repo_path), error=str(e)),
-                extra=get_log_extra("QUERY-MIGRATE-008")
+                format_error_log(
+                    "QUERY-MIGRATE-008",
+                    "Failed to search repository",
+                    repository_alias=repository_alias,
+                    repo_path=str(repo_path),
+                    error=str(e),
+                ),
+                extra=get_log_extra("QUERY-MIGRATE-008"),
             )
             # Re-raise exception to be handled by calling method
             raise
@@ -1452,9 +1483,12 @@ class SemanticQueryManager:
             if not temporal_service.has_temporal_index():
                 # GRACEFUL FALLBACK (Acceptance Criterion 9)
                 logger.warning(
-                    format_error_log("QUERY-MIGRATE-009", "Temporal index not available for repository, falling back to regular search",
-                                     repository_alias=repository_alias),
-                    extra=get_log_extra("QUERY-MIGRATE-009")
+                    format_error_log(
+                        "QUERY-MIGRATE-009",
+                        "Temporal index not available for repository, falling back to regular search",
+                        repository_alias=repository_alias,
+                    ),
+                    extra=get_log_extra("QUERY-MIGRATE-009"),
                 )
                 # Fall back to regular search - return empty list with warning
                 # The warning will be added to query response by caller
@@ -1557,17 +1591,22 @@ class SemanticQueryManager:
         except ValueError as e:
             # Clear error messages for invalid parameters (Acceptance Criterion 10)
             logger.error(
-                format_error_log("QUERY-MIGRATE-010", "Temporal query validation error",
-                                 error=str(e)),
-                extra=get_log_extra("QUERY-MIGRATE-010")
+                format_error_log(
+                    "QUERY-MIGRATE-010", "Temporal query validation error", error=str(e)
+                ),
+                extra=get_log_extra("QUERY-MIGRATE-010"),
             )
             raise ValueError(str(e))
         except Exception as e:
             # Log error and fall back to regular search
             logger.error(
-                format_error_log("QUERY-MIGRATE-011", "Temporal query failed for repository",
-                                 repository_alias=repository_alias, error=str(e)),
-                extra=get_log_extra("QUERY-MIGRATE-011")
+                format_error_log(
+                    "QUERY-MIGRATE-011",
+                    "Temporal query failed for repository",
+                    repository_alias=repository_alias,
+                    error=str(e),
+                ),
+                extra=get_log_extra("QUERY-MIGRATE-011"),
             )
             # Re-raise to let caller handle
             raise SemanticQueryError(f"Temporal query failed: {str(e)}")
@@ -1690,9 +1729,13 @@ class SemanticQueryManager:
             )
         except Exception as e:
             logger.error(
-                format_error_log("QUERY-MIGRATE-012", "FTS search failed for repository",
-                                 repository_alias=repository_alias, error=str(e)),
-                extra=get_log_extra("QUERY-MIGRATE-012")
+                format_error_log(
+                    "QUERY-MIGRATE-012",
+                    "FTS search failed for repository",
+                    repository_alias=repository_alias,
+                    error=str(e),
+                ),
+                extra=get_log_extra("QUERY-MIGRATE-012"),
             )
             raise SemanticQueryError(f"FTS search failed: {str(e)}")
 

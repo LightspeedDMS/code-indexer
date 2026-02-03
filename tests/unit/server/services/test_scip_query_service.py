@@ -808,7 +808,9 @@ class TestFindDefinitionMethod:
             ):
                 service.find_definition("ExactSymbol", exact=True)
 
-            mock_engine.find_definition.assert_called_once_with("ExactSymbol", exact=True)
+            mock_engine.find_definition.assert_called_once_with(
+                "ExactSymbol", exact=True
+            )
 
     def test_find_definition_with_repository_alias_filter(self):
         """Filters SCIP files by repository_alias."""
@@ -1102,8 +1104,12 @@ class TestGetDependentsMethod:
             service = SCIPQueryService(str(golden_repos), None)
             mock_engine = MagicMock()
             mock_engine.get_dependents.return_value = [
-                QueryResult("OrderSvc", "repo", "orders.py", 100, 8, "dep", "call", "c"),
-                QueryResult("Checkout", "repo", "checkout.py", 50, 4, "dep", "call", "c"),
+                QueryResult(
+                    "OrderSvc", "repo", "orders.py", 100, 8, "dep", "call", "c"
+                ),
+                QueryResult(
+                    "Checkout", "repo", "checkout.py", 50, 4, "dep", "call", "c"
+                ),
             ]
 
             with patch(
@@ -1206,9 +1212,7 @@ class TestAnalyzeImpactMethod:
             (scip / "index.scip.db").touch()
 
             service = SCIPQueryService(str(golden_repos), None)
-            mock_result = ImpactAnalysisResult(
-                "Sym", None, 5, [], [], False, 0
-            )
+            mock_result = ImpactAnalysisResult("Sym", None, 5, [], [], False, 0)
 
             with patch(
                 "code_indexer.scip.query.composites.analyze_impact",
@@ -1240,7 +1244,11 @@ class TestTraceCallchainMethod:
             service = SCIPQueryService(str(golden_repos), None)
             mock_engine = MagicMock()
             mock_engine.trace_call_chain.return_value = [
-                CallChain(path=["handleReq", "validate", "sanitize"], length=3, has_cycle=False)
+                CallChain(
+                    path=["handleReq", "validate", "sanitize"],
+                    length=3,
+                    has_cycle=False,
+                )
             ]
 
             with patch(
@@ -1311,7 +1319,9 @@ class TestGetContextMethod:
                         path=Path("user.py"),
                         project="repo",
                         relevance_score=1.0,
-                        symbols=[ContextSymbol("UserService", "def", "def", 10, 0, 1.0)],
+                        symbols=[
+                            ContextSymbol("UserService", "def", "def", 10, 0, 1.0)
+                        ],
                         read_priority=1,
                     )
                 ],
@@ -1390,7 +1400,9 @@ class TestAccessControlForQueryMethods:
                 engine_calls.append(str(scip_file))
                 mock = MagicMock()
                 mock.find_definition.return_value = [
-                    QueryResult("Sym", "accessible-repo", "f.py", 1, 0, "def", None, "c")
+                    QueryResult(
+                        "Sym", "accessible-repo", "f.py", 1, 0, "def", None, "c"
+                    )
                 ]
                 return mock
 

@@ -213,11 +213,13 @@ def _apply_payload_truncation(
                 result_dict["has_more"] = False
         except Exception as e:
             # Log error but don't fail the search
-            logger.warning(format_error_log(
-                "MCP-GENERAL-023",
-                f"Failed to truncate result: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-023",
+                    f"Failed to truncate result: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             # Keep original content on error
             result_dict["cache_handle"] = None
             result_dict["has_more"] = False
@@ -267,11 +269,13 @@ def _apply_fts_payload_truncation(
                     result_dict["snippet_cache_handle"] = None
                     result_dict["snippet_has_more"] = False
             except Exception as e:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-024",
-                    f"Failed to truncate code_snippet: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-024",
+                        f"Failed to truncate code_snippet: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 result_dict["snippet_cache_handle"] = None
                 result_dict["snippet_has_more"] = False
 
@@ -292,11 +296,13 @@ def _apply_fts_payload_truncation(
                     result_dict["match_text_cache_handle"] = None
                     result_dict["match_text_has_more"] = False
             except Exception as e:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-025",
-                    f"Failed to truncate match_text: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-025",
+                        f"Failed to truncate match_text: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 result_dict["match_text_cache_handle"] = None
                 result_dict["match_text_has_more"] = False
 
@@ -338,11 +344,13 @@ def _truncate_regex_field(
             result_dict[f"{field_name}_cache_handle"] = None
             result_dict[f"{field_name}_has_more"] = False
     except Exception as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-026",
-            f"Failed to truncate {field_name}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-026",
+                f"Failed to truncate {field_name}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         result_dict[f"{field_name}_cache_handle"] = None
         result_dict[f"{field_name}_has_more"] = False
 
@@ -421,11 +429,13 @@ def _truncate_field(
             container[f"{field_name}_cache_handle"] = None
             container[f"{field_name}_has_more"] = False
     except Exception as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-027",
-            f"Failed to truncate {log_context}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-027",
+                f"Failed to truncate {log_context}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         container[f"{field_name}_cache_handle"] = None
         container[f"{field_name}_has_more"] = False
 
@@ -533,11 +543,13 @@ def _apply_scip_payload_truncation(
                 result_dict["context_cache_handle"] = None
                 result_dict["context_has_more"] = False
         except Exception as e:
-            logger.warning(format_error_log(
-                "MCP-GENERAL-028",
-                f"Failed to truncate SCIP context: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-028",
+                    f"Failed to truncate SCIP context: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             # Keep original context on error, add metadata
             result_dict["context_cache_handle"] = None
             result_dict["context_has_more"] = False
@@ -730,11 +742,13 @@ def _expand_wildcard_patterns(patterns: List[str]) -> List[str]:
         registry = get_server_global_registry(golden_repos_dir)
         available_repos = [r["alias_name"] for r in registry.list_global_repos()]
     except Exception as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-029",
-            f"Failed to list global repos for wildcard expansion: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-029",
+                f"Failed to list global repos for wildcard expansion: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return patterns
 
     expanded = []
@@ -751,11 +765,13 @@ def _expand_wildcard_patterns(patterns: List[str]) -> List[str]:
                 )
                 expanded.extend(matches)
             else:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-030",
-                    f"Wildcard pattern '{pattern}' matched no repositories",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-030",
+                        f"Wildcard pattern '{pattern}' matched no repositories",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
         else:
             # Keep literal pattern
             expanded.append(pattern)
@@ -855,11 +871,13 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         response = service.search(request)
     except Exception as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-031",
-            f"MultiSearchService failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-031",
+                f"MultiSearchService failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": True,
@@ -1114,9 +1132,7 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 response_results = _apply_fts_payload_truncation(response_results)
             # Story #681: Temporal truncation for temporal queries
             if _is_temporal_query(params):
-                response_results = _apply_temporal_payload_truncation(
-                    response_results
-                )
+                response_results = _apply_temporal_payload_truncation(response_results)
             else:
                 # Story #679: Semantic truncation for content field
                 response_results = _apply_payload_truncation(response_results)
@@ -1174,9 +1190,7 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             search_mode = params.get("search_mode", "semantic")
             if search_mode in ["fts", "hybrid"]:
                 # Story #680: FTS truncation for code_snippet and match_text
-                result["results"] = _apply_fts_payload_truncation(
-                    result["results"]
-                )
+                result["results"] = _apply_fts_payload_truncation(result["results"])
             # Story #681: Temporal truncation for temporal queries
             if _is_temporal_query(params):
                 result["results"] = _apply_temporal_payload_truncation(
@@ -1221,11 +1235,13 @@ def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             for repo in global_repos_data:
                 # Validate required fields exist
                 if "alias_name" not in repo or "repo_name" not in repo:
-                    logger.warning(format_error_log(
-                        "MCP-GENERAL-032",
-                        f"Skipping malformed global repo entry: {repo}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "MCP-GENERAL-032",
+                            f"Skipping malformed global repo entry: {repo}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                     continue
 
                 normalized = {
@@ -1246,12 +1262,14 @@ def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         except Exception as e:
             # Log but don't fail - continue with activated repos only
-            logger.warning(format_error_log(
-                "MCP-GENERAL-033",
-                f"Failed to load global repos from {golden_repos_dir}: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-033",
+                    f"Failed to load global repos from {golden_repos_dir}: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Merge activated and global repos
         all_repos = activated_repos + global_repos
@@ -1471,11 +1489,13 @@ def _omni_list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     errors[repo_alias] = result_data.get("error", "Unknown error")
         except Exception as e:
             errors[repo_alias] = str(e)
-            logger.warning(format_error_log(
-                "MCP-GENERAL-034",
-                f"Omni-list-files failed for {repo_alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-034",
+                    f"Omni-list-files failed for {repo_alias}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
     # Get response_format parameter (default to "flat" for backward compatibility)
     response_format = params.get("response_format", "flat")
@@ -2202,9 +2222,7 @@ def create_user(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e), "user": None})
 
 
-def get_repository_statistics(
-    params: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def get_repository_statistics(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get repository statistics."""
     from pathlib import Path
 
@@ -2314,9 +2332,7 @@ def get_job_details(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def get_all_repositories_status(
-    params: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def get_all_repositories_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get status summary of all repositories."""
     try:
         # Get activated repos status
@@ -2341,11 +2357,13 @@ def get_all_repositories_status(
 
             for repo in global_repos_data:
                 if "alias_name" not in repo or "repo_name" not in repo:
-                    logger.warning(format_error_log(
-                        "MCP-GENERAL-035",
-                        f"Skipping malformed global repo entry: {repo}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "MCP-GENERAL-035",
+                            f"Skipping malformed global repo entry: {repo}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                     continue
 
                 global_status = {
@@ -2360,12 +2378,14 @@ def get_all_repositories_status(
                 }
                 status_summary.append(global_status)
         except Exception as e:
-            logger.warning(format_error_log(
-                "MCP-GENERAL-036",
-                f"Failed to load global repos status: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-036",
+                    f"Failed to load global repos status: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         return _mcp_response(
             {
@@ -2380,9 +2400,7 @@ def get_all_repositories_status(
         )
 
 
-def manage_composite_repository(
-    params: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def manage_composite_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Manage composite repository operations."""
     try:
         operation = params["operation"]
@@ -2510,9 +2528,7 @@ def handle_set_global_config(args: Dict[str, Any], user: User) -> Dict[str, Any]
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_add_golden_repo_index(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_add_golden_repo_index(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for add_golden_repo_index tool (Story #596 AC1, AC3, AC4, AC5)."""
     alias = args.get("alias")
     index_type = args.get("index_type")
@@ -2553,19 +2569,19 @@ def handle_add_golden_repo_index(
         # AC4: Unknown alias, AC3: Invalid type, AC5: Already exists
         return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-037",
-            f"Error adding index to golden repo: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-037",
+                f"Error adding index to golden repo: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {"success": False, "error": f"Failed to add index: {str(e)}"}
         )
 
 
-def handle_get_golden_repo_indexes(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_get_golden_repo_indexes(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for get_golden_repo_indexes tool (Story #596 AC2, AC4)."""
     alias = args.get("alias")
 
@@ -2592,11 +2608,13 @@ def handle_get_golden_repo_indexes(
         # AC4: Unknown alias
         return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-038",
-            f"Error getting golden repo indexes: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-038",
+                f"Error getting golden repo indexes: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {"success": False, "error": f"Failed to get indexes: {str(e)}"}
         )
@@ -2652,11 +2670,13 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
                     errors[repo_alias] = result_data.get("error", "Unknown error")
         except Exception as e:
             errors[repo_alias] = str(e)
-            logger.warning(format_error_log(
-                "MCP-GENERAL-039",
-                f"Omni-regex failed for {repo_alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-039",
+                    f"Omni-regex failed for {repo_alias}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
     elapsed_ms = int((time.time() - start_time) * 1000)
 
@@ -2771,11 +2791,13 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
         )
 
     except TimeoutError as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-040",
-            f"Search timeout in regex_search: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-040",
+                f"Search timeout in regex_search: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         # Format timeout error response
         error_formatter = SearchErrorFormatter()
         config_service = get_config_service()
@@ -2850,11 +2872,13 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             auto_watch_manager.start_watch(repo_path)
         except Exception as e:
             # Log but don't fail - auto-watch is enhancement, not critical
-            logger.warning(format_error_log(
-                "MCP-GENERAL-041",
-                f"Failed to start auto-watch for {repository_alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-041",
+                    f"Failed to start auto-watch for {repository_alias}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Call file CRUD service
         result = file_crud_service.create_file(
@@ -2867,32 +2891,40 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(result)
 
     except FileExistsError as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-042",
-            f"File creation failed - file already exists: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-042",
+                f"File creation failed - file already exists: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
     except PermissionError as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-043",
-            f"File creation failed - permission denied: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-043",
+                f"File creation failed - permission denied: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
     except CRUDOperationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-044",
-            f"File creation failed - CRUD operation error: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-044",
+                f"File creation failed - CRUD operation error: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-045",
-            f"File creation failed - invalid parameters: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-045",
+                f"File creation failed - invalid parameters: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
         logger.exception(
@@ -2966,11 +2998,13 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             auto_watch_manager.start_watch(repo_path)
         except Exception as e:
             # Log but don't fail - auto-watch is enhancement, not critical
-            logger.warning(format_error_log(
-                "MCP-GENERAL-046",
-                f"Failed to start auto-watch for {repository_alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-046",
+                    f"Failed to start auto-watch for {repository_alias}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Call file CRUD service
         result = file_crud_service.edit_file(
@@ -2986,39 +3020,49 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(result)
 
     except HashMismatchError as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-047",
-            f"File edit failed - hash mismatch (concurrent modification): {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-047",
+                f"File edit failed - hash mismatch (concurrent modification): {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-048",
-            f"File edit failed - file not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-048",
+                f"File edit failed - file not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-049",
-            f"File edit failed - validation error: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-049",
+                f"File edit failed - validation error: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
     except PermissionError as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-050",
-            f"File edit failed - permission denied: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-050",
+                f"File edit failed - permission denied: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
     except CRUDOperationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-051",
-            f"File edit failed - CRUD operation error: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-051",
+                f"File edit failed - CRUD operation error: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
         logger.exception(
@@ -3076,11 +3120,13 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             auto_watch_manager.start_watch(repo_path)
         except Exception as e:
             # Log but don't fail - auto-watch is enhancement, not critical
-            logger.warning(format_error_log(
-                "MCP-GENERAL-052",
-                f"Failed to start auto-watch for {repository_alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-052",
+                    f"Failed to start auto-watch for {repository_alias}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Call file CRUD service
         result = file_crud_service.delete_file(
@@ -3093,39 +3139,49 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(result)
 
     except HashMismatchError as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-053",
-            f"File deletion failed - hash mismatch (safety check): {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-053",
+                f"File deletion failed - hash mismatch (safety check): {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-054",
-            f"File deletion failed - file not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-054",
+                f"File deletion failed - file not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
     except PermissionError as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-055",
-            f"File deletion failed - permission denied: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-055",
+                f"File deletion failed - permission denied: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
     except CRUDOperationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-056",
-            f"File deletion failed - CRUD operation error: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-056",
+                f"File deletion failed - CRUD operation error: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-057",
-            f"File deletion failed - invalid parameters: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-057",
+                f"File deletion failed - invalid parameters: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
         logger.exception(
@@ -3224,11 +3280,13 @@ def _omni_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                     errors[repo_alias] = result_data.get("error", "Unknown error")
         except Exception as e:
             errors[repo_alias] = str(e)
-            logger.warning(format_error_log(
-                "MCP-GENERAL-058",
-                f"Omni-git-log failed for {repo_alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-058",
+                    f"Omni-git-log failed for {repo_alias}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
     # Sort by date descending and apply limit
     all_commits.sort(key=lambda x: x.get("date", ""), reverse=True)
@@ -3457,9 +3515,7 @@ def handle_git_show_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_git_file_at_revision(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_git_file_at_revision(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_file_at_revision tool - get file contents at specific revision."""
     from pathlib import Path
     from code_indexer.global_repos.git_operations import GitOperationsService
@@ -3961,11 +4017,13 @@ def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]
                     errors[repo_alias] = result_data.get("error", "Unknown error")
         except Exception as e:
             errors[repo_alias] = str(e)
-            logger.warning(format_error_log(
-                "MCP-GENERAL-059",
-                f"Omni-git-search failed for {repo_alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-059",
+                    f"Omni-git-search failed for {repo_alias}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
     elapsed_ms = int((time.time() - start_time) * 1000)
 
@@ -4501,9 +4559,7 @@ def handle_ssh_key_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 HANDLER_REGISTRY["cidx_ssh_key_delete"] = handle_ssh_key_delete
 
 
-def handle_ssh_key_show_public(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_ssh_key_show_public(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Get the public key content for copy/paste.
 
@@ -4545,9 +4601,7 @@ def handle_ssh_key_show_public(
 HANDLER_REGISTRY["cidx_ssh_key_show_public"] = handle_ssh_key_show_public
 
 
-def handle_ssh_key_assign_host(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_ssh_key_assign_host(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Assign a host to an SSH key.
 
@@ -5344,11 +5398,13 @@ def trigger_reindex(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     except ValueError as e:
         elapsed_ms = int((time.time() - start_time) * 1000)
-        logger.warning(format_error_log(
-            "MCP-GENERAL-060",
-            f"trigger_reindex validation error in {elapsed_ms}ms: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-060",
+                f"trigger_reindex validation error in {elapsed_ms}ms: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -5357,11 +5413,13 @@ def trigger_reindex(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
     except FileNotFoundError as e:
         elapsed_ms = int((time.time() - start_time) * 1000)
-        logger.warning(format_error_log(
-            "MCP-GENERAL-061",
-            f"trigger_reindex repo not found in {elapsed_ms}ms: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-061",
+                f"trigger_reindex repo not found in {elapsed_ms}ms: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -5437,11 +5495,13 @@ def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     except FileNotFoundError as e:
         elapsed_ms = int((time.time() - start_time) * 1000)
-        logger.warning(format_error_log(
-            "MCP-GENERAL-062",
-            f"get_index_status repo not found in {elapsed_ms}ms: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-062",
+                f"get_index_status repo not found in {elapsed_ms}ms: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -5494,10 +5554,13 @@ def git_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(result)
 
     except GitCommandError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-063",
-            f"git_status failed: {e}", extra={"correlation_id": get_correlation_id()}
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-063",
+                f"git_status failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -5541,10 +5604,13 @@ def git_stage(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(result)
 
     except GitCommandError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-064",
-            f"git_stage failed: {e}", extra={"correlation_id": get_correlation_id()}
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-064",
+                f"git_stage failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -5588,10 +5654,13 @@ def git_unstage(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(result)
 
     except GitCommandError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-065",
-            f"git_unstage failed: {e}", extra={"correlation_id": get_correlation_id()}
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-065",
+                f"git_unstage failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -5641,10 +5710,13 @@ def git_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(result)
 
     except GitCommandError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-066",
-            f"git_commit failed: {e}", extra={"correlation_id": get_correlation_id()}
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-066",
+                f"git_commit failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -5687,10 +5759,13 @@ def git_push(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(result)
 
     except GitCommandError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-067",
-            f"git_push failed: {e}", extra={"correlation_id": get_correlation_id()}
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-067",
+                f"git_push failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -5731,10 +5806,13 @@ def git_pull(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(result)
 
     except GitCommandError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-068",
-            f"git_pull failed: {e}", extra={"correlation_id": get_correlation_id()}
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-068",
+                f"git_pull failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -5771,10 +5849,13 @@ def git_fetch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(result)
 
     except GitCommandError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-069",
-            f"git_fetch failed: {e}", extra={"correlation_id": get_correlation_id()}
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-069",
+                f"git_fetch failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -5847,10 +5928,13 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
     except GitCommandError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-070",
-            f"git_reset failed: {e}", extra={"correlation_id": get_correlation_id()}
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-070",
+                f"git_reset failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -5918,10 +6002,13 @@ def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
     except GitCommandError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-071",
-            f"git_clean failed: {e}", extra={"correlation_id": get_correlation_id()}
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-071",
+                f"git_clean failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -5959,11 +6046,13 @@ def git_merge_abort(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(result)
 
     except GitCommandError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-072",
-            f"git_merge_abort failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-072",
+                f"git_merge_abort failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -6007,11 +6096,13 @@ def git_checkout_file(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(result)
 
     except GitCommandError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-073",
-            f"git_checkout_file failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-073",
+                f"git_checkout_file failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -6050,11 +6141,13 @@ def git_branch_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(result)
 
     except GitCommandError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-074",
-            f"git_branch_list failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-074",
+                f"git_branch_list failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -6101,11 +6194,13 @@ def git_branch_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(result)
 
     except GitCommandError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-075",
-            f"git_branch_create failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-075",
+                f"git_branch_create failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -6152,11 +6247,13 @@ def git_branch_switch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(result)
 
     except GitCommandError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-076",
-            f"git_branch_switch failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-076",
+                f"git_branch_switch failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -6230,11 +6327,13 @@ def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
     except GitCommandError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-077",
-            f"git_branch_delete failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-077",
+                f"git_branch_delete failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -6298,10 +6397,13 @@ def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(result)
 
     except GitCommandError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-078",
-            f"git_diff failed: {e}", extra={"correlation_id": get_correlation_id()}
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-078",
+                f"git_diff failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -6349,10 +6451,13 @@ def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(result)
 
     except GitCommandError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-079",
-            f"git_log failed: {e}", extra={"correlation_id": get_correlation_id()}
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-079",
+                f"git_log failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -6750,11 +6855,13 @@ def get_scip_audit_log(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     except Exception as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-080",
-            f"Error retrieving SCIP audit log: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-080",
+                f"Error retrieving SCIP audit log: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -6772,9 +6879,7 @@ HANDLER_REGISTRY["scip_context"] = scip_context
 
 
 # Story #633: GitHub Actions Monitoring Handlers
-def handle_gh_actions_list_runs(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_gh_actions_list_runs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gh_actions_list_runs tool.
 
@@ -6824,9 +6929,7 @@ def handle_gh_actions_list_runs(
 
         # Create client and list runs
         client = GitHubActionsClient(token)
-        runs = client.list_runs(
-            repository=repository, branch=branch, status=status
-        )
+        runs = client.list_runs(repository=repository, branch=branch, status=status)
 
         return _mcp_response(
             {
@@ -6844,11 +6947,13 @@ def handle_gh_actions_list_runs(
         )
 
     except GitHubAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-081",
-            f"GitHub authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-081",
+                f"GitHub authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -6857,11 +6962,13 @@ def handle_gh_actions_list_runs(
             }
         )
     except GitHubRepositoryNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-082",
-            f"GitHub repository not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-082",
+                f"GitHub repository not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -6938,11 +7045,13 @@ def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[str, Any
         )
 
     except GitHubAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-083",
-            f"GitHub authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-083",
+                f"GitHub authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -6951,11 +7060,13 @@ def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[str, Any
             }
         )
     except GitHubRepositoryNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-084",
-            f"GitHub repository not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-084",
+                f"GitHub repository not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -6971,9 +7082,7 @@ def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[str, Any
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_gh_actions_search_logs(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_gh_actions_search_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gh_actions_search_logs tool.
 
@@ -7047,11 +7156,13 @@ def handle_gh_actions_search_logs(
         )
 
     except GitHubAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-085",
-            f"GitHub authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-085",
+                f"GitHub authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7060,11 +7171,13 @@ def handle_gh_actions_search_logs(
             }
         )
     except GitHubRepositoryNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-086",
-            f"GitHub repository not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-086",
+                f"GitHub repository not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7080,9 +7193,7 @@ def handle_gh_actions_search_logs(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_gh_actions_get_job_logs(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_gh_actions_get_job_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gh_actions_get_job_logs tool.
 
@@ -7144,11 +7255,13 @@ def handle_gh_actions_get_job_logs(
         )
 
     except GitHubAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-087",
-            f"GitHub authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-087",
+                f"GitHub authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7157,11 +7270,13 @@ def handle_gh_actions_get_job_logs(
             }
         )
     except GitHubRepositoryNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-088",
-            f"GitHub repository not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-088",
+                f"GitHub repository not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7177,9 +7292,7 @@ def handle_gh_actions_get_job_logs(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_gh_actions_retry_run(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_gh_actions_retry_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gh_actions_retry_run tool.
 
@@ -7241,11 +7354,13 @@ def handle_gh_actions_retry_run(
         )
 
     except GitHubAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-089",
-            f"GitHub authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-089",
+                f"GitHub authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7254,11 +7369,13 @@ def handle_gh_actions_retry_run(
             }
         )
     except GitHubRepositoryNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-090",
-            f"GitHub repository not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-090",
+                f"GitHub repository not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7274,9 +7391,7 @@ def handle_gh_actions_retry_run(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_gh_actions_cancel_run(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_gh_actions_cancel_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gh_actions_cancel_run tool.
 
@@ -7338,11 +7453,13 @@ def handle_gh_actions_cancel_run(
         )
 
     except GitHubAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-091",
-            f"GitHub authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-091",
+                f"GitHub authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7351,11 +7468,13 @@ def handle_gh_actions_cancel_run(
             }
         )
     except GitHubRepositoryNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-092",
-            f"GitHub repository not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-092",
+                f"GitHub repository not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7385,9 +7504,7 @@ HANDLER_REGISTRY["gh_actions_cancel_run"] = handle_gh_actions_cancel_run
 # ============================================================================
 
 
-def handle_gitlab_ci_list_pipelines(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_gitlab_ci_list_pipelines(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gitlab_ci_list_pipelines tool.
 
@@ -7437,9 +7554,7 @@ def handle_gitlab_ci_list_pipelines(
 
         # Create client and list pipelines (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        pipelines = client.list_pipelines(
-            project_id=project_id, ref=ref, status=status
-        )
+        pipelines = client.list_pipelines(project_id=project_id, ref=ref, status=status)
 
         return _mcp_response(
             {
@@ -7457,11 +7572,13 @@ def handle_gitlab_ci_list_pipelines(
         )
 
     except GitLabAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-093",
-            f"GitLab authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-093",
+                f"GitLab authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7470,11 +7587,13 @@ def handle_gitlab_ci_list_pipelines(
             }
         )
     except GitLabProjectNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-094",
-            f"GitLab project not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-094",
+                f"GitLab project not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7490,9 +7609,7 @@ def handle_gitlab_ci_list_pipelines(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_gitlab_ci_get_pipeline(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_gitlab_ci_get_pipeline(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gitlab_ci_get_pipeline tool.
 
@@ -7555,11 +7672,13 @@ def handle_gitlab_ci_get_pipeline(
         )
 
     except GitLabAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-095",
-            f"GitLab authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-095",
+                f"GitLab authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7568,11 +7687,13 @@ def handle_gitlab_ci_get_pipeline(
             }
         )
     except GitLabProjectNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-096",
-            f"GitLab project not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-096",
+                f"GitLab project not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7588,9 +7709,7 @@ def handle_gitlab_ci_get_pipeline(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_gitlab_ci_search_logs(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_gitlab_ci_search_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gitlab_ci_search_logs tool.
 
@@ -7668,11 +7787,13 @@ def handle_gitlab_ci_search_logs(
         )
 
     except GitLabAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-097",
-            f"GitLab authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-097",
+                f"GitLab authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7681,11 +7802,13 @@ def handle_gitlab_ci_search_logs(
             }
         )
     except GitLabProjectNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-098",
-            f"GitLab project not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-098",
+                f"GitLab project not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7707,9 +7830,7 @@ HANDLER_REGISTRY["gitlab_ci_get_pipeline"] = handle_gitlab_ci_get_pipeline
 HANDLER_REGISTRY["gitlab_ci_search_logs"] = handle_gitlab_ci_search_logs
 
 
-def handle_gitlab_ci_get_job_logs(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_gitlab_ci_get_job_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gitlab_ci_get_job_logs tool.
 
@@ -7770,11 +7891,13 @@ def handle_gitlab_ci_get_job_logs(
         )
 
     except GitLabAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-099",
-            f"GitLab authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-099",
+                f"GitLab authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7783,11 +7906,13 @@ def handle_gitlab_ci_get_job_logs(
             }
         )
     except GitLabProjectNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-100",
-            f"GitLab project not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-100",
+                f"GitLab project not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7803,9 +7928,7 @@ def handle_gitlab_ci_get_job_logs(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_gitlab_ci_retry_pipeline(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_gitlab_ci_retry_pipeline(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gitlab_ci_retry_pipeline tool.
 
@@ -7853,9 +7976,7 @@ def handle_gitlab_ci_retry_pipeline(
 
         # Create client and retry pipeline (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        result = client.retry_pipeline(
-            project_id=project_id, pipeline_id=pipeline_id
-        )
+        result = client.retry_pipeline(project_id=project_id, pipeline_id=pipeline_id)
 
         return _mcp_response(
             {
@@ -7869,11 +7990,13 @@ def handle_gitlab_ci_retry_pipeline(
         )
 
     except GitLabAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-101",
-            f"GitLab authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-101",
+                f"GitLab authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7882,11 +8005,13 @@ def handle_gitlab_ci_retry_pipeline(
             }
         )
     except GitLabProjectNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-102",
-            f"GitLab project not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-102",
+                f"GitLab project not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7952,9 +8077,7 @@ def handle_gitlab_ci_cancel_pipeline(
 
         # Create client and cancel pipeline (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        result = client.cancel_pipeline(
-            project_id=project_id, pipeline_id=pipeline_id
-        )
+        result = client.cancel_pipeline(project_id=project_id, pipeline_id=pipeline_id)
 
         return _mcp_response(
             {
@@ -7968,11 +8091,13 @@ def handle_gitlab_ci_cancel_pipeline(
         )
 
     except GitLabAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-103",
-            f"GitLab authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-103",
+                f"GitLab authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -7981,11 +8106,13 @@ def handle_gitlab_ci_cancel_pipeline(
             }
         )
     except GitLabProjectNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-104",
-            f"GitLab project not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-104",
+                f"GitLab project not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -8012,9 +8139,7 @@ HANDLER_REGISTRY["gitlab_ci_cancel_pipeline"] = handle_gitlab_ci_cancel_pipeline
 # =============================================================================
 
 
-def handle_github_actions_list_runs(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_github_actions_list_runs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for github_actions_list_runs tool.
 
@@ -8075,9 +8200,7 @@ def handle_github_actions_list_runs(
 
         # Create client and list runs (CRITICAL: keyword)
         client = GitHubActionsClient(token)
-        runs = client.list_runs(
-            repository=repository, branch=branch, status=status
-        )
+        runs = client.list_runs(repository=repository, branch=branch, status=status)
 
         # Apply limit to results
         if limit:
@@ -8101,11 +8224,13 @@ def handle_github_actions_list_runs(
         )
 
     except GitHubAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-105",
-            f"GitHub authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-105",
+                f"GitHub authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -8114,11 +8239,13 @@ def handle_github_actions_list_runs(
             }
         )
     except GitHubRepositoryNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-106",
-            f"GitHub repository not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-106",
+                f"GitHub repository not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -8134,9 +8261,7 @@ def handle_github_actions_list_runs(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_github_actions_get_run(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_github_actions_get_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for github_actions_get_run tool.
 
@@ -8206,11 +8331,13 @@ def handle_github_actions_get_run(
         )
 
     except GitHubAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-107",
-            f"GitHub authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-107",
+                f"GitHub authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -8219,11 +8346,13 @@ def handle_github_actions_get_run(
             }
         )
     except GitHubRepositoryNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-108",
-            f"GitHub repository not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-108",
+                f"GitHub repository not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -8322,11 +8451,13 @@ def handle_github_actions_search_logs(
         )
 
     except GitHubAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-109",
-            f"GitHub authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-109",
+                f"GitHub authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -8335,11 +8466,13 @@ def handle_github_actions_search_logs(
             }
         )
     except GitHubRepositoryNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-110",
-            f"GitHub repository not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-110",
+                f"GitHub repository not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -8428,11 +8561,13 @@ def handle_github_actions_get_job_logs(
         )
 
     except GitHubAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-111",
-            f"GitHub authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-111",
+                f"GitHub authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -8441,11 +8576,13 @@ def handle_github_actions_get_job_logs(
             }
         )
     except GitHubRepositoryNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-112",
-            f"GitHub repository not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-112",
+                f"GitHub repository not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -8461,9 +8598,7 @@ def handle_github_actions_get_job_logs(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_github_actions_retry_run(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_github_actions_retry_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for github_actions_retry_run tool.
 
@@ -8535,11 +8670,13 @@ def handle_github_actions_retry_run(
         )
 
     except GitHubAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-113",
-            f"GitHub authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-113",
+                f"GitHub authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -8548,11 +8685,13 @@ def handle_github_actions_retry_run(
             }
         )
     except GitHubRepositoryNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-114",
-            f"GitHub repository not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-114",
+                f"GitHub repository not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -8642,11 +8781,13 @@ def handle_github_actions_cancel_run(
         )
 
     except GitHubAuthenticationError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-115",
-            f"GitHub authentication failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-115",
+                f"GitHub authentication failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -8655,11 +8796,13 @@ def handle_github_actions_cancel_run(
             }
         )
     except GitHubRepositoryNotFoundError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-116",
-            f"GitHub repository not found: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-116",
+                f"GitHub repository not found: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -8741,11 +8884,13 @@ def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any
             }
         )
     except CacheNotFoundError as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-117",
-            f"Cache handle not found or expired: {handle}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-117",
+                f"Cache handle not found or expired: {handle}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {
                 "success": False,
@@ -8842,11 +8987,13 @@ def handle_set_session_impersonation(
         return _mcp_response({"status": "ok", "impersonating": username})
 
     except Exception as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-118",
-            f"Error in set_session_impersonation: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-118",
+                f"Error in set_session_impersonation: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"status": "error", "error": str(e)})
 
 
@@ -8884,10 +9031,9 @@ def _get_delegation_function_repo_path() -> Optional[Path]:
         # Get the actual path from golden repo manager
         golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
         if not golden_repo_manager:
-            logger.warning(format_error_log(
-                "MCP-GENERAL-119",
-                "Golden repo manager not available"
-            ))
+            logger.warning(
+                format_error_log("MCP-GENERAL-119", "Golden repo manager not available")
+            )
             return None
 
         # Try to get the repo path
@@ -8895,17 +9041,20 @@ def _get_delegation_function_repo_path() -> Optional[Path]:
             repo_path = golden_repo_manager.get_actual_repo_path(function_repo_alias)
             return Path(repo_path) if repo_path else None
         except Exception as e:
-            logger.warning(format_error_log(
-                "MCP-GENERAL-120",
-                f"Function repository '{function_repo_alias}' not found: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-120",
+                    f"Function repository '{function_repo_alias}' not found: {e}",
+                )
+            )
             return None
 
     except Exception as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-121",
-            f"Error getting delegation function repo path: {e}"
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-121", f"Error getting delegation function repo path: {e}"
+            )
+        )
         return None
 
 
@@ -8922,10 +9071,9 @@ def _get_user_groups(user: User) -> set:
     try:
         group_manager = getattr(app_module.app.state, "group_manager", None)
         if not group_manager:
-            logger.warning(format_error_log(
-                "MCP-GENERAL-122",
-                "Group manager not available"
-            ))
+            logger.warning(
+                format_error_log("MCP-GENERAL-122", "Group manager not available")
+            )
             return set()
 
         group = group_manager.get_user_group(user.username)
@@ -8934,10 +9082,11 @@ def _get_user_groups(user: User) -> set:
         return set()
 
     except Exception as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-123",
-            f"Error getting user groups for {user.username}: {e}"
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-123", f"Error getting user groups for {user.username}: {e}"
+            )
+        )
         return set()
 
 
@@ -9025,10 +9174,9 @@ def _get_delegation_config():
         delegation_manager = config_service.get_delegation_manager()
         return delegation_manager.load_config()
     except Exception as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-124",
-            f"Error getting delegation config: {e}"
-        ))
+        logger.warning(
+            format_error_log("MCP-GENERAL-124", f"Error getting delegation config: {e}")
+        )
         return None
 
 
@@ -9099,10 +9247,13 @@ def _get_cidx_callback_base_url() -> Optional[str]:
             return delegation_config.cidx_callback_url
         return None
     except Exception as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-125",
-            "Failed to get CIDX callback URL from delegation config: %s", e
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-125",
+                "Failed to get CIDX callback URL from delegation config: %s",
+                e,
+            )
+        )
         return None
 
 
@@ -9219,11 +9370,13 @@ async def handle_execute_delegation_function(
                     )
                 except Exception as callback_err:
                     # Log but don't fail - callback registration is best-effort
-                    logger.warning(format_error_log(
-                        "MCP-GENERAL-126",
-                        f"Failed to register callback for job {job_id}: {callback_err}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "MCP-GENERAL-126",
+                            f"Failed to register callback for job {job_id}: {callback_err}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
 
             # Story #720: Register job in tracker for callback-based completion
             from ..services.delegation_job_tracker import DelegationJobTracker
@@ -9236,10 +9389,13 @@ async def handle_execute_delegation_function(
             return _mcp_response({"success": True, "job_id": job_id})
 
     except ClaudeServerError as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-127",
-            f"Claude Server error: {e}", extra={"correlation_id": get_correlation_id()}
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-127",
+                f"Claude Server error: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": f"Claude Server error: {e}"})
     except Exception as e:
         logger.exception(
@@ -9355,11 +9511,13 @@ async def handle_poll_delegation_job(
             )
 
     except Exception as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-128",
-            f"Error waiting for delegation job {job_id}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-128",
+                f"Error waiting for delegation job {job_id}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response(
             {"success": False, "error": f"Error waiting for job completion: {str(e)}"}
         )
@@ -9440,11 +9598,13 @@ def handle_list_groups(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
         return _mcp_response({"success": True, "groups": result_groups})
     except Exception as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-129",
-            f"Error in handle_list_groups: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-129",
+                f"Error in handle_list_groups: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -9480,11 +9640,13 @@ def handle_create_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         except ValueError as e:
             return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-130",
-            f"Error in handle_create_group: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-130",
+                f"Error in handle_create_group: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -9514,11 +9676,13 @@ def handle_get_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-131",
-            f"Error in handle_get_group: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-131",
+                f"Error in handle_get_group: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -9556,11 +9720,13 @@ def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         except ValueError as e:
             return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-132",
-            f"Error in handle_update_group: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-132",
+                f"Error in handle_update_group: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -9600,17 +9766,17 @@ def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         except (DefaultGroupCannotBeDeletedError, GroupHasUsersError) as e:
             return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-133",
-            f"Error in handle_delete_group: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-133",
+                f"Error in handle_delete_group: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_add_member_to_group(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_add_member_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Assign a user to a group."""
     try:
         group_manager = _get_group_manager()
@@ -9641,17 +9807,17 @@ def handle_add_member_to_group(
         )
         return _mcp_response({"success": True})
     except Exception as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-134",
-            f"Error in handle_add_member_to_group: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-134",
+                f"Error in handle_add_member_to_group: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_remove_member_from_group(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_remove_member_from_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Remove a user from a group."""
     try:
         group_manager = _get_group_manager()
@@ -9680,11 +9846,13 @@ def handle_remove_member_from_group(
         )
         return _mcp_response({"success": True})
     except Exception as e:
-        logger.error(format_error_log(
-            "MCP-GENERAL-135",
-            f"Error in handle_remove_member_from_group: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-135",
+                f"Error in handle_remove_member_from_group: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -9722,17 +9890,17 @@ def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any
                 )
         return _mcp_response({"success": True, "added_count": added_count})
     except Exception as e:
-        logger.error(format_error_log(
-            "MCP-TOOL-042",
-            f"Error in handle_add_repos_to_group: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "MCP-TOOL-042",
+                f"Error in handle_add_repos_to_group: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_remove_repo_from_group(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_remove_repo_from_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Revoke a group's access to a single repository."""
     from ..services.group_access_manager import CidxMetaCannotBeRevokedError
 
@@ -9779,11 +9947,13 @@ def handle_remove_repo_from_group(
                 }
             )
     except Exception as e:
-        logger.error(format_error_log(
-            "QUERY-GENERAL-001",
-            f"Error in handle_remove_repo_from_group: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "QUERY-GENERAL-001",
+                f"Error in handle_remove_repo_from_group: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -9831,11 +10001,13 @@ def handle_bulk_remove_repos_from_group(
                 continue
         return _mcp_response({"success": True, "removed_count": removed_count})
     except Exception as e:
-        logger.error(format_error_log(
-            "QUERY-GENERAL-002",
-            f"Error in handle_bulk_remove_repos_from_group: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "QUERY-GENERAL-002",
+                f"Error in handle_bulk_remove_repos_from_group: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -9876,11 +10048,13 @@ def handle_list_api_keys(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "QUERY-GENERAL-003",
-            f"Error in handle_list_api_keys: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "QUERY-GENERAL-003",
+                f"Error in handle_list_api_keys: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -9901,11 +10075,13 @@ def handle_create_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "QUERY-GENERAL-004",
-            f"Error in handle_create_api_key: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "QUERY-GENERAL-004",
+                f"Error in handle_create_api_key: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -9924,11 +10100,13 @@ def handle_delete_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         result = app_module.user_manager.delete_api_key(user.username, key_id)
         return _mcp_response({"success": result})
     except Exception as e:
-        logger.error(format_error_log(
-            "QUERY-GENERAL-005",
-            f"Error in handle_delete_api_key: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "QUERY-GENERAL-005",
+                f"Error in handle_delete_api_key: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -9943,9 +10121,7 @@ HANDLER_REGISTRY["delete_api_key"] = handle_delete_api_key
 # =============================================================================
 
 
-def handle_list_mcp_credentials(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_list_mcp_credentials(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List all MCP credentials for the authenticated user."""
     try:
         credentials = dependencies.mcp_credential_manager.get_credentials(user.username)
@@ -9963,17 +10139,17 @@ def handle_list_mcp_credentials(
             }
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "QUERY-GENERAL-006",
-            f"Error in handle_list_mcp_credentials: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "QUERY-GENERAL-006",
+                f"Error in handle_list_mcp_credentials: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_create_mcp_credential(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_create_mcp_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Create a new MCP credential for the authenticated user."""
     try:
         description = args.get("description", "")
@@ -9991,17 +10167,17 @@ def handle_create_mcp_credential(
             }
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "QUERY-GENERAL-007",
-            f"Error in handle_create_mcp_credential: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "QUERY-GENERAL-007",
+                f"Error in handle_create_mcp_credential: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_delete_mcp_credential(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_delete_mcp_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Delete an MCP credential belonging to the authenticated user."""
     try:
         credential_id = args.get("credential_id", "")
@@ -10018,11 +10194,13 @@ def handle_delete_mcp_credential(
         )
         return _mcp_response({"success": result})
     except Exception as e:
-        logger.error(format_error_log(
-            "REPO-GENERAL-001",
-            f"Error in handle_delete_mcp_credential: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "REPO-GENERAL-001",
+                f"Error in handle_delete_mcp_credential: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -10066,11 +10244,13 @@ def handle_admin_list_user_mcp_credentials(
             }
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "REPO-GENERAL-002",
-            f"Error in handle_admin_list_user_mcp_credentials: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "REPO-GENERAL-002",
+                f"Error in handle_admin_list_user_mcp_credentials: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -10103,11 +10283,13 @@ def handle_admin_create_user_mcp_credential(
             }
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "REPO-GENERAL-003",
-            f"Error in handle_admin_create_user_mcp_credential: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "REPO-GENERAL-003",
+                f"Error in handle_admin_create_user_mcp_credential: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -10153,11 +10335,13 @@ def handle_admin_delete_user_mcp_credential(
         )
         return _mcp_response({"success": result})
     except Exception as e:
-        logger.error(format_error_log(
-            "REPO-GENERAL-004",
-            f"Error in handle_admin_delete_user_mcp_credential: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "REPO-GENERAL-004",
+                f"Error in handle_admin_delete_user_mcp_credential: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -10190,11 +10374,13 @@ def handle_admin_list_all_mcp_credentials(
             }
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "REPO-GENERAL-005",
-            f"Error in handle_admin_list_all_mcp_credentials: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "REPO-GENERAL-005",
+                f"Error in handle_admin_list_all_mcp_credentials: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -10290,17 +10476,17 @@ def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": True, "entries": filtered, "total": len(filtered)}
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "REPO-GENERAL-006",
-            f"Error in handle_query_audit_logs: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "REPO-GENERAL-006",
+                f"Error in handle_query_audit_logs: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_enter_maintenance_mode(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_enter_maintenance_mode(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Enter server maintenance mode (admin only)."""
     try:
         if user.role != UserRole.ADMIN:
@@ -10321,17 +10507,17 @@ def handle_enter_maintenance_mode(
             result["custom_message"] = args["message"]
         return _mcp_response({"success": True, **result})
     except Exception as e:
-        logger.error(format_error_log(
-            "REPO-GENERAL-007",
-            f"Error in handle_enter_maintenance_mode: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "REPO-GENERAL-007",
+                f"Error in handle_enter_maintenance_mode: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_exit_maintenance_mode(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_exit_maintenance_mode(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Exit server maintenance mode (admin only)."""
     try:
         if user.role != UserRole.ADMIN:
@@ -10350,11 +10536,13 @@ def handle_exit_maintenance_mode(
         result = state.exit_maintenance_mode()
         return _mcp_response({"success": True, **result})
     except Exception as e:
-        logger.error(format_error_log(
-            "REPO-GENERAL-008",
-            f"Error in handle_exit_maintenance_mode: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "REPO-GENERAL-008",
+                f"Error in handle_exit_maintenance_mode: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -10363,9 +10551,7 @@ HANDLER_REGISTRY["enter_maintenance_mode"] = handle_enter_maintenance_mode
 HANDLER_REGISTRY["exit_maintenance_mode"] = handle_exit_maintenance_mode
 
 
-def handle_get_maintenance_status(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_get_maintenance_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get current server maintenance mode status (any authenticated user)."""
     try:
         from code_indexer.server.services.maintenance_service import (
@@ -10386,11 +10572,13 @@ def handle_get_maintenance_status(
             }
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "REPO-GENERAL-009",
-            f"Error in handle_get_maintenance_status: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "REPO-GENERAL-009",
+                f"Error in handle_get_maintenance_status: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -10433,17 +10621,17 @@ def handle_scip_pr_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": True, "history": history, "total": len(history)}
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "REPO-GENERAL-010",
-            f"Error in handle_scip_pr_history: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "REPO-GENERAL-010",
+                f"Error in handle_scip_pr_history: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_scip_cleanup_history(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_scip_cleanup_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get SCIP workspace cleanup history (admin only)."""
     try:
         if user.role != UserRole.ADMIN:
@@ -10476,11 +10664,13 @@ def handle_scip_cleanup_history(
             {"success": True, "history": history, "total": len(history)}
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "REPO-GENERAL-011",
-            f"Error in handle_scip_cleanup_history: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "REPO-GENERAL-011",
+                f"Error in handle_scip_cleanup_history: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
@@ -10516,9 +10706,7 @@ def _execute_workspace_cleanup() -> Dict[str, Any]:
     return {"message": "Workspace cleanup service not available"}
 
 
-def handle_scip_cleanup_workspaces(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_scip_cleanup_workspaces(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Trigger SCIP workspace cleanup job (admin only)."""
     global _cleanup_job_state
     try:
@@ -10550,11 +10738,13 @@ def handle_scip_cleanup_workspaces(
             _cleanup_job_state["last_result"] = _execute_workspace_cleanup()
             _cleanup_job_state["progress"] = "completed"
         except Exception as cleanup_error:
-            logger.error(format_error_log(
-                "REPO-GENERAL-012",
-                f"Workspace cleanup failed: {cleanup_error}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-012",
+                    f"Workspace cleanup failed: {cleanup_error}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             _cleanup_job_state["progress"] = f"failed: {str(cleanup_error)}"
         finally:
             _cleanup_job_state["running"] = False
@@ -10568,17 +10758,17 @@ def handle_scip_cleanup_workspaces(
         )
     except Exception as e:
         _cleanup_job_state["running"] = False
-        logger.error(format_error_log(
-            "REPO-GENERAL-013",
-            f"Error in handle_scip_cleanup_workspaces: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "REPO-GENERAL-013",
+                f"Error in handle_scip_cleanup_workspaces: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_scip_cleanup_status(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+def handle_scip_cleanup_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get SCIP workspace cleanup job status (admin only)."""
     try:
         if user.role != UserRole.ADMIN:
@@ -10612,13 +10802,146 @@ def handle_scip_cleanup_status(
             }
         )
     except Exception as e:
-        logger.error(format_error_log(
-            "REPO-GENERAL-014",
-            f"Error in handle_scip_cleanup_status: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "REPO-GENERAL-014",
+                f"Error in handle_scip_cleanup_status: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return _mcp_response({"success": False, "error": str(e)})
+
+
+def handle_start_trace(
+    args: Dict[str, Any], user: User, *, session_state=None
+) -> Dict[str, Any]:
+    """
+    Start a new Langfuse trace for the current research session.
+
+    Args:
+        args: Tool arguments containing topic, optional strategy and metadata
+        user: The authenticated user making the request
+        session_state: Optional MCPSessionState for accessing session context
+
+    Returns:
+        MCP response with trace status and trace_id
+    """
+    try:
+        from code_indexer.server.services.langfuse_service import get_langfuse_service
+
+        service = get_langfuse_service()
+        if not service.is_enabled():
+            return _mcp_response(
+                {"status": "disabled", "message": "Langfuse tracing is not enabled"}
+            )
+
+        if not session_state:
+            return _mcp_response(
+                {"status": "error", "message": "No session context available"}
+            )
+
+        session_id = session_state.session_id
+        username = user.username
+
+        topic = args.get("topic")
+        if not topic:
+            return _mcp_response(
+                {"status": "error", "message": "Missing required parameter: topic"}
+            )
+
+        strategy = args.get("strategy")
+        metadata = args.get("metadata")
+
+        trace_ctx = service.trace_manager.start_trace(
+            session_id=session_id,
+            topic=topic,
+            strategy=strategy,
+            metadata=metadata,
+            username=username,
+        )
+
+        if trace_ctx is None:
+            return _mcp_response(
+                {"status": "error", "message": "Failed to create trace"}
+            )
+
+        return _mcp_response({"status": "active", "trace_id": trace_ctx.trace_id})
+
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "TRACE-001",
+                f"Error in handle_start_trace: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return _mcp_response({"status": "error", "message": str(e)})
+
+
+def handle_end_trace(
+    args: Dict[str, Any], user: User, *, session_state=None
+) -> Dict[str, Any]:
+    """
+    End the current active trace for the research session.
+
+    Args:
+        args: Tool arguments with optional score, feedback, outcome
+        user: The authenticated user making the request
+        session_state: Optional MCPSessionState for accessing session context
+
+    Returns:
+        MCP response with trace status and trace_id
+    """
+    try:
+        from code_indexer.server.services.langfuse_service import get_langfuse_service
+
+        service = get_langfuse_service()
+        if not service.is_enabled():
+            return _mcp_response(
+                {"status": "disabled", "message": "Langfuse tracing is not enabled"}
+            )
+
+        if not session_state:
+            return _mcp_response(
+                {"status": "error", "message": "No session context available"}
+            )
+
+        session_id = session_state.session_id
+
+        # Get trace_id before ending
+        trace_ctx = service.trace_manager.get_active_trace(session_id)
+        if not trace_ctx:
+            return _mcp_response(
+                {"status": "no_active_trace", "message": "No active trace to end"}
+            )
+
+        trace_id = trace_ctx.trace_id
+
+        score = args.get("score")
+        feedback = args.get("feedback")
+        outcome = args.get("outcome")
+
+        success = service.trace_manager.end_trace(
+            session_id=session_id, score=score, feedback=feedback, outcome=outcome
+        )
+
+        if success:
+            return _mcp_response({"status": "ended", "trace_id": trace_id})
+        else:
+            return _mcp_response({"status": "error", "message": "Failed to end trace"})
+
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "TRACE-002",
+                f"Error in handle_end_trace: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return _mcp_response({"status": "error", "message": str(e)})
 
 
 HANDLER_REGISTRY["scip_cleanup_workspaces"] = handle_scip_cleanup_workspaces
 HANDLER_REGISTRY["scip_cleanup_status"] = handle_scip_cleanup_status
+HANDLER_REGISTRY["start_trace"] = handle_start_trace
+HANDLER_REGISTRY["end_trace"] = handle_end_trace

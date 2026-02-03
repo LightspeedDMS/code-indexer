@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.23] - 2026-02-03
+
+### Added
+
+- **Story #136: Langfuse Research Session Tracing** - Integrated Langfuse observability for MCP tool usage tracking. New MCP tools `start_trace` and `end_trace` allow users to create research session traces that capture all tool calls as spans with timing, inputs, and outputs. Features include:
+  - Session tracing with `start_trace(name, metadata)` and `end_trace(score, feedback)`
+  - Automatic span creation for all MCP tool calls within a trace
+  - Auto-trace configuration (`auto_trace_enabled`) for implicit trace creation on first tool call
+  - Graceful degradation - Langfuse errors never fail upstream MCP operations
+  - Web UI configuration section for Langfuse settings (public key, secret key, host, auto-trace)
+  - HTTP session persistence via `?session_id=xxx` query parameter for trace continuity across requests
+
+### Fixed
+
+- **Langfuse SDK API compatibility** - Updated to use Langfuse SDK 3.7.0 API (`start_as_current_span()`, `start_span()`, `create_score()`)
+- **Nested lock deadlock** - Changed `threading.Lock()` to `threading.RLock()` in LangfuseService to prevent deadlock during lazy initialization
+
+---
+
 ## [8.8.22] - 2026-02-02
 
 ### Fixed

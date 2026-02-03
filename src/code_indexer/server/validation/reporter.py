@@ -128,11 +128,13 @@ class ValidationReporter:
             return "\n".join(report_lines)
 
         except Exception as e:
-            logger.error(format_error_log(
-                "SCIP-GENERAL-034",
-                f"Failed to generate summary report: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "SCIP-GENERAL-034",
+                    f"Failed to generate summary report: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return f"Error generating summary report: {str(e)}"
 
     def generate_detailed_report(self, validation_result: ValidationResult) -> str:
@@ -307,11 +309,13 @@ class ValidationReporter:
             return "\n".join(report_lines)
 
         except Exception as e:
-            logger.error(format_error_log(
-                "SCIP-GENERAL-035",
-                f"Failed to generate detailed report: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "SCIP-GENERAL-035",
+                    f"Failed to generate detailed report: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return f"Error generating detailed report: {str(e)}"
 
     def generate_recommendations(
@@ -440,11 +444,13 @@ class ValidationReporter:
             return recommendations
 
         except Exception as e:
-            logger.error(format_error_log(
-                "SCIP-GENERAL-036",
-                f"Failed to generate recommendations: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "SCIP-GENERAL-036",
+                    f"Failed to generate recommendations: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return [f"Error generating recommendations: {str(e)}"]
 
     def _get_health_status(self, score: float) -> str:
@@ -517,11 +523,13 @@ class ValidationReporter:
             }
 
         except Exception as e:
-            logger.error(format_error_log(
-                "SCIP-GENERAL-037",
-                f"Failed to format metrics for JSON: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "SCIP-GENERAL-037",
+                    f"Failed to format metrics for JSON: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return {
                 "error": f"Failed to format validation result: {str(e)}",
                 "timestamp": datetime.now(timezone.utc).isoformat(),

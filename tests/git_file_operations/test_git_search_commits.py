@@ -28,7 +28,9 @@ GIT_SHORT_HASH_MIN_LENGTH = 7
 # ---------------------------------------------------------------------------
 
 
-def create_searchable_commits(repo_path: Path, prefix: str, count: int = 3) -> List[str]:
+def create_searchable_commits(
+    repo_path: Path, prefix: str, count: int = 3
+) -> List[str]:
     """
     Create commits with searchable messages containing the prefix.
 
@@ -173,7 +175,9 @@ class TestGitSearchCommits:
         assert len(result.matches) >= 1
         # All matches should be from the filtered author
         for match in result.matches:
-            assert "Test User" in match.author_name or "test" in match.author_name.lower()
+            assert (
+                "Test User" in match.author_name or "test" in match.author_name.lower()
+            )
 
     def test_search_commits_author_filter_no_match(
         self,
@@ -189,8 +193,7 @@ class TestGitSearchCommits:
 
         # Search with non-existent author
         result = service.search_commits(
-            query="AUTHORFILTER",
-            author="nonexistent.author@nowhere.invalid"
+            query="AUTHORFILTER", author="nonexistent.author@nowhere.invalid"
         )
 
         assert len(result.matches) == 0
@@ -209,7 +212,9 @@ class TestGitSearchCommits:
         assert result.is_regex is True
         assert len(result.matches) >= 1
         # Should find the initial commit
-        assert any("Initial" in m.subject and "commit" in m.subject for m in result.matches)
+        assert any(
+            "Initial" in m.subject and "commit" in m.subject for m in result.matches
+        )
 
     def test_search_commits_regex_alternation(
         self,
@@ -222,18 +227,26 @@ class TestGitSearchCommits:
         # Create commits with different keywords
         test_file1 = local_test_repo / "regex_feature.txt"
         test_file1.write_text("feature content\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add feature for regex testing"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         test_file2 = local_test_repo / "regex_bugfix.txt"
         test_file2.write_text("bugfix content\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Fix bug for regex testing"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         service = GitOperationsService(local_test_repo)
@@ -322,10 +335,14 @@ class TestGitSearchCommits:
         # Create commit with specific case
         test_file = local_test_repo / "case_test.txt"
         test_file.write_text("case test content\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "UPPERCASE message for CaseTest"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         service = GitOperationsService(local_test_repo)
@@ -347,10 +364,14 @@ class TestGitSearchCommits:
         # Create commit with body
         test_file = local_test_repo / "highlight_test.txt"
         test_file.write_text("highlight content\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "HIGHLIGHT subject line"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         service = GitOperationsService(local_test_repo)

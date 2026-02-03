@@ -160,8 +160,48 @@ Partial results supported. Failed repos appear in 'errors' field, successful rep
 PERFORMANCE TIP:
 Start with limit=3-5 for multi-repo searches. Token usage scales with number of repos.
 
+SESSION TRACING (Observability):
+
+CIDX supports research session tracing for observability via Langfuse. This helps track tool usage, measure performance, and debug issues.
+
+WHEN TO USE TRACING:
+- Long research sessions with multiple queries
+- Performance analysis of search patterns
+- Debugging unexpected results
+- Usage analytics and audit trails
+
+TRACE WORKFLOW:
+1. Start a trace at the beginning of your research session:
+   start_trace(name='my-research-session', metadata={'topic': 'authentication'})
+
+2. Execute your searches and tool calls (automatically recorded as spans):
+   search_code(query_text='authentication', repository_alias='backend-global')
+   get_file_content(repository_alias='backend-global', file_path='src/auth.py')
+
+3. End the trace when research is complete:
+   end_trace(score=0.9, feedback='Found all relevant code')
+
+IMPORTANT - SESSION PERSISTENCE (HTTP CLIENTS):
+For HTTP-based MCP calls (not stdio), trace state persists across requests only if you include a session_id query parameter:
+  POST /mcp?session_id=my-unique-session-id
+
+Without session_id, each HTTP request has isolated state and cannot continue a trace from a previous request.
+
+AUTO-TRACING (Optional):
+When auto_trace_enabled is configured in server settings, a trace is automatically created on the first tool call if none exists. This simplifies casual usage but explicit start_trace is recommended for controlled research sessions.
+
+GRACEFUL DEGRADATION:
+- If Langfuse is disabled or unavailable, tracing tools return success but do nothing
+- Langfuse errors never fail upstream MCP tool calls
+- Search and file operations work normally regardless of tracing state
+
+TRACE VS NO TRACE:
+- With trace: Tool calls logged as spans with timing, inputs, outputs
+- Without trace: Tools work normally, no observability data collected
+
 TOOL CATEGORIES:
-search, scip, git_exploration, git_operations, files, repo_management, golden_repos, system, user_management, ssh_keys, meta
+search, scip, git_exploration, git_operations, files, repo_management, golden_repos, system, user_management, ssh_keys, meta, tracing
 
 Use category filter to narrow results:
 cidx_quick_reference(category='search') -> returns search tools with summaries
+cidx_quick_reference(category='tracing') -> returns tracing tools

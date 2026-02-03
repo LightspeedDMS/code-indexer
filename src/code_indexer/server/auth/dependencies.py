@@ -547,10 +547,12 @@ def _hybrid_auth_impl(
         # Session role may be stale if admin changed it after login
         if session:
             if not user_manager:
-                logger.error(format_error_log(
-                    "AUTH-GENERAL-001",
-                    f"Hybrid auth ({auth_type}): user_manager not initialized"
-                ))
+                logger.error(
+                    format_error_log(
+                        "AUTH-GENERAL-001",
+                        f"Hybrid auth ({auth_type}): user_manager not initialized",
+                    )
+                )
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="User manager not initialized",
@@ -564,10 +566,12 @@ def _hybrid_auth_impl(
 
             if not user:
                 # Session is valid but user not found - user was deleted
-                logger.error(format_error_log(
-                    "AUTH-GENERAL-002",
-                    f"Hybrid auth ({auth_type}): User {session.username} not found in database"
-                ))
+                logger.error(
+                    format_error_log(
+                        "AUTH-GENERAL-002",
+                        f"Hybrid auth ({auth_type}): User {session.username} not found in database",
+                    )
+                )
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"User '{session.username}' not found in user database",
@@ -611,10 +615,12 @@ def _hybrid_auth_impl(
             raise
 
     # No valid authentication found
-    logger.warning(format_error_log(
-        "AUTH-GENERAL-003",
-        f"Hybrid auth ({auth_type}): No valid authentication found"
-    ))
+    logger.warning(
+        format_error_log(
+            "AUTH-GENERAL-003",
+            f"Hybrid auth ({auth_type}): No valid authentication found",
+        )
+    )
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Authentication required",

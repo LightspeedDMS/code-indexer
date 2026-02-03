@@ -95,11 +95,13 @@ class WorkspaceCleanupService:
         workspaces: List[Path] = []
 
         if not self.workspace_root.exists():
-            logger.warning(format_error_log(
-                "MCP-GENERAL-188",
-                f"Workspace root does not exist: {self.workspace_root}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-188",
+                    f"Workspace root does not exist: {self.workspace_root}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return workspaces
 
         for item in self.workspace_root.iterdir():
@@ -134,11 +136,13 @@ class WorkspaceCleanupService:
             return bool(age_days > self.retention_days)
 
         except Exception as e:
-            logger.error(format_error_log(
-                "MCP-GENERAL-189",
-                f"Error checking workspace age for {workspace_path}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-189",
+                    f"Error checking workspace age for {workspace_path}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return False
 
     def is_workspace_recently_modified(
@@ -175,11 +179,13 @@ class WorkspaceCleanupService:
             return False
 
         except Exception as e:
-            logger.error(format_error_log(
-                "MCP-GENERAL-190",
-                f"Error checking workspace modification time for {workspace_path}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-190",
+                    f"Error checking workspace modification time for {workspace_path}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return False
 
     def get_active_job_ids(self) -> set:
@@ -236,11 +242,13 @@ class WorkspaceCleanupService:
                 if entry.is_file():
                     total_size += entry.stat().st_size
         except Exception as e:
-            logger.warning(format_error_log(
-                "MCP-GENERAL-191",
-                f"Error calculating size for {directory_path}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-191",
+                    f"Error calculating size for {directory_path}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         return total_size
 
@@ -270,11 +278,13 @@ class WorkspaceCleanupService:
             return True, size
 
         except Exception as e:
-            logger.error(format_error_log(
-                "MCP-GENERAL-192",
-                f"Failed to delete workspace {workspace_path}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-192",
+                    f"Failed to delete workspace {workspace_path}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return False, 0
 
     def cleanup_workspaces(self) -> CleanupResult:
@@ -431,11 +441,13 @@ class WorkspaceCleanupService:
                     oldest_age_days = age_days
 
             except Exception as e:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-193",
-                    f"Error checking workspace age for {workspace_path}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-193",
+                        f"Error checking workspace age for {workspace_path}: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
 
         status["oldest_workspace_age"] = oldest_age_days
 

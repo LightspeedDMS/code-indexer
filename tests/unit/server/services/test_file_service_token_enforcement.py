@@ -74,7 +74,9 @@ class TestFileServiceTokenEnforcement:
         config_service = get_config_service()
         config = config_service.get_config()
         assert config.file_content_limits_config is not None
-        config.file_content_limits_config.max_tokens_per_request = max_tokens_per_request
+        config.file_content_limits_config.max_tokens_per_request = (
+            max_tokens_per_request
+        )
         config.file_content_limits_config.chars_per_token = chars_per_token
         config_service.config_manager.save_config(config)
 

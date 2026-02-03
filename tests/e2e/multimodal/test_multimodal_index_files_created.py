@@ -49,34 +49,32 @@ class TestMultimodalIndexFilesCreated:
         voyage_code_dir = index_dir / "voyage-code-3"
         voyage_multimodal_dir = index_dir / "voyage-multimodal-3"
 
-        assert voyage_code_dir.exists(), (
-            f"voyage-code-3 collection directory missing: {voyage_code_dir}"
-        )
-        assert voyage_multimodal_dir.exists(), (
-            f"voyage-multimodal-3 collection directory missing: {voyage_multimodal_dir}"
-        )
+        assert (
+            voyage_code_dir.exists()
+        ), f"voyage-code-3 collection directory missing: {voyage_code_dir}"
+        assert (
+            voyage_multimodal_dir.exists()
+        ), f"voyage-multimodal-3 collection directory missing: {voyage_multimodal_dir}"
 
         # Verify HNSW index files exist for BOTH collections
         code_hnsw = voyage_code_dir / "hnsw_index.bin"
         multimodal_hnsw = voyage_multimodal_dir / "hnsw_index.bin"
 
-        assert code_hnsw.exists(), (
-            f"voyage-code-3 HNSW index missing: {code_hnsw}"
-        )
-        assert multimodal_hnsw.exists(), (
-            f"voyage-multimodal-3 HNSW index missing: {multimodal_hnsw}"
-        )
+        assert code_hnsw.exists(), f"voyage-code-3 HNSW index missing: {code_hnsw}"
+        assert (
+            multimodal_hnsw.exists()
+        ), f"voyage-multimodal-3 HNSW index missing: {multimodal_hnsw}"
 
         # Verify id_index.bin exists and has content for multimodal collection
         multimodal_id_index = voyage_multimodal_dir / "id_index.bin"
-        assert multimodal_id_index.exists(), (
-            f"voyage-multimodal-3 id_index.bin missing: {multimodal_id_index}"
-        )
+        assert (
+            multimodal_id_index.exists()
+        ), f"voyage-multimodal-3 id_index.bin missing: {multimodal_id_index}"
 
         # Verify id_index.bin has actual content (size > 0)
-        assert multimodal_id_index.stat().st_size > 0, (
-            "voyage-multimodal-3 id_index.bin is empty - no vectors indexed"
-        )
+        assert (
+            multimodal_id_index.stat().st_size > 0
+        ), "voyage-multimodal-3 id_index.bin is empty - no vectors indexed"
 
     def test_multimodal_hnsw_has_vectors(self, multimodal_repo_path):
         """Verify multimodal HNSW index contains vectors (non-empty index).
@@ -85,8 +83,11 @@ class TestMultimodalIndexFilesCreated:
         """
         # Ensure indexing has been done (from previous test or setup)
         multimodal_hnsw = (
-            multimodal_repo_path / ".code-indexer" / "index" /
-            "voyage-multimodal-3" / "hnsw_index.bin"
+            multimodal_repo_path
+            / ".code-indexer"
+            / "index"
+            / "voyage-multimodal-3"
+            / "hnsw_index.bin"
         )
 
         if not multimodal_hnsw.exists():
@@ -106,12 +107,12 @@ class TestMultimodalIndexFilesCreated:
             )
 
         # Verify HNSW index file exists and is non-empty
-        assert multimodal_hnsw.exists(), (
-            f"voyage-multimodal-3 HNSW index missing: {multimodal_hnsw}"
-        )
-        assert multimodal_hnsw.stat().st_size > 0, (
-            "voyage-multimodal-3 HNSW index is empty - no vectors built"
-        )
+        assert (
+            multimodal_hnsw.exists()
+        ), f"voyage-multimodal-3 HNSW index missing: {multimodal_hnsw}"
+        assert (
+            multimodal_hnsw.stat().st_size > 0
+        ), "voyage-multimodal-3 HNSW index is empty - no vectors built"
 
     def test_multimodal_collection_has_document_ids(self, multimodal_repo_path):
         """Verify multimodal collection has document IDs mapped to vectors.
@@ -120,8 +121,11 @@ class TestMultimodalIndexFilesCreated:
         """
         # Ensure indexing has been done
         multimodal_id_index = (
-            multimodal_repo_path / ".code-indexer" / "index" /
-            "voyage-multimodal-3" / "id_index.bin"
+            multimodal_repo_path
+            / ".code-indexer"
+            / "index"
+            / "voyage-multimodal-3"
+            / "id_index.bin"
         )
 
         if not multimodal_id_index.exists():
@@ -140,12 +144,14 @@ class TestMultimodalIndexFilesCreated:
             )
 
         # Verify id_index.bin exists and has content
-        assert multimodal_id_index.exists(), (
-            f"voyage-multimodal-3 id_index.bin missing: {multimodal_id_index}"
-        )
+        assert (
+            multimodal_id_index.exists()
+        ), f"voyage-multimodal-3 id_index.bin missing: {multimodal_id_index}"
 
         file_size = multimodal_id_index.stat().st_size
-        assert file_size > 100, (  # Arbitrary threshold, real index should be much larger
+        assert (
+            file_size > 100
+        ), (  # Arbitrary threshold, real index should be much larger
             f"voyage-multimodal-3 id_index.bin suspiciously small ({file_size} bytes) - "
             "likely no documents mapped to vectors"
         )

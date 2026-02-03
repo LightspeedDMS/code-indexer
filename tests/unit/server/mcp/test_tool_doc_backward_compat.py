@@ -13,7 +13,17 @@ def temp_docs_dir(tmp_path):
     """Create a temporary tool_docs directory with category subdirectories."""
     docs_dir = tmp_path / "tool_docs"
     docs_dir.mkdir()
-    for category in ["search", "git", "scip", "files", "admin", "repos", "ssh", "guides", "cicd"]:
+    for category in [
+        "search",
+        "git",
+        "scip",
+        "files",
+        "admin",
+        "repos",
+        "ssh",
+        "guides",
+        "cicd",
+    ]:
         (docs_dir / category).mkdir()
     return docs_dir
 
@@ -41,12 +51,16 @@ class TestBackwardCompatibility:
             loaded_description = loader.get_description(tool_name)
 
             if original_description != loaded_description:
-                mismatches.append({
-                    "tool": tool_name,
-                    "original_len": len(original_description),
-                    "loaded_len": len(loaded_description),
-                    "diff_start": self._find_first_diff(original_description, loaded_description),
-                })
+                mismatches.append(
+                    {
+                        "tool": tool_name,
+                        "original_len": len(original_description),
+                        "loaded_len": len(loaded_description),
+                        "diff_start": self._find_first_diff(
+                            original_description, loaded_description
+                        ),
+                    }
+                )
 
         if mismatches:
             details = "\n".join(
@@ -75,9 +89,9 @@ class TestBackwardCompatibility:
             if original == loaded:
                 exact_matches += 1
 
-        assert exact_matches == expected_count, (
-            f"Only {exact_matches}/{expected_count} tools have exact description matches"
-        )
+        assert (
+            exact_matches == expected_count
+        ), f"Only {exact_matches}/{expected_count} tools have exact description matches"
 
     def test_whitespace_preserved_exactly(self, temp_docs_dir):
         """Whitespace (newlines, spaces, tabs) should be preserved exactly."""
@@ -142,7 +156,9 @@ Code: def func(): pass"""
         from tools.convert_tool_docs import convert_tool
         from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
 
-        description_with_unicode = "TL;DR: Unicode test. Arrow: \u2192, Check: \u2713, Euro: \u20ac"
+        description_with_unicode = (
+            "TL;DR: Unicode test. Arrow: \u2192, Check: \u2713, Euro: \u20ac"
+        )
 
         tool_def = {
             "description": description_with_unicode,

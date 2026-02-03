@@ -209,14 +209,13 @@ class SCIPQueryService:
             try:
                 engine = SCIPQueryEngine(scip_file)
                 results = engine.find_definition(symbol, exact=exact)
-                all_results.extend(
-                    self._query_result_to_dict(r) for r in results
-                )
+                all_results.extend(self._query_result_to_dict(r) for r in results)
             except Exception as e:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-138",
-                    f"Failed to query SCIP file {scip_file}: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-138", f"Failed to query SCIP file {scip_file}: {e}"
+                    )
+                )
                 continue
 
         return all_results
@@ -257,14 +256,13 @@ class SCIPQueryService:
             try:
                 engine = SCIPQueryEngine(scip_file)
                 results = engine.find_references(symbol, limit=limit, exact=exact)
-                all_results.extend(
-                    self._query_result_to_dict(r) for r in results
-                )
+                all_results.extend(self._query_result_to_dict(r) for r in results)
             except Exception as e:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-139",
-                    f"Failed to query SCIP file {scip_file}: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-139", f"Failed to query SCIP file {scip_file}: {e}"
+                    )
+                )
                 continue
 
         return all_results
@@ -305,14 +303,13 @@ class SCIPQueryService:
             try:
                 engine = SCIPQueryEngine(scip_file)
                 results = engine.get_dependencies(symbol, depth=depth, exact=exact)
-                all_results.extend(
-                    self._query_result_to_dict(r) for r in results
-                )
+                all_results.extend(self._query_result_to_dict(r) for r in results)
             except Exception as e:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-140",
-                    f"Failed to query SCIP file {scip_file}: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-140", f"Failed to query SCIP file {scip_file}: {e}"
+                    )
+                )
                 continue
 
         return all_results
@@ -353,14 +350,13 @@ class SCIPQueryService:
             try:
                 engine = SCIPQueryEngine(scip_file)
                 results = engine.get_dependents(symbol, depth=depth, exact=exact)
-                all_results.extend(
-                    self._query_result_to_dict(r) for r in results
-                )
+                all_results.extend(self._query_result_to_dict(r) for r in results)
             except Exception as e:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-141",
-                    f"Failed to query SCIP file {scip_file}: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-141", f"Failed to query SCIP file {scip_file}: {e}"
+                    )
+                )
                 continue
 
         return all_results
@@ -473,10 +469,12 @@ class SCIPQueryService:
                     for chain in chains
                 )
             except Exception as e:
-                logger.warning(format_error_log(
-                    "MCP-GENERAL-142",
-                    f"Failed to trace call chain in {scip_file}: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-142",
+                        f"Failed to trace call chain in {scip_file}: {e}",
+                    )
+                )
                 continue
 
         return all_results

@@ -56,10 +56,12 @@ class DelegationFunctionLoader:
         functions: List[DelegationFunction] = []
 
         if not repo_path.exists() or not repo_path.is_dir():
-            logger.warning(format_error_log(
-                "AUTH-GENERAL-024",
-                f"Function repository path does not exist: {repo_path}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "AUTH-GENERAL-024",
+                    f"Function repository path does not exist: {repo_path}",
+                )
+            )
             return functions
 
         for file_path in repo_path.glob("*.md"):
@@ -67,15 +69,19 @@ class DelegationFunctionLoader:
                 func = self.parse_function_file(file_path)
                 functions.append(func)
             except ValueError as e:
-                logger.warning(format_error_log(
-                    "AUTH-GENERAL-025",
-                    f"Skipping invalid function file {file_path}: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "AUTH-GENERAL-025",
+                        f"Skipping invalid function file {file_path}: {e}",
+                    )
+                )
             except Exception as e:
-                logger.warning(format_error_log(
-                    "AUTH-GENERAL-026",
-                    f"Error parsing function file {file_path}: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "AUTH-GENERAL-026",
+                        f"Error parsing function file {file_path}: {e}",
+                    )
+                )
 
         return functions
 
@@ -121,9 +127,7 @@ class DelegationFunctionLoader:
             prompt_template=body,
         )
 
-    def _parse_frontmatter(
-        self, content: str
-    ) -> tuple[Optional[Dict[str, Any]], str]:
+    def _parse_frontmatter(self, content: str) -> tuple[Optional[Dict[str, Any]], str]:
         """
         Parse YAML frontmatter from markdown content.
 
@@ -142,7 +146,7 @@ class DelegationFunctionLoader:
             return None, content
 
         frontmatter_str = content[3:end_index].strip()
-        body = content[end_index + 3:].strip()
+        body = content[end_index + 3 :].strip()
 
         try:
             frontmatter = yaml.safe_load(frontmatter_str)
@@ -150,10 +154,11 @@ class DelegationFunctionLoader:
                 return None, content
             return frontmatter, body
         except yaml.YAMLError as e:
-            logger.warning(format_error_log(
-                "AUTH-GENERAL-027",
-                f"Failed to parse YAML frontmatter: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "AUTH-GENERAL-027", f"Failed to parse YAML frontmatter: {e}"
+                )
+            )
             return None, content
 
     def filter_by_groups(
@@ -172,8 +177,4 @@ class DelegationFunctionLoader:
         if not user_groups:
             return []
 
-        return [
-            func
-            for func in functions
-            if set(func.allowed_groups) & user_groups
-        ]
+        return [func for func in functions if set(func.allowed_groups) & user_groups]

@@ -98,9 +98,7 @@ class TestAC5IndependentFieldCaching:
         # Retrieve each independently and verify correct content (sync calls)
         content_retrieved = cache.retrieve(result["cache_handle"], page=0)
         snippet_retrieved = cache.retrieve(result["snippet_cache_handle"], page=0)
-        match_text_retrieved = cache.retrieve(
-            result["match_text_cache_handle"], page=0
-        )
+        match_text_retrieved = cache.retrieve(result["match_text_cache_handle"], page=0)
 
         assert content_retrieved.content == content_data
         assert snippet_retrieved.content == snippet_data

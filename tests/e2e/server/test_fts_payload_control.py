@@ -40,7 +40,9 @@ class TestFtsPayloadCacheE2E:
         cache.close()
 
     @pytest.mark.asyncio
-    async def test_fts_large_snippet_truncation_workflow(self, cache_with_standard_config):
+    async def test_fts_large_snippet_truncation_workflow(
+        self, cache_with_standard_config
+    ):
         """E2E: Large FTS snippet is truncated with cache handle for retrieval."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
@@ -113,7 +115,9 @@ class TestFtsPayloadCacheE2E:
         assert retrieved.content == large_match_text
 
     @pytest.mark.asyncio
-    async def test_fts_both_fields_independent_caching(self, cache_with_standard_config):
+    async def test_fts_both_fields_independent_caching(
+        self, cache_with_standard_config
+    ):
         """E2E: Both snippet and match_text are cached independently."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 

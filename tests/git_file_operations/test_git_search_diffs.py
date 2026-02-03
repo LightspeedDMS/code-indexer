@@ -47,10 +47,14 @@ class TestGitSearchDiffs:
         test_file = local_test_repo / "pickaxe_test.txt"
         test_file.write_text(f"Contains {unique_content} in content\n")
 
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add pickaxe test file"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         service = GitOperationsService(local_test_repo)
@@ -73,10 +77,14 @@ class TestGitSearchDiffs:
         test_file = local_test_repo / "result_object_test.txt"
         test_file.write_text(f"Contains {unique_content}\n")
 
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add result object test file"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         service = GitOperationsService(local_test_repo)
@@ -100,7 +108,9 @@ class TestGitSearchDiffs:
         AC2: Pickaxe returns empty when string never existed.
         """
         service = GitOperationsService(local_test_repo)
-        result = service.search_diffs(search_string="NONEXISTENT_STRING_NEVER_USED_xyz987abc")
+        result = service.search_diffs(
+            search_string="NONEXISTENT_STRING_NEVER_USED_xyz987abc"
+        )
 
         assert len(result.matches) == 0
         assert result.total_matches == 0
@@ -118,10 +128,14 @@ class TestGitSearchDiffs:
         test_file = local_test_repo / "match_fields_test.txt"
         test_file.write_text(f"Contains {unique_content}\n")
 
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add match fields test file"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         service = GitOperationsService(local_test_repo)
@@ -152,10 +166,14 @@ class TestGitSearchDiffs:
         test_file = local_test_repo / "regex_test.txt"
         test_file.write_text("function calculateTotal(items) { return sum; }\n")
 
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add regex test function"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         service = GitOperationsService(local_test_repo)
@@ -177,10 +195,14 @@ class TestGitSearchDiffs:
         test_file = local_test_repo / "regex_meta_test.txt"
         test_file.write_text("test.value = getValue()\n")
 
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add regex meta test"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         service = GitOperationsService(local_test_repo)
@@ -209,18 +231,21 @@ class TestGitSearchDiffs:
         (subdir / "specific.txt").write_text("SPECIFIC_PATH_CONTENT_12345\n")
         (local_test_repo / "other.txt").write_text("OTHER_PATH_CONTENT_67890\n")
 
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add files in different paths"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         service = GitOperationsService(local_test_repo)
 
         # Search with path filter
         result = service.search_diffs(
-            search_string="SPECIFIC_PATH_CONTENT",
-            path="subdir/"
+            search_string="SPECIFIC_PATH_CONTENT", path="subdir/"
         )
 
         assert len(result.matches) >= 1
@@ -239,10 +264,7 @@ class TestGitSearchDiffs:
         service = GitOperationsService(local_test_repo)
 
         with pytest.raises(ValueError, match="mutually exclusive"):
-            service.search_diffs(
-                search_string="literal",
-                search_pattern="regex.*"
-            )
+            service.search_diffs(search_string="literal", search_pattern="regex.*")
 
     def test_search_diffs_missing_param_error(
         self,
@@ -270,17 +292,21 @@ class TestGitSearchDiffs:
         for i in range(5):
             test_file = local_test_repo / f"limit_test_{i}.txt"
             test_file.write_text(f"LIMIT_TEST_CONTENT_{i}_UNIQUE\n")
-            subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "add", "."],
+                cwd=local_test_repo,
+                check=True,
+                capture_output=True,
+            )
             subprocess.run(
                 ["git", "commit", "-m", f"Limit test commit {i}"],
-                cwd=local_test_repo, check=True, capture_output=True
+                cwd=local_test_repo,
+                check=True,
+                capture_output=True,
             )
 
         service = GitOperationsService(local_test_repo)
-        result = service.search_diffs(
-            search_string="LIMIT_TEST_CONTENT",
-            limit=2
-        )
+        result = service.search_diffs(search_string="LIMIT_TEST_CONTENT", limit=2)
 
         assert len(result.matches) <= 2
 
@@ -297,25 +323,30 @@ class TestGitSearchDiffs:
         for i in range(5):
             test_file = local_test_repo / f"truncate_diff_{i}.txt"
             test_file.write_text(f"TRUNCATE_DIFF_CONTENT_{i}\n")
-            subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "add", "."],
+                cwd=local_test_repo,
+                check=True,
+                capture_output=True,
+            )
             subprocess.run(
                 ["git", "commit", "-m", f"Truncate diff test {i}"],
-                cwd=local_test_repo, check=True, capture_output=True
+                cwd=local_test_repo,
+                check=True,
+                capture_output=True,
             )
 
         service = GitOperationsService(local_test_repo)
 
         # With low limit - should be truncated
         result_limited = service.search_diffs(
-            search_string="TRUNCATE_DIFF_CONTENT",
-            limit=2
+            search_string="TRUNCATE_DIFF_CONTENT", limit=2
         )
         assert result_limited.truncated is True
 
         # With high limit - should not be truncated
         result_all = service.search_diffs(
-            search_string="TRUNCATE_DIFF_CONTENT",
-            limit=100
+            search_string="TRUNCATE_DIFF_CONTENT", limit=100
         )
         assert result_all.truncated is False
 
@@ -332,18 +363,26 @@ class TestGitSearchDiffs:
         test_file = local_test_repo / "to_remove.txt"
         test_file.write_text("CONTENT_TO_BE_REMOVED_XYZ\n")
 
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add file to remove"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         # Now remove the file
         test_file.unlink()
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Remove the file"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         service = GitOperationsService(local_test_repo)
@@ -368,18 +407,26 @@ class TestGitSearchDiffs:
         test_file = local_test_repo / "modify_test.txt"
         test_file.write_text("ORIGINAL_MODIFY_CONTENT_123\n")
 
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add original content"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         # Modify the file (replace content)
         test_file.write_text("MODIFIED_CONTENT_456\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Modify the content"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         service = GitOperationsService(local_test_repo)
@@ -401,19 +448,20 @@ class TestGitSearchDiffs:
         test_file = local_test_repo / "since_test.txt"
         test_file.write_text(f"{unique_content}\n")
 
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add since test file"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         service = GitOperationsService(local_test_repo)
 
         # Future date - should find nothing
-        result = service.search_diffs(
-            search_string=unique_content,
-            since="2099-01-01"
-        )
+        result = service.search_diffs(search_string=unique_content, since="2099-01-01")
         assert len(result.matches) == 0
 
     @pytest.mark.slow
@@ -429,19 +477,20 @@ class TestGitSearchDiffs:
         test_file = local_test_repo / "until_test.txt"
         test_file.write_text(f"{unique_content}\n")
 
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add until test file"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         service = GitOperationsService(local_test_repo)
 
         # Past date - should find nothing
-        result = service.search_diffs(
-            search_string=unique_content,
-            until="1990-01-01"
-        )
+        result = service.search_diffs(search_string=unique_content, until="1990-01-01")
         assert len(result.matches) == 0
 
     @pytest.mark.slow
@@ -457,10 +506,14 @@ class TestGitSearchDiffs:
         test_file = local_test_repo / "files_changed_test.txt"
         test_file.write_text(f"{unique_content}\n")
 
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add files changed test"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         service = GitOperationsService(local_test_repo)
@@ -484,10 +537,14 @@ class TestGitSearchDiffs:
         test_file = local_test_repo / "timing_test.txt"
         test_file.write_text(f"{unique_content}\n")
 
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add timing test"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         service = GitOperationsService(local_test_repo)
@@ -512,10 +569,14 @@ class TestGitSearchDiffs:
         (local_test_repo / "multi_b.txt").write_text(f"{unique_content}_B\n")
         (local_test_repo / "multi_c.txt").write_text("Different content\n")
 
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add multiple files"],
-            cwd=local_test_repo, check=True, capture_output=True
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
         )
 
         service = GitOperationsService(local_test_repo)

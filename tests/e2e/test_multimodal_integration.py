@@ -66,9 +66,7 @@ class TestMultimodalIntegration:
         # Create test markdown file WITHOUT image
         test_file = tmp_path / "README.md"
         test_file.write_text(
-            "# Test Document\n\n"
-            "Just regular text content.\n\n"
-            "No images here."
+            "# Test Document\n\n" "Just regular text content.\n\n" "No images here."
         )
 
         # Create chunker with simple config

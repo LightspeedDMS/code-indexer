@@ -72,9 +72,7 @@ def seed_api_keys_on_startup(
                         seeded_anthropic_key
                     )
                     result["anthropic_seeded"] = True
-                    logger.info(
-                        "Auto-seeded Anthropic API key from environment/config"
-                    )
+                    logger.info("Auto-seeded Anthropic API key from environment/config")
 
         # Auto-seed VoyageAI key if blank
         if not config.claude_integration_config.voyageai_api_key:
@@ -94,9 +92,10 @@ def seed_api_keys_on_startup(
             logger.info("Saved auto-seeded API keys to server config")
 
     except Exception as e:
-        logger.warning(format_error_log(
-            "MCP-GENERAL-194",
-            f"Failed to auto-seed API keys on startup: {e}"
-        ))
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-194", f"Failed to auto-seed API keys on startup: {e}"
+            )
+        )
 
     return result

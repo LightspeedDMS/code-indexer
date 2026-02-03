@@ -213,4 +213,7 @@ class TestServerConfigManager:
 
         # Load config and verify github_repo is persisted
         loaded_config = config_manager.load_config()
-        assert loaded_config.self_monitoring_config.github_repo == "LightspeedDMS/code-indexer"
+        assert (
+            loaded_config.self_monitoring_config.github_repo
+            == "LightspeedDMS/code-indexer"
+        )

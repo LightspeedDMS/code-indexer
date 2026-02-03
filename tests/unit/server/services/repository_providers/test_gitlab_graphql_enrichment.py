@@ -275,6 +275,7 @@ class TestDiscoverRepositoriesIntegration:
         self, gitlab_provider, monkeypatch
     ):
         """Should enrich discovered repositories with commit info via GraphQL."""
+
         # Mock REST API response
         def mock_make_api_request(endpoint, params=None):
             response = Mock()

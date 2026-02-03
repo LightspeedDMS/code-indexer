@@ -84,7 +84,9 @@ class SessionRegistry:
                     # TTL cleanup attributes (Story #731)
                     instance._cleanup_task: Optional[asyncio.Task] = None
                     instance._ttl_seconds = DEFAULT_SESSION_TTL_SECONDS
-                    instance._cleanup_interval_seconds = DEFAULT_CLEANUP_INTERVAL_SECONDS
+                    instance._cleanup_interval_seconds = (
+                        DEFAULT_CLEANUP_INTERVAL_SECONDS
+                    )
                     cls._instance = instance
         return cls._instance
 
@@ -211,10 +213,11 @@ class SessionRegistry:
                 try:
                     self.cleanup_stale_sessions()
                 except Exception as e:
-                    logger.error(format_error_log(
-                        "REPO-GENERAL-015",
-                        f"Session cleanup error: {e}"
-                    ))
+                    logger.error(
+                        format_error_log(
+                            "REPO-GENERAL-015", f"Session cleanup error: {e}"
+                        )
+                    )
         except asyncio.CancelledError:
             # Normal shutdown, don't log as error
             pass
@@ -249,10 +252,12 @@ class SessionRegistry:
                             config.mcp_session_config.cleanup_interval_seconds
                         )
             except Exception as e:
-                logger.warning(format_error_log(
-                    "REPO-GENERAL-016",
-                    f"Could not read config, using defaults: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "REPO-GENERAL-016",
+                        f"Could not read config, using defaults: {e}",
+                    )
+                )
 
         # Fall back to module-level defaults if still None
         if ttl_seconds is None:

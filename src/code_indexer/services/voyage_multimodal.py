@@ -100,7 +100,7 @@ class VoyageMultimodalClient:
         self,
         text: str,
         image_paths: List[Union[Path, str]],
-        input_type: Optional[str] = None
+        input_type: Optional[str] = None,
     ) -> List[float]:
         """Generate multimodal embedding for text and images.
 
@@ -123,10 +123,7 @@ class VoyageMultimodalClient:
         # Add images if provided
         for image_path in image_paths:
             image_data_url = self._encode_image_to_base64(image_path)
-            content.append({
-                "type": "image_base64",
-                "image_base64": image_data_url
-            })
+            content.append({"type": "image_base64", "image_base64": image_data_url})
 
         # Build API request payload
         payload: Dict[str, Any] = {
@@ -165,9 +162,7 @@ class VoyageMultimodalClient:
         return embedding
 
     def get_multimodal_embeddings_batch(
-        self,
-        items: List[Dict[str, Any]],
-        input_type: Optional[str] = None
+        self, items: List[Dict[str, Any]], input_type: Optional[str] = None
     ) -> List[List[float]]:
         """Generate multimodal embeddings for batch of items with token-aware batching.
 
@@ -208,7 +203,9 @@ class VoyageMultimodalClient:
             # Check if adding this item would exceed 90% safety limit
             if current_tokens + item_tokens > safety_limit and current_batch:
                 # Submit current batch before it gets too large
-                batch_embeddings = self._submit_multimodal_batch(current_batch, input_type)
+                batch_embeddings = self._submit_multimodal_batch(
+                    current_batch, input_type
+                )
                 all_embeddings.extend(batch_embeddings)
 
                 # Start new batch with current item
@@ -252,9 +249,7 @@ class VoyageMultimodalClient:
         return VoyageTokenizer.count_tokens([text], model=self.config.model)
 
     def _submit_multimodal_batch(
-        self,
-        items: List[Dict[str, Any]],
-        input_type: Optional[str] = None
+        self, items: List[Dict[str, Any]], input_type: Optional[str] = None
     ) -> List[List[float]]:
         """Submit a batch of multimodal items to the API.
 
@@ -280,10 +275,7 @@ class VoyageMultimodalClient:
             # Add images if provided
             for image_path in item.get("image_paths", []):
                 image_data_url = self._encode_image_to_base64(image_path)
-                content.append({
-                    "type": "image_base64",
-                    "image_base64": image_data_url
-                })
+                content.append({"type": "image_base64", "image_base64": image_data_url})
 
             inputs.append({"content": content})
 
@@ -339,7 +331,5 @@ class VoyageMultimodalClient:
             1024-dimensional embedding vector as list of floats
         """
         return self.get_multimodal_embedding(
-            text=text,
-            image_paths=[],
-            input_type="query"
+            text=text, image_paths=[], input_type="query"
         )

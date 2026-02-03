@@ -101,17 +101,15 @@ def _mock_config_service(token_limit):
 class TestMcpHandlerSkipTruncation:
     """Test that MCP handler calls FileService with skip_truncation=True."""
 
-    def test_handler_calls_file_service_with_skip_truncation_true(
-        self, mock_user
-    ):
+    def test_handler_calls_file_service_with_skip_truncation_true(self, mock_user):
         """Verify MCP handler calls get_file_content with skip_truncation=True."""
         from code_indexer.server.mcp import handlers
 
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_file_service = MagicMock()
             mock_app.file_service = mock_file_service
-            mock_file_service.get_file_content.return_value = _make_file_service_response(
-                "Full file content\n" * MEDIUM_FILE_LINES
+            mock_file_service.get_file_content.return_value = (
+                _make_file_service_response("Full file content\n" * MEDIUM_FILE_LINES)
             )
             mock_app.app.state.payload_cache = None
 
@@ -120,9 +118,9 @@ class TestMcpHandlerSkipTruncation:
 
             mock_file_service.get_file_content.assert_called_once()
             call_kwargs = mock_file_service.get_file_content.call_args[1]
-            assert call_kwargs.get("skip_truncation") is True, (
-                "MCP handler MUST call FileService with skip_truncation=True"
-            )
+            assert (
+                call_kwargs.get("skip_truncation") is True
+            ), "MCP handler MUST call FileService with skip_truncation=True"
 
     def test_handler_calls_by_path_with_skip_truncation_true(self, mock_user):
         """Verify MCP handler calls get_file_content_by_path with skip_truncation=True."""
@@ -136,9 +134,7 @@ class TestMcpHandlerSkipTruncation:
             patch(
                 "code_indexer.global_repos.alias_manager.AliasManager"
             ) as mock_alias_class,
-            patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-            ) as mock_dir,
+            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_dir,
         ):
             mock_dir.return_value = "/fake/golden/repos"
             mock_registry = MagicMock()
@@ -179,8 +175,10 @@ class TestTruncationHelperIntegration:
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_file_service = MagicMock()
             mock_app.file_service = mock_file_service
-            mock_file_service.get_file_content.return_value = _make_file_service_response(
-                large_content, "large_file.py", LARGE_FILE_LINES
+            mock_file_service.get_file_content.return_value = (
+                _make_file_service_response(
+                    large_content, "large_file.py", LARGE_FILE_LINES
+                )
             )
             mock_app.app.state.payload_cache = mock_payload_cache
 
@@ -198,9 +196,7 @@ class TestTruncationHelperIntegration:
                 stored_content = mock_payload_cache.store.call_args[0][0]
                 assert stored_content == large_content
 
-    def test_cache_handle_returned_for_large_file(
-        self, mock_user, mock_payload_cache
-    ):
+    def test_cache_handle_returned_for_large_file(self, mock_user, mock_payload_cache):
         """Verify cache_handle is returned in response when content is truncated."""
         from code_indexer.server.mcp import handlers
 
@@ -210,8 +206,10 @@ class TestTruncationHelperIntegration:
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_file_service = MagicMock()
             mock_app.file_service = mock_file_service
-            mock_file_service.get_file_content.return_value = _make_file_service_response(
-                large_content, "huge_file.py", HUGE_FILE_LINES
+            mock_file_service.get_file_content.return_value = (
+                _make_file_service_response(
+                    large_content, "huge_file.py", HUGE_FILE_LINES
+                )
             )
             mock_app.app.state.payload_cache = mock_payload_cache
 
@@ -243,8 +241,8 @@ class TestBackwardCompatibility:
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_file_service = MagicMock()
             mock_app.file_service = mock_file_service
-            mock_file_service.get_file_content.return_value = _make_file_service_response(
-                small_content, "small.py", SMALL_FILE_LINES
+            mock_file_service.get_file_content.return_value = (
+                _make_file_service_response(small_content, "small.py", SMALL_FILE_LINES)
             )
             mock_app.app.state.payload_cache = mock_payload_cache
 

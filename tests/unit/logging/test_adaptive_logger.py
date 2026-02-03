@@ -17,13 +17,13 @@ class TestAdaptiveLoggerContextDetection:
         logger = AdaptiveLogger()
         assert logger._context == "cli"
 
-    @patch('sys.argv', ['uvicorn', 'code_indexer.server.app:app'])
+    @patch("sys.argv", ["uvicorn", "code_indexer.server.app:app"])
     def test_detect_server_context_with_uvicorn(self):
         """Test that server context is detected when running under uvicorn."""
         logger = AdaptiveLogger()
         assert logger._context == "server"
 
-    @patch.dict('os.environ', {'FASTAPI_APP': 'true'})
+    @patch.dict("os.environ", {"FASTAPI_APP": "true"})
     def test_detect_server_context_with_env_var(self):
         """Test that server context is detected via environment variable."""
         logger = AdaptiveLogger()
@@ -42,12 +42,12 @@ class TestAdaptiveLoggerCLIMode:
         """Test CLI format warning output (non-verbose)."""
         output = StringIO()
 
-        with patch('sys.stderr', output):
+        with patch("sys.stderr", output):
             self.logger.warn_image_skipped(
                 file_path="docs/article.md",
                 image_ref="images/missing.png",
                 reason="File not found",
-                verbose=False
+                verbose=False,
             )
 
         result = output.getvalue()
@@ -58,12 +58,12 @@ class TestAdaptiveLoggerCLIMode:
         """Test CLI format warning output (verbose mode)."""
         output = StringIO()
 
-        with patch('sys.stderr', output):
+        with patch("sys.stderr", output):
             self.logger.warn_image_skipped(
                 file_path="docs/article.md",
                 image_ref="images/missing.png",
                 reason="File not found",
-                verbose=True
+                verbose=True,
             )
 
         result = output.getvalue()
@@ -76,16 +76,16 @@ class TestAdaptiveLoggerCLIMode:
         """Test CLI format has correct multi-line structure."""
         output = StringIO()
 
-        with patch('sys.stderr', output):
+        with patch("sys.stderr", output):
             self.logger.warn_image_skipped(
                 file_path="docs/article.md",
                 image_ref="images/missing.png",
                 reason="File not found",
-                verbose=True
+                verbose=True,
             )
 
         result = output.getvalue()
-        lines = result.strip().split('\n')
+        lines = result.strip().split("\n")
 
         # Should have multiple lines
         assert len(lines) >= 3
@@ -111,10 +111,10 @@ class TestAdaptiveLoggerServerMode:
         # Capture log output
         log_capture = StringIO()
         handler = logging.StreamHandler(log_capture)
-        handler.setFormatter(logging.Formatter('%(message)s'))
+        handler.setFormatter(logging.Formatter("%(message)s"))
 
         # Get or create logger
-        py_logger = logging.getLogger('cidx.image_extractor')
+        py_logger = logging.getLogger("cidx.image_extractor")
         py_logger.addHandler(handler)
         py_logger.setLevel(logging.WARNING)
 
@@ -123,7 +123,7 @@ class TestAdaptiveLoggerServerMode:
                 file_path="docs/article.md",
                 image_ref="images/missing.png",
                 reason="File not found",
-                verbose=False  # Verbose flag should be ignored in server mode
+                verbose=False,  # Verbose flag should be ignored in server mode
             )
 
             result = log_capture.getvalue()
@@ -147,9 +147,9 @@ class TestAdaptiveLoggerServerMode:
         """Test that verbose flag is ignored in server mode."""
         log_capture = StringIO()
         handler = logging.StreamHandler(log_capture)
-        handler.setFormatter(logging.Formatter('%(message)s'))
+        handler.setFormatter(logging.Formatter("%(message)s"))
 
-        py_logger = logging.getLogger('cidx.image_extractor')
+        py_logger = logging.getLogger("cidx.image_extractor")
         py_logger.addHandler(handler)
         py_logger.setLevel(logging.WARNING)
 
@@ -159,7 +159,7 @@ class TestAdaptiveLoggerServerMode:
                 file_path="docs/article.md",
                 image_ref="images/missing.png",
                 reason="File not found",
-                verbose=False
+                verbose=False,
             )
 
             result = log_capture.getvalue()
@@ -177,7 +177,7 @@ class TestAdaptiveLoggerIntegration:
         logger._context = "cli"
 
         output = StringIO()
-        with patch('sys.stderr', output):
+        with patch("sys.stderr", output):
             logger.warn_image_skipped("file1.md", "img1.png", "missing", verbose=True)
             logger.warn_image_skipped("file2.md", "img2.png", "oversized", verbose=True)
 
@@ -196,18 +196,22 @@ class TestAdaptiveLoggerIntegration:
 
         log_capture = StringIO()
         handler = logging.StreamHandler(log_capture)
-        handler.setFormatter(logging.Formatter('%(message)s'))
+        handler.setFormatter(logging.Formatter("%(message)s"))
 
-        py_logger = logging.getLogger('cidx.image_extractor')
+        py_logger = logging.getLogger("cidx.image_extractor")
         py_logger.addHandler(handler)
         py_logger.setLevel(logging.WARNING)
 
         try:
             logger.warn_image_skipped("file1.md", "img1.png", "missing", verbose=False)
-            logger.warn_image_skipped("file2.md", "img2.png", "oversized", verbose=False)
+            logger.warn_image_skipped(
+                "file2.md", "img2.png", "oversized", verbose=False
+            )
 
             result = log_capture.getvalue()
-            lines = [line.strip() for line in result.strip().split('\n') if line.strip()]
+            lines = [
+                line.strip() for line in result.strip().split("\n") if line.strip()
+            ]
 
             # Should have 2 JSON log entries
             assert len(lines) == 2

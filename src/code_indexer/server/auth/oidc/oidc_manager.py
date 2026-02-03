@@ -49,12 +49,14 @@ class OIDCManager:
                     extra={"correlation_id": get_correlation_id()},
                 )
             except Exception as e:
-                logger.error(format_error_log(
-                    "AUTH-GENERAL-004",
-                    f"Failed to initialize SSO provider: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "AUTH-GENERAL-004",
+                        f"Failed to initialize SSO provider: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 # Don't set self.provider - leave it None so we can retry
                 raise
 
@@ -85,11 +87,13 @@ class OIDCManager:
 
         # Check if group_manager is available (injected via app.py)
         if not hasattr(self, "group_manager") or self.group_manager is None:
-            logger.warning(format_error_log(
-                "AUTH-GENERAL-005",
-                f"Group manager not available, skipping SSO provisioning for {username}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "AUTH-GENERAL-005",
+                    f"Group manager not available, skipping SSO provisioning for {username}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return
 
         try:
@@ -109,19 +113,23 @@ class OIDCManager:
                     extra={"correlation_id": get_correlation_id()},
                 )
             else:
-                logger.warning(format_error_log(
-                    "AUTH-GENERAL-006",
-                    f"SSO provisioning returned False for user {username}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "AUTH-GENERAL-006",
+                        f"SSO provisioning returned False for user {username}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
         except Exception as e:
             # AC6: Errors are logged but do not block authentication
-            logger.error(format_error_log(
-                "AUTH-GENERAL-007",
-                f"SSO provisioning failed for user {username}: {e}. "
-                f"User will have fallback cidx-meta-only access.",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "AUTH-GENERAL-007",
+                    f"SSO provisioning failed for user {username}: {e}. "
+                    f"User will have fallback cidx-meta-only access.",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
     def create_jwt_session(self, user):
         return self.jwt_manager.create_token(
@@ -213,11 +221,13 @@ class OIDCManager:
                     return existing_user
                 else:
                     # Stale OIDC link (defensive check - should be cleaned up on user deletion)
-                    logger.warning(format_error_log(
-                        "AUTH-GENERAL-008",
-                        f"Stale OIDC link found for subject={user_info.subject}, deleting",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "AUTH-GENERAL-008",
+                            f"Stale OIDC link found for subject={user_info.subject}, deleting",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                     await db.execute(
                         "DELETE FROM oidc_identity_links WHERE subject = ?",
                         (user_info.subject,),
@@ -256,11 +266,13 @@ class OIDCManager:
             # Extract username from configured username_claim
             # If username_claim is configured but not present in userinfo, fail
             if not user_info.username:
-                logger.error(format_error_log(
-                    "AUTH-GENERAL-009",
-                    f"Username claim '{self.config.username_claim}' not found in OIDC userinfo. Available claims: {list(user_info.__dict__.keys())}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "AUTH-GENERAL-009",
+                        f"Username claim '{self.config.username_claim}' not found in OIDC userinfo. Available claims: {list(user_info.__dict__.keys())}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return None
 
             base_username = user_info.username
@@ -271,13 +283,15 @@ class OIDCManager:
 
             # Check if username already exists (collision detection)
             if self.user_manager.get_user(base_username):
-                logger.error(format_error_log(
-                    "AUTH-OIDC-001",
-                    f"JIT provisioning failed: Username '{base_username}' already exists. "
-                    f"OIDC subject={user_info.subject}, email={user_info.email}. "
-                    f"Admin must manually link accounts or resolve username conflict.",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "AUTH-OIDC-001",
+                        f"JIT provisioning failed: Username '{base_username}' already exists. "
+                        f"OIDC subject={user_info.subject}, email={user_info.email}. "
+                        f"Admin must manually link accounts or resolve username conflict.",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return None
 
             # Create OIDC identity data

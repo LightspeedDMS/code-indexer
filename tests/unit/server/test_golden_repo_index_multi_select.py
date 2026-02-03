@@ -86,9 +86,13 @@ class TestAddIndexMultiSelectAPI:
         API should accept and process.
         """
         # Arrange
-        mock_golden_repo_manager.add_index_to_golden_repo.return_value = "job-single-123"
+        mock_golden_repo_manager.add_index_to_golden_repo.return_value = (
+            "job-single-123"
+        )
 
-        with patch("code_indexer.server.app.golden_repo_manager", mock_golden_repo_manager):
+        with patch(
+            "code_indexer.server.app.golden_repo_manager", mock_golden_repo_manager
+        ):
             # Act
             response = test_client.post(
                 "/api/admin/golden-repos/test-repo/indexes",
@@ -122,7 +126,9 @@ class TestAddIndexMultiSelectAPI:
             "job-temporal-789",
         ]
 
-        with patch("code_indexer.server.app.golden_repo_manager", mock_golden_repo_manager):
+        with patch(
+            "code_indexer.server.app.golden_repo_manager", mock_golden_repo_manager
+        ):
             # Act
             response = test_client.post(
                 "/api/admin/golden-repos/test-repo/indexes",
@@ -150,9 +156,13 @@ class TestAddIndexMultiSelectAPI:
         Should behave identically to: { index_type: "scip" }
         """
         # Arrange
-        mock_golden_repo_manager.add_index_to_golden_repo.return_value = "job-scip-single"
+        mock_golden_repo_manager.add_index_to_golden_repo.return_value = (
+            "job-scip-single"
+        )
 
-        with patch("code_indexer.server.app.golden_repo_manager", mock_golden_repo_manager):
+        with patch(
+            "code_indexer.server.app.golden_repo_manager", mock_golden_repo_manager
+        ):
             # Act
             response = test_client.post(
                 "/api/admin/golden-repos/test-repo/indexes",
@@ -177,7 +187,9 @@ class TestAddIndexMultiSelectAPI:
         JavaScript sends: { index_types: [] }
         API should reject with clear error.
         """
-        with patch("code_indexer.server.app.golden_repo_manager", mock_golden_repo_manager):
+        with patch(
+            "code_indexer.server.app.golden_repo_manager", mock_golden_repo_manager
+        ):
             # Act
             response = test_client.post(
                 "/api/admin/golden-repos/test-repo/indexes",
@@ -200,7 +212,9 @@ class TestAddIndexMultiSelectAPI:
         JavaScript sends: {}
         API should reject with clear error.
         """
-        with patch("code_indexer.server.app.golden_repo_manager", mock_golden_repo_manager):
+        with patch(
+            "code_indexer.server.app.golden_repo_manager", mock_golden_repo_manager
+        ):
             # Act
             response = test_client.post(
                 "/api/admin/golden-repos/test-repo/indexes",
@@ -220,7 +234,9 @@ class TestAddIndexMultiSelectAPI:
         JavaScript sends: { index_types: ["semantic", "invalid_type"] }
         API should reject before processing.
         """
-        with patch("code_indexer.server.app.golden_repo_manager", mock_golden_repo_manager):
+        with patch(
+            "code_indexer.server.app.golden_repo_manager", mock_golden_repo_manager
+        ):
             # Act
             response = test_client.post(
                 "/api/admin/golden-repos/test-repo/indexes",
@@ -232,7 +248,10 @@ class TestAddIndexMultiSelectAPI:
         assert response.status_code == 400
         data = response.json()
         assert "detail" in data
-        assert "invalid_type" in data["detail"].lower() or "invalid" in data["detail"].lower()
+        assert (
+            "invalid_type" in data["detail"].lower()
+            or "invalid" in data["detail"].lower()
+        )
 
     def test_all_four_valid_types_accepted(
         self, test_client, mock_golden_repo_manager, mock_auth_admin
@@ -244,10 +263,15 @@ class TestAddIndexMultiSelectAPI:
         """
         # Arrange
         mock_golden_repo_manager.add_index_to_golden_repo.side_effect = [
-            "job-1", "job-2", "job-3", "job-4"
+            "job-1",
+            "job-2",
+            "job-3",
+            "job-4",
         ]
 
-        with patch("code_indexer.server.app.golden_repo_manager", mock_golden_repo_manager):
+        with patch(
+            "code_indexer.server.app.golden_repo_manager", mock_golden_repo_manager
+        ):
             # Act
             response = test_client.post(
                 "/api/admin/golden-repos/test-repo/indexes",
@@ -292,6 +316,8 @@ class TestAddIndexRequestModel:
 
         # If both provided, index_types should take precedence
         # This is an edge case - JavaScript shouldn't send both
-        request = AddIndexRequest(index_type="semantic", index_types=["fts", "temporal"])
+        request = AddIndexRequest(
+            index_type="semantic", index_types=["fts", "temporal"]
+        )
         # The implementation decides which to use - we just verify both are stored
         assert request.index_types == ["fts", "temporal"]

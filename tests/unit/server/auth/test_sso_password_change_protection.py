@@ -362,7 +362,9 @@ class TestSSOPasswordChangeAPIProtection:
 
         user_manager = dependencies.user_manager
         user_manager.create_user(
-            username="regularuser", password=REGULAR_USER_PASSWORD, role=UserRole.NORMAL_USER
+            username="regularuser",
+            password=REGULAR_USER_PASSWORD,
+            role=UserRole.NORMAL_USER,
         )
         return user_manager.get_user("regularuser")
 

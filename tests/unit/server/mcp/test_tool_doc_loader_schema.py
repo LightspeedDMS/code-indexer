@@ -13,7 +13,17 @@ def temp_docs_dir(tmp_path):
     """Create a temporary tool_docs directory with category subdirectories."""
     docs_dir = tmp_path / "tool_docs"
     docs_dir.mkdir()
-    for category in ["search", "git", "scip", "files", "admin", "repos", "ssh", "guides", "cicd"]:
+    for category in [
+        "search",
+        "git",
+        "scip",
+        "files",
+        "admin",
+        "repos",
+        "ssh",
+        "guides",
+        "cicd",
+    ]:
         (docs_dir / category).mkdir()
     return docs_dir
 
@@ -26,7 +36,8 @@ class TestInputSchemaLoading:
         from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
 
         search_dir = temp_docs_dir / "search"
-        (search_dir / "test_tool.md").write_text('''---
+        (search_dir / "test_tool.md").write_text(
+            """---
 name: test_tool
 category: search
 required_permission: query_repos
@@ -45,7 +56,8 @@ inputSchema:
 ---
 
 Full description of the test tool.
-''')
+"""
+        )
 
         loader = ToolDocLoader(temp_docs_dir)
         loader.load_all_docs()
@@ -62,7 +74,8 @@ Full description of the test tool.
         from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
 
         guides_dir = temp_docs_dir / "guides"
-        (guides_dir / "guide_doc.md").write_text('''---
+        (guides_dir / "guide_doc.md").write_text(
+            """---
 name: guide_doc
 category: guides
 required_permission: query_repos
@@ -70,7 +83,8 @@ tl_dr: A guide document.
 ---
 
 This is a guide, not a tool.
-''')
+"""
+        )
 
         loader = ToolDocLoader(temp_docs_dir)
         loader.load_all_docs()
@@ -83,7 +97,8 @@ This is a guide, not a tool.
         from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
 
         search_dir = temp_docs_dir / "search"
-        (search_dir / "complex_tool.md").write_text('''---
+        (search_dir / "complex_tool.md").write_text(
+            """---
 name: complex_tool
 category: search
 required_permission: query_repos
@@ -110,7 +125,8 @@ inputSchema:
 ---
 
 Complex tool description.
-''')
+"""
+        )
 
         loader = ToolDocLoader(temp_docs_dir)
         loader.load_all_docs()
@@ -131,7 +147,8 @@ Complex tool description.
         from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
 
         admin_dir = temp_docs_dir / "admin"
-        (admin_dir / "nested_tool.md").write_text('''---
+        (admin_dir / "nested_tool.md").write_text(
+            """---
 name: nested_tool
 category: admin
 required_permission: manage_users
@@ -156,7 +173,8 @@ inputSchema:
 ---
 
 Nested schema description.
-''')
+"""
+        )
 
         loader = ToolDocLoader(temp_docs_dir)
         loader.load_all_docs()
@@ -166,7 +184,10 @@ Nested schema description.
         config = tool_doc.inputSchema["properties"]["config"]
         assert config["type"] == "object"
         assert "options" in config["properties"]
-        assert config["properties"]["options"]["properties"]["timeout"]["type"] == "integer"
+        assert (
+            config["properties"]["options"]["properties"]["timeout"]["type"]
+            == "integer"
+        )
 
 
 class TestBuildToolRegistry:
@@ -177,7 +198,8 @@ class TestBuildToolRegistry:
         from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
 
         search_dir = temp_docs_dir / "search"
-        (search_dir / "search_tool.md").write_text('''---
+        (search_dir / "search_tool.md").write_text(
+            """---
 name: search_tool
 category: search
 required_permission: query_repos
@@ -192,7 +214,8 @@ inputSchema:
 ---
 
 Search tool description with details.
-''')
+"""
+        )
 
         loader = ToolDocLoader(temp_docs_dir)
         registry = loader.build_tool_registry()
@@ -202,14 +225,18 @@ Search tool description with details.
         assert registry["search_tool"]["required_permission"] == "query_repos"
         assert registry["search_tool"]["inputSchema"]["type"] == "object"
         # Description should be the markdown body, not tl_dr
-        assert "Search tool description with details" in registry["search_tool"]["description"]
+        assert (
+            "Search tool description with details"
+            in registry["search_tool"]["description"]
+        )
 
     def test_build_tool_registry_skips_tools_without_schema(self, temp_docs_dir):
         """Verify tools without inputSchema are excluded from registry."""
         from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
 
         search_dir = temp_docs_dir / "search"
-        (search_dir / "with_schema.md").write_text('''---
+        (search_dir / "with_schema.md").write_text(
+            """---
 name: with_schema
 category: search
 required_permission: query_repos
@@ -220,10 +247,12 @@ inputSchema:
 ---
 
 Has schema.
-''')
+"""
+        )
 
         guides_dir = temp_docs_dir / "guides"
-        (guides_dir / "no_schema.md").write_text('''---
+        (guides_dir / "no_schema.md").write_text(
+            """---
 name: no_schema
 category: guides
 required_permission: query_repos
@@ -231,7 +260,8 @@ tl_dr: No schema guide.
 ---
 
 Guide without schema.
-''')
+"""
+        )
 
         loader = ToolDocLoader(temp_docs_dir)
         registry = loader.build_tool_registry()
@@ -244,7 +274,8 @@ Guide without schema.
         from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
 
         search_dir = temp_docs_dir / "search"
-        (search_dir / "auto_load.md").write_text('''---
+        (search_dir / "auto_load.md").write_text(
+            """---
 name: auto_load
 category: search
 required_permission: query_repos
@@ -255,7 +286,8 @@ inputSchema:
 ---
 
 Auto loaded tool.
-''')
+"""
+        )
 
         loader = ToolDocLoader(temp_docs_dir)
         assert loader._loaded is False
@@ -271,7 +303,8 @@ Auto loaded tool.
 
         search_dir = temp_docs_dir / "search"
         for i in range(3):
-            (search_dir / f"tool_{i}.md").write_text(f'''---
+            (search_dir / f"tool_{i}.md").write_text(
+                f"""---
 name: tool_{i}
 category: search
 required_permission: query_repos
@@ -284,7 +317,8 @@ inputSchema:
 ---
 
 Tool {i} description.
-''')
+"""
+            )
 
         loader = ToolDocLoader(temp_docs_dir)
         registry = loader.build_tool_registry()
@@ -303,7 +337,8 @@ class TestGetToolsByCategory:
         from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
 
         search_dir = temp_docs_dir / "search"
-        (search_dir / "search_tool.md").write_text('''---
+        (search_dir / "search_tool.md").write_text(
+            """---
 name: search_tool
 category: search
 required_permission: query_repos
@@ -314,10 +349,12 @@ inputSchema:
 ---
 
 Search tool.
-''')
+"""
+        )
 
         git_dir = temp_docs_dir / "git"
-        (git_dir / "git_tool.md").write_text('''---
+        (git_dir / "git_tool.md").write_text(
+            """---
 name: git_tool
 category: git
 required_permission: query_repos
@@ -328,7 +365,8 @@ inputSchema:
 ---
 
 Git tool.
-''')
+"""
+        )
 
         loader = ToolDocLoader(temp_docs_dir)
         categories = loader.get_tools_by_category()
@@ -345,7 +383,8 @@ Git tool.
         from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
 
         search_dir = temp_docs_dir / "search"
-        (search_dir / "search_tool.md").write_text('''---
+        (search_dir / "search_tool.md").write_text(
+            """---
 name: search_tool
 category: search
 required_permission: query_repos
@@ -356,7 +395,8 @@ inputSchema:
 ---
 
 Search tool.
-''')
+"""
+        )
 
         loader = ToolDocLoader(temp_docs_dir)
         categories = loader.get_tools_by_category()
@@ -368,7 +408,8 @@ Search tool.
         from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
 
         search_dir = temp_docs_dir / "search"
-        (search_dir / "search_tool.md").write_text('''---
+        (search_dir / "search_tool.md").write_text(
+            """---
 name: search_tool
 category: search
 required_permission: query_repos
@@ -379,10 +420,12 @@ inputSchema:
 ---
 
 Search tool.
-''')
+"""
+        )
 
         guides_dir = temp_docs_dir / "guides"
-        (guides_dir / "guide_doc.md").write_text('''---
+        (guides_dir / "guide_doc.md").write_text(
+            """---
 name: guide_doc
 category: guides
 required_permission: query_repos
@@ -390,7 +433,8 @@ tl_dr: Guide document.
 ---
 
 Guide without schema.
-''')
+"""
+        )
 
         loader = ToolDocLoader(temp_docs_dir)
         categories = loader.get_tools_by_category()
@@ -407,7 +451,8 @@ Guide without schema.
         from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
 
         search_dir = temp_docs_dir / "search"
-        (search_dir / "tool.md").write_text('''---
+        (search_dir / "tool.md").write_text(
+            """---
 name: tool
 category: search
 required_permission: query_repos
@@ -418,7 +463,8 @@ inputSchema:
 ---
 
 Tool.
-''')
+"""
+        )
 
         loader = ToolDocLoader(temp_docs_dir)
         assert loader._loaded is False
@@ -434,7 +480,8 @@ Tool.
 
         search_dir = temp_docs_dir / "search"
         for name in ["search_a", "search_b", "search_c"]:
-            (search_dir / f"{name}.md").write_text(f'''---
+            (search_dir / f"{name}.md").write_text(
+                f"""---
 name: {name}
 category: search
 required_permission: query_repos
@@ -445,7 +492,8 @@ inputSchema:
 ---
 
 {name} tool.
-''')
+"""
+            )
 
         loader = ToolDocLoader(temp_docs_dir)
         categories = loader.get_tools_by_category()
@@ -470,7 +518,7 @@ class TestToolDocDataclassUpdate:
             required_permission="query_repos",
             tl_dr="Test",
             description="Test description",
-            inputSchema={"type": "object", "properties": {}}
+            inputSchema={"type": "object", "properties": {}},
         )
 
         assert doc.inputSchema is not None
@@ -485,7 +533,7 @@ class TestToolDocDataclassUpdate:
             category="search",
             required_permission="query_repos",
             tl_dr="Test",
-            description="Test description"
+            description="Test description",
         )
 
         assert doc.inputSchema is None

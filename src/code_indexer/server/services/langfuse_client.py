@@ -1,0 +1,258 @@
+"""
+Langfuse Client Service for CIDX Server (Story #136).
+
+Provides a wrapper around the Langfuse Python SDK with:
+- Lazy initialization (SDK only imported/initialized when first used)
+- Graceful disabled mode (all operations no-op when disabled)
+- Thread-safe singleton pattern for SDK instance (double-check locking)
+- Comprehensive error handling
+- Trace, span, and scoring operations
+"""
+
+import logging
+import threading
+from typing import Optional, Dict, Any
+
+from code_indexer.server.utils.config_manager import LangfuseConfig
+
+logger = logging.getLogger(__name__)
+
+
+class LangfuseClient:
+    """
+    Wrapper around Langfuse Python SDK for research session tracing.
+
+    Provides lazy initialization - the Langfuse SDK is only imported and
+    initialized on first use. When disabled, all operations are no-ops.
+
+    Thread-safe singleton pattern with double-check locking ensures only
+    one SDK instance per client even in concurrent scenarios.
+
+    Example usage:
+        config = LangfuseConfig(enabled=True, public_key="pk", secret_key="sk")
+        client = LangfuseClient(config)
+
+        # Lazy init happens on first call
+        trace = client.create_trace(name="research", session_id="session-1")
+        if trace:
+            span = client.create_span(trace_id=trace.id, name="search_code")
+            client.score(trace_id=trace.id, name="quality", value=0.9)
+            client.flush()
+    """
+
+    def __init__(self, config: LangfuseConfig):
+        """
+        Initialize LangfuseClient with configuration.
+
+        Args:
+            config: LangfuseConfig object containing credentials and settings
+        """
+        self._config = config
+        self._langfuse = None  # Lazy initialization
+        self._lock = threading.Lock()  # Thread-safe initialization
+
+    def is_enabled(self) -> bool:
+        """Check if Langfuse tracing is enabled."""
+        return self._config.enabled
+
+    def _ensure_initialized(self) -> bool:
+        """
+        Ensure Langfuse SDK is initialized (lazy init with thread safety).
+
+        Uses double-check locking pattern to avoid race conditions while
+        minimizing lock contention.
+
+        Returns:
+            True if initialized successfully, False if disabled or error
+        """
+        if not self._config.enabled:
+            return False
+
+        # Fast path: already initialized
+        if self._langfuse is not None:
+            return True
+
+        # Slow path: initialize with lock
+        with self._lock:
+            # Double-check: another thread may have initialized while we waited
+            if self._langfuse is not None:
+                return True
+
+            try:
+                # Lazy import - only import Langfuse when actually needed
+                from langfuse import Langfuse
+
+                self._langfuse = Langfuse(
+                    public_key=self._config.public_key,
+                    secret_key=self._config.secret_key,
+                    host=self._config.host,
+                )
+                logger.info("Langfuse SDK initialized successfully")
+                return True
+
+            except Exception as e:
+                logger.error(f"Failed to initialize Langfuse SDK: {e}")
+                return False
+
+    def create_trace(
+        self,
+        name: str,
+        session_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
+    ) -> Optional[Any]:
+        """
+        Create a new trace in Langfuse.
+
+        Langfuse 3.7.0 API creates traces implicitly when starting root spans.
+        We use start_as_current_span() to create the root span (which creates
+        the trace), then update_current_trace() to set session_id/user_id.
+
+        Args:
+            name: Name of the trace (e.g., "research-session")
+            session_id: MCP session ID
+            metadata: Optional metadata dict (topic, strategy, etc.)
+            user_id: Optional user identifier
+
+        Returns:
+            Simple object with .id and .trace_id properties if successful, None otherwise
+        """
+        if not self._ensure_initialized():
+            return None
+
+        try:
+            # Create root span with context (creates trace implicitly)
+            # Use end_on_exit=False so we control lifecycle manually
+            span_cm = self._langfuse.start_as_current_span(
+                name=name,
+                metadata=metadata,
+                end_on_exit=False,
+            )
+
+            # Enter context to activate span
+            span = span_cm.__enter__()
+
+            # Update trace with session_id and user_id
+            self._langfuse.update_current_trace(
+                session_id=session_id,
+                user_id=user_id,
+            )
+
+            # Exit context (but don't end span yet - caller controls lifecycle)
+            span_cm.__exit__(None, None, None)
+
+            logger.debug(f"Created trace: {name} (session={session_id}, trace_id={span.trace_id})")
+
+            # Return simple object with properties TraceStateManager expects
+            # TraceStateManager accesses trace.id in line 131
+            class TraceObject:
+                def __init__(self, trace_id: str):
+                    self.id = trace_id  # TraceStateManager expects .id
+                    self.trace_id = trace_id  # Also provide .trace_id for consistency
+
+            return TraceObject(span.trace_id)
+
+        except Exception as e:
+            logger.error(f"Failed to create trace '{name}': {e}")
+            return None
+
+    def create_span(
+        self,
+        trace_id: str,
+        name: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        input_data: Optional[Dict[str, Any]] = None,
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Any]:
+        """
+        Create a new span within a trace.
+
+        Langfuse 3.7.0 API uses start_span() with a TraceContext parameter
+        to attach spans to specific traces.
+
+        Args:
+            trace_id: ID of parent trace
+            name: Name of the span (e.g., "search_code", "list_files")
+            metadata: Optional metadata dict
+            input_data: Optional input data (tool arguments)
+            output_data: Optional output data (tool results)
+
+        Returns:
+            Langfuse span object if successful, None otherwise
+        """
+        if not self._ensure_initialized():
+            return None
+
+        try:
+            # Import TraceContext for type hints
+            from langfuse.types import TraceContext
+
+            # Create TraceContext to attach span to existing trace
+            trace_context = TraceContext(trace_id=trace_id)
+
+            # Create span attached to the trace
+            span = self._langfuse.start_span(
+                trace_context=trace_context,
+                name=name,
+                metadata=metadata,
+                input=input_data,
+                output=output_data,
+            )
+            logger.debug(f"Created span: {name} (trace={trace_id})")
+            return span
+
+        except Exception as e:
+            logger.error(f"Failed to create span '{name}': {e}")
+            return None
+
+    def score(
+        self, trace_id: str, name: str, value: float, comment: Optional[str] = None
+    ) -> Optional[Any]:
+        """
+        Add a score to a trace (for user feedback, quality assessment).
+
+        Langfuse 3.7.0 API uses create_score() method.
+
+        Args:
+            trace_id: ID of the trace to score
+            name: Name of the score (e.g., "user-feedback", "quality")
+            value: Score value (typically 0.0 to 1.0)
+            comment: Optional comment or feedback text
+
+        Returns:
+            Langfuse score object if successful, None otherwise
+        """
+        if not self._ensure_initialized():
+            return None
+
+        try:
+            # create_score() is the correct method name in Langfuse 3.7.0
+            score = self._langfuse.create_score(
+                trace_id=trace_id, name=name, value=value, comment=comment
+            )
+            logger.debug(f"Added score to trace {trace_id}: {name}={value}")
+            return score
+
+        except Exception as e:
+            logger.error(f"Failed to add score to trace {trace_id}: {e}")
+            return None
+
+    def flush(self) -> None:
+        """
+        Flush all pending traces/spans to Langfuse.
+
+        Should be called when ending a trace or at shutdown to ensure
+        all data is sent before the process exits.
+        """
+        if not self._config.enabled:
+            return
+
+        if self._langfuse is None:
+            return
+
+        try:
+            self._langfuse.flush()
+            logger.debug("Flushed Langfuse traces")
+
+        except Exception as e:
+            logger.error(f"Failed to flush Langfuse: {e}")

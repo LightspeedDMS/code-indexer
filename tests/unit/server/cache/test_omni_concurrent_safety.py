@@ -187,9 +187,9 @@ class TestOmniCacheThreadSafety:
         assert len(exceptions) == 0, f"Store operations raised exceptions: {exceptions}"
 
         stats = cache.get_stats()
-        assert stats["total_entries"] <= max_entries, (
-            f"Cache size {stats['total_entries']} exceeds max {max_entries}"
-        )
+        assert (
+            stats["total_entries"] <= max_entries
+        ), f"Cache size {stats['total_entries']} exceeds max {max_entries}"
 
     def test_concurrent_get_metadata(self) -> None:
         """

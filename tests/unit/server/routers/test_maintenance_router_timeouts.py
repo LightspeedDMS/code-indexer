@@ -23,11 +23,15 @@ class TestDrainTimeoutEndpoint:
         response = client.get("/api/admin/maintenance/drain-timeout")
         assert response.status_code == 401
 
-    def test_returns_max_job_timeout_and_recommended_drain_timeout(self, test_app_with_auth):
+    def test_returns_max_job_timeout_and_recommended_drain_timeout(
+        self, test_app_with_auth
+    ):
         """Endpoint should return both max_job_timeout and recommended_drain_timeout."""
         client, auth_headers = test_app_with_auth
 
-        response = client.get("/api/admin/maintenance/drain-timeout", headers=auth_headers)
+        response = client.get(
+            "/api/admin/maintenance/drain-timeout", headers=auth_headers
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -46,7 +50,9 @@ class TestDrainTimeoutEndpoint:
         """Recommended drain timeout should be 1.5x max job timeout."""
         client, auth_headers = test_app_with_auth
 
-        response = client.get("/api/admin/maintenance/drain-timeout", headers=auth_headers)
+        response = client.get(
+            "/api/admin/maintenance/drain-timeout", headers=auth_headers
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -59,7 +65,10 @@ class TestDrainTimeoutEndpoint:
 
     def test_uses_config_manager_to_get_config(self):
         """Endpoint should use ServerConfigManager to retrieve current config."""
-        from code_indexer.server.utils.config_manager import ServerConfig, ServerConfigManager
+        from code_indexer.server.utils.config_manager import (
+            ServerConfig,
+            ServerConfigManager,
+        )
         from code_indexer.server.routers.maintenance_router import get_config_manager
         from code_indexer.server.auth.user_manager import User, UserRole
         from code_indexer.server.auth.dependencies import get_current_admin_user
@@ -97,7 +106,9 @@ class TestDrainTimeoutEndpoint:
         """Endpoint should handle missing config by using defaults."""
         client, auth_headers = test_app_with_auth
 
-        with patch("code_indexer.server.routers.maintenance_router.get_config_manager") as mock_get_manager:
+        with patch(
+            "code_indexer.server.routers.maintenance_router.get_config_manager"
+        ) as mock_get_manager:
             mock_manager = MagicMock()
             mock_manager.load_config.return_value = None  # No config file
             mock_manager.create_default_config.return_value = MagicMock(
@@ -113,7 +124,9 @@ class TestDrainTimeoutEndpoint:
             )
             mock_get_manager.return_value = mock_manager
 
-            response = client.get("/api/admin/maintenance/drain-timeout", headers=auth_headers)
+            response = client.get(
+                "/api/admin/maintenance/drain-timeout", headers=auth_headers
+            )
 
             # Should still succeed with default config
             assert response.status_code == 200

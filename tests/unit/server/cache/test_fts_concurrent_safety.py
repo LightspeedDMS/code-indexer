@@ -80,13 +80,17 @@ class TestFTSCacheThreadSafety:
         for t in threads:
             t.join(timeout=10)
 
-        assert len(exceptions) == 0, f"Concurrent queries raised exceptions: {exceptions}"
+        assert (
+            len(exceptions) == 0
+        ), f"Concurrent queries raised exceptions: {exceptions}"
         assert len(results) == 10, f"Expected 10 results, got {len(results)}"
 
         first_index, first_schema = results[0]
         for index, schema in results[1:]:
             assert index is first_index, "All queries should return same cached index"
-            assert schema is first_schema, "All queries should return same cached schema"
+            assert (
+                schema is first_schema
+            ), "All queries should return same cached schema"
 
         stats = cache.get_stats()
         assert stats.reload_count >= 9, "Should have at least 9 reload calls"
@@ -129,12 +133,14 @@ class TestFTSCacheThreadSafety:
         for t in threads:
             t.join(timeout=30)
 
-        assert len(exceptions) == 0, f"Concurrent queries raised exceptions: {exceptions}"
+        assert (
+            len(exceptions) == 0
+        ), f"Concurrent queries raised exceptions: {exceptions}"
 
         for index_name, index_results in results.items():
-            assert len(index_results) == queries_per_index, (
-                f"Index {index_name}: expected {queries_per_index}, got {len(index_results)}"
-            )
+            assert (
+                len(index_results) == queries_per_index
+            ), f"Index {index_name}: expected {queries_per_index}, got {len(index_results)}"
 
     def test_tantivy_reload_thread_safety(self, tmp_path: Path) -> None:
         """
@@ -168,7 +174,9 @@ class TestFTSCacheThreadSafety:
         for t in threads:
             t.join(timeout=30)
 
-        assert len(exceptions) == 0, f"Reload operations raised exceptions: {exceptions}"
+        assert (
+            len(exceptions) == 0
+        ), f"Reload operations raised exceptions: {exceptions}"
         assert len(reload_counts) == 50, "All queries should complete"
 
         stats = cache.get_stats()

@@ -119,9 +119,7 @@ class TestTruncationHelperBasic:
         tokens = truncation_helper.estimate_tokens("abcd")
         assert tokens == 1
 
-    def test_truncate_and_cache_small_content_no_truncation(
-        self, truncation_helper
-    ):
+    def test_truncate_and_cache_small_content_no_truncation(self, truncation_helper):
         """Test that small content is not truncated and no cache handle is returned."""
         small_content = "Small content under limit"  # 25 chars = ~6 tokens
 
@@ -133,7 +131,9 @@ class TestTruncationHelperBasic:
         assert result.truncated is False
         assert result.cache_handle is None
         assert result.preview == small_content
-        assert result.original_tokens == truncation_helper.estimate_tokens(small_content)
+        assert result.original_tokens == truncation_helper.estimate_tokens(
+            small_content
+        )
         assert result.preview_tokens == result.original_tokens
 
     def test_truncate_and_cache_large_content_is_truncated(

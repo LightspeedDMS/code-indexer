@@ -29,7 +29,10 @@ class TestJobListDisplay:
         When I view the jobs page
         Then I see the repository name from repo_alias (not "N/A" or "Unknown")
         """
-        from code_indexer.server.repositories.background_jobs import BackgroundJob, JobStatus
+        from code_indexer.server.repositories.background_jobs import (
+            BackgroundJob,
+            JobStatus,
+        )
         from datetime import datetime, timezone
         import uuid
 

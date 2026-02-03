@@ -180,7 +180,9 @@ WorkingDirectory=/home/user
 
         with patch.object(Path, "exists", return_value=True):
             with patch.object(Path, "read_text", return_value=service_content):
-                with patch("code_indexer.server.auto_update.deployment_executor.logger") as mock_logger:
+                with patch(
+                    "code_indexer.server.auto_update.deployment_executor.logger"
+                ) as mock_logger:
                     result = executor._ensure_cidx_repo_root()
 
         # Should return True (graceful handling, not fatal)

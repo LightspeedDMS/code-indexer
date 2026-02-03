@@ -780,9 +780,7 @@ class TestGetRepositoryStatusTemporalOutput:
 
             # Use non-global alias to test the activated repository code path
             # that calls repository_listing_manager.get_repository_details
-            result = get_repository_status(
-                {"repository_alias": "test-repo"}, user
-            )
+            result = get_repository_status({"repository_alias": "test-repo"}, user)
 
             response_data = json.loads(result["content"][0]["text"])
 

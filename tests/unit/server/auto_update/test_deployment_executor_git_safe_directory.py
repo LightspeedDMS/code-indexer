@@ -215,7 +215,9 @@ ExecStart=/usr/bin/python3 -m uvicorn app:app
         add_call = mock_run.call_args_list[1]
         assert add_call[0][0][-1] == "/correct/repo/path"
 
-    def test_ensure_git_safe_directory_falls_back_to_repo_path_when_no_working_directory(self):
+    def test_ensure_git_safe_directory_falls_back_to_repo_path_when_no_working_directory(
+        self,
+    ):
         """Should fall back to self.repo_path when WorkingDirectory not in service file."""
         executor = DeploymentExecutor(
             repo_path=Path("/home/user/code-indexer"),

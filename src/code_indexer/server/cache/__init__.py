@@ -66,11 +66,13 @@ def get_global_cache() -> HNSWIndexCache:
                     extra={"correlation_id": get_correlation_id()},
                 )
             except Exception as e:
-                logger.warning(format_error_log(
-                    "GIT-GENERAL-007",
-                    f"Failed to load cache config from {config_file}: {e}. Using defaults.",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "GIT-GENERAL-007",
+                        f"Failed to load cache config from {config_file}: {e}. Using defaults.",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 config = HNSWIndexCacheConfig.from_env()
         else:
             # Try environment variables, fall back to defaults
@@ -135,11 +137,13 @@ def get_global_fts_cache() -> FTSIndexCache:
                     extra={"correlation_id": get_correlation_id()},
                 )
             except Exception as e:
-                logger.warning(format_error_log(
-                    "GIT-GENERAL-008",
-                    f"Failed to load FTS cache config from {config_file}: {e}. Using defaults.",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "GIT-GENERAL-008",
+                        f"Failed to load FTS cache config from {config_file}: {e}. Using defaults.",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 config = FTSIndexCacheConfig.from_env()
         else:
             # Try environment variables, fall back to defaults

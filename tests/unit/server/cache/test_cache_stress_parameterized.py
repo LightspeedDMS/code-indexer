@@ -148,16 +148,22 @@ class TestParameterizedStressTests:
             for op_id in range(operations_per_thread):
                 try:
                     if op_id % 3 == 0:
-                        data = [{"id": j, "w": worker_id, "op": op_id} for j in range(5)]
+                        data = [
+                            {"id": j, "w": worker_id, "op": op_id} for j in range(5)
+                        ]
                         cursor = cache.store_results(data, {"worker": worker_id})
                         with lock:
                             stored_cursors.append(cursor)
                             results.append(True)
                     else:
                         with lock:
-                            cursor = stored_cursors[
-                                (worker_id + op_id) % len(stored_cursors)
-                            ] if stored_cursors else None
+                            cursor = (
+                                stored_cursors[
+                                    (worker_id + op_id) % len(stored_cursors)
+                                ]
+                                if stored_cursors
+                                else None
+                            )
                         if cursor:
                             cache.get_results(cursor, offset=0, limit=5)
                         with lock:
@@ -218,7 +224,10 @@ class TestMixedOperationPatterns:
                         path = repo_paths[op_id % len(repo_paths)]
                         cache.get_or_load(
                             path,
-                            lambda p=path: (MagicMock(), {i: f"{p}_v{i}" for i in range(10)}),
+                            lambda p=path: (
+                                MagicMock(),
+                                {i: f"{p}_v{i}" for i in range(10)},
+                            ),
                         )
                         with lock:
                             read_ops += 1

@@ -16,14 +16,14 @@ def create_mock_id_token(claims):
     """
     # Create header (standard JWT header)
     header = {"alg": "RS256", "typ": "JWT"}
-    header_b64 = base64.urlsafe_b64encode(
-        json.dumps(header).encode()
-    ).decode().rstrip("=")
+    header_b64 = (
+        base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip("=")
+    )
 
     # Create payload with claims
-    payload_b64 = base64.urlsafe_b64encode(
-        json.dumps(claims).encode()
-    ).decode().rstrip("=")
+    payload_b64 = (
+        base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    )
 
     # Signature is not validated in tests, so just use placeholder
     signature = "mock-signature"

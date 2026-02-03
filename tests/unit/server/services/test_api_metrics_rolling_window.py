@@ -187,15 +187,9 @@ class TestRollingWindowApiMetricsService:
         service = ApiMetricsService()
 
         # Add timestamps at various ages within 24 hours
-        service._regex_searches.append(
-            datetime.now(timezone.utc) - timedelta(hours=1)
-        )
-        service._regex_searches.append(
-            datetime.now(timezone.utc) - timedelta(hours=12)
-        )
-        service._regex_searches.append(
-            datetime.now(timezone.utc) - timedelta(hours=23)
-        )
+        service._regex_searches.append(datetime.now(timezone.utc) - timedelta(hours=1))
+        service._regex_searches.append(datetime.now(timezone.utc) - timedelta(hours=12))
+        service._regex_searches.append(datetime.now(timezone.utc) - timedelta(hours=23))
 
         # Add a recent one
         service.increment_regex_search()
@@ -305,9 +299,7 @@ class TestRollingWindowApiMetricsService:
 
         # Execute concurrent operations
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
-            futures = [
-                executor.submit(mixed_operations) for _ in range(num_threads)
-            ]
+            futures = [executor.submit(mixed_operations) for _ in range(num_threads)]
             for future in concurrent.futures.as_completed(futures):
                 future.result()
 
@@ -431,12 +423,13 @@ class TestDashboardServiceApiMetricsIntegration:
         # Should not raise when api_window is passed
         # We expect the method signature to support api_window
         import inspect
+
         sig = inspect.signature(service.get_stats_partial)
         param_names = list(sig.parameters.keys())
 
-        assert "api_window" in param_names, (
-            "get_stats_partial should accept api_window parameter"
-        )
+        assert (
+            "api_window" in param_names
+        ), "get_stats_partial should accept api_window parameter"
 
     def test_get_stats_partial_passes_window_to_metrics_service(self):
         """Test that get_stats_partial passes window_seconds to api_metrics_service."""
@@ -485,9 +478,9 @@ class TestDashboardServiceApiMetricsIntegration:
 
         # Get metrics second time - should still be 2 (not reset)
         metrics2 = fresh_service.get_metrics(window_seconds=60)
-        assert metrics2["semantic_searches"] == 2, (
-            "Metrics should not reset on read with rolling window approach"
-        )
+        assert (
+            metrics2["semantic_searches"] == 2
+        ), "Metrics should not reset on read with rolling window approach"
 
 
 class TestGlobalServiceInstanceCompatibility:

@@ -9,15 +9,17 @@ Tests the complete error code logging workflow:
 
 from code_indexer.server.error_codes import ERROR_REGISTRY, get_error_definition
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
-from code_indexer.server.middleware.correlation import set_correlation_id, clear_correlation_id
+from code_indexer.server.middleware.correlation import (
+    set_correlation_id,
+    clear_correlation_id,
+)
 
 
 def test_error_log_format():
     """Test that error logs are formatted correctly with error codes."""
     # Test AUTH-HYBRID-001 error code
     message = format_error_log(
-        "AUTH-HYBRID-001",
-        "Hybrid auth (session): user_manager not initialized"
+        "AUTH-HYBRID-001", "Hybrid auth (session): user_manager not initialized"
     )
 
     # Verify format
@@ -25,11 +27,7 @@ def test_error_log_format():
     assert "user_manager not initialized" in message
 
     # Test with additional context
-    message = format_error_log(
-        "AUTH-HYBRID-002",
-        "User not found",
-        username="testuser"
-    )
+    message = format_error_log("AUTH-HYBRID-002", "User not found", username="testuser")
 
     assert "[AUTH-HYBRID-002]" in message
     assert "username=testuser" in message

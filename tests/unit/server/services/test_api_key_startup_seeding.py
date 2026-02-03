@@ -15,7 +15,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 
-
 class TestApiKeyStartupSeeding:
     """Test auto-seeding of API keys during server startup."""
 
@@ -127,9 +126,7 @@ class TestApiKeyStartupSeeding:
         mock_config.claude_integration_config.anthropic_api_key = (
             "sk-ant-api03-existing123456789012345678901234"
         )
-        mock_config.claude_integration_config.voyageai_api_key = (
-            "pa-existingvoyage123"
-        )
+        mock_config.claude_integration_config.voyageai_api_key = "pa-existingvoyage123"
 
         mock_config_service = MagicMock()
         mock_config_service.get_config.return_value = mock_config

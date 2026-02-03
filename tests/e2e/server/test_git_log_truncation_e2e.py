@@ -118,7 +118,9 @@ def e2e_git_log_environment():
         )
 
         # Create commit with substantial body text
-        commit_subject = f"Commit {i:03d}: Add function_{i} with comprehensive implementation"
+        commit_subject = (
+            f"Commit {i:03d}: Add function_{i} with comprehensive implementation"
+        )
         commit_body = f"""
 This commit adds function_{i} to the codebase.
 
@@ -266,7 +268,9 @@ class TestGitLogTruncationE2E:
 
             assert cache_handle is not None, "Expected cache_handle for large log"
             assert truncated is True, "Expected truncated=True for large log"
-            assert total_tokens > 100, f"Expected total_tokens > 100, got {total_tokens}"
+            assert (
+                total_tokens > 100
+            ), f"Expected total_tokens > 100, got {total_tokens}"
             assert has_more is True, "Expected has_more=True for truncated log"
 
             # Verify backward-compatible fields still present

@@ -32,7 +32,9 @@ class TestGetGoldenRepoIndexesSeparateTypes:
     @pytest.fixture
     def mock_golden_repo_manager(self, temp_dir):
         """Create a mock GoldenRepoManager with test setup."""
-        from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+        from code_indexer.server.repositories.golden_repo_manager import (
+            GoldenRepoManager,
+        )
 
         # Create mock golden repo
         repo_path = temp_dir / "test-repo"
@@ -59,23 +61,25 @@ class TestGetGoldenRepoIndexesSeparateTypes:
 
         NOT: combined 'semantic_fts' key
         """
-        from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+        from code_indexer.server.repositories.golden_repo_manager import (
+            GoldenRepoManager,
+        )
 
         manager, temp_dir, repo_path = mock_golden_repo_manager
 
         # Use the real method implementation
-        with patch.object(GoldenRepoManager, '__init__', lambda self, *args, **kwargs: None):
+        with patch.object(
+            GoldenRepoManager, "__init__", lambda self, *args, **kwargs: None
+        ):
             real_manager = GoldenRepoManager.__new__(GoldenRepoManager)
             real_manager.golden_repos = manager.golden_repos
             real_manager.get_actual_repo_path = manager.get_actual_repo_path
 
             # Mock _index_exists and _get_index_status methods
             real_manager._index_exists = Mock(return_value=False)
-            real_manager._get_index_status = Mock(return_value={
-                "exists": False,
-                "path": None,
-                "last_updated": None
-            })
+            real_manager._get_index_status = Mock(
+                return_value={"exists": False, "path": None, "last_updated": None}
+            )
 
             result = real_manager.get_golden_repo_indexes("test-repo")
 
@@ -86,19 +90,23 @@ class TestGetGoldenRepoIndexesSeparateTypes:
         indexes = result["indexes"]
 
         # CRITICAL: Should have separate keys
-        assert "semantic" in indexes, "Missing 'semantic' key - should be separate from FTS"
+        assert (
+            "semantic" in indexes
+        ), "Missing 'semantic' key - should be separate from FTS"
         assert "fts" in indexes, "Missing 'fts' key - should be separate from semantic"
         assert "temporal" in indexes
         assert "scip" in indexes
 
         # CRITICAL: Should NOT have combined key
-        assert "semantic_fts" not in indexes, (
-            "Found 'semantic_fts' key - should be separate 'semantic' and 'fts' keys"
-        )
+        assert (
+            "semantic_fts" not in indexes
+        ), "Found 'semantic_fts' key - should be separate 'semantic' and 'fts' keys"
 
     def test_semantic_index_status_correctly_reported(self, temp_dir):
         """Test that semantic index presence is correctly detected."""
-        from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+        from code_indexer.server.repositories.golden_repo_manager import (
+            GoldenRepoManager,
+        )
 
         # Create semantic index directory
         repo_path = temp_dir / "test-repo-semantic"
@@ -107,7 +115,9 @@ class TestGetGoldenRepoIndexesSeparateTypes:
         semantic_index.mkdir(parents=True)
 
         # Create the manager with real implementation
-        with patch.object(GoldenRepoManager, '__init__', lambda self, *args, **kwargs: None):
+        with patch.object(
+            GoldenRepoManager, "__init__", lambda self, *args, **kwargs: None
+        ):
             manager = GoldenRepoManager.__new__(GoldenRepoManager)
             manager.golden_repos_dir = str(temp_dir)
 
@@ -122,11 +132,19 @@ class TestGetGoldenRepoIndexesSeparateTypes:
                 return index_type == "semantic"
 
             manager._index_exists = mock_index_exists
-            manager._get_index_status = Mock(side_effect=lambda repo_dir, idx_type, golden_repo: {
-                "exists": idx_type == "semantic",
-                "path": str(repo_dir / ".code-indexer" / "index") if idx_type == "semantic" else None,
-                "last_updated": "2025-01-01T00:00:00Z" if idx_type == "semantic" else None
-            })
+            manager._get_index_status = Mock(
+                side_effect=lambda repo_dir, idx_type, golden_repo: {
+                    "exists": idx_type == "semantic",
+                    "path": (
+                        str(repo_dir / ".code-indexer" / "index")
+                        if idx_type == "semantic"
+                        else None
+                    ),
+                    "last_updated": (
+                        "2025-01-01T00:00:00Z" if idx_type == "semantic" else None
+                    ),
+                }
+            )
 
             result = manager.get_golden_repo_indexes("test-repo-semantic")
 
@@ -135,7 +153,9 @@ class TestGetGoldenRepoIndexesSeparateTypes:
 
     def test_fts_index_status_correctly_reported(self, temp_dir):
         """Test that FTS index presence is correctly detected."""
-        from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+        from code_indexer.server.repositories.golden_repo_manager import (
+            GoldenRepoManager,
+        )
 
         # Create FTS index directory (tantivy_index)
         repo_path = temp_dir / "test-repo-fts"
@@ -143,7 +163,9 @@ class TestGetGoldenRepoIndexesSeparateTypes:
         fts_index = repo_path / ".code-indexer" / "tantivy_index"
         fts_index.mkdir(parents=True)
 
-        with patch.object(GoldenRepoManager, '__init__', lambda self, *args, **kwargs: None):
+        with patch.object(
+            GoldenRepoManager, "__init__", lambda self, *args, **kwargs: None
+        ):
             manager = GoldenRepoManager.__new__(GoldenRepoManager)
             manager.golden_repos_dir = str(temp_dir)
 
@@ -158,11 +180,19 @@ class TestGetGoldenRepoIndexesSeparateTypes:
                 return index_type == "fts"
 
             manager._index_exists = mock_index_exists
-            manager._get_index_status = Mock(side_effect=lambda repo_dir, idx_type, golden_repo: {
-                "exists": idx_type == "fts",
-                "path": str(repo_dir / ".code-indexer" / "tantivy_index") if idx_type == "fts" else None,
-                "last_updated": "2025-01-01T00:00:00Z" if idx_type == "fts" else None
-            })
+            manager._get_index_status = Mock(
+                side_effect=lambda repo_dir, idx_type, golden_repo: {
+                    "exists": idx_type == "fts",
+                    "path": (
+                        str(repo_dir / ".code-indexer" / "tantivy_index")
+                        if idx_type == "fts"
+                        else None
+                    ),
+                    "last_updated": (
+                        "2025-01-01T00:00:00Z" if idx_type == "fts" else None
+                    ),
+                }
+            )
 
             result = manager.get_golden_repo_indexes("test-repo-fts")
 
@@ -171,14 +201,18 @@ class TestGetGoldenRepoIndexesSeparateTypes:
 
     def test_both_semantic_and_fts_can_exist_independently(self, temp_dir):
         """Test that both semantic and FTS can exist independently."""
-        from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+        from code_indexer.server.repositories.golden_repo_manager import (
+            GoldenRepoManager,
+        )
 
         repo_path = temp_dir / "test-repo-both"
         repo_path.mkdir(parents=True)
         (repo_path / ".code-indexer" / "index").mkdir(parents=True)
         (repo_path / ".code-indexer" / "tantivy_index").mkdir(parents=True)
 
-        with patch.object(GoldenRepoManager, '__init__', lambda self, *args, **kwargs: None):
+        with patch.object(
+            GoldenRepoManager, "__init__", lambda self, *args, **kwargs: None
+        ):
             manager = GoldenRepoManager.__new__(GoldenRepoManager)
             manager.golden_repos_dir = str(temp_dir)
 
@@ -193,11 +227,25 @@ class TestGetGoldenRepoIndexesSeparateTypes:
                 return index_type in ["semantic", "fts"]
 
             manager._index_exists = mock_index_exists
-            manager._get_index_status = Mock(side_effect=lambda repo_dir, idx_type, golden_repo: {
-                "exists": idx_type in ["semantic", "fts"],
-                "path": str(repo_dir / ".code-indexer" / ("index" if idx_type == "semantic" else "tantivy_index")) if idx_type in ["semantic", "fts"] else None,
-                "last_updated": "2025-01-01T00:00:00Z" if idx_type in ["semantic", "fts"] else None
-            })
+            manager._get_index_status = Mock(
+                side_effect=lambda repo_dir, idx_type, golden_repo: {
+                    "exists": idx_type in ["semantic", "fts"],
+                    "path": (
+                        str(
+                            repo_dir
+                            / ".code-indexer"
+                            / ("index" if idx_type == "semantic" else "tantivy_index")
+                        )
+                        if idx_type in ["semantic", "fts"]
+                        else None
+                    ),
+                    "last_updated": (
+                        "2025-01-01T00:00:00Z"
+                        if idx_type in ["semantic", "fts"]
+                        else None
+                    ),
+                }
+            )
 
             result = manager.get_golden_repo_indexes("test-repo-both")
 
@@ -214,38 +262,48 @@ class TestIndexExistsMethodSeparateTypes:
 
     def test_index_exists_recognizes_semantic_type(self):
         """Test that _index_exists handles 'semantic' as a valid type."""
-        from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+        from code_indexer.server.repositories.golden_repo_manager import (
+            GoldenRepoManager,
+        )
 
-        with patch.object(GoldenRepoManager, '__init__', lambda self, *args, **kwargs: None):
+        with patch.object(
+            GoldenRepoManager, "__init__", lambda self, *args, **kwargs: None
+        ):
             manager = GoldenRepoManager.__new__(GoldenRepoManager)
 
             golden_repo = Mock()
             golden_repo.clone_path = "/fake/path"
 
             # The method should not raise for 'semantic' type
-            with patch('pathlib.Path.exists', return_value=False):
+            with patch("pathlib.Path.exists", return_value=False):
                 # Should handle 'semantic' without error
                 try:
                     result = manager._index_exists(golden_repo, "semantic")
                     # If it returns something, it handled the type
                     assert result in [True, False]
                 except KeyError:
-                    pytest.fail("_index_exists doesn't recognize 'semantic' as valid type")
+                    pytest.fail(
+                        "_index_exists doesn't recognize 'semantic' as valid type"
+                    )
                 except AttributeError:
                     # Mock setup issue, skip
                     pass
 
     def test_index_exists_recognizes_fts_type(self):
         """Test that _index_exists handles 'fts' as a valid type."""
-        from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+        from code_indexer.server.repositories.golden_repo_manager import (
+            GoldenRepoManager,
+        )
 
-        with patch.object(GoldenRepoManager, '__init__', lambda self, *args, **kwargs: None):
+        with patch.object(
+            GoldenRepoManager, "__init__", lambda self, *args, **kwargs: None
+        ):
             manager = GoldenRepoManager.__new__(GoldenRepoManager)
 
             golden_repo = Mock()
             golden_repo.clone_path = "/fake/path"
 
-            with patch('pathlib.Path.exists', return_value=False):
+            with patch("pathlib.Path.exists", return_value=False):
                 try:
                     result = manager._index_exists(golden_repo, "fts")
                     assert result in [True, False]

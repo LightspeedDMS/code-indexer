@@ -149,5 +149,8 @@ class TestSelfMonitoringConfig:
         assert loaded_config.self_monitoring_config.enabled is True
         assert loaded_config.self_monitoring_config.cadence_minutes == 45
         assert loaded_config.self_monitoring_config.model == "sonnet"
-        assert loaded_config.self_monitoring_config.prompt_template == "Custom prompt for testing"
+        assert (
+            loaded_config.self_monitoring_config.prompt_template
+            == "Custom prompt for testing"
+        )
         assert loaded_config.self_monitoring_config.prompt_user_modified is True

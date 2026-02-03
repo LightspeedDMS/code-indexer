@@ -140,9 +140,7 @@ class TestHybridEdgeCases:
         # Retrieve and verify unicode preserved (sync calls)
         content_retrieved = cache.retrieve(result["cache_handle"], page=0)
         snippet_retrieved = cache.retrieve(result["snippet_cache_handle"], page=0)
-        match_text_retrieved = cache.retrieve(
-            result["match_text_cache_handle"], page=0
-        )
+        match_text_retrieved = cache.retrieve(result["match_text_cache_handle"], page=0)
 
         # Unicode content should be correctly preserved
         assert "Hello" in content_retrieved.content

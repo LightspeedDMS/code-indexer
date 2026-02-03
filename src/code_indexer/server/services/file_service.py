@@ -203,11 +203,15 @@ class FileListingService:
             return cast(str, activated_path)
 
         except Exception as e:
-            logger.error(format_error_log(
-                "CACHE-GENERAL-011",
-                "Failed to get repository path",
-                repo_id=repo_id, username=username, error=str(e)),
-                extra=get_log_extra("CACHE-GENERAL-011")
+            logger.error(
+                format_error_log(
+                    "CACHE-GENERAL-011",
+                    "Failed to get repository path",
+                    repo_id=repo_id,
+                    username=username,
+                    error=str(e),
+                ),
+                extra=get_log_extra("CACHE-GENERAL-011"),
             )
             if isinstance(e, FileNotFoundError):
                 raise
@@ -265,20 +269,26 @@ class FileListingService:
                         files.append(file_info)
 
                     except (OSError, PermissionError) as e:
-                        logger.warning(format_error_log(
-                            "CACHE-GENERAL-012",
-                            "Cannot access file",
-                            file_path=str(file_path), error=str(e)),
-                            extra=get_log_extra("CACHE-GENERAL-012")
+                        logger.warning(
+                            format_error_log(
+                                "CACHE-GENERAL-012",
+                                "Cannot access file",
+                                file_path=str(file_path),
+                                error=str(e),
+                            ),
+                            extra=get_log_extra("CACHE-GENERAL-012"),
                         )
                         continue
 
         except PermissionError as e:
-            logger.error(format_error_log(
-                "CACHE-GENERAL-013",
-                "Cannot access repository directory",
-                repo_path=repo_path, error=str(e)),
-                extra=get_log_extra("CACHE-GENERAL-013")
+            logger.error(
+                format_error_log(
+                    "CACHE-GENERAL-013",
+                    "Cannot access repository directory",
+                    repo_path=repo_path,
+                    error=str(e),
+                ),
+                extra=get_log_extra("CACHE-GENERAL-013"),
             )
             raise
 
@@ -324,11 +334,14 @@ class FileListingService:
                 "gitwildmatch", gitignore_content.splitlines()
             )
         except (OSError, UnicodeDecodeError) as e:
-            logger.warning(format_error_log(
-                "CACHE-GENERAL-014",
-                "Failed to read .gitignore",
-                gitignore_path=str(gitignore_path), error=str(e)),
-                extra=get_log_extra("CACHE-GENERAL-014")
+            logger.warning(
+                format_error_log(
+                    "CACHE-GENERAL-014",
+                    "Failed to read .gitignore",
+                    gitignore_path=str(gitignore_path),
+                    error=str(e),
+                ),
+                extra=get_log_extra("CACHE-GENERAL-014"),
             )
             return None
 
@@ -439,11 +452,14 @@ class FileListingService:
 
         if sort_by is None or sort_by not in valid_sort_fields:
             if sort_by is not None:
-                logger.warning(format_error_log(
-                    "CACHE-GENERAL-015",
-                    "Invalid sort field, using default",
-                    sort_by=sort_by, default="path"),
-                    extra=get_log_extra("CACHE-GENERAL-015")
+                logger.warning(
+                    format_error_log(
+                        "CACHE-GENERAL-015",
+                        "Invalid sort field, using default",
+                        sort_by=sort_by,
+                        default="path",
+                    ),
+                    extra=get_log_extra("CACHE-GENERAL-015"),
                 )
             sort_by = "path"
 
@@ -523,7 +539,9 @@ class FileListingService:
             truncated_at_line = effective_offset + lines_before_truncation
 
             # Recalculate estimated tokens for truncated content
-            estimated_tokens = len(actual_content) // file_content_limits.chars_per_token
+            estimated_tokens = (
+                len(actual_content) // file_content_limits.chars_per_token
+            )
 
         # Determine if pagination required
         # Formula: last_returned_line = effective_offset + returned_lines - 1
@@ -658,7 +676,11 @@ class FileListingService:
                 "truncated": False,
                 "truncated_at_line": None,
                 "requires_pagination": has_more,
-                "pagination_hint": f"More content available. Use offset={next_offset} to continue reading." if has_more else None,
+                "pagination_hint": (
+                    f"More content available. Use offset={next_offset} to continue reading."
+                    if has_more
+                    else None
+                ),
             }
 
             enforced_content = content
@@ -832,7 +854,11 @@ class FileListingService:
                 "truncated": False,
                 "truncated_at_line": None,
                 "requires_pagination": has_more,
-                "pagination_hint": f"More content available. Use offset={next_offset} to continue reading." if has_more else None,
+                "pagination_hint": (
+                    f"More content available. Use offset={next_offset} to continue reading."
+                    if has_more
+                    else None
+                ),
             }
 
             enforced_content = content

@@ -73,7 +73,9 @@ class MaintenanceState:
                 "maintenance_mode": True,
                 "running_jobs": running_jobs,
                 "queued_jobs": queued_jobs,
-                "entered_at": self._entered_at.isoformat() if self._entered_at else None,
+                "entered_at": (
+                    self._entered_at.isoformat() if self._entered_at else None
+                ),
                 "message": f"Maintenance mode active. {running_jobs} running, {queued_jobs} queued.",
             }
 
@@ -103,10 +105,12 @@ class MaintenanceState:
             try:
                 total += tracker.get_running_jobs_count()
             except Exception as e:
-                logger.warning(format_error_log(
-                    "GIT-GENERAL-049",
-                    f"Failed to get running jobs from tracker: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "GIT-GENERAL-049",
+                        f"Failed to get running jobs from tracker: {e}",
+                    )
+                )
         return total
 
     def _get_queued_jobs_count(self) -> int:
@@ -116,10 +120,12 @@ class MaintenanceState:
             try:
                 total += tracker.get_queued_jobs_count()
             except Exception as e:
-                logger.warning(format_error_log(
-                    "GIT-GENERAL-050",
-                    f"Failed to get queued jobs from tracker: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "GIT-GENERAL-050",
+                        f"Failed to get queued jobs from tracker: {e}",
+                    )
+                )
         return total
 
     def register_job_tracker(self, tracker: Any) -> None:
@@ -144,7 +150,9 @@ class MaintenanceState:
                 "drained": drained,
                 "running_jobs": running_jobs,
                 "queued_jobs": queued_jobs,
-                "entered_at": self._entered_at.isoformat() if self._entered_at else None,
+                "entered_at": (
+                    self._entered_at.isoformat() if self._entered_at else None
+                ),
             }
 
     def is_drained(self) -> bool:
@@ -199,10 +207,12 @@ class MaintenanceState:
                 if hasattr(tracker, "get_running_jobs_details"):
                     jobs.extend(tracker.get_running_jobs_details())
             except Exception as e:
-                logger.warning(format_error_log(
-                    "GIT-GENERAL-051",
-                    f"Failed to get job details from tracker: {e}"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "GIT-GENERAL-051",
+                        f"Failed to get job details from tracker: {e}",
+                    )
+                )
         return jobs
 
     def get_max_job_timeout(self, config: Any) -> int:
@@ -224,17 +234,21 @@ class MaintenanceState:
 
         # Resource config timeouts
         if config.resource_config:
-            timeouts.extend([
-                config.resource_config.git_refresh_timeout,
-                config.resource_config.cidx_index_timeout,
-            ])
+            timeouts.extend(
+                [
+                    config.resource_config.git_refresh_timeout,
+                    config.resource_config.cidx_index_timeout,
+                ]
+            )
 
         # SCIP config timeouts
         if config.scip_config:
-            timeouts.extend([
-                config.scip_config.indexing_timeout_seconds,
-                config.scip_config.scip_generation_timeout_seconds,
-            ])
+            timeouts.extend(
+                [
+                    config.scip_config.indexing_timeout_seconds,
+                    config.scip_config.scip_generation_timeout_seconds,
+                ]
+            )
 
         return max(timeouts) if timeouts else 3600  # Default 1 hour
 

@@ -112,7 +112,9 @@ def _apply_scip_payload_truncation(
     Returns:
         Results with truncated context fields if applicable
     """
-    from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation as mcp_truncate
+    from code_indexer.server.mcp.handlers import (
+        _apply_scip_payload_truncation as mcp_truncate,
+    )
 
     return mcp_truncate(results)
 
@@ -159,11 +161,13 @@ def get_definition(
             "results": results,
         }
     except Exception as e:
-        logger.warning(format_error_log(
-            "WEB-GENERAL-022",
-            f"Definition query failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-022",
+                f"Definition query failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return {"success": False, "error": str(e)}
 
 
@@ -212,11 +216,13 @@ def get_references(
             "results": results,
         }
     except Exception as e:
-        logger.warning(format_error_log(
-            "WEB-GENERAL-023",
-            f"References query failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-023",
+                f"References query failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return {"success": False, "error": str(e)}
 
 
@@ -265,11 +271,13 @@ def get_dependencies(
             "results": results,
         }
     except Exception as e:
-        logger.warning(format_error_log(
-            "WEB-GENERAL-024",
-            f"Dependencies query failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-024",
+                f"Dependencies query failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return {"success": False, "error": str(e)}
 
 
@@ -318,11 +326,13 @@ def get_dependents(
             "results": results,
         }
     except Exception as e:
-        logger.warning(format_error_log(
-            "WEB-GENERAL-025",
-            f"Dependents query failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-025",
+                f"Dependents query failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return {"success": False, "error": str(e)}
 
 
@@ -367,11 +377,13 @@ def get_impact(
             "affected_files": result["affected_files"],
         }
     except Exception as e:
-        logger.warning(format_error_log(
-            "WEB-GENERAL-026",
-            f"Impact analysis failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-026",
+                f"Impact analysis failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return {"success": False, "error": str(e)}
 
 
@@ -417,11 +429,13 @@ def get_callchain(
             "chains": chains,
         }
     except Exception as e:
-        logger.warning(format_error_log(
-            "WEB-GENERAL-027",
-            f"Call chain tracing failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-027",
+                f"Call chain tracing failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return {"success": False, "error": str(e)}
 
 
@@ -474,9 +488,11 @@ def get_context(
             "files": result["files"],
         }
     except Exception as e:
-        logger.warning(format_error_log(
-            "WEB-GENERAL-028",
-            f"Smart context query failed: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-028",
+                f"Smart context query failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         return {"success": False, "error": str(e)}

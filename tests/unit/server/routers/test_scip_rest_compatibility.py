@@ -46,65 +46,65 @@ class TestDuplicateFunctionsRemoved:
         import code_indexer.server.routers.scip_queries as scip_queries
 
         # The function should not exist as a public or private function
-        assert not hasattr(scip_queries, "_find_scip_files"), (
-            "_find_scip_files should be removed from scip_queries.py"
-        )
+        assert not hasattr(
+            scip_queries, "_find_scip_files"
+        ), "_find_scip_files should be removed from scip_queries.py"
 
     def test_get_accessible_repos_not_in_module(self):
         """AC: Verify _get_accessible_repos function is removed from scip_queries.py."""
         import code_indexer.server.routers.scip_queries as scip_queries
 
-        assert not hasattr(scip_queries, "_get_accessible_repos"), (
-            "_get_accessible_repos should be removed from scip_queries.py"
-        )
+        assert not hasattr(
+            scip_queries, "_get_accessible_repos"
+        ), "_get_accessible_repos should be removed from scip_queries.py"
 
     def test_filter_scip_results_not_in_module(self):
         """AC: Verify _filter_scip_results function is removed from scip_queries.py."""
         import code_indexer.server.routers.scip_queries as scip_queries
 
-        assert not hasattr(scip_queries, "_filter_scip_results"), (
-            "_filter_scip_results should be removed from scip_queries.py"
-        )
+        assert not hasattr(
+            scip_queries, "_filter_scip_results"
+        ), "_filter_scip_results should be removed from scip_queries.py"
 
     def test_get_golden_repos_dir_not_in_module(self):
         """Verify _get_golden_repos_dir function is removed from scip_queries.py."""
         import code_indexer.server.routers.scip_queries as scip_queries
 
-        assert not hasattr(scip_queries, "_get_golden_repos_dir"), (
-            "_get_golden_repos_dir should be removed from scip_queries.py"
-        )
+        assert not hasattr(
+            scip_queries, "_get_golden_repos_dir"
+        ), "_get_golden_repos_dir should be removed from scip_queries.py"
 
     def test_filter_impact_results_not_in_module(self):
         """Verify _filter_impact_results function is removed from scip_queries.py."""
         import code_indexer.server.routers.scip_queries as scip_queries
 
-        assert not hasattr(scip_queries, "_filter_impact_results"), (
-            "_filter_impact_results should be removed from scip_queries.py"
-        )
+        assert not hasattr(
+            scip_queries, "_filter_impact_results"
+        ), "_filter_impact_results should be removed from scip_queries.py"
 
     def test_filter_callchain_results_not_in_module(self):
         """Verify _filter_callchain_results function is removed from scip_queries.py."""
         import code_indexer.server.routers.scip_queries as scip_queries
 
-        assert not hasattr(scip_queries, "_filter_callchain_results"), (
-            "_filter_callchain_results should be removed from scip_queries.py"
-        )
+        assert not hasattr(
+            scip_queries, "_filter_callchain_results"
+        ), "_filter_callchain_results should be removed from scip_queries.py"
 
     def test_filter_context_results_not_in_module(self):
         """Verify _filter_context_results function is removed from scip_queries.py."""
         import code_indexer.server.routers.scip_queries as scip_queries
 
-        assert not hasattr(scip_queries, "_filter_context_results"), (
-            "_filter_context_results should be removed from scip_queries.py"
-        )
+        assert not hasattr(
+            scip_queries, "_filter_context_results"
+        ), "_filter_context_results should be removed from scip_queries.py"
 
     def test_extract_repo_name_from_project_not_in_module(self):
         """Verify _extract_repo_name_from_project is removed from scip_queries.py."""
         import code_indexer.server.routers.scip_queries as scip_queries
 
-        assert not hasattr(scip_queries, "_extract_repo_name_from_project"), (
-            "_extract_repo_name_from_project should be removed from scip_queries.py"
-        )
+        assert not hasattr(
+            scip_queries, "_extract_repo_name_from_project"
+        ), "_extract_repo_name_from_project should be removed from scip_queries.py"
 
 
 class TestBackwardCompatibility:
@@ -205,9 +205,7 @@ class TestBackwardCompatibility:
                 assert "total_results" in response
                 assert "results" in response
 
-    def test_impact_response_structure_unchanged(
-        self, mock_user, mock_scip_service
-    ):
+    def test_impact_response_structure_unchanged(self, mock_user, mock_scip_service):
         """AC: Verify /scip/impact response structure is unchanged."""
         from fastapi import Request
         from code_indexer.server.routers.scip_queries import get_impact
@@ -244,9 +242,7 @@ class TestBackwardCompatibility:
             assert "affected_symbols" in response
             assert "affected_files" in response
 
-    def test_callchain_response_structure_unchanged(
-        self, mock_user, mock_scip_service
-    ):
+    def test_callchain_response_structure_unchanged(self, mock_user, mock_scip_service):
         """AC: Verify /scip/callchain response structure is unchanged."""
         from fastapi import Request
         from code_indexer.server.routers.scip_queries import get_callchain
@@ -275,9 +271,7 @@ class TestBackwardCompatibility:
             assert "total_chains_found" in response
             assert "chains" in response
 
-    def test_context_response_structure_unchanged(
-        self, mock_user, mock_scip_service
-    ):
+    def test_context_response_structure_unchanged(self, mock_user, mock_scip_service):
         """AC: Verify /scip/context response structure is unchanged."""
         from fastapi import Request
         from code_indexer.server.routers.scip_queries import get_context
@@ -322,9 +316,7 @@ class TestErrorHandling:
     Story #50: Tests converted from async to sync since route handlers are now sync.
     """
 
-    def test_definition_catches_service_exception(
-        self, mock_user, mock_scip_service
-    ):
+    def test_definition_catches_service_exception(self, mock_user, mock_scip_service):
         """Verify route catches and returns errors when service raises exception."""
         from fastapi import Request
         from code_indexer.server.routers.scip_queries import get_definition
@@ -348,9 +340,7 @@ class TestErrorHandling:
             assert response["success"] is False
             assert "error" in response
 
-    def test_references_catches_service_exception(
-        self, mock_user, mock_scip_service
-    ):
+    def test_references_catches_service_exception(self, mock_user, mock_scip_service):
         """Verify references route catches and returns errors."""
         from fastapi import Request
         from code_indexer.server.routers.scip_queries import get_references
@@ -375,9 +365,7 @@ class TestErrorHandling:
             assert response["success"] is False
             assert "error" in response
 
-    def test_impact_catches_service_exception(
-        self, mock_user, mock_scip_service
-    ):
+    def test_impact_catches_service_exception(self, mock_user, mock_scip_service):
         """Verify impact route catches and returns errors."""
         from fastapi import Request
         from code_indexer.server.routers.scip_queries import get_impact
@@ -400,9 +388,7 @@ class TestErrorHandling:
             assert response["success"] is False
             assert "error" in response
 
-    def test_callchain_catches_service_exception(
-        self, mock_user, mock_scip_service
-    ):
+    def test_callchain_catches_service_exception(self, mock_user, mock_scip_service):
         """Verify callchain route catches and returns errors."""
         from fastapi import Request
         from code_indexer.server.routers.scip_queries import get_callchain
@@ -426,9 +412,7 @@ class TestErrorHandling:
             assert response["success"] is False
             assert "error" in response
 
-    def test_context_catches_service_exception(
-        self, mock_user, mock_scip_service
-    ):
+    def test_context_catches_service_exception(self, mock_user, mock_scip_service):
         """Verify context route catches and returns errors."""
         from fastapi import Request
         from code_indexer.server.routers.scip_queries import get_context

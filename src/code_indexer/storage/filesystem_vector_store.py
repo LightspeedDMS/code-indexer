@@ -546,7 +546,9 @@ class FilesystemVectorStore:
             if collection_name not in self._vector_size_cache:
                 # Load metadata ONCE
                 subdirectory = self._active_subdirectories.get(collection_name)
-                collection_path = self._get_collection_path(collection_name, subdirectory)
+                collection_path = self._get_collection_path(
+                    collection_name, subdirectory
+                )
                 meta_file = collection_path / "collection_meta.json"
 
                 if not meta_file.exists():

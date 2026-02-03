@@ -24,6 +24,7 @@ def reload_multi_search_service():
     This prevents mock leakage from concurrent execution tests in other files.
     """
     import code_indexer.server.multi.multi_search_service as mss
+
     importlib.reload(mss)
     yield
 
@@ -65,9 +66,7 @@ class TestMultiSearchServiceSyncInterface:
         )
 
         # Mock the internal search method to avoid actual search
-        with patch.object(
-            service, "_search_single_repo_sync", return_value=[]
-        ):
+        with patch.object(service, "_search_single_repo_sync", return_value=[]):
             # Should be callable synchronously without await
             response = service.search(request)
 
@@ -269,9 +268,7 @@ class TestMultiSearchServiceFunctionalityPreserved:
                 raise Exception("Repo not found")
             return [{"file_path": "test.py", "score": 0.9}]
 
-        with patch.object(
-            service, "_search_single_repo_sync", side_effect=mock_search
-        ):
+        with patch.object(service, "_search_single_repo_sync", side_effect=mock_search):
             response = service.search(request)
 
             # Good repo should have results

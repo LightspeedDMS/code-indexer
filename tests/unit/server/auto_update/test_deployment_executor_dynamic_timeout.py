@@ -127,8 +127,10 @@ class TestDeploymentExecutorDynamicTimeout:
             )
 
             # Mock _get_drain_timeout to return known value
-            with patch.object(executor, "_get_drain_timeout") as mock_get_timeout, \
-                 patch("requests.get") as mock_get:
+            with (
+                patch.object(executor, "_get_drain_timeout") as mock_get_timeout,
+                patch("requests.get") as mock_get,
+            ):
                 mock_get_timeout.return_value = 1  # 1 second timeout
 
                 # Mock drain-status to show not drained
@@ -162,10 +164,12 @@ class TestDeploymentExecutorDynamicTimeout:
                 server_url="http://localhost:8000",
             )
 
-            with patch.object(executor, "_enter_maintenance_mode") as mock_enter, \
-                 patch.object(executor, "_get_drain_timeout") as mock_get_timeout, \
-                 patch("requests.get") as mock_get, \
-                 patch("subprocess.run") as mock_run:
+            with (
+                patch.object(executor, "_enter_maintenance_mode") as mock_enter,
+                patch.object(executor, "_get_drain_timeout") as mock_get_timeout,
+                patch("requests.get") as mock_get,
+                patch("subprocess.run") as mock_run,
+            ):
                 mock_enter.return_value = True
                 mock_get_timeout.return_value = 5400
 

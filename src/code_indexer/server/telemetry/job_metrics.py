@@ -152,10 +152,11 @@ class JobMetrics:
             logger.info("JobMetrics initialized: 9 metrics registered")
 
         except Exception as e:
-            logger.warning(format_error_log(
-                "QUERY-GENERAL-017",
-                f"Failed to register job metrics: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "QUERY-GENERAL-017", f"Failed to register job metrics: {e}"
+                )
+            )
             self._is_active = False
 
     def _observe_active_jobs(self, options: Any) -> Any:

@@ -80,9 +80,7 @@ class TestAnthropicConnectivityTest:
         # Mock subprocess for failed Claude CLI test
         mock_process = MagicMock()
         mock_process.returncode = 1
-        mock_process.communicate = AsyncMock(
-            return_value=(b"", b"Invalid API key")
-        )
+        mock_process.communicate = AsyncMock(return_value=(b"", b"Invalid API key"))
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_process):
             result = await tester.test_anthropic_connectivity(
@@ -100,9 +98,7 @@ class TestAnthropicConnectivityTest:
 
         # Mock subprocess that times out
         mock_process = MagicMock()
-        mock_process.communicate = AsyncMock(
-            side_effect=asyncio.TimeoutError()
-        )
+        mock_process.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
         mock_process.kill = MagicMock()
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_process):
@@ -126,9 +122,7 @@ class TestVoyageAIConnectivityTest:
         # Mock httpx for successful embedding test
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "data": [{"embedding": [0.1, 0.2, 0.3]}]
-        }
+        mock_response.json.return_value = {"data": [{"embedding": [0.1, 0.2, 0.3]}]}
 
         with patch("httpx.AsyncClient") as mock_client:
             mock_client.return_value.__aenter__ = AsyncMock(
@@ -137,9 +131,7 @@ class TestVoyageAIConnectivityTest:
             mock_client.return_value.__aexit__ = AsyncMock(return_value=None)
             mock_client.return_value.post = AsyncMock(return_value=mock_response)
 
-            result = await tester.test_voyageai_connectivity(
-                "pa-validvoyagekey12345"
-            )
+            result = await tester.test_voyageai_connectivity("pa-validvoyagekey12345")
 
         assert result.success is True
         assert result.provider == "voyageai"
@@ -164,9 +156,7 @@ class TestVoyageAIConnectivityTest:
             mock_client.return_value.__aexit__ = AsyncMock(return_value=None)
             mock_client.return_value.post = AsyncMock(return_value=mock_response)
 
-            result = await tester.test_voyageai_connectivity(
-                "pa-invalidvoyagekey12"
-            )
+            result = await tester.test_voyageai_connectivity("pa-invalidvoyagekey12")
 
         assert result.success is False
         assert result.provider == "voyageai"
@@ -187,9 +177,7 @@ class TestVoyageAIConnectivityTest:
                 side_effect=asyncio.TimeoutError()
             )
 
-            result = await tester.test_voyageai_connectivity(
-                "pa-timeoutvoyagekey12"
-            )
+            result = await tester.test_voyageai_connectivity("pa-timeoutvoyagekey12")
 
         assert result.success is False
         assert result.provider == "voyageai"

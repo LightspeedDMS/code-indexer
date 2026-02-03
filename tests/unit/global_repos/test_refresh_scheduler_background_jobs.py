@@ -201,7 +201,9 @@ class TestRefreshSchedulerBackgroundJobManagerIntegration:
         )
 
         with patch.object(
-            scheduler.alias_manager, "read_alias", side_effect=RuntimeError("Refresh timeout")
+            scheduler.alias_manager,
+            "read_alias",
+            side_effect=RuntimeError("Refresh timeout"),
         ):
             with pytest.raises(RuntimeError, match="Refresh timeout"):
                 scheduler._execute_refresh("test-repo-global")
@@ -222,7 +224,10 @@ class TestRefreshSchedulerBackgroundJobManagerIntegration:
         2. Job execution encounters an error and raises exception
         3. BackgroundJobManager catches exception and marks job as FAILED
         """
-        from code_indexer.server.repositories.background_jobs import BackgroundJobManager, JobStatus
+        from code_indexer.server.repositories.background_jobs import (
+            BackgroundJobManager,
+            JobStatus,
+        )
         import time
 
         # Create real BackgroundJobManager
@@ -241,7 +246,9 @@ class TestRefreshSchedulerBackgroundJobManagerIntegration:
 
         # Mock _execute_refresh to raise exception
         with patch.object(
-            scheduler, "_execute_refresh", side_effect=RuntimeError("Simulated refresh timeout")
+            scheduler,
+            "_execute_refresh",
+            side_effect=RuntimeError("Simulated refresh timeout"),
         ):
             job_id = scheduler._submit_refresh_job("test-repo-global")
 

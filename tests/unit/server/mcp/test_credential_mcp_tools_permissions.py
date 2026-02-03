@@ -10,7 +10,6 @@ Tests verify:
 2. Input schema validation for each tool
 """
 
-
 from code_indexer.server.mcp.tools import TOOL_REGISTRY
 
 
@@ -39,19 +38,22 @@ class TestUserSelfServiceToolsPermissions:
     def test_list_mcp_credentials_requires_query_repos_permission(self):
         """list_mcp_credentials tool requires query_repos permission."""
         assert (
-            TOOL_REGISTRY["list_mcp_credentials"]["required_permission"] == "query_repos"
+            TOOL_REGISTRY["list_mcp_credentials"]["required_permission"]
+            == "query_repos"
         )
 
     def test_create_mcp_credential_requires_query_repos_permission(self):
         """create_mcp_credential tool requires query_repos permission."""
         assert (
-            TOOL_REGISTRY["create_mcp_credential"]["required_permission"] == "query_repos"
+            TOOL_REGISTRY["create_mcp_credential"]["required_permission"]
+            == "query_repos"
         )
 
     def test_delete_mcp_credential_requires_query_repos_permission(self):
         """delete_mcp_credential tool requires query_repos permission."""
         assert (
-            TOOL_REGISTRY["delete_mcp_credential"]["required_permission"] == "query_repos"
+            TOOL_REGISTRY["delete_mcp_credential"]["required_permission"]
+            == "query_repos"
         )
 
 

@@ -17,9 +17,7 @@ def test_trigger_scan_submits_job_when_configured():
     job_manager.submit_job = Mock(return_value="scan-job-001")
 
     service = SelfMonitoringService(
-        enabled=True,
-        cadence_minutes=60,
-        job_manager=job_manager
+        enabled=True, cadence_minutes=60, job_manager=job_manager
     )
 
     # Act
@@ -42,11 +40,7 @@ def test_trigger_scan_returns_error_when_job_manager_missing():
     from code_indexer.server.self_monitoring.service import SelfMonitoringService
 
     # Arrange
-    service = SelfMonitoringService(
-        enabled=True,
-        cadence_minutes=60,
-        job_manager=None
-    )
+    service = SelfMonitoringService(enabled=True, cadence_minutes=60, job_manager=None)
 
     # Act
     result = service.trigger_scan()
@@ -63,9 +57,7 @@ def test_trigger_scan_returns_error_when_not_enabled():
     # Arrange
     job_manager = Mock()
     service = SelfMonitoringService(
-        enabled=False,
-        cadence_minutes=60,
-        job_manager=job_manager
+        enabled=False, cadence_minutes=60, job_manager=job_manager
     )
 
     # Act

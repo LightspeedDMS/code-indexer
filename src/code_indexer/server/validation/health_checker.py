@@ -84,11 +84,13 @@ class IndexHealthChecker:
             )
 
             if not sample_embeddings:
-                logger.warning(format_error_log(
-                    "REPO-GENERAL-063",
-                    "No embeddings found in index for dimension checking",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "REPO-GENERAL-063",
+                        "No embeddings found in index for dimension checking",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return HealthCheckResult(
                     is_healthy=False,
                     dimension_consistency_score=0.0,
@@ -145,12 +147,14 @@ class IndexHealthChecker:
             )
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-064",
-                f"Embedding dimension check failed: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-064",
+                    f"Embedding dimension check failed: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise IndexCorruptionError(
                 f"Failed to check embedding dimensions: {str(e)}",
                 corruption_type="dimension_check_failed",
@@ -175,11 +179,13 @@ class IndexHealthChecker:
             )
 
             if not sample_embeddings:
-                logger.warning(format_error_log(
-                    "REPO-GENERAL-065",
-                    "No embeddings found for vector quality analysis",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "REPO-GENERAL-065",
+                        "No embeddings found for vector quality analysis",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return HealthCheckResult(
                     is_healthy=False,
                     quality_score=0.0,
@@ -228,11 +234,13 @@ class IndexHealthChecker:
                         corrupt_files.append(file_path)
 
                 except (ValueError, TypeError) as e:
-                    logger.warning(format_error_log(
-                        "REPO-GENERAL-066",
-                        f"Failed to analyze vector for {file_path}: {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "REPO-GENERAL-066",
+                            f"Failed to analyze vector for {file_path}: {e}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                     corrupt_files.append(file_path)
 
             # Calculate quality metrics
@@ -277,12 +285,14 @@ class IndexHealthChecker:
             )
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-067",
-                f"Vector quality check failed: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-067",
+                    f"Vector quality check failed: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise IndexCorruptionError(
                 f"Failed to analyze vector quality: {str(e)}",
                 corruption_type="vector_quality_check_failed",
@@ -307,11 +317,13 @@ class IndexHealthChecker:
             )
 
             if not sample_embeddings:
-                logger.warning(format_error_log(
-                    "REPO-GENERAL-068",
-                    "No embeddings found for metadata integrity check",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "REPO-GENERAL-068",
+                        "No embeddings found for metadata integrity check",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return HealthCheckResult(
                     is_healthy=False,
                     completeness_score=0.0,
@@ -442,12 +454,14 @@ class IndexHealthChecker:
             )
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-069",
-                f"Metadata integrity check failed: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-069",
+                    f"Metadata integrity check failed: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise IndexCorruptionError(
                 f"Failed to check metadata integrity: {str(e)}",
                 corruption_type="metadata_check_failed",
@@ -500,11 +514,13 @@ class IndexHealthChecker:
                         )
 
                 except Exception as e:
-                    logger.warning(format_error_log(
-                        "REPO-GENERAL-070",
-                        f"Query {i} failed: {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "REPO-GENERAL-070",
+                            f"Query {i} failed: {e}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                     # Consider failed queries as very slow
                     query_times.append(10000.0)  # 10 second penalty
                     slow_queries.append(
@@ -559,12 +575,14 @@ class IndexHealthChecker:
             )
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-071",
-                f"Query performance measurement failed: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-071",
+                    f"Query performance measurement failed: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             # Return degraded performance result rather than raising exception
             return HealthCheckResult(
                 is_healthy=False,
@@ -633,12 +651,14 @@ class IndexHealthChecker:
             )
 
         except Exception as e:
-            logger.error(format_error_log(
-                "SCIP-GENERAL-023",
-                f"Failed to collect index statistics: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "SCIP-GENERAL-023",
+                    f"Failed to collect index statistics: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             # Return empty statistics rather than raising exception
             return HealthCheckResult(
                 is_healthy=False,
@@ -796,12 +816,14 @@ class IndexHealthChecker:
         except IndexCorruptionError:
             raise  # Re-raise corruption errors
         except Exception as e:
-            logger.error(format_error_log(
-                "SCIP-GENERAL-024",
-                f"Comprehensive health check failed: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "SCIP-GENERAL-024",
+                    f"Comprehensive health check failed: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise IndexCorruptionError(
                 f"Health check system failure: {str(e)}",
                 corruption_type="health_check_system_failure",

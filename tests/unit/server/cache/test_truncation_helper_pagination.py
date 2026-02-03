@@ -121,9 +121,7 @@ class TestTruncationHelperPaginationCalculation:
 
         return TruncationHelper(payload_cache, content_limits)
 
-    def test_truncated_content_returns_correct_total_pages(
-        self, truncation_helper
-    ):
+    def test_truncated_content_returns_correct_total_pages(self, truncation_helper):
         """Truncated content should return correct total_pages based on content size."""
         # 1000 chars content with max_fetch_size_chars=500 = 2 pages
         large_content = "x" * 1000
@@ -183,8 +181,8 @@ class TestTruncationHelperPaginationCalculation:
         - 2500 chars = 5 pages
         """
         test_cases = [
-            (500, 1),   # Exactly one page
-            (501, 2),   # Just over one page
+            (500, 1),  # Exactly one page
+            (501, 2),  # Just over one page
             (1000, 2),  # Exactly two pages
             (1500, 3),  # Three pages
             (2500, 5),  # Five pages
@@ -198,7 +196,9 @@ class TestTruncationHelperPaginationCalculation:
                 content_type="file",
             )
 
-            assert result.truncated is True, f"Content size {content_size} should be truncated"
+            assert (
+                result.truncated is True
+            ), f"Content size {content_size} should be truncated"
             assert result.total_pages == expected_pages, (
                 f"Content size {content_size} should have {expected_pages} pages, "
                 f"got {result.total_pages}"

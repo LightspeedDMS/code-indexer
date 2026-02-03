@@ -210,9 +210,7 @@ def files_edit(
 @click.argument("path")
 @click.option("--repository", "-r", required=True, help="Repository alias")
 @click.option("--content-hash", help="Expected content hash (optimistic locking)")
-@click.option(
-    "--confirm", is_flag=True, help="Confirm deletion (required for safety)"
-)
+@click.option("--confirm", is_flag=True, help="Confirm deletion (required for safety)")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def files_delete(
     path: str,

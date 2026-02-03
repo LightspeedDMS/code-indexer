@@ -349,5 +349,7 @@ class TestPayloadCacheSyncThreadSafety:
         import inspect
 
         source = inspect.getsource(cache_module)
-        assert "aiosqlite" not in source, "aiosqlite should not be used in sync implementation"
+        assert (
+            "aiosqlite" not in source
+        ), "aiosqlite should not be used in sync implementation"
         assert "sqlite3" in source, "sqlite3 should be used in sync implementation"

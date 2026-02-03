@@ -33,22 +33,24 @@ def test_chunk_images_field_is_list_of_strings():
 
     # Check first chunk structure
     chunk = chunks[0]
-    assert 'images' in chunk, "Expected 'images' field in chunk"
+    assert "images" in chunk, "Expected 'images' field in chunk"
 
-    images = chunk['images']
+    images = chunk["images"]
     assert isinstance(images, list), f"Expected images to be a list, got {type(images)}"
 
     # This is the critical assertion: images should be a list of strings
     if len(images) > 0:
         for img_ref in images:
-            assert isinstance(img_ref, str), (
-                f"Expected img_ref to be a string, got {type(img_ref)}: {img_ref}"
-            )
+            assert isinstance(
+                img_ref, str
+            ), f"Expected img_ref to be a string, got {type(img_ref)}: {img_ref}"
             # Should be a relative path string like "images/database-schema.png"
             assert not isinstance(img_ref, dict), "img_ref should NOT be a dict"
 
         # Verify the actual content
-        assert "images/database-schema.png" in images, f"Expected image path in {images}"
+        assert (
+            "images/database-schema.png" in images
+        ), f"Expected image path in {images}"
 
     print(f"\nEVIDENCE: chunk['images'] = {images}")
     print(f"Type: {type(images)}")
@@ -67,7 +69,7 @@ def test_chunk_images_usage_in_file_chunking_manager():
     codebase_dir = REPO_ROOT
 
     # CORRECT USAGE (what should be in file_chunking_manager.py):
-    for img_ref in chunk.get('images', []):
+    for img_ref in chunk.get("images", []):
         # img_ref is a STRING, not a dict
         img_path = codebase_dir / img_ref  # CORRECT - use img_ref directly
         assert isinstance(img_path, Path)

@@ -119,11 +119,13 @@ class AutoUpdateService:
 
             # Try to acquire deployment lock
             if not self.deployment_lock.acquire():
-                logger.warning(format_error_log(
-                    "GIT-GENERAL-005",
-                    "Another deployment in progress, skipping",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "GIT-GENERAL-005",
+                        "Another deployment in progress, skipping",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 self.transition_to(ServiceState.IDLE)
                 return
 
@@ -141,11 +143,13 @@ class AutoUpdateService:
                         extra={"correlation_id": get_correlation_id()},
                     )
                 else:
-                    logger.error(format_error_log(
-                        "GIT-GENERAL-006",
-                        "Deployment failed",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.error(
+                        format_error_log(
+                            "GIT-GENERAL-006",
+                            "Deployment failed",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
 
             except Exception as e:
                 # Record error and continue

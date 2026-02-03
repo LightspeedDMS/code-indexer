@@ -457,11 +457,13 @@ class HNSWIndexCache:
         Thread periodically checks for expired entries and evicts them.
         """
         if self._cleanup_thread and self._cleanup_thread.is_alive():
-            logger.warning(format_error_log(
-                "GIT-GENERAL-012",
-                "Background cleanup thread already running",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "GIT-GENERAL-012",
+                    "Background cleanup thread already running",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return
 
         self._cleanup_stop_event.clear()
@@ -472,11 +474,13 @@ class HNSWIndexCache:
                 try:
                     self._cleanup_expired_entries()
                 except Exception as e:
-                    logger.error(format_error_log(
-                        "GIT-GENERAL-013",
-                        f"Error in background cleanup: {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.error(
+                        format_error_log(
+                            "GIT-GENERAL-013",
+                            f"Error in background cleanup: {e}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
 
                 # Wait for cleanup interval or stop event
                 self._cleanup_stop_event.wait(

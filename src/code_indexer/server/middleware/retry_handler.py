@@ -131,11 +131,13 @@ class DatabaseRetryHandler:
                     attempt <= self.config.max_attempts
                 ):  # Don't delay after final attempt
                     delay = self.calculate_delay(attempt)
-                    logger.warning(format_error_log(
-                        "REPO-GENERAL-020",
-                        f"Database operation failed on attempt {attempt}, retrying in {delay:.2f}s: {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "REPO-GENERAL-020",
+                            f"Database operation failed on attempt {attempt}, retrying in {delay:.2f}s: {e}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                     time.sleep(delay)
 
         # This should not be reached, but provide fallback

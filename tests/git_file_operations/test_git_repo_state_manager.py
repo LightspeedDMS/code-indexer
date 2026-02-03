@@ -40,12 +40,16 @@ class TestGitRepoStateManagerInit:
 class TestCaptureState:
     """Tests for state capture functionality."""
 
-    def test_capture_state_returns_git_repo_state(self, state_manager: GitRepoStateManager):
+    def test_capture_state_returns_git_repo_state(
+        self, state_manager: GitRepoStateManager
+    ):
         """capture_state returns GitRepoState object."""
         state = state_manager.capture_state()
         assert isinstance(state, GitRepoState)
 
-    def test_capture_state_gets_current_branch(self, state_manager: GitRepoStateManager):
+    def test_capture_state_gets_current_branch(
+        self, state_manager: GitRepoStateManager
+    ):
         """capture_state correctly identifies current branch."""
         state = state_manager.capture_state()
         assert state.current_branch == "main"
@@ -64,7 +68,9 @@ class TestCaptureState:
         # Create and stage a file
         test_file = local_test_repo / "staged_test.txt"
         test_file.write_text("staged content")
-        subprocess.run(["git", "add", "staged_test.txt"], cwd=local_test_repo, check=True)
+        subprocess.run(
+            ["git", "add", "staged_test.txt"], cwd=local_test_repo, check=True
+        )
 
         state = state_manager.capture_state()
         assert "staged_test.txt" in state.staged_files
@@ -178,7 +184,9 @@ class TestRestoreState:
         # Create and stage a file
         test_file = local_test_repo / "staged_cleanup_test.txt"
         test_file.write_text("staged content")
-        subprocess.run(["git", "add", "staged_cleanup_test.txt"], cwd=local_test_repo, check=True)
+        subprocess.run(
+            ["git", "add", "staged_cleanup_test.txt"], cwd=local_test_repo, check=True
+        )
 
         # Verify file is staged
         assert state_manager.has_uncommitted_changes()
@@ -360,7 +368,10 @@ class TestIdempotency:
     """Tests verifying idempotent test behavior."""
 
     def test_captured_state_fixture_provides_automatic_restoration(
-        self, captured_state: GitRepoState, state_manager: GitRepoStateManager, local_test_repo: Path
+        self,
+        captured_state: GitRepoState,
+        state_manager: GitRepoStateManager,
+        local_test_repo: Path,
     ):
         """
         captured_state fixture automatically restores state after test.

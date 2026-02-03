@@ -92,20 +92,24 @@ class CompositeRepoValidator:
                     error_message = CompositeRepoValidator.UNSUPPORTED_OPERATIONS[
                         operation
                     ]
-                    logger.warning(format_error_log(
-                        "SCIP-GENERAL-038",
-                        f"Blocked unsupported operation '{operation}' on composite repository: {repo_path}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "SCIP-GENERAL-038",
+                            f"Blocked unsupported operation '{operation}' on composite repository: {repo_path}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                     raise HTTPException(status_code=400, detail=error_message)
 
         except json.JSONDecodeError as e:
             # If config file is malformed, log but don't block operation
             # This is a graceful degradation - we don't want to break operations
             # due to corrupted config files
-            logger.error(format_error_log(
-                "SCIP-GENERAL-039",
-                f"Failed to parse config file {config_file}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "SCIP-GENERAL-039",
+                    f"Failed to parse config file {config_file}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return

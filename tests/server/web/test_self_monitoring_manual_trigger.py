@@ -19,7 +19,9 @@ def test_manual_trigger_route_auto_detects_repo_root(
 ):
     """Test that manual trigger route reads repo_root from app.state (Bug #87)."""
     # Set app.state values that would be set during startup
-    repo_root_path = Path(__file__).resolve().parent.parent.parent.parent  # project root
+    repo_root_path = (
+        Path(__file__).resolve().parent.parent.parent.parent
+    )  # project root
     authenticated_client.app.state.self_monitoring_repo_root = str(repo_root_path)
     authenticated_client.app.state.self_monitoring_github_repo = "owner/repo"
 
@@ -41,7 +43,9 @@ def test_manual_trigger_route_auto_detects_repo_root(
 
             # Submit manual trigger request
             form_data = {"csrf_token": "test-token"}
-            response = authenticated_client.post("/admin/self-monitoring/run-now", data=form_data)
+            response = authenticated_client.post(
+                "/admin/self-monitoring/run-now", data=form_data
+            )
 
         # Verify the response succeeded
         assert response.status_code == status.HTTP_200_OK
@@ -58,8 +62,9 @@ def test_manual_trigger_route_auto_detects_repo_root(
         assert isinstance(
             init_kwargs["repo_root"], str
         ), "repo_root should be a string path"
-        assert init_kwargs["repo_root"] == str(repo_root_path), \
-            f"repo_root should match app.state value: {repo_root_path}"
+        assert init_kwargs["repo_root"] == str(
+            repo_root_path
+        ), f"repo_root should match app.state value: {repo_root_path}"
 
 
 def test_manual_trigger_route_auto_detects_github_repo(
@@ -68,7 +73,9 @@ def test_manual_trigger_route_auto_detects_github_repo(
 ):
     """Test that manual trigger route reads github_repo from app.state (Bug #87)."""
     # Set app.state values that would be set during startup
-    repo_root_path = Path(__file__).resolve().parent.parent.parent.parent  # project root
+    repo_root_path = (
+        Path(__file__).resolve().parent.parent.parent.parent
+    )  # project root
     authenticated_client.app.state.self_monitoring_repo_root = str(repo_root_path)
     authenticated_client.app.state.self_monitoring_github_repo = "test-owner/test-repo"
 
@@ -90,7 +97,9 @@ def test_manual_trigger_route_auto_detects_github_repo(
 
             # Submit manual trigger request
             form_data = {"csrf_token": "test-token"}
-            response = authenticated_client.post("/admin/self-monitoring/run-now", data=form_data)
+            response = authenticated_client.post(
+                "/admin/self-monitoring/run-now", data=form_data
+            )
 
         # Verify the response succeeded
         assert response.status_code == status.HTTP_200_OK
@@ -101,14 +110,15 @@ def test_manual_trigger_route_auto_detects_github_repo(
 
         # Bug #87 fix: github_repo should be read from app.state
         assert "github_repo" in init_kwargs, "github_repo parameter is missing"
-        assert init_kwargs["github_repo"] == "test-owner/test-repo", \
-            "github_repo should match app.state value"
+        assert (
+            init_kwargs["github_repo"] == "test-owner/test-repo"
+        ), "github_repo should match app.state value"
         assert isinstance(
             init_kwargs["github_repo"], str
         ), "github_repo should be a string"
-        assert "/" in init_kwargs[
-            "github_repo"
-        ], "github_repo should be in 'owner/repo' format"
+        assert (
+            "/" in init_kwargs["github_repo"]
+        ), "github_repo should be in 'owner/repo' format"
 
 
 def test_manual_trigger_route_does_not_use_environment_variable(
@@ -121,7 +131,9 @@ def test_manual_trigger_route_does_not_use_environment_variable(
     # Set app.state to known values
     repo_root_path = Path(__file__).resolve().parent.parent.parent.parent
     authenticated_client.app.state.self_monitoring_repo_root = str(repo_root_path)
-    authenticated_client.app.state.self_monitoring_github_repo = "correct-owner/correct-repo"
+    authenticated_client.app.state.self_monitoring_github_repo = (
+        "correct-owner/correct-repo"
+    )
 
     # Set GITHUB_REPOSITORY environment variable to different value
     old_env = os.environ.get("GITHUB_REPOSITORY")
@@ -130,7 +142,8 @@ def test_manual_trigger_route_does_not_use_environment_variable(
     try:
         # Mock CSRF validation to bypass known test infrastructure issue
         with patch(
-            "code_indexer.server.web.routes.validate_login_csrf_token", return_value=True
+            "code_indexer.server.web.routes.validate_login_csrf_token",
+            return_value=True,
         ):
             # Mock the SelfMonitoringService to capture initialization parameters
             with patch(
@@ -158,8 +171,9 @@ def test_manual_trigger_route_does_not_use_environment_variable(
                 init_kwargs = mock_service_class.call_args[1]
 
                 # github_repo should be from app.state, NOT from env var
-                assert init_kwargs["github_repo"] == "correct-owner/correct-repo", \
-                    "github_repo should come from app.state, not GITHUB_REPOSITORY env var"
+                assert (
+                    init_kwargs["github_repo"] == "correct-owner/correct-repo"
+                ), "github_repo should come from app.state, not GITHUB_REPOSITORY env var"
                 assert (
                     init_kwargs["github_repo"] != "wrong-owner/wrong-repo"
                 ), "github_repo should NOT come from GITHUB_REPOSITORY env var"

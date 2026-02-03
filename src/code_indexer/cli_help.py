@@ -84,7 +84,9 @@ def help_commands():
         console.print()
 
     console.print("[dim]Legend: v=available  x=unavailable in current mode[/dim]")
-    console.print("[dim]        [ALL]=Both modes  [LOCAL]=Local only  [REMOTE]=Remote only[/dim]")
+    console.print(
+        "[dim]        [ALL]=Both modes  [LOCAL]=Local only  [REMOTE]=Remote only[/dim]"
+    )
 
 
 @help_group.command("matrix")
@@ -128,13 +130,13 @@ def help_features():
         {
             "name": "Semantic Search",
             "description": "AI-powered code search using vector embeddings",
-            "command": "cidx query \"your search\"",
+            "command": 'cidx query "your search"',
             "modes": "local, remote",
         },
         {
             "name": "Full-Text Search",
             "description": "Fast text-based search with regex support",
-            "command": "cidx query \"pattern\" --fts",
+            "command": 'cidx query "pattern" --fts',
             "modes": "local, remote",
         },
         {
@@ -146,7 +148,7 @@ def help_features():
         {
             "name": "Git History Search",
             "description": "Search through commit history and diffs",
-            "command": "cidx query \"bug\" --time-range-all",
+            "command": 'cidx query "bug" --time-range-all',
             "modes": "local (with temporal index)",
         },
         {
@@ -177,5 +179,5 @@ def help_features():
         console.print()
 
     console.print("[bold]Getting Started:[/bold]")
-    console.print("  Local mode:  cidx init && cidx index && cidx query \"search\"")
-    console.print("  Remote mode: cidx init --remote URL && cidx query \"search\"")
+    console.print('  Local mode:  cidx init && cidx index && cidx query "search"')
+    console.print('  Remote mode: cidx init --remote URL && cidx query "search"')

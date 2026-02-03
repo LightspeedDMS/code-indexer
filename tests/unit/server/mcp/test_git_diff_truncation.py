@@ -125,9 +125,7 @@ def _mock_config_service(token_limit):
 class TestGitDiffTruncationWithCacheHandle:
     """Test git_diff handler truncation with cache_handle support."""
 
-    def test_large_diff_returns_cache_handle(
-        self, mock_user, mock_payload_cache
-    ):
+    def test_large_diff_returns_cache_handle(self, mock_user, mock_payload_cache):
         """Verify large diff returns cache_handle when truncated.
 
         Story #34 AC1: When git diff exceeds git_diff_max_tokens, store full diff
@@ -139,9 +137,7 @@ class TestGitDiffTruncationWithCacheHandle:
         large_diff_result = _mock_git_diff_result(num_files=50, lines_per_hunk=100)
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-            ) as mock_dir,
+            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_dir,
             patch(
                 "code_indexer.server.mcp.handlers._resolve_repo_path"
             ) as mock_resolve,
@@ -161,8 +157,8 @@ class TestGitDiffTruncationWithCacheHandle:
             mock_git_service_class.return_value = mock_git_service
 
             mock_app.app.state.payload_cache = mock_payload_cache
-            mock_config_svc.return_value.get_config.return_value = (
-                _mock_config_service(LOW_TOKEN_LIMIT)
+            mock_config_svc.return_value.get_config.return_value = _mock_config_service(
+                LOW_TOKEN_LIMIT
             )
 
             result = handlers.handle_git_diff(
@@ -196,9 +192,7 @@ class TestGitDiffTruncationWithCacheHandle:
         small_diff_result = _mock_git_diff_result(num_files=1, lines_per_hunk=5)
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-            ) as mock_dir,
+            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_dir,
             patch(
                 "code_indexer.server.mcp.handlers._resolve_repo_path"
             ) as mock_resolve,
@@ -218,8 +212,8 @@ class TestGitDiffTruncationWithCacheHandle:
             mock_git_service_class.return_value = mock_git_service
 
             mock_app.app.state.payload_cache = mock_payload_cache
-            mock_config_svc.return_value.get_config.return_value = (
-                _mock_config_service(HIGH_TOKEN_LIMIT)
+            mock_config_svc.return_value.get_config.return_value = _mock_config_service(
+                HIGH_TOKEN_LIMIT
             )
 
             result = handlers.handle_git_diff(
@@ -250,9 +244,7 @@ class TestGitDiffTruncationWithCacheHandle:
         large_diff_result = _mock_git_diff_result(num_files=50, lines_per_hunk=100)
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-            ) as mock_dir,
+            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_dir,
             patch(
                 "code_indexer.server.mcp.handlers._resolve_repo_path"
             ) as mock_resolve,
@@ -272,8 +264,8 @@ class TestGitDiffTruncationWithCacheHandle:
             mock_git_service_class.return_value = mock_git_service
 
             mock_app.app.state.payload_cache = mock_payload_cache
-            mock_config_svc.return_value.get_config.return_value = (
-                _mock_config_service(LOW_TOKEN_LIMIT)
+            mock_config_svc.return_value.get_config.return_value = _mock_config_service(
+                LOW_TOKEN_LIMIT
             )
 
             result = handlers.handle_git_diff(
@@ -306,9 +298,7 @@ class TestGitDiffTruncationWithCacheHandle:
             for field in required_fields:
                 assert field in data, f"Missing required field: {field}"
 
-    def test_diff_stores_serialized_json_in_cache(
-        self, mock_user, mock_payload_cache
-    ):
+    def test_diff_stores_serialized_json_in_cache(self, mock_user, mock_payload_cache):
         """Verify full diff is serialized to JSON and stored in cache.
 
         Story #34 AC4: Full diff result should be JSON-serialized and stored.
@@ -318,9 +308,7 @@ class TestGitDiffTruncationWithCacheHandle:
         large_diff_result = _mock_git_diff_result(num_files=50, lines_per_hunk=100)
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-            ) as mock_dir,
+            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_dir,
             patch(
                 "code_indexer.server.mcp.handlers._resolve_repo_path"
             ) as mock_resolve,
@@ -340,8 +328,8 @@ class TestGitDiffTruncationWithCacheHandle:
             mock_git_service_class.return_value = mock_git_service
 
             mock_app.app.state.payload_cache = mock_payload_cache
-            mock_config_svc.return_value.get_config.return_value = (
-                _mock_config_service(LOW_TOKEN_LIMIT)
+            mock_config_svc.return_value.get_config.return_value = _mock_config_service(
+                LOW_TOKEN_LIMIT
             )
 
             handlers.handle_git_diff(
@@ -372,9 +360,7 @@ class TestGitDiffTruncationWithCacheHandle:
         large_diff_result = _mock_git_diff_result(num_files=50, lines_per_hunk=100)
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-            ) as mock_dir,
+            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_dir,
             patch(
                 "code_indexer.server.mcp.handlers._resolve_repo_path"
             ) as mock_resolve,
@@ -395,8 +381,8 @@ class TestGitDiffTruncationWithCacheHandle:
 
             # No payload_cache available
             mock_app.app.state.payload_cache = None
-            mock_config_svc.return_value.get_config.return_value = (
-                _mock_config_service(LOW_TOKEN_LIMIT)
+            mock_config_svc.return_value.get_config.return_value = _mock_config_service(
+                LOW_TOKEN_LIMIT
             )
 
             result = handlers.handle_git_diff(
@@ -414,9 +400,7 @@ class TestGitDiffTruncationWithCacheHandle:
             assert data.get("cache_handle") is None
             assert data.get("truncated") is False
 
-    def test_diff_preserves_backward_compatibility(
-        self, mock_user, mock_payload_cache
-    ):
+    def test_diff_preserves_backward_compatibility(self, mock_user, mock_payload_cache):
         """Verify existing response fields are preserved.
 
         Story #34 AC6: Backward compatibility - existing fields must be preserved.
@@ -426,9 +410,7 @@ class TestGitDiffTruncationWithCacheHandle:
         small_diff_result = _mock_git_diff_result(num_files=2, lines_per_hunk=5)
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-            ) as mock_dir,
+            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_dir,
             patch(
                 "code_indexer.server.mcp.handlers._resolve_repo_path"
             ) as mock_resolve,
@@ -448,8 +430,8 @@ class TestGitDiffTruncationWithCacheHandle:
             mock_git_service_class.return_value = mock_git_service
 
             mock_app.app.state.payload_cache = mock_payload_cache
-            mock_config_svc.return_value.get_config.return_value = (
-                _mock_config_service(HIGH_TOKEN_LIMIT)
+            mock_config_svc.return_value.get_config.return_value = _mock_config_service(
+                HIGH_TOKEN_LIMIT
             )
 
             result = handlers.handle_git_diff(
@@ -498,9 +480,7 @@ class TestGitDiffTruncationHelperIntegration:
         large_diff_result = _mock_git_diff_result(num_files=50, lines_per_hunk=100)
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-            ) as mock_dir,
+            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_dir,
             patch(
                 "code_indexer.server.mcp.handlers._resolve_repo_path"
             ) as mock_resolve,

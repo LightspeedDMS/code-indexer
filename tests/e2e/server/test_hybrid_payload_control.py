@@ -43,7 +43,9 @@ class TestHybridPayloadCacheE2E:
         cache.close()
 
     @pytest.mark.asyncio
-    async def test_hybrid_all_fields_truncation_workflow(self, cache_with_standard_config):
+    async def test_hybrid_all_fields_truncation_workflow(
+        self, cache_with_standard_config
+    ):
         """E2E: Hybrid result with all fields large - all are truncated independently."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,
@@ -91,7 +93,9 @@ class TestHybridPayloadCacheE2E:
         # Retrieve each and verify correct content
         content_retrieved = cache_with_standard_config.retrieve(content_handle, page=0)
         snippet_retrieved = cache_with_standard_config.retrieve(snippet_handle, page=0)
-        match_text_retrieved = cache_with_standard_config.retrieve(match_text_handle, page=0)
+        match_text_retrieved = cache_with_standard_config.retrieve(
+            match_text_handle, page=0
+        )
 
         assert content_retrieved.content == large_content
         assert snippet_retrieved.content == large_snippet
@@ -124,7 +128,9 @@ class TestHybridMcpCacheRetrievalE2E:
         return user
 
     @pytest.mark.asyncio
-    async def test_mcp_retrieve_all_hybrid_handles_independently(self, cache, mock_user):
+    async def test_mcp_retrieve_all_hybrid_handles_independently(
+        self, cache, mock_user
+    ):
         """E2E: MCP tool retrieves each hybrid field handle independently."""
         from code_indexer.server.mcp.handlers import (
             _apply_payload_truncation,

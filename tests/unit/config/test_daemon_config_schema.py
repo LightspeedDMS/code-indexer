@@ -1,6 +1,5 @@
 """Unit tests for DaemonConfig schema updates."""
 
-
 import pytest
 from pydantic import ValidationError
 
@@ -13,7 +12,7 @@ class TestDaemonConfigSocketFields:
     def test_daemon_config_has_socket_mode_field(self):
         """DaemonConfig should have socket_mode field."""
         config = DaemonConfig()
-        assert hasattr(config, 'socket_mode')
+        assert hasattr(config, "socket_mode")
 
     def test_daemon_config_socket_mode_defaults_to_shared(self):
         """socket_mode should default to 'shared'."""
@@ -23,7 +22,7 @@ class TestDaemonConfigSocketFields:
     def test_daemon_config_has_socket_base_field(self):
         """DaemonConfig should have optional socket_base field."""
         config = DaemonConfig()
-        assert hasattr(config, 'socket_base')
+        assert hasattr(config, "socket_base")
         assert config.socket_base is None
 
     def test_daemon_config_validates_socket_mode_values(self):

@@ -61,8 +61,7 @@ async def sso_callback(code: str, state: str, request: Request):
         raise HTTPException(status_code=500, detail="ID token not returned by provider")
 
     user_info = oidc_manager.provider.get_user_info(
-        tokens["access_token"],
-        tokens["id_token"]
+        tokens["access_token"], tokens["id_token"]
     )
 
     # Match or create user (email-based)

@@ -57,13 +57,17 @@ class TestDiscoveryBranchesCredentialRetrieval:
 
         client = TestClient(app)
 
-        with patch(
-            "code_indexer.server.web.routes.get_session_manager"
-        ) as mock_get_session_manager, patch(
-            "code_indexer.server.web.routes._get_token_manager"
-        ) as mock_get_token_manager, patch(
-            "code_indexer.server.services.remote_branch_service.RemoteBranchService"
-        ) as mock_service_class:
+        with (
+            patch(
+                "code_indexer.server.web.routes.get_session_manager"
+            ) as mock_get_session_manager,
+            patch(
+                "code_indexer.server.web.routes._get_token_manager"
+            ) as mock_get_token_manager,
+            patch(
+                "code_indexer.server.services.remote_branch_service.RemoteBranchService"
+            ) as mock_service_class,
+        ):
             # Setup mocks
             mock_session_manager = MagicMock()
             mock_session_manager.get_session.return_value = mock_session
@@ -132,13 +136,17 @@ class TestDiscoveryBranchesCredentialRetrieval:
 
         client = TestClient(app)
 
-        with patch(
-            "code_indexer.server.web.routes.get_session_manager"
-        ) as mock_get_session_manager, patch(
-            "code_indexer.server.web.routes._get_token_manager"
-        ) as mock_get_token_manager, patch(
-            "code_indexer.server.services.remote_branch_service.RemoteBranchService"
-        ) as mock_service_class:
+        with (
+            patch(
+                "code_indexer.server.web.routes.get_session_manager"
+            ) as mock_get_session_manager,
+            patch(
+                "code_indexer.server.web.routes._get_token_manager"
+            ) as mock_get_token_manager,
+            patch(
+                "code_indexer.server.services.remote_branch_service.RemoteBranchService"
+            ) as mock_service_class,
+        ):
             mock_session_manager = MagicMock()
             mock_session_manager.get_session.return_value = mock_session
             mock_get_session_manager.return_value = mock_session_manager
@@ -196,13 +204,17 @@ class TestDiscoveryBranchesCredentialRetrieval:
 
         client = TestClient(app)
 
-        with patch(
-            "code_indexer.server.web.routes.get_session_manager"
-        ) as mock_get_session_manager, patch(
-            "code_indexer.server.web.routes._get_token_manager"
-        ) as mock_get_token_manager, patch(
-            "code_indexer.server.services.remote_branch_service.RemoteBranchService"
-        ) as mock_service_class:
+        with (
+            patch(
+                "code_indexer.server.web.routes.get_session_manager"
+            ) as mock_get_session_manager,
+            patch(
+                "code_indexer.server.web.routes._get_token_manager"
+            ) as mock_get_token_manager,
+            patch(
+                "code_indexer.server.services.remote_branch_service.RemoteBranchService"
+            ) as mock_service_class,
+        ):
             mock_session_manager = MagicMock()
             mock_session_manager.get_session.return_value = mock_session
             mock_get_session_manager.return_value = mock_session_manager
@@ -245,17 +257,24 @@ class TestDiscoveryBranchesCredentialRetrieval:
 
         # Mock token manager with both tokens
         mock_token_manager = MagicMock()
+
         def get_token_side_effect(platform):
             if platform == "github":
-                return TokenData(platform="github", token="ghp_github_token", base_url=None)
+                return TokenData(
+                    platform="github", token="ghp_github_token", base_url=None
+                )
             elif platform == "gitlab":
-                return TokenData(platform="gitlab", token="glpat-gitlab_token", base_url=None)
+                return TokenData(
+                    platform="gitlab", token="glpat-gitlab_token", base_url=None
+                )
             return None
+
         mock_token_manager.get_token.side_effect = get_token_side_effect
 
         # Track credentials passed for each call
         credentials_used = []
         mock_service = MagicMock()
+
         def fetch_side_effect(clone_url, platform, credentials):
             credentials_used.append((clone_url, platform, credentials))
             return MagicMock(
@@ -264,17 +283,22 @@ class TestDiscoveryBranchesCredentialRetrieval:
                 default_branch="main",
                 error=None,
             )
+
         mock_service.fetch_remote_branches.side_effect = fetch_side_effect
 
         client = TestClient(app)
 
-        with patch(
-            "code_indexer.server.web.routes.get_session_manager"
-        ) as mock_get_session_manager, patch(
-            "code_indexer.server.web.routes._get_token_manager"
-        ) as mock_get_token_manager, patch(
-            "code_indexer.server.services.remote_branch_service.RemoteBranchService"
-        ) as mock_service_class:
+        with (
+            patch(
+                "code_indexer.server.web.routes.get_session_manager"
+            ) as mock_get_session_manager,
+            patch(
+                "code_indexer.server.web.routes._get_token_manager"
+            ) as mock_get_token_manager,
+            patch(
+                "code_indexer.server.services.remote_branch_service.RemoteBranchService"
+            ) as mock_service_class,
+        ):
             mock_session_manager = MagicMock()
             mock_session_manager.get_session.return_value = mock_session
             mock_get_session_manager.return_value = mock_session_manager

@@ -104,7 +104,10 @@ class TestGroupMCPToolsExistInRegistry:
     def test_remove_member_from_group_exists_in_registry(self):
         """AC6b: remove_member_from_group tool exists in TOOL_REGISTRY."""
         assert "remove_member_from_group" in TOOL_REGISTRY
-        assert TOOL_REGISTRY["remove_member_from_group"]["name"] == "remove_member_from_group"
+        assert (
+            TOOL_REGISTRY["remove_member_from_group"]["name"]
+            == "remove_member_from_group"
+        )
 
     def test_add_repos_to_group_exists_in_registry(self):
         """AC7: add_repos_to_group tool exists in TOOL_REGISTRY."""
@@ -114,7 +117,9 @@ class TestGroupMCPToolsExistInRegistry:
     def test_remove_repo_from_group_exists_in_registry(self):
         """AC8: remove_repo_from_group tool exists in TOOL_REGISTRY."""
         assert "remove_repo_from_group" in TOOL_REGISTRY
-        assert TOOL_REGISTRY["remove_repo_from_group"]["name"] == "remove_repo_from_group"
+        assert (
+            TOOL_REGISTRY["remove_repo_from_group"]["name"] == "remove_repo_from_group"
+        )
 
     def test_bulk_remove_repos_from_group_exists_in_registry(self):
         """AC9: bulk_remove_repos_from_group tool exists in TOOL_REGISTRY."""
@@ -205,13 +210,15 @@ class TestGroupMCPToolsPermissions:
     def test_add_member_to_group_requires_manage_users_permission(self):
         """add_member_to_group tool requires manage_users permission (admin only)."""
         assert (
-            TOOL_REGISTRY["add_member_to_group"]["required_permission"] == "manage_users"
+            TOOL_REGISTRY["add_member_to_group"]["required_permission"]
+            == "manage_users"
         )
 
     def test_remove_member_from_group_requires_manage_users_permission(self):
         """remove_member_from_group tool requires manage_users permission (admin only)."""
         assert (
-            TOOL_REGISTRY["remove_member_from_group"]["required_permission"] == "manage_users"
+            TOOL_REGISTRY["remove_member_from_group"]["required_permission"]
+            == "manage_users"
         )
 
     def test_add_repos_to_group_requires_manage_users_permission(self):
@@ -492,9 +499,7 @@ class TestListGroupsHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    def test_list_groups_returns_success_true(
-        self, admin_user, mock_group_manager
-    ):
+    def test_list_groups_returns_success_true(self, admin_user, mock_group_manager):
         """list_groups handler returns success=True on valid call."""
         with patch(
             "code_indexer.server.mcp.handlers._get_group_manager",
@@ -508,9 +513,7 @@ class TestListGroupsHandler:
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    def test_list_groups_returns_groups_array(
-        self, admin_user, mock_group_manager
-    ):
+    def test_list_groups_returns_groups_array(self, admin_user, mock_group_manager):
         """list_groups handler returns groups array."""
         with patch(
             "code_indexer.server.mcp.handlers._get_group_manager",
@@ -523,9 +526,7 @@ class TestListGroupsHandler:
             assert "groups" in content
             assert isinstance(content["groups"], list)
 
-    def test_list_groups_returns_default_groups(
-        self, admin_user, mock_group_manager
-    ):
+    def test_list_groups_returns_default_groups(self, admin_user, mock_group_manager):
         """list_groups handler returns default groups (admins, powerusers, users)."""
         with patch(
             "code_indexer.server.mcp.handlers._get_group_manager",
@@ -772,7 +773,9 @@ class TestRemoveMemberFromGroupHandler:
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    def test_remove_member_from_group_user_not_in_group(self, admin_user, mock_group_manager):
+    def test_remove_member_from_group_user_not_in_group(
+        self, admin_user, mock_group_manager
+    ):
         """remove_member_from_group handler returns success even if user not in that specific group."""
         with patch(
             "code_indexer.server.mcp.handlers._get_group_manager",
@@ -855,9 +858,7 @@ class TestRemoveRepoFromGroupHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    def test_remove_repo_from_group_succeeds(
-        self, admin_user, mock_group_manager
-    ):
+    def test_remove_repo_from_group_succeeds(self, admin_user, mock_group_manager):
         """remove_repo_from_group handler succeeds for existing repo access."""
         with patch(
             "code_indexer.server.mcp.handlers._get_group_manager",

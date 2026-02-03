@@ -152,7 +152,9 @@ class TestRestApiCacheRetrievalE2E:
             app.state.payload_cache = original
 
     @pytest.mark.asyncio
-    async def test_complete_truncation_and_retrieval_workflow(self, app_with_cache, cache):
+    async def test_complete_truncation_and_retrieval_workflow(
+        self, app_with_cache, cache
+    ):
         """E2E: Complete workflow - truncate, then retrieve via REST API."""
         from httpx import AsyncClient, ASGITransport
 

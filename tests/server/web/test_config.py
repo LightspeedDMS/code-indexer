@@ -335,7 +335,9 @@ class TestConfigReset:
         ), "Page should have 'Reset to Defaults' button"
 
     def test_config_reset_post_restores_defaults(
-        self, authenticated_client: TestClient, web_infrastructure: WebTestInfrastructure
+        self,
+        authenticated_client: TestClient,
+        web_infrastructure: WebTestInfrastructure,
     ):
         """
         AC6: POST to /admin/config/reset restores configuration to defaults.
@@ -359,6 +361,7 @@ class TestConfigReset:
 
         # Verify modification
         from code_indexer.server.services.config_service import get_config_service
+
         config_service = get_config_service()
         config = config_service.get_config()
         assert config.mcp_session_config.session_ttl_seconds == 9999

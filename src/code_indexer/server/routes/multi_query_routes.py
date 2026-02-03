@@ -204,22 +204,22 @@ def multi_repository_query(
 
     except ValueError as e:
         # Validation error from service
-        logger.error(format_error_log(
-            "WEB-GENERAL-029",
-            "Multi-repo search validation error",
-            error=str(e)),
-            extra=get_log_extra("WEB-GENERAL-029")
+        logger.error(
+            format_error_log(
+                "WEB-GENERAL-029", "Multi-repo search validation error", error=str(e)
+            ),
+            extra=get_log_extra("WEB-GENERAL-029"),
         )
         raise HTTPException(status_code=422, detail=str(e))
 
     except Exception as e:
         # Unexpected error
-        logger.error(format_error_log(
-            "WEB-GENERAL-030",
-            "Multi-repo search failed",
-            error=str(e)),
+        logger.error(
+            format_error_log(
+                "WEB-GENERAL-030", "Multi-repo search failed", error=str(e)
+            ),
             extra=get_log_extra("WEB-GENERAL-030"),
-            exc_info=True
+            exc_info=True,
         )
         raise HTTPException(
             status_code=500, detail=f"Multi-repository search failed: {str(e)}"

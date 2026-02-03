@@ -100,7 +100,10 @@ class TestServerConfigManagerBackgroundJobsPersistence:
             saved_config = json.load(f)
 
         assert "background_jobs_config" in saved_config
-        assert saved_config["background_jobs_config"]["max_concurrent_background_jobs"] == 10
+        assert (
+            saved_config["background_jobs_config"]["max_concurrent_background_jobs"]
+            == 10
+        )
 
     def test_custom_background_jobs_config_loads_from_file(self, tmp_path):
         """Custom background_jobs settings should load correctly from config file."""

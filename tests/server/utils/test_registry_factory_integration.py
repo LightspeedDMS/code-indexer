@@ -7,7 +7,6 @@ factory function (SQLite backend consistency).
 """
 
 
-
 def _initialize_db_schema(db_path: str) -> None:
     """Helper to initialize database schema for tests."""
     from code_indexer.server.storage.database_manager import DatabaseSchema

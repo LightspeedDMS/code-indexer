@@ -490,7 +490,11 @@ class TestScipCompositeHandlersGoldenReposDirectory:
         # Create mock service with expected response
         mock_service = MagicMock()
         mock_service.trace_callchain.return_value = [
-            {"path": ["func1", "intermediate", "func2"], "length": 3, "has_cycle": False}
+            {
+                "path": ["func1", "intermediate", "func2"],
+                "length": 3,
+                "has_cycle": False,
+            }
         ]
 
         mock_user = MagicMock()
@@ -555,9 +559,7 @@ class TestScipCompositeHandlersGoldenReposDirectory:
             mock_service.trace_callchain.assert_called_once()
             call_kwargs = mock_service.trace_callchain.call_args[1]
             max_depth_arg = call_kwargs.get("max_depth")
-            assert (
-                max_depth_arg <= 10
-            ), f"Expected max_depth <= 10, got {max_depth_arg}"
+            assert max_depth_arg <= 10, f"Expected max_depth <= 10, got {max_depth_arg}"
 
     def test_scip_context_delegates_to_service(self) -> None:
         """Verify scip_context delegates to SCIPQueryService.get_context()."""

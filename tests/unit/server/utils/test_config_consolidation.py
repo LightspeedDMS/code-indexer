@@ -59,7 +59,9 @@ class TestFileContentLimitsConfig:
 
     def test_custom_values(self):
         """Test FileContentLimitsConfig accepts custom values."""
-        config = FileContentLimitsConfig(max_tokens_per_request=10000, chars_per_token=3)
+        config = FileContentLimitsConfig(
+            max_tokens_per_request=10000, chars_per_token=3
+        )
 
         assert config.max_tokens_per_request == 10000
         assert config.chars_per_token == 3
@@ -284,7 +286,9 @@ class TestConfigValidation:
         manager = ServerConfigManager(str(tmp_path))
         config = ServerConfig(
             server_dir=str(tmp_path),
-            file_content_limits_config=FileContentLimitsConfig(max_tokens_per_request=5000),
+            file_content_limits_config=FileContentLimitsConfig(
+                max_tokens_per_request=5000
+            ),
         )
         manager.validate_config(config)  # Should not raise
 
@@ -293,7 +297,9 @@ class TestConfigValidation:
         manager = ServerConfigManager(str(tmp_path))
         config = ServerConfig(
             server_dir=str(tmp_path),
-            file_content_limits_config=FileContentLimitsConfig(max_tokens_per_request=999),
+            file_content_limits_config=FileContentLimitsConfig(
+                max_tokens_per_request=999
+            ),
         )
         with pytest.raises(ValueError, match="max_tokens_per_request"):
             manager.validate_config(config)
@@ -303,7 +309,9 @@ class TestConfigValidation:
         manager = ServerConfigManager(str(tmp_path))
         config = ServerConfig(
             server_dir=str(tmp_path),
-            file_content_limits_config=FileContentLimitsConfig(max_tokens_per_request=50001),
+            file_content_limits_config=FileContentLimitsConfig(
+                max_tokens_per_request=50001
+            ),
         )
         with pytest.raises(ValueError, match="max_tokens_per_request"):
             manager.validate_config(config)

@@ -127,40 +127,50 @@ def create_file(
         return CreateFileResponse(**result)
 
     except FileExistsError as e:
-        logger.warning(format_error_log(
-            "STORE-GENERAL-018",
-            f"File already exists: {alias}/{request.file_path}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "STORE-GENERAL-018",
+                f"File already exists: {alias}/{request.file_path}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except PermissionError as e:
-        logger.warning(format_error_log(
-            "STORE-GENERAL-019",
-            f"Permission denied for {alias}/{request.file_path}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "STORE-GENERAL-019",
+                f"Permission denied for {alias}/{request.file_path}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "STORE-GENERAL-020",
-            f"Repository not found: {alias}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "STORE-GENERAL-020",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except ValueError as e:
-        logger.warning(format_error_log(
-            "STORE-GENERAL-021",
-            f"Invalid request for {alias}/{request.file_path}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "STORE-GENERAL-021",
+                f"Invalid request for {alias}/{request.file_path}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "STORE-GENERAL-022",
-            f"Create file failed for {alias}/{request.file_path}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-022",
+                f"Create file failed for {alias}/{request.file_path}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -217,40 +227,50 @@ def edit_file(
         return EditFileResponse(**result)
 
     except HashMismatchError as e:
-        logger.warning(format_error_log(
-            "STORE-GENERAL-023",
-            f"Hash mismatch for {alias}/{file_path}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "STORE-GENERAL-023",
+                f"Hash mismatch for {alias}/{file_path}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except PermissionError as e:
-        logger.warning(format_error_log(
-            "STORE-GENERAL-024",
-            f"Permission denied for {alias}/{file_path}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "STORE-GENERAL-024",
+                f"Permission denied for {alias}/{file_path}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "STORE-GENERAL-025",
-            f"File or repository not found: {alias}/{file_path}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "STORE-GENERAL-025",
+                f"File or repository not found: {alias}/{file_path}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except ValueError as e:
-        logger.warning(format_error_log(
-            "SVC-GENERAL-001",
-            f"Invalid request for {alias}/{file_path}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "SVC-GENERAL-001",
+                f"Invalid request for {alias}/{file_path}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "SVC-GENERAL-002",
-            f"Edit file failed for {alias}/{file_path}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-002",
+                f"Edit file failed for {alias}/{file_path}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -304,26 +324,32 @@ def delete_file(
         return DeleteFileResponse(**result)
 
     except PermissionError as e:
-        logger.warning(format_error_log(
-            "SVC-GENERAL-003",
-            f"Permission denied for {alias}/{file_path}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "SVC-GENERAL-003",
+                f"Permission denied for {alias}/{file_path}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "SVC-GENERAL-004",
-            f"File or repository not found: {alias}/{file_path}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "SVC-GENERAL-004",
+                f"File or repository not found: {alias}/{file_path}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "SVC-GENERAL-005",
-            f"Delete file failed for {alias}/{file_path}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-005",
+                f"Delete file failed for {alias}/{file_path}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",

@@ -556,17 +556,24 @@ class FileChunkingManager:
                     raise
 
             # MULTIMODAL PROCESSING: Handle chunks with images
-            if multimodal_chunks and hasattr(self, 'multimodal_client') and self.multimodal_client:
-                logger.debug(f"Processing {len(multimodal_chunks)} multimodal chunks for {file_path}")
+            if (
+                multimodal_chunks
+                and hasattr(self, "multimodal_client")
+                and self.multimodal_client
+            ):
+                logger.debug(
+                    f"Processing {len(multimodal_chunks)} multimodal chunks for {file_path}"
+                )
 
                 # Ensure multimodal collection exists using model name as collection name
                 # This creates .code-indexer/index/voyage-multimodal-3/ (NOT subdirectory)
                 multimodal_collection_name = self.multimodal_client.config.model
-                if not self.vector_store_client.collection_exists(multimodal_collection_name):
+                if not self.vector_store_client.collection_exists(
+                    multimodal_collection_name
+                ):
                     # voyage-multimodal-3 produces 1024-dimensional embeddings
                     self.vector_store_client.create_collection(
-                        collection_name=multimodal_collection_name,
-                        vector_size=1024
+                        collection_name=multimodal_collection_name, vector_size=1024
                     )
                     logger.info(
                         f"Created multimodal collection '{multimodal_collection_name}' at same level as code embeddings"
@@ -576,17 +583,17 @@ class FileChunkingManager:
                     # Image paths from ImageExtractorFactory are already relative to codebase_dir
                     # and have been validated (existence, format, size checks)
                     image_paths = []
-                    for img_ref in chunk.get('images', []):
+                    for img_ref in chunk.get("images", []):
                         # img_ref can be either:
                         # - string (relative path) from TextChunker (legacy)
                         # - dict with 'path' key from FixedSizeChunker with ImageExtractorFactory
                         if isinstance(img_ref, dict):
-                            img_ref_path = img_ref['path']
+                            img_ref_path = img_ref["path"]
                         else:
                             img_ref_path = img_ref
 
                         # Skip remote URLs (http://, https://) - shouldn't happen with ImageExtractorFactory
-                        if img_ref_path.startswith(('http://', 'https://')):
+                        if img_ref_path.startswith(("http://", "https://")):
                             logger.debug(f"Skipping remote image URL: {img_ref_path}")
                             continue
 
@@ -606,20 +613,23 @@ class FileChunkingManager:
                         try:
                             img_path.relative_to(self.codebase_dir)
                         except ValueError:
-                            logger.warning(f"Image outside codebase: {img_path} - skipping")
+                            logger.warning(
+                                f"Image outside codebase: {img_path} - skipping"
+                            )
                             continue
 
                         image_paths.append(img_path)
 
                     if not image_paths:
-                        logger.warning(f"No valid images for chunk {chunk.get('chunk_index')} - skipping")
+                        logger.warning(
+                            f"No valid images for chunk {chunk.get('chunk_index')} - skipping"
+                        )
                         continue
 
                     try:
                         # Get multimodal embedding (client handles base64 encoding)
                         embedding = self.multimodal_client.get_multimodal_embedding(
-                            text=chunk['text'],
-                            image_paths=image_paths
+                            text=chunk["text"], image_paths=image_paths
                         )
 
                         logger.debug(
@@ -635,7 +645,9 @@ class FileChunkingManager:
                             "line_start": chunk.get("line_start"),
                             "line_end": chunk.get("line_end"),
                             "file_extension": file_path.suffix.lstrip(".") or "txt",
-                            "images": chunk.get("images", []),  # Preserve images metadata
+                            "images": chunk.get(
+                                "images", []
+                            ),  # Preserve images metadata
                         }
 
                         vector_point = self._create_vector_point(
@@ -653,11 +665,13 @@ class FileChunkingManager:
 
                         success = self.vector_store_client.upsert_points(
                             points=[vector_point],
-                            collection_name=multimodal_collection_name
+                            collection_name=multimodal_collection_name,
                         )
 
                         if not success:
-                            raise RuntimeError("Failed to store multimodal vector point")
+                            raise RuntimeError(
+                                "Failed to store multimodal vector point"
+                            )
 
                         logger.debug(
                             f"Stored multimodal embedding for chunk {chunk.get('chunk_index')} "
@@ -665,7 +679,9 @@ class FileChunkingManager:
                         )
 
                     except Exception as e:
-                        logger.error(f"Failed to generate or store multimodal embedding: {e}")
+                        logger.error(
+                            f"Failed to generate or store multimodal embedding: {e}"
+                        )
                         # Continue processing other chunks rather than failing entire file
                         continue
 
@@ -737,7 +753,9 @@ class FileChunkingManager:
                     )
 
                 # Create points with preserved order: regular_chunks[i] → embeddings[i] → points[i]
-                for i, (chunk, embedding) in enumerate(zip(regular_chunks, all_embeddings)):
+                for i, (chunk, embedding) in enumerate(
+                    zip(regular_chunks, all_embeddings)
+                ):
                     if embedding:  # Validate individual embedding
                         file_points.append(
                             {

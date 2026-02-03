@@ -313,9 +313,7 @@ class TestTemporalMcpCacheRetrievalE2E:
             {
                 "content": "small",
                 "temporal_context": {
-                    "evolution": [
-                        {"content": large_evo_content, "diff": "small diff"}
-                    ]
+                    "evolution": [{"content": large_evo_content, "diff": "small diff"}]
                 },
             }
         ]

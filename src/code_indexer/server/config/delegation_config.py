@@ -53,7 +53,9 @@ class ClaudeDelegationConfig:
     claude_server_credential_type: Literal["password", "api_key"] = "password"
     claude_server_credential: str = ""  # Encrypted at rest
     skip_ssl_verify: bool = False  # Allow self-signed certificates for E2E testing
-    cidx_callback_url: str = ""  # Story #720: URL that Claude Server uses to POST callbacks
+    cidx_callback_url: str = (
+        ""  # Story #720: URL that Claude Server uses to POST callbacks
+    )
 
     @property
     def is_configured(self) -> bool:
@@ -133,10 +135,12 @@ class ClaudeDelegationManager:
         try:
             combined = base64.b64decode(encrypted_credential.encode("utf-8"))
             if len(combined) < AES_BLOCK_SIZE + 1:
-                logger.warning(format_error_log(
-                    "GIT-GENERAL-020",
-                    "Encrypted credential too short, returning empty"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "GIT-GENERAL-020",
+                        "Encrypted credential too short, returning empty",
+                    )
+                )
                 return ""
 
             iv = combined[:AES_BLOCK_SIZE]
@@ -154,10 +158,11 @@ class ClaudeDelegationManager:
             data = unpadder.update(padded_data) + unpadder.finalize()
             return data.decode("utf-8")
         except Exception as e:
-            logger.warning(format_error_log(
-                "GIT-GENERAL-021",
-                f"Failed to decrypt credential: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "GIT-GENERAL-021", f"Failed to decrypt credential: {e}"
+                )
+            )
             return ""
 
     def save_config(self, config: ClaudeDelegationConfig) -> None:
@@ -183,11 +188,13 @@ class ClaudeDelegationManager:
         # Check file permissions - warn if not 0600
         file_mode = self.config_file.stat().st_mode & 0o777
         if file_mode != 0o600:
-            logger.warning(format_error_log(
-                "GIT-GENERAL-022",
-                f"Insecure file permissions on {self.config_file}: "
-                f"found {oct(file_mode)}, expected 0o600"
-            ))
+            logger.warning(
+                format_error_log(
+                    "GIT-GENERAL-022",
+                    f"Insecure file permissions on {self.config_file}: "
+                    f"found {oct(file_mode)}, expected 0o600",
+                )
+            )
 
         with open(self.config_file, "r") as f:
             config_dict = json.load(f)
@@ -255,10 +262,9 @@ class ClaudeDelegationManager:
                     )
         except httpx.ConnectError as e:
             # Log detailed error for debugging, return generic message to user
-            logger.warning(format_error_log(
-                "GIT-GENERAL-023",
-                f"Connection error to {url}: {e}"
-            ))
+            logger.warning(
+                format_error_log("GIT-GENERAL-023", f"Connection error to {url}: {e}")
+            )
             return ConnectivityResult(
                 success=False,
                 error_message="Connection failed: Unable to connect to server",
@@ -271,10 +277,9 @@ class ClaudeDelegationManager:
         except Exception as e:
             # Log detailed error for debugging, return generic message to user
             # This prevents potential credential exposure in error messages
-            logger.warning(format_error_log(
-                "GIT-GENERAL-024",
-                f"Validation error for {url}: {e}"
-            ))
+            logger.warning(
+                format_error_log("GIT-GENERAL-024", f"Validation error for {url}: {e}")
+            )
             return ConnectivityResult(
                 success=False,
                 error_message="Validation failed: An unexpected error occurred",

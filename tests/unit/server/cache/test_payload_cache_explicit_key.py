@@ -274,7 +274,9 @@ class TestPayloadCacheHasKey:
         # Create cache with very short TTL
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_path = Path(tmpdir) / "short_ttl_cache.db"
-            short_ttl_config = PayloadCacheConfig(cache_ttl_seconds=0)  # Immediate expiry
+            short_ttl_config = PayloadCacheConfig(
+                cache_ttl_seconds=0
+            )  # Immediate expiry
             short_ttl_cache = PayloadCache(db_path=temp_path, config=short_ttl_config)
             short_ttl_cache.initialize()
 

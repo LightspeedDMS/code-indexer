@@ -168,20 +168,24 @@ class SelfMonitoringService:
                 cursor = conn.cursor()
 
                 # Find and mark orphaned scans (>2 hours old, not completed)
-                cursor.execute("""
+                cursor.execute(
+                    """
                     UPDATE self_monitoring_scans
                     SET completed_at = datetime('now'),
                         status = 'FAILURE',
                         error_message = 'Scan failed to complete (orphaned after 2 hours)'
                     WHERE completed_at IS NULL
                       AND datetime(started_at) < datetime('now', '-2 hours')
-                """)
+                """
+                )
 
                 orphaned_count = cursor.rowcount
                 conn.commit()
 
             if orphaned_count > 0:
-                logger.info(f"Cleaned up {orphaned_count} orphaned scans older than 2 hours")
+                logger.info(
+                    f"Cleaned up {orphaned_count} orphaned scans older than 2 hours"
+                )
 
         except Exception as e:
             logger.warning(
@@ -209,7 +213,9 @@ class SelfMonitoringService:
             - Database error occurs (fail-safe: run immediately)
         """
         if not self._db_path:
-            logger.debug("No database path configured, skipping initial wait calculation")
+            logger.debug(
+                "No database path configured, skipping initial wait calculation"
+            )
             return 0.0
 
         try:
@@ -233,8 +239,10 @@ class SelfMonitoringService:
             # Parse timestamp - handle both naive and timezone-aware formats
             last_scan_iso = row[0]
             # Try parsing as timezone-aware first (with 'Z' or offset)
-            if last_scan_iso.endswith('Z'):
-                last_scan_time = datetime.fromisoformat(last_scan_iso.replace("Z", "+00:00"))
+            if last_scan_iso.endswith("Z"):
+                last_scan_time = datetime.fromisoformat(
+                    last_scan_iso.replace("Z", "+00:00")
+                )
             else:
                 # Parse as-is, which may be naive or have offset
                 last_scan_time = datetime.fromisoformat(last_scan_iso)
@@ -351,12 +359,18 @@ class SelfMonitoringService:
         Returns:
             Scan result dictionary with status and metrics
         """
-        logger.debug(f"[SELF-MON-DEBUG] _execute_scan: Entry - db_path={self._db_path}, log_db_path={self._log_db_path}, github_repo={self._github_repo}")
+        logger.debug(
+            f"[SELF-MON-DEBUG] _execute_scan: Entry - db_path={self._db_path}, log_db_path={self._log_db_path}, github_repo={self._github_repo}"
+        )
 
         # Validate required configuration
         if not self._db_path or not self._log_db_path:
-            error_msg = "Database paths not configured: db_path and log_db_path are required"
-            logger.debug(f"[SELF-MON-DEBUG] _execute_scan: Config validation failed - db_path={self._db_path}, log_db_path={self._log_db_path}")
+            error_msg = (
+                "Database paths not configured: db_path and log_db_path are required"
+            )
+            logger.debug(
+                f"[SELF-MON-DEBUG] _execute_scan: Config validation failed - db_path={self._db_path}, log_db_path={self._log_db_path}"
+            )
             logger.error(
                 format_error_log(
                     "MONITOR-GENERAL-010",
@@ -367,7 +381,9 @@ class SelfMonitoringService:
 
         if not self._github_repo:
             error_msg = "GitHub repository not configured: github_repo is required"
-            logger.debug("[SELF-MON-DEBUG] _execute_scan: Config validation failed - github_repo is None")
+            logger.debug(
+                "[SELF-MON-DEBUG] _execute_scan: Config validation failed - github_repo is None"
+            )
             logger.error(
                 format_error_log(
                     "MONITOR-GENERAL-011",
@@ -376,7 +392,9 @@ class SelfMonitoringService:
             )
             return {"status": "FAILURE", "error": error_msg}
 
-        logger.debug(f"[SELF-MON-DEBUG] _execute_scan: Config validated - model={self._model}, repo_root={self._repo_root}, server_name={self._server_name}")
+        logger.debug(
+            f"[SELF-MON-DEBUG] _execute_scan: Config validated - model={self._model}, repo_root={self._repo_root}, server_name={self._server_name}"
+        )
 
         from code_indexer.server.self_monitoring.scanner import LogScanner
         from code_indexer.server.self_monitoring.prompts import get_default_prompt
@@ -384,7 +402,9 @@ class SelfMonitoringService:
 
         # Load default prompt if not configured
         prompt = self._prompt_template or get_default_prompt()
-        logger.debug(f"[SELF-MON-DEBUG] _execute_scan: Prompt loaded - using_default={not self._prompt_template}, length={len(prompt)}")
+        logger.debug(
+            f"[SELF-MON-DEBUG] _execute_scan: Prompt loaded - using_default={not self._prompt_template}, length={len(prompt)}"
+        )
 
         # Generate unique scan ID
         scan_id = str(uuid.uuid4())
@@ -401,13 +421,15 @@ class SelfMonitoringService:
             model=self._model,
             repo_root=self._repo_root,
             github_token=self._github_token,
-            server_name=self._server_name
+            server_name=self._server_name,
         )
 
         # Execute scan (this handles all workflow including creating scan record)
         logger.debug("[SELF-MON-DEBUG] _execute_scan: Calling scanner.execute_scan()")
         result = scanner.execute_scan()
-        logger.debug(f"[SELF-MON-DEBUG] _execute_scan: scanner.execute_scan() returned - status={result.get('status')}")
+        logger.debug(
+            f"[SELF-MON-DEBUG] _execute_scan: scanner.execute_scan() returned - status={result.get('status')}"
+        )
         return result
 
     @property
@@ -437,7 +459,9 @@ class SelfMonitoringService:
             Success: {"status": "queued", "scan_id": "..."}
             Error: {"status": "error", "error": "..."}
         """
-        logger.debug(f"[SELF-MON-DEBUG] trigger_scan: Entry - enabled={self._enabled}, job_manager={self._job_manager is not None}")
+        logger.debug(
+            f"[SELF-MON-DEBUG] trigger_scan: Entry - enabled={self._enabled}, job_manager={self._job_manager is not None}"
+        )
 
         if not self._enabled:
             logger.debug("[SELF-MON-DEBUG] trigger_scan: Self-monitoring not enabled")
@@ -447,10 +471,7 @@ class SelfMonitoringService:
                     "Manual scan trigger rejected: self-monitoring not enabled",
                 )
             )
-            return {
-                "status": "error",
-                "error": "Self-monitoring is not enabled"
-            }
+            return {"status": "error", "error": "Self-monitoring is not enabled"}
 
         if self._job_manager is None:
             logger.debug("[SELF-MON-DEBUG] trigger_scan: Job manager not available")
@@ -460,14 +481,13 @@ class SelfMonitoringService:
                     "Manual scan trigger rejected: job manager not available",
                 )
             )
-            return {
-                "status": "error",
-                "error": "Job manager not available"
-            }
+            return {"status": "error", "error": "Job manager not available"}
 
         try:
             logger.info("Manual scan trigger: submitting self-monitoring scan job")
-            logger.debug(f"[SELF-MON-DEBUG] trigger_scan: Submitting job - github_repo={self._github_repo}")
+            logger.debug(
+                f"[SELF-MON-DEBUG] trigger_scan: Submitting job - github_repo={self._github_repo}"
+            )
 
             # Submit job to background job manager
             # Concurrency is handled by the job queue itself - multiple scans
@@ -481,15 +501,16 @@ class SelfMonitoringService:
             )
 
             logger.info(f"Manual scan trigger: job submitted with ID {job_id}")
-            logger.debug(f"[SELF-MON-DEBUG] trigger_scan: Job submitted successfully - job_id={job_id}")
+            logger.debug(
+                f"[SELF-MON-DEBUG] trigger_scan: Job submitted successfully - job_id={job_id}"
+            )
 
-            return {
-                "status": "queued",
-                "scan_id": job_id
-            }
+            return {"status": "queued", "scan_id": job_id}
 
         except Exception as e:
-            logger.debug(f"[SELF-MON-DEBUG] trigger_scan: Exception caught - {type(e).__name__}: {e}")
+            logger.debug(
+                f"[SELF-MON-DEBUG] trigger_scan: Exception caught - {type(e).__name__}: {e}"
+            )
             logger.error(
                 format_error_log(
                     "MONITOR-GENERAL-009",
@@ -497,7 +518,4 @@ class SelfMonitoringService:
                 ),
                 exc_info=True,
             )
-            return {
-                "status": "error",
-                "error": str(e)
-            }
+            return {"status": "error", "error": str(e)}

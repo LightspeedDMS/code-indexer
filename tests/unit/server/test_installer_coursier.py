@@ -57,9 +57,7 @@ class TestIsCoursierInstalled:
 
     def test_returns_false_on_timeout(self, installer):
         """Test returns False when command times out."""
-        with patch(
-            "subprocess.run", side_effect=subprocess.TimeoutExpired("cs", 10)
-        ):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("cs", 10)):
             result = installer._is_coursier_installed()
 
         assert result is False
@@ -139,7 +137,9 @@ class TestInstallCoursier:
         assert result is False
 
     @patch("platform.machine", return_value="x86_64")
-    def test_returns_false_when_verification_fails(self, mock_machine, installer, tmp_path):
+    def test_returns_false_when_verification_fails(
+        self, mock_machine, installer, tmp_path
+    ):
         """Test returns False when post-install verification fails."""
         from unittest.mock import MagicMock
 

@@ -54,7 +54,10 @@ class TestServerConfigVoyageAIKeyPersistence:
             loaded_config = manager.load_config()
 
             assert loaded_config is not None
-            assert loaded_config.claude_integration_config.voyageai_api_key == "pa-persistedkey12345"
+            assert (
+                loaded_config.claude_integration_config.voyageai_api_key
+                == "pa-persistedkey12345"
+            )
 
     def test_voyageai_api_key_in_settings_dict(self):
         """voyageai_api_key is included in get_all_settings claude_cli section."""

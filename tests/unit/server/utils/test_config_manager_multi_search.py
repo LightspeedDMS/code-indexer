@@ -122,10 +122,18 @@ class TestServerConfigManagerMultiSearchPersistence:
             saved_config = json.load(f)
 
         assert "multi_search_limits_config" in saved_config
-        assert saved_config["multi_search_limits_config"]["multi_search_max_workers"] == 5
-        assert saved_config["multi_search_limits_config"]["multi_search_timeout_seconds"] == 60
+        assert (
+            saved_config["multi_search_limits_config"]["multi_search_max_workers"] == 5
+        )
+        assert (
+            saved_config["multi_search_limits_config"]["multi_search_timeout_seconds"]
+            == 60
+        )
         assert saved_config["multi_search_limits_config"]["scip_multi_max_workers"] == 4
-        assert saved_config["multi_search_limits_config"]["scip_multi_timeout_seconds"] == 45
+        assert (
+            saved_config["multi_search_limits_config"]["scip_multi_timeout_seconds"]
+            == 45
+        )
 
     def test_custom_multi_search_config_loads_from_file(self, tmp_path):
         """Custom multi_search settings should load correctly from config file."""
@@ -190,7 +198,9 @@ class TestServerConfigManagerMultiSearchPersistence:
         # Load and verify
         loaded_config = config_manager.load_config()
         assert loaded_config.multi_search_limits_config.multi_search_max_workers == 8
-        assert loaded_config.multi_search_limits_config.scip_multi_timeout_seconds == 120
+        assert (
+            loaded_config.multi_search_limits_config.scip_multi_timeout_seconds == 120
+        )
 
 
 class TestServerConfigManagerMultiSearchValidation:

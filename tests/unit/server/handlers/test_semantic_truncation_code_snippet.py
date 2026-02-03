@@ -13,7 +13,6 @@ TDD methodology: Tests written BEFORE the fix is implemented.
 """
 
 
-
 class TestCodeSnippetTruncation:
     """Tests for code_snippet field truncation in semantic search results.
 

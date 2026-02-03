@@ -51,9 +51,7 @@ def test_client(mock_user):
 class TestDefinitionEndpoint:
     """Tests for /scip/definition endpoint."""
 
-    def test_definition_endpoint_returns_results(
-        self, test_client, mock_scip_service
-    ):
+    def test_definition_endpoint_returns_results(self, test_client, mock_scip_service):
         """Should call SCIPQueryService and return aggregated definition results."""
         # Mock service to return definition results
         mock_scip_service.find_definition.return_value = [

@@ -145,7 +145,9 @@ class TestOIDCRoutes:
 
         # Verify provider methods were called
         oidc_mgr.provider.exchange_code_for_token.assert_called_once()
-        oidc_mgr.provider.get_user_info.assert_called_once_with("test-access-token", "test-id-token")
+        oidc_mgr.provider.get_user_info.assert_called_once_with(
+            "test-access-token", "test-id-token"
+        )
         oidc_mgr.match_or_create_user.assert_called_once()
 
     def test_sso_callback_handles_match_or_create_user_returning_none(self):

@@ -106,7 +106,7 @@ class GitRepoStateManager:
         args: List[str],
         check: bool = True,
         capture_output: bool = True,
-        timeout: int = 60
+        timeout: int = 60,
     ) -> subprocess.CompletedProcess:
         """
         Execute git command in repository.
@@ -127,7 +127,7 @@ class GitRepoStateManager:
             check=check,
             capture_output=capture_output,
             text=True,
-            timeout=timeout
+            timeout=timeout,
         )
 
     def capture_state(self) -> GitRepoState:
@@ -162,7 +162,7 @@ class GitRepoStateManager:
             staged_files=staged_files,
             unstaged_files=unstaged_files,
             untracked_files=untracked_files,
-            remote_refs=remote_refs
+            remote_refs=remote_refs,
         )
 
         logger.debug(f"Captured state: {state}")
@@ -194,11 +194,13 @@ class GitRepoStateManager:
         """Get remote refs for push rollback tracking."""
         remote_refs = {}
         try:
-            result = self._run_git([
-                "for-each-ref",
-                "--format=%(refname:short) %(objectname)",
-                "refs/remotes/"
-            ])
+            result = self._run_git(
+                [
+                    "for-each-ref",
+                    "--format=%(refname:short) %(objectname)",
+                    "refs/remotes/",
+                ]
+            )
             for line in result.stdout.splitlines():
                 if line.strip():
                     parts = line.strip().split()
@@ -291,9 +293,13 @@ class GitRepoStateManager:
             except subprocess.CalledProcessError as e:
                 logger.debug(f"checkout {state.current_branch} failed, trying -B: {e}")
                 try:
-                    self._run_git(["checkout", "-B", state.current_branch, state.head_commit])
+                    self._run_git(
+                        ["checkout", "-B", state.current_branch, state.head_commit]
+                    )
                 except Exception as e2:
-                    logger.warning(f"Failed to restore branch {state.current_branch}: {e2}")
+                    logger.warning(
+                        f"Failed to restore branch {state.current_branch}: {e2}"
+                    )
 
         try:
             self._run_git(["reset", "--hard", state.head_commit])
@@ -310,10 +316,7 @@ class GitRepoStateManager:
                 logger.debug(f"Failed to delete test branch {state.test_branch}: {e}")
 
     def rollback_pushed_commits(
-        self,
-        branch: str,
-        original_commit: str,
-        remote: str = "origin"
+        self, branch: str, original_commit: str, remote: str = "origin"
     ) -> bool:
         """
         Rollback pushed commits via force push or revert.
@@ -329,15 +332,14 @@ class GitRepoStateManager:
         Returns:
             True if rollback succeeded, False otherwise
         """
-        logger.warning(f"Rolling back pushed commits on {branch} to {original_commit[:8]}")
+        logger.warning(
+            f"Rolling back pushed commits on {branch} to {original_commit[:8]}"
+        )
 
         try:
             self._run_git(["checkout", branch])
             self._run_git(["reset", "--hard", original_commit])
-            self._run_git(
-                ["push", "--force-with-lease", remote, branch],
-                timeout=300
-            )
+            self._run_git(["push", "--force-with-lease", remote, branch], timeout=300)
             logger.info(f"Successfully rolled back {branch} to {original_commit[:8]}")
             return True
         except subprocess.CalledProcessError as e:

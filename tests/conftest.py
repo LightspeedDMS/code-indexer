@@ -328,6 +328,7 @@ def initialize_api_metrics_service(tmp_path_factory):
         from src.code_indexer.server.services.api_metrics_service import (
             api_metrics_service as src_service,
         )
+
         src_service.initialize(str(db_path))
     except ImportError:
         pass
@@ -337,6 +338,7 @@ def initialize_api_metrics_service(tmp_path_factory):
         from code_indexer.server.services.api_metrics_service import (
             api_metrics_service as pkg_service,
         )
+
         pkg_service.initialize(str(db_path))
     except ImportError:
         pass
@@ -364,6 +366,7 @@ def fresh_api_metrics():
         from src.code_indexer.server.services.api_metrics_service import (
             api_metrics_service,
         )
+
         api_metrics_service.reset()
         yield api_metrics_service
         api_metrics_service.reset()

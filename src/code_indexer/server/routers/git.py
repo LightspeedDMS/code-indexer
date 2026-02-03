@@ -66,28 +66,30 @@ router = APIRouter(prefix="/api/v1/repos/{alias}/git", tags=["git"])
     summary="Get git status",
     description="Get the git status of the activated repository",
 )
-def git_status(
-    alias: str, user: User = Depends(get_current_user)
-) -> GitStatusResponse:
+def git_status(alias: str, user: User = Depends(get_current_user)) -> GitStatusResponse:
     """Get git status of the repository."""
     try:
         service = git_operations_service
         result = service.get_status(repo_alias=alias, username=user.username)
         return GitStatusResponse(**result)
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "SVC-GENERAL-006",
-            f"Repository not found: {alias}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "SVC-GENERAL-006",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "SVC-GENERAL-007",
-            f"Git status failed for {alias}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-007",
+                f"Git status failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -148,19 +150,23 @@ def git_diff(
         result = service.get_diff(repo_alias=alias, username=user.username, **kwargs)
         return GitDiffResponse(**result)
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "SVC-GENERAL-008",
-            f"Repository not found: {alias}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "SVC-GENERAL-008",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "SVC-GENERAL-009",
-            f"Git diff failed for {alias}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-009",
+                f"Git diff failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -231,19 +237,23 @@ def git_log(
         result = service.get_log(repo_alias=alias, username=user.username, **kwargs)
         return GitLogResponse(**result)
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "SVC-GENERAL-010",
-            f"Repository not found: {alias}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "SVC-GENERAL-010",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "SVC-GENERAL-011",
-            f"Git log failed for {alias}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-011",
+                f"Git log failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -277,26 +287,32 @@ def git_stage(
         )
         return GitStageResponse(**result)
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "SVC-GENERAL-012",
-            f"Repository not found: {alias}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "SVC-GENERAL-012",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except ValueError as e:
-        logger.warning(format_error_log(
-            "SVC-GENERAL-013",
-            f"Invalid request for {alias}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "SVC-GENERAL-013",
+                f"Invalid request for {alias}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "SVC-GENERAL-014",
-            f"Git stage failed for {alias}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-014",
+                f"Git stage failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -326,19 +342,23 @@ def git_unstage(
         )
         return GitUnstageResponse(**result)
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "TELEM-GENERAL-001",
-            f"Repository not found: {alias}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "TELEM-GENERAL-001",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "TELEM-GENERAL-002",
-            f"Git unstage failed for {alias}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "TELEM-GENERAL-002",
+                f"Git unstage failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -373,26 +393,32 @@ def git_commit(
         )
         return GitCommitResponse(**result)
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "TELEM-GENERAL-003",
-            f"Repository not found: {alias}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "TELEM-GENERAL-003",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except ValueError as e:
-        logger.warning(format_error_log(
-            "TELEM-GENERAL-004",
-            f"Invalid request for {alias}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "TELEM-GENERAL-004",
+                f"Invalid request for {alias}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "TELEM-GENERAL-005",
-            f"Git commit failed for {alias}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "TELEM-GENERAL-005",
+                f"Git commit failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -429,19 +455,23 @@ def git_push(
         )
         return GitPushResponse(**result)
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "TELEM-GENERAL-006",
-            f"Repository not found: {alias}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "TELEM-GENERAL-006",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "TELEM-GENERAL-007",
-            f"Git push failed for {alias}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "TELEM-GENERAL-007",
+                f"Git push failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -476,19 +506,23 @@ def git_pull(
         )
         return GitPullResponse(**result)
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "TELEM-GENERAL-008",
-            f"Repository not found: {alias}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "TELEM-GENERAL-008",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "VALID-GENERAL-001",
-            f"Git pull failed for {alias}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "VALID-GENERAL-001",
+                f"Git pull failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -519,19 +553,23 @@ def git_fetch(
         )
         return GitFetchResponse(**result)
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "VALID-GENERAL-002",
-            f"Repository not found: {alias}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "VALID-GENERAL-002",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "VALID-GENERAL-003",
-            f"Git fetch failed for {alias}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "VALID-GENERAL-003",
+                f"Git fetch failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -570,33 +608,41 @@ def git_reset(
         )
         return GitResetResponse(**result)
     except PermissionError as e:
-        logger.warning(format_error_log(
-            "VALID-GENERAL-004",
-            f"Confirmation required for {alias}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "VALID-GENERAL-004",
+                f"Confirmation required for {alias}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "VALID-GENERAL-005",
-            f"Repository not found: {alias}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "VALID-GENERAL-005",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except ValueError as e:
-        logger.warning(format_error_log(
-            "VALID-GENERAL-006",
-            f"Invalid request for {alias}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "VALID-GENERAL-006",
+                f"Invalid request for {alias}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "VALID-GENERAL-007",
-            f"Git reset failed for {alias}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "VALID-GENERAL-007",
+                f"Git reset failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -631,26 +677,32 @@ def git_clean(
         )
         return GitCleanResponse(**result)
     except PermissionError as e:
-        logger.warning(format_error_log(
-            "VALID-GENERAL-008",
-            f"Confirmation required for {alias}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "VALID-GENERAL-008",
+                f"Confirmation required for {alias}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "VALID-GENERAL-009",
-            f"Repository not found: {alias}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "VALID-GENERAL-009",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "VALID-GENERAL-010",
-            f"Git clean failed for {alias}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "VALID-GENERAL-010",
+                f"Git clean failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -678,19 +730,23 @@ def git_merge_abort(
         result = service.abort_merge(repo_alias=alias, username=user.username)
         return GitMergeAbortResponse(**result)
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "VALID-GENERAL-011",
-            f"Repository not found or no merge in progress: {alias}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "VALID-GENERAL-011",
+                f"Repository not found or no merge in progress: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "WEB-GENERAL-001",
-            f"Git merge abort failed for {alias}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "WEB-GENERAL-001",
+                f"Git merge abort failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -720,19 +776,23 @@ def git_checkout_file(
         )
         return GitCheckoutFileResponse(**result)
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "WEB-GENERAL-002",
-            f"Repository or file not found: {alias}/{request.file_path}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-002",
+                f"Repository or file not found: {alias}/{request.file_path}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "WEB-GENERAL-003",
-            f"Git checkout file failed for {alias}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "WEB-GENERAL-003",
+                f"Git checkout file failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -763,19 +823,23 @@ def git_branch_list(
         result = service.list_branches(repo_alias=alias, username=user.username)
         return GitBranchListResponse(**result)
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "WEB-GENERAL-004",
-            f"Repository not found: {alias}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-004",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "WEB-GENERAL-005",
-            f"Git branch list failed for {alias}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "WEB-GENERAL-005",
+                f"Git branch list failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -807,33 +871,41 @@ def git_branch_create(
         )
         return GitBranchCreateResponse(**result)
     except FileExistsError as e:
-        logger.warning(format_error_log(
-            "WEB-GENERAL-006",
-            f"Branch already exists: {alias}/{request.branch_name}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-006",
+                f"Branch already exists: {alias}/{request.branch_name}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "WEB-GENERAL-007",
-            f"Repository not found: {alias}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-007",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except ValueError as e:
-        logger.warning(format_error_log(
-            "WEB-GENERAL-008",
-            f"Invalid request for {alias}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-008",
+                f"Invalid request for {alias}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "WEB-GENERAL-009",
-            f"Git branch create failed for {alias}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "WEB-GENERAL-009",
+                f"Git branch create failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -863,19 +935,23 @@ def git_branch_switch(
         )
         return GitBranchSwitchResponse(**result)
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "WEB-GENERAL-010",
-            f"Repository or branch not found: {alias}/{name}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-010",
+                f"Repository or branch not found: {alias}/{name}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "WEB-GENERAL-011",
-            f"Git branch switch failed for {alias}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "WEB-GENERAL-011",
+                f"Git branch switch failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
@@ -912,26 +988,32 @@ def git_branch_delete(
         )
         return GitBranchDeleteResponse(**result)
     except PermissionError as e:
-        logger.warning(format_error_log(
-            "WEB-GENERAL-012",
-            f"Confirmation required for {alias}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-012",
+                f"Confirmation required for {alias}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except FileNotFoundError as e:
-        logger.warning(format_error_log(
-            "WEB-GENERAL-013",
-            f"Repository or branch not found: {alias}/{name}",
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-013",
+                f"Repository or branch not found: {alias}/{name}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        logger.error(format_error_log(
-            "WEB-GENERAL-014",
-            f"Git branch delete failed for {alias}: {e}",
-            exc_info=True,
-            extra={"correlation_id": get_correlation_id()},
-        ))
+        logger.error(
+            format_error_log(
+                "WEB-GENERAL-014",
+                f"Git branch delete failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",

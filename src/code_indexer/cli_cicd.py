@@ -78,7 +78,13 @@ def github_group():
 @click.option("--branch", "-b", help="Filter by branch name")
 @click.option("--limit", "-n", default=10, type=int, help="Maximum runs to return")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
-def github_list(repository: str, status: Optional[str], branch: Optional[str], limit: int, json_output: bool):
+def github_list(
+    repository: str,
+    status: Optional[str],
+    branch: Optional[str],
+    limit: int,
+    json_output: bool,
+):
     """List GitHub Actions workflow runs for OWNER/REPO."""
     import asyncio
     from .api_clients.cicd_client import CICDAPIClient
@@ -88,7 +94,12 @@ def github_list(repository: str, status: Optional[str], branch: Optional[str], l
     if "/" not in repository:
         if json_output:
             from .cli_utils import format_json_error
-            console.print(format_json_error("Repository must be in OWNER/REPO format", "ValueError"))
+
+            console.print(
+                format_json_error(
+                    "Repository must be in OWNER/REPO format", "ValueError"
+                )
+            )
         else:
             console.print("[red]Error: Repository must be in OWNER/REPO format[/red]")
         sys.exit(1)
@@ -98,7 +109,9 @@ def github_list(repository: str, status: Optional[str], branch: Optional[str], l
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.github_list_runs(owner, repo, status, branch, limit))
+        result = asyncio.run(
+            client.github_list_runs(owner, repo, status, branch, limit)
+        )
 
         if json_output:
             console.print(format_json_success(result))
@@ -119,11 +132,21 @@ def github_list(repository: str, status: Optional[str], branch: Optional[str], l
                 run_id = str(run.get("id", ""))
                 run_status = run.get("status", "unknown")
                 run_branch = run.get("head_branch", run.get("branch", ""))
-                started = run.get("created_at", run.get("started_at", ""))[:16] if run.get("created_at") or run.get("started_at") else ""
+                started = (
+                    run.get("created_at", run.get("started_at", ""))[:16]
+                    if run.get("created_at") or run.get("started_at")
+                    else ""
+                )
                 duration = run.get("duration", "")
 
                 status_color = _format_status_color(run_status)
-                table.add_row(run_id, f"[{status_color}]{run_status}[/{status_color}]", run_branch, started, str(duration))
+                table.add_row(
+                    run_id,
+                    f"[{status_color}]{run_status}[/{status_color}]",
+                    run_branch,
+                    started,
+                    str(duration),
+                )
 
             console.print(table)
 
@@ -144,7 +167,12 @@ def github_show(repository: str, run_id: int, json_output: bool):
     if "/" not in repository:
         if json_output:
             from .cli_utils import format_json_error
-            console.print(format_json_error("Repository must be in OWNER/REPO format", "ValueError"))
+
+            console.print(
+                format_json_error(
+                    "Repository must be in OWNER/REPO format", "ValueError"
+                )
+            )
         else:
             console.print("[red]Error: Repository must be in OWNER/REPO format[/red]")
         sys.exit(1)
@@ -162,11 +190,19 @@ def github_show(repository: str, run_id: int, json_output: bool):
             run_status = result.get("status", "unknown")
             status_color = _format_status_color(run_status)
 
-            console.print(f"[bold]Run #{run_id}[/bold] - [{status_color}]{run_status}[/{status_color}]")
+            console.print(
+                f"[bold]Run #{run_id}[/bold] - [{status_color}]{run_status}[/{status_color}]"
+            )
             console.print(f"[dim]Repository:[/dim] {repository}")
-            console.print(f"[dim]Branch:[/dim] {result.get('head_branch', result.get('branch', 'N/A'))}")
-            console.print(f"[dim]Workflow:[/dim] {result.get('name', result.get('workflow_name', 'N/A'))}")
-            console.print(f"[dim]Started:[/dim] {result.get('created_at', result.get('started_at', 'N/A'))}")
+            console.print(
+                f"[dim]Branch:[/dim] {result.get('head_branch', result.get('branch', 'N/A'))}"
+            )
+            console.print(
+                f"[dim]Workflow:[/dim] {result.get('name', result.get('workflow_name', 'N/A'))}"
+            )
+            console.print(
+                f"[dim]Started:[/dim] {result.get('created_at', result.get('started_at', 'N/A'))}"
+            )
             console.print(f"[dim]Conclusion:[/dim] {result.get('conclusion', 'N/A')}")
 
             jobs = result.get("jobs", [])
@@ -175,7 +211,9 @@ def github_show(repository: str, run_id: int, json_output: bool):
                 for job in jobs:
                     job_status = job.get("status", "unknown")
                     job_color = _format_status_color(job_status)
-                    console.print(f"  [{job_color}]{job_status}[/{job_color}] {job.get('name', 'unnamed')}")
+                    console.print(
+                        f"  [{job_color}]{job_status}[/{job_color}] {job.get('name', 'unnamed')}"
+                    )
 
     except Exception as e:
         _handle_cicd_error(e, json_output)
@@ -195,7 +233,12 @@ def github_logs(repository: str, run_id: int, query: Optional[str], json_output:
     if "/" not in repository:
         if json_output:
             from .cli_utils import format_json_error
-            console.print(format_json_error("Repository must be in OWNER/REPO format", "ValueError"))
+
+            console.print(
+                format_json_error(
+                    "Repository must be in OWNER/REPO format", "ValueError"
+                )
+            )
         else:
             console.print("[red]Error: Repository must be in OWNER/REPO format[/red]")
         sys.exit(1)
@@ -242,7 +285,12 @@ def github_job_logs(repository: str, job_id: int, json_output: bool):
     if "/" not in repository:
         if json_output:
             from .cli_utils import format_json_error
-            console.print(format_json_error("Repository must be in OWNER/REPO format", "ValueError"))
+
+            console.print(
+                format_json_error(
+                    "Repository must be in OWNER/REPO format", "ValueError"
+                )
+            )
         else:
             console.print("[red]Error: Repository must be in OWNER/REPO format[/red]")
         sys.exit(1)
@@ -280,7 +328,12 @@ def github_retry(repository: str, run_id: int, json_output: bool):
     if "/" not in repository:
         if json_output:
             from .cli_utils import format_json_error
-            console.print(format_json_error("Repository must be in OWNER/REPO format", "ValueError"))
+
+            console.print(
+                format_json_error(
+                    "Repository must be in OWNER/REPO format", "ValueError"
+                )
+            )
         else:
             console.print("[red]Error: Repository must be in OWNER/REPO format[/red]")
         sys.exit(1)
@@ -314,7 +367,12 @@ def github_cancel(repository: str, run_id: int, json_output: bool):
     if "/" not in repository:
         if json_output:
             from .cli_utils import format_json_error
-            console.print(format_json_error("Repository must be in OWNER/REPO format", "ValueError"))
+
+            console.print(
+                format_json_error(
+                    "Repository must be in OWNER/REPO format", "ValueError"
+                )
+            )
         else:
             console.print("[red]Error: Repository must be in OWNER/REPO format[/red]")
         sys.exit(1)
@@ -351,7 +409,13 @@ def gitlab_group():
 @click.option("--ref", "-r", help="Filter by branch/tag name")
 @click.option("--limit", "-n", default=10, type=int, help="Maximum pipelines to return")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
-def gitlab_list(project_id: str, status: Optional[str], ref: Optional[str], limit: int, json_output: bool):
+def gitlab_list(
+    project_id: str,
+    status: Optional[str],
+    ref: Optional[str],
+    limit: int,
+    json_output: bool,
+):
     """List GitLab CI pipelines for PROJECT_ID."""
     import asyncio
     from .api_clients.cicd_client import CICDAPIClient
@@ -360,7 +424,9 @@ def gitlab_list(project_id: str, status: Optional[str], ref: Optional[str], limi
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.gitlab_list_pipelines(project_id, status, ref, limit))
+        result = asyncio.run(
+            client.gitlab_list_pipelines(project_id, status, ref, limit)
+        )
 
         if json_output:
             console.print(format_json_success(result))
@@ -381,11 +447,21 @@ def gitlab_list(project_id: str, status: Optional[str], ref: Optional[str], limi
                 pid = str(pipeline.get("id", ""))
                 pstatus = pipeline.get("status", "unknown")
                 pref = pipeline.get("ref", "")
-                started = pipeline.get("created_at", pipeline.get("started_at", ""))[:16] if pipeline.get("created_at") or pipeline.get("started_at") else ""
+                started = (
+                    pipeline.get("created_at", pipeline.get("started_at", ""))[:16]
+                    if pipeline.get("created_at") or pipeline.get("started_at")
+                    else ""
+                )
                 duration = pipeline.get("duration", "")
 
                 status_color = _format_status_color(pstatus)
-                table.add_row(pid, f"[{status_color}]{pstatus}[/{status_color}]", pref, started, str(duration))
+                table.add_row(
+                    pid,
+                    f"[{status_color}]{pstatus}[/{status_color}]",
+                    pref,
+                    started,
+                    str(duration),
+                )
 
             console.print(table)
 
@@ -414,10 +490,14 @@ def gitlab_show(project_id: str, pipeline_id: int, json_output: bool):
             pstatus = result.get("status", "unknown")
             status_color = _format_status_color(pstatus)
 
-            console.print(f"[bold]Pipeline #{pipeline_id}[/bold] - [{status_color}]{pstatus}[/{status_color}]")
+            console.print(
+                f"[bold]Pipeline #{pipeline_id}[/bold] - [{status_color}]{pstatus}[/{status_color}]"
+            )
             console.print(f"[dim]Project:[/dim] {project_id}")
             console.print(f"[dim]Ref:[/dim] {result.get('ref', 'N/A')}")
-            console.print(f"[dim]Started:[/dim] {result.get('created_at', result.get('started_at', 'N/A'))}")
+            console.print(
+                f"[dim]Started:[/dim] {result.get('created_at', result.get('started_at', 'N/A'))}"
+            )
             console.print(f"[dim]Duration:[/dim] {result.get('duration', 'N/A')}s")
 
             jobs = result.get("jobs", [])
@@ -426,7 +506,9 @@ def gitlab_show(project_id: str, pipeline_id: int, json_output: bool):
                 for job in jobs:
                     jstatus = job.get("status", "unknown")
                     jcolor = _format_status_color(jstatus)
-                    console.print(f"  [{jcolor}]{jstatus}[/{jcolor}] {job.get('name', 'unnamed')}")
+                    console.print(
+                        f"  [{jcolor}]{jstatus}[/{jcolor}] {job.get('name', 'unnamed')}"
+                    )
 
     except Exception as e:
         _handle_cicd_error(e, json_output)
@@ -437,7 +519,9 @@ def gitlab_show(project_id: str, pipeline_id: int, json_output: bool):
 @click.argument("pipeline_id", type=int)
 @click.option("--query", "-q", help="Search pattern for logs")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
-def gitlab_logs(project_id: str, pipeline_id: int, query: Optional[str], json_output: bool):
+def gitlab_logs(
+    project_id: str, pipeline_id: int, query: Optional[str], json_output: bool
+):
     """Search logs for a GitLab CI pipeline."""
     import asyncio
     from .api_clients.cicd_client import CICDAPIClient
@@ -513,9 +597,13 @@ def gitlab_retry(project_id: str, pipeline_id: int, json_output: bool):
         asyncio.run(client.gitlab_retry_pipeline(project_id, pipeline_id))
 
         if json_output:
-            console.print(format_json_success({"success": True, "pipeline_id": pipeline_id}))
+            console.print(
+                format_json_success({"success": True, "pipeline_id": pipeline_id})
+            )
         else:
-            console.print(f"[green]Pipeline #{pipeline_id} has been queued for retry[/green]")
+            console.print(
+                f"[green]Pipeline #{pipeline_id} has been queued for retry[/green]"
+            )
 
     except Exception as e:
         _handle_cicd_error(e, json_output)
@@ -537,9 +625,13 @@ def gitlab_cancel(project_id: str, pipeline_id: int, json_output: bool):
         asyncio.run(client.gitlab_cancel_pipeline(project_id, pipeline_id))
 
         if json_output:
-            console.print(format_json_success({"success": True, "pipeline_id": pipeline_id}))
+            console.print(
+                format_json_success({"success": True, "pipeline_id": pipeline_id})
+            )
         else:
-            console.print(f"[yellow]Pipeline #{pipeline_id} has been cancelled[/yellow]")
+            console.print(
+                f"[yellow]Pipeline #{pipeline_id} has been cancelled[/yellow]"
+            )
 
     except Exception as e:
         _handle_cicd_error(e, json_output)

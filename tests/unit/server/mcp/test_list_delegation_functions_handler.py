@@ -80,9 +80,7 @@ def admin_user():
 class TestListDelegationFunctionsHandler:
     """Tests for list_delegation_functions handler."""
 
-    def test_handler_returns_mcp_response_format(
-        self, test_user, temp_function_repo
-    ):
+    def test_handler_returns_mcp_response_format(self, test_user, temp_function_repo):
         """
         Handler should return MCP-compliant response format.
 
@@ -175,6 +173,7 @@ class TestListDelegationFunctionsHandler:
                 "code_indexer.server.mcp.handlers._get_delegation_function_repo_path",
                 lambda: temp_function_repo,
             )
+
             # _get_user_groups is called with the effective user
             # Impersonated user belongs to 'admins' group
             # Admin user (if NOT impersonating) would belong to 'engineering' group

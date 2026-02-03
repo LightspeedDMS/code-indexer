@@ -130,9 +130,7 @@ class TestSCIPDefinitionDelegatesToService:
         assert "symbol" in data["error"].lower()
         assert "required" in data["error"].lower()
 
-    def test_scip_definition_catches_service_exceptions(
-        self, mock_user: User
-    ) -> None:
+    def test_scip_definition_catches_service_exceptions(self, mock_user: User) -> None:
         """Verify handler catches and returns errors when service raises exception."""
         from code_indexer.server.mcp.handlers import scip_definition
 

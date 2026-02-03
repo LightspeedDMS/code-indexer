@@ -322,11 +322,13 @@ class RemoteBranchService:
 
             if result.returncode != 0:
                 error_msg = result.stderr.strip() if result.stderr else "Unknown error"
-                logger.warning(format_error_log(
-                    "GIT-GENERAL-052",
-                    f"git ls-remote failed for {clone_url}: {error_msg}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "GIT-GENERAL-052",
+                        f"git ls-remote failed for {clone_url}: {error_msg}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return BranchFetchResult(
                     success=False,
                     branches=[],
@@ -354,11 +356,13 @@ class RemoteBranchService:
 
         except subprocess.TimeoutExpired:
             error_msg = f"Timeout fetching branches (>{self.timeout}s)"
-            logger.warning(format_error_log(
-                "GIT-GENERAL-053",
-                f"git ls-remote timeout for {clone_url}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "GIT-GENERAL-053",
+                    f"git ls-remote timeout for {clone_url}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return BranchFetchResult(
                 success=False,
                 branches=[],
@@ -369,11 +373,13 @@ class RemoteBranchService:
             error_msg = str(e)
             # SECURITY: Do not use exc_info=True here - stack traces could expose
             # effective_url which may contain embedded credentials
-            logger.error(format_error_log(
-                "GIT-GENERAL-054",
-                f"Error fetching branches for {clone_url}: {error_msg}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "GIT-GENERAL-054",
+                    f"Error fetching branches for {clone_url}: {error_msg}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return BranchFetchResult(
                 success=False,
                 branches=[],

@@ -7,7 +7,6 @@ Tests follow TDD methodology - tests written FIRST before implementation.
 """
 
 
-
 class TestPromptTemplateProcessorRender:
     """Tests for PromptTemplateProcessor.render() method."""
 
@@ -373,9 +372,9 @@ class TestPromptTemplateProcessorImpersonationPosition:
         template_pos = result.find("TEMPLATE_MARKER_UNIQUE_12345")
 
         assert impersonation_pos == 0, "Impersonation instruction must be at position 0"
-        assert template_pos > impersonation_pos, (
-            "Template content must come after impersonation instruction"
-        )
+        assert (
+            template_pos > impersonation_pos
+        ), "Template content must come after impersonation instruction"
 
 
 class TestPromptTemplateProcessorSpaceVariantPlaceholders:

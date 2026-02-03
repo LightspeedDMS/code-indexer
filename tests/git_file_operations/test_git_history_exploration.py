@@ -121,7 +121,10 @@ class TestGitLog:
         commit = result.commits[0]
 
         assert commit.hash is not None and len(commit.hash) == GIT_FULL_HASH_LENGTH
-        assert commit.short_hash is not None and len(commit.short_hash) >= GIT_SHORT_HASH_MIN_LENGTH
+        assert (
+            commit.short_hash is not None
+            and len(commit.short_hash) >= GIT_SHORT_HASH_MIN_LENGTH
+        )
         assert commit.author_name is not None
         assert commit.author_email is not None
         assert commit.author_date is not None
@@ -138,17 +141,47 @@ class TestGitLog:
         """
         file_a = local_test_repo / "file_a.txt"
         file_a.write_text("Content A\n")
-        subprocess.run(["git", "add", "file_a.txt"], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Add file_a"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "file_a.txt"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add file_a"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         file_b = local_test_repo / "file_b.txt"
         file_b.write_text("Content B\n")
-        subprocess.run(["git", "add", "file_b.txt"], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Add file_b"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "file_b.txt"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add file_b"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         file_a.write_text("Content A modified\n")
-        subprocess.run(["git", "add", "file_a.txt"], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Update file_a"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "file_a.txt"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Update file_a"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         service = GitOperationsService(local_test_repo)
 
@@ -253,7 +286,9 @@ class TestGitShowCommit:
         """
         test_file = local_test_repo / "show_commit_test.txt"
         test_file.write_text("Initial content\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add show_commit_test.txt"],
             cwd=local_test_repo,
@@ -288,7 +323,9 @@ class TestGitShowCommit:
         """
         test_file = local_test_repo / "diff_test.txt"
         test_file.write_text("Line 1\nLine 2\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add diff_test.txt"],
             cwd=local_test_repo,
@@ -377,17 +414,39 @@ class TestGitDiff:
         """
         test_file = local_test_repo / "diff_file.txt"
         test_file.write_text("Original content\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "First commit"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "First commit"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
         first_commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=local_test_repo, check=True, capture_output=True, text=True
+            ["git", "rev-parse", "HEAD"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
 
         test_file.write_text("Modified content\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Second commit"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Second commit"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
         second_commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=local_test_repo, check=True, capture_output=True, text=True
+            ["git", "rev-parse", "HEAD"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
 
         service = GitOperationsService(local_test_repo)
@@ -407,17 +466,39 @@ class TestGitDiff:
         """
         test_file = local_test_repo / "hunk_file.txt"
         test_file.write_text("Line 1\nLine 2\nLine 3\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Add hunk_file"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add hunk_file"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
         first_commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=local_test_repo, check=True, capture_output=True, text=True
+            ["git", "rev-parse", "HEAD"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
 
         test_file.write_text("Line 1\nModified Line 2\nLine 3\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Modify hunk_file"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Modify hunk_file"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
         second_commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=local_test_repo, check=True, capture_output=True, text=True
+            ["git", "rev-parse", "HEAD"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
 
         service = GitOperationsService(local_test_repo)
@@ -440,17 +521,39 @@ class TestGitDiff:
         """
         test_file = local_test_repo / "status_file.txt"
         test_file.write_text("Content\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Add status_file"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add status_file"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
         first_commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=local_test_repo, check=True, capture_output=True, text=True
+            ["git", "rev-parse", "HEAD"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
 
         test_file.unlink()
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Delete status_file"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Delete status_file"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
         second_commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=local_test_repo, check=True, capture_output=True, text=True
+            ["git", "rev-parse", "HEAD"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
 
         service = GitOperationsService(local_test_repo)
@@ -470,17 +573,39 @@ class TestGitDiff:
         """
         test_file = local_test_repo / "stat_file.txt"
         test_file.write_text("Content\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Add stat_file"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add stat_file"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
         first_commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=local_test_repo, check=True, capture_output=True, text=True
+            ["git", "rev-parse", "HEAD"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
 
         test_file.write_text("Modified content\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Modify stat_file"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Modify stat_file"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
         second_commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=local_test_repo, check=True, capture_output=True, text=True
+            ["git", "rev-parse", "HEAD"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
 
         service = GitOperationsService(local_test_repo)
@@ -502,18 +627,40 @@ class TestGitDiff:
         file_b = local_test_repo / "filter_b.txt"
         file_a.write_text("A\n")
         file_b.write_text("B\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Add files"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add files"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
         first_commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=local_test_repo, check=True, capture_output=True, text=True
+            ["git", "rev-parse", "HEAD"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
 
         file_a.write_text("A modified\n")
         file_b.write_text("B modified\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Modify files"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Modify files"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
         second_commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=local_test_repo, check=True, capture_output=True, text=True
+            ["git", "rev-parse", "HEAD"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
 
         service = GitOperationsService(local_test_repo)
@@ -541,8 +688,15 @@ class TestGitBlame:
         """
         test_file = local_test_repo / "blame_test.txt"
         test_file.write_text("Line 1\nLine 2\nLine 3\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Add blame_test.txt"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add blame_test.txt"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         service = GitOperationsService(local_test_repo)
         result = service.get_blame("blame_test.txt")
@@ -564,8 +718,15 @@ class TestGitBlame:
         """
         test_file = local_test_repo / "blame_lines.txt"
         test_file.write_text("First\nSecond\nThird\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Add blame_lines.txt"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add blame_lines.txt"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         service = GitOperationsService(local_test_repo)
         result = service.get_blame("blame_lines.txt")
@@ -587,8 +748,15 @@ class TestGitBlame:
         """
         test_file = local_test_repo / "blame_range.txt"
         test_file.write_text("Line 1\nLine 2\nLine 3\nLine 4\nLine 5\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Add blame_range.txt"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add blame_range.txt"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         service = GitOperationsService(local_test_repo)
         result = service.get_blame("blame_range.txt", start_line=2, end_line=4)
@@ -607,12 +775,26 @@ class TestGitBlame:
         """
         test_file = local_test_repo / "blame_unique.txt"
         test_file.write_text("Initial line\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "First commit"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "First commit"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         test_file.write_text("Initial line\nSecond line\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Second commit"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Second commit"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         service = GitOperationsService(local_test_repo)
         result = service.get_blame("blame_unique.txt")
@@ -652,15 +834,33 @@ class TestGitFileAtRevision:
         test_file = local_test_repo / "revision_test.txt"
         original_content = "Original content\n"
         test_file.write_text(original_content)
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "First version"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "First version"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
         first_commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=local_test_repo, check=True, capture_output=True, text=True
+            ["git", "rev-parse", "HEAD"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
 
         test_file.write_text("Modified content\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Second version"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Second version"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         service = GitOperationsService(local_test_repo)
         result = service.get_file_at_revision("revision_test.txt", first_commit)
@@ -677,8 +877,15 @@ class TestGitFileAtRevision:
         """
         test_file = local_test_repo / "branch_test.txt"
         test_file.write_text("Main branch content\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Add branch_test"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add branch_test"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         service = GitOperationsService(local_test_repo)
         result = service.get_file_at_revision("branch_test.txt", "HEAD")
@@ -698,8 +905,15 @@ class TestGitFileAtRevision:
         test_file = local_test_repo / "size_test.txt"
         content = "Hello World\n"
         test_file.write_text(content)
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Add size_test"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add size_test"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         service = GitOperationsService(local_test_repo)
         result = service.get_file_at_revision("size_test.txt", "HEAD")
@@ -731,8 +945,15 @@ class TestGitFileAtRevision:
         """
         test_file = local_test_repo / "valid_file.txt"
         test_file.write_text("Content\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Add valid_file"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add valid_file"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         service = GitOperationsService(local_test_repo)
 
@@ -758,16 +979,37 @@ class TestGitFileHistory:
         """
         test_file = local_test_repo / "history_file.txt"
         test_file.write_text("Version 1\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "First version"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "First version"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         test_file.write_text("Version 2\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Second version"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Second version"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         test_file.write_text("Version 3\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Third version"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Third version"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         service = GitOperationsService(local_test_repo)
         result = service.get_file_history("history_file.txt")
@@ -785,12 +1027,26 @@ class TestGitFileHistory:
         """
         test_file = local_test_repo / "stats_file.txt"
         test_file.write_text("Line 1\nLine 2\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Add stats_file"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add stats_file"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         test_file.write_text("Line 1\nModified Line 2\nLine 3\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Modify stats_file"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Modify stats_file"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         service = GitOperationsService(local_test_repo)
         result = service.get_file_history("stats_file.txt")
@@ -810,8 +1066,18 @@ class TestGitFileHistory:
         test_file = local_test_repo / "truncate_file.txt"
         for i in range(5):
             test_file.write_text(f"Version {i}\n")
-            subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-            subprocess.run(["git", "commit", "-m", f"Version {i}"], cwd=local_test_repo, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "add", "."],
+                cwd=local_test_repo,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", f"Version {i}"],
+                cwd=local_test_repo,
+                check=True,
+                capture_output=True,
+            )
 
         service = GitOperationsService(local_test_repo)
 
@@ -832,8 +1098,15 @@ class TestGitFileHistory:
         """
         test_file = local_test_repo / "detail_file.txt"
         test_file.write_text("Content\n")
-        subprocess.run(["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "Add detail_file"], cwd=local_test_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=local_test_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add detail_file"],
+            cwd=local_test_repo,
+            check=True,
+            capture_output=True,
+        )
 
         service = GitOperationsService(local_test_repo)
         result = service.get_file_history("detail_file.txt")

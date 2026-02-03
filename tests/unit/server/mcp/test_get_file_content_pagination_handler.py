@@ -58,9 +58,7 @@ def _extract_response_data(mcp_response: dict) -> dict:
 class TestGetFileContentPaginationParameters:
     """Test get_file_content handler parameter extraction and validation."""
 
-    def test_offset_and_limit_forwarded_to_service(
-        self, mock_user, mock_file_service
-    ):
+    def test_offset_and_limit_forwarded_to_service(self, mock_user, mock_file_service):
         """Test that offset and limit parameters are forwarded to FileService."""
         from code_indexer.server.mcp import handlers
 

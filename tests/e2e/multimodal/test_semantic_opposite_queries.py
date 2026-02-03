@@ -61,7 +61,9 @@ class TestSemanticOppositeQueries:
         )
         assert result.returncode == 0, f"cidx index failed: {result.stderr}"
 
-    def _find_multimodal_vector_for_file(self, multimodal_repo_path: Path, filename: str) -> bool:
+    def _find_multimodal_vector_for_file(
+        self, multimodal_repo_path: Path, filename: str
+    ) -> bool:
         """Search for a vector file containing the given filename in multimodal collection.
 
         Args:
@@ -105,7 +107,9 @@ class TestSemanticOppositeQueries:
         ), "shakespeare-sonnet.md should have a multimodal vector in voyage-multimodal-3 collection"
 
         # Verify the text does NOT contain database terms (proves opposite semantics)
-        sonnet_file = multimodal_repo_path / "docs" / "unrelated" / "shakespeare-sonnet.md"
+        sonnet_file = (
+            multimodal_repo_path / "docs" / "unrelated" / "shakespeare-sonnet.md"
+        )
         sonnet_text = sonnet_file.read_text()
         assert "VARCHAR" not in sonnet_text, "VARCHAR should not be in sonnet text"
         assert "INTEGER" not in sonnet_text, "INTEGER should not be in sonnet text"
@@ -129,7 +133,9 @@ class TestSemanticOppositeQueries:
         recipe_text = recipe_file.read_text()
         assert "JWT" not in recipe_text, "JWT should not be in recipe text"
         assert "bearer" not in recipe_text, "bearer should not be in recipe text"
-        assert "authentication" not in recipe_text, "authentication should not be in recipe text"
+        assert (
+            "authentication" not in recipe_text
+        ), "authentication should not be in recipe text"
 
     def test_hiking_guide_has_multimodal_vector(self, multimodal_repo_path):
         """Verify hiking-guide.md has a multimodal vector created.
@@ -148,7 +154,9 @@ class TestSemanticOppositeQueries:
         hiking_file = multimodal_repo_path / "docs" / "unrelated" / "hiking-guide.md"
         hiking_text = hiking_file.read_text()
         assert "8000" not in hiking_text, "8000 should not be in hiking text"
-        assert "postgresql" not in hiking_text.lower(), "postgresql should not be in hiking text"
+        assert (
+            "postgresql" not in hiking_text.lower()
+        ), "postgresql should not be in hiking text"
         assert "database" not in hiking_text, "database should not be in hiking text"
 
     def test_fairy_tale_has_multimodal_vector(self, multimodal_repo_path):
@@ -207,11 +215,17 @@ class TestSemanticOppositeQueries:
         ), "astronomy-basics.htmx should have a multimodal vector in voyage-multimodal-3 collection"
 
         # Verify the text does NOT contain JWT terms (proves opposite semantics)
-        astro_file = multimodal_repo_path / "docs" / "unrelated" / "astronomy-basics.htmx"
+        astro_file = (
+            multimodal_repo_path / "docs" / "unrelated" / "astronomy-basics.htmx"
+        )
         astro_text = astro_file.read_text()
         assert "JWT" not in astro_text, "JWT should not be in astronomy text"
-        assert "bearer" not in astro_text.lower(), "bearer should not be in astronomy text"
-        assert "authentication" not in astro_text.lower(), "authentication should not be in astronomy text"
+        assert (
+            "bearer" not in astro_text.lower()
+        ), "bearer should not be in astronomy text"
+        assert (
+            "authentication" not in astro_text.lower()
+        ), "authentication should not be in astronomy text"
 
     def test_all_unrelated_docs_have_multimodal_vectors(self, multimodal_repo_path):
         """Verify ALL documents in docs/unrelated/ have multimodal vectors.

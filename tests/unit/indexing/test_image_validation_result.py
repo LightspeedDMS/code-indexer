@@ -9,9 +9,7 @@ class TestImageValidationResult:
     def test_valid_image_result(self):
         """Test creation of valid image result."""
         result = ImageValidationResult(
-            path="images/valid.png",
-            is_valid=True,
-            skip_reason=None
+            path="images/valid.png", is_valid=True, skip_reason=None
         )
 
         assert result.path == "images/valid.png"
@@ -21,9 +19,7 @@ class TestImageValidationResult:
     def test_missing_image_result(self):
         """Test creation of result for missing image."""
         result = ImageValidationResult(
-            path="images/missing.png",
-            is_valid=False,
-            skip_reason="missing"
+            path="images/missing.png", is_valid=False, skip_reason="missing"
         )
 
         assert result.path == "images/missing.png"
@@ -35,7 +31,7 @@ class TestImageValidationResult:
         result = ImageValidationResult(
             path="https://example.com/image.png",
             is_valid=False,
-            skip_reason="remote_url"
+            skip_reason="remote_url",
         )
 
         assert result.path == "https://example.com/image.png"
@@ -45,9 +41,7 @@ class TestImageValidationResult:
     def test_oversized_result(self):
         """Test creation of result for oversized image."""
         result = ImageValidationResult(
-            path="images/huge.png",
-            is_valid=False,
-            skip_reason="oversized"
+            path="images/huge.png", is_valid=False, skip_reason="oversized"
         )
 
         assert result.path == "images/huge.png"
@@ -57,9 +51,7 @@ class TestImageValidationResult:
     def test_unsupported_format_result(self):
         """Test creation of result for unsupported format."""
         result = ImageValidationResult(
-            path="images/file.bmp",
-            is_valid=False,
-            skip_reason="unsupported_format"
+            path="images/file.bmp", is_valid=False, skip_reason="unsupported_format"
         )
 
         assert result.path == "images/file.bmp"
@@ -71,7 +63,7 @@ class TestImageValidationResult:
         result = ImageValidationResult(
             path="data:image/png;base64,iVBORw0KGgo...",
             is_valid=False,
-            skip_reason="data_uri"
+            skip_reason="data_uri",
         )
 
         assert result.path == "data:image/png;base64,iVBORw0KGgo..."
@@ -80,10 +72,7 @@ class TestImageValidationResult:
 
     def test_default_skip_reason_is_none(self):
         """Test that skip_reason defaults to None."""
-        result = ImageValidationResult(
-            path="images/test.png",
-            is_valid=True
-        )
+        result = ImageValidationResult(path="images/test.png", is_valid=True)
 
         assert result.skip_reason is None
 
@@ -94,13 +83,11 @@ class TestImageValidationResult:
             "remote_url",
             "oversized",
             "unsupported_format",
-            "data_uri"
+            "data_uri",
         ]
 
         for reason in valid_reasons:
             result = ImageValidationResult(
-                path=f"test_{reason}.png",
-                is_valid=False,
-                skip_reason=reason
+                path=f"test_{reason}.png", is_valid=False, skip_reason=reason
             )
             assert result.skip_reason == reason

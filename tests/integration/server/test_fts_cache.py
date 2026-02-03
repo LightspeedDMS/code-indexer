@@ -167,7 +167,9 @@ class TestFtsCacheRetrievalEndpoint:
         assert match_text_data["content"] == match_text_content
 
     @pytest.mark.asyncio
-    async def test_fts_pagination_for_very_large_content(self, app_with_cache, real_cache):
+    async def test_fts_pagination_for_very_large_content(
+        self, app_with_cache, real_cache
+    ):
         """Test pagination works for FTS content larger than max_fetch_size."""
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
         from unittest.mock import patch

@@ -221,7 +221,9 @@ class TestFileContentPaginationE2E:
         )
 
         content_lines = result["content"].strip().split("\n")
-        assert len(content_lines) == 5000, f"Expected 5000 (capped at MAX_ALLOWED_LIMIT), got {len(content_lines)}"
+        assert (
+            len(content_lines) == 5000
+        ), f"Expected 5000 (capped at MAX_ALLOWED_LIMIT), got {len(content_lines)}"
 
         metadata = result["metadata"]
         assert metadata["returned_lines"] == 5000

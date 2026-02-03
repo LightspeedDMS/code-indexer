@@ -73,7 +73,10 @@ class TestQuickReferenceDisplayName:
             mcp_response = quick_reference({}, test_user)
 
         result = _extract_mcp_data(mcp_response)
-        assert result["server_identity"] == "This server is CIDX (a.k.a. ProductionServer)."
+        assert (
+            result["server_identity"]
+            == "This server is CIDX (a.k.a. ProductionServer)."
+        )
 
     def test_quick_reference_aka_empty_name_fallback(self, test_user):
         """AC3/AC5: Empty display name should fall back to 'Neo' in a.k.a. line."""

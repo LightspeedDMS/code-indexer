@@ -50,15 +50,14 @@ class TestClaudeServerClientModelParameter:
         )
 
         await client.create_job(
-            prompt="Test prompt",
-            repositories=["repo1"],
-            model="opus"
+            prompt="Test prompt", repositories=["repo1"], model="opus"
         )
 
         # Verify the request included Model field
         requests = httpx_mock.get_requests()
         job_request = [r for r in requests if r.url.path == "/jobs"][0]
         import json
+
         request_data = json.loads(job_request.content)
         assert "Model" in request_data
         assert request_data["Model"] == "opus"
@@ -96,20 +95,21 @@ class TestClaudeServerClientModelParameter:
         )
 
         await client.create_job(
-            prompt="Test prompt",
-            repositories=["repo1"],
-            model="sonnet"
+            prompt="Test prompt", repositories=["repo1"], model="sonnet"
         )
 
         # Verify the request included Model=sonnet
         requests = httpx_mock.get_requests()
         job_request = [r for r in requests if r.url.path == "/jobs"][0]
         import json
+
         request_data = json.loads(job_request.content)
         assert request_data["Model"] == "sonnet"
 
     @pytest.mark.asyncio
-    async def test_create_job_omits_model_when_not_provided(self, httpx_mock: HTTPXMock):
+    async def test_create_job_omits_model_when_not_provided(
+        self, httpx_mock: HTTPXMock
+    ):
         """AC6: create_job does NOT include Model field when model=None."""
         from code_indexer.server.clients.claude_server_client import (
             ClaudeServerClient,
@@ -141,15 +141,13 @@ class TestClaudeServerClientModelParameter:
         )
 
         # Call without model parameter
-        await client.create_job(
-            prompt="Test prompt",
-            repositories=["repo1"]
-        )
+        await client.create_job(prompt="Test prompt", repositories=["repo1"])
 
         # Verify the request does NOT include Model field
         requests = httpx_mock.get_requests()
         job_request = [r for r in requests if r.url.path == "/jobs"][0]
         import json
+
         request_data = json.loads(job_request.content)
         assert "Model" not in request_data
 
@@ -183,9 +181,6 @@ class TestClaudeServerClientModelParameter:
         )
 
         # Should work without model parameter (no TypeError)
-        result = await client.create_job(
-            prompt="Test",
-            repositories=["repo"]
-        )
+        result = await client.create_job(prompt="Test", repositories=["repo"])
 
         assert result["job_id"] == "job-00000"

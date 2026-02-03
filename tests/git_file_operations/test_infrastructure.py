@@ -56,11 +56,13 @@ class TestSSHSkipBehavior:
     def test_skip_ssh_env_var_name_constant(self):
         """Verify the environment variable name constant is correct."""
         from .conftest import SKIP_SSH_TESTS_ENV
+
         assert SKIP_SSH_TESTS_ENV == "CIDX_SKIP_SSH_TESTS"
 
     def test_requires_ssh_access_decorator_exists(self):
         """Verify the requires_ssh_access decorator is importable."""
         from .conftest import requires_ssh_access
+
         assert callable(requires_ssh_access)
 
 
@@ -73,7 +75,7 @@ class TestSSHMarkerBehavior:
 
     @pytest.mark.skipif(
         os.environ.get("CIDX_SKIP_SSH_TESTS", "").lower() in ("1", "true", "yes"),
-        reason="Skipped: CIDX_SKIP_SSH_TESTS is set (no SSH access in CI)"
+        reason="Skipped: CIDX_SKIP_SSH_TESTS is set (no SSH access in CI)",
     )
     def test_this_should_be_skipped_when_env_set(self):
         """This test should be skipped when CIDX_SKIP_SSH_TESTS=1."""
@@ -81,7 +83,7 @@ class TestSSHMarkerBehavior:
 
     @pytest.mark.skipif(
         os.environ.get("CIDX_SKIP_SSH_TESTS", "").lower() in ("1", "true", "yes"),
-        reason="Skipped: CIDX_SKIP_SSH_TESTS is set (no SSH access in CI)"
+        reason="Skipped: CIDX_SKIP_SSH_TESTS is set (no SSH access in CI)",
     )
     def test_this_should_run_when_env_not_set(self):
         """This test should run normally when env var is not set."""
@@ -105,20 +107,26 @@ class TestSSHSkipBehaviorIntegration:
 
         result = subprocess.run(
             [
-                sys.executable, "-m", "pytest",
-                str(this_file) + "::TestSSHMarkerBehavior::test_this_should_be_skipped_when_env_set",
-                "-v", "--tb=short"
+                sys.executable,
+                "-m",
+                "pytest",
+                str(this_file)
+                + "::TestSSHMarkerBehavior::test_this_should_be_skipped_when_env_set",
+                "-v",
+                "--tb=short",
             ],
             capture_output=True,
             text=True,
             env=env,
-            timeout=SUBPROCESS_TIMEOUT_SECONDS
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
         )
 
-        assert result.returncode == 0, f"pytest failed: {result.stdout}\n{result.stderr}"
-        assert "SKIPPED" in result.stdout or "skipped" in result.stdout.lower(), (
-            f"Test should have been skipped:\n{result.stdout}"
-        )
+        assert (
+            result.returncode == 0
+        ), f"pytest failed: {result.stdout}\n{result.stderr}"
+        assert (
+            "SKIPPED" in result.stdout or "skipped" in result.stdout.lower()
+        ), f"Test should have been skipped:\n{result.stdout}"
 
     def test_marked_test_runs_when_env_var_not_set(self):
         """Verify tests with skipif for CIDX_SKIP_SSH_TESTS run when env var is NOT set."""
@@ -129,17 +137,23 @@ class TestSSHSkipBehaviorIntegration:
 
         result = subprocess.run(
             [
-                sys.executable, "-m", "pytest",
-                str(this_file) + "::TestSSHMarkerBehavior::test_this_should_run_when_env_not_set",
-                "-v", "--tb=short"
+                sys.executable,
+                "-m",
+                "pytest",
+                str(this_file)
+                + "::TestSSHMarkerBehavior::test_this_should_run_when_env_not_set",
+                "-v",
+                "--tb=short",
             ],
             capture_output=True,
             text=True,
             env=env,
-            timeout=SUBPROCESS_TIMEOUT_SECONDS
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
         )
 
-        assert result.returncode == 0, f"pytest failed: {result.stdout}\n{result.stderr}"
+        assert (
+            result.returncode == 0
+        ), f"pytest failed: {result.stdout}\n{result.stderr}"
         assert "PASSED" in result.stdout, f"Test should have passed:\n{result.stdout}"
 
 
@@ -149,22 +163,26 @@ class TestFixturesImportable:
     def test_git_repo_state_manager_importable(self):
         """Verify GitRepoStateManager is importable."""
         from .git_repo_state_manager import GitRepoStateManager, GitRepoState
+
         assert GitRepoStateManager is not None
         assert GitRepoState is not None
 
     def test_skip_ssh_constant_importable(self):
         """Verify SKIP_SSH_TESTS_ENV constant is importable."""
         from .conftest import SKIP_SSH_TESTS_ENV
+
         assert SKIP_SSH_TESTS_ENV == "CIDX_SKIP_SSH_TESTS"
 
     def test_requires_ssh_decorator_importable(self):
         """Verify requires_ssh_access decorator is importable."""
         from .conftest import requires_ssh_access
+
         assert callable(requires_ssh_access)
 
     def test_external_repo_constants_importable(self):
         """Verify external repository constants are importable."""
         from .conftest import EXTERNAL_REPO_URL, EXTERNAL_REPO_NAME
+
         assert EXTERNAL_REPO_URL == "git@github.com:LightspeedDMS/VivaGoals-to-pptx.git"
         assert EXTERNAL_REPO_NAME == "VivaGoals-to-pptx"
 
@@ -183,7 +201,7 @@ class TestFixturesFunctional:
             ["git", "log", "--oneline", "-1"],
             cwd=local_test_repo,
             capture_output=True,
-            text=True
+            text=True,
         )
         assert result.returncode == 0
         assert result.stdout.strip(), "Repository should have at least one commit"
@@ -191,10 +209,7 @@ class TestFixturesFunctional:
     def test_local_test_repo_has_remote_origin(self, local_test_repo):
         """Verify local_test_repo has origin remote configured."""
         result = subprocess.run(
-            ["git", "remote", "-v"],
-            cwd=local_test_repo,
-            capture_output=True,
-            text=True
+            ["git", "remote", "-v"], cwd=local_test_repo, capture_output=True, text=True
         )
         assert result.returncode == 0
         assert "origin" in result.stdout, "Repository should have origin remote"
@@ -228,7 +243,9 @@ class TestFixturesFunctional:
         assert unique_filename.startswith("test_file_")
         assert unique_filename.endswith(".txt")
 
-    def test_unique_branch_name_fixture_generates_unique_names(self, unique_branch_name):
+    def test_unique_branch_name_fixture_generates_unique_names(
+        self, unique_branch_name
+    ):
         """Verify unique_branch_name fixture generates unique branch names."""
         assert isinstance(unique_branch_name, str)
         assert unique_branch_name.startswith("cidx-test-branch-")

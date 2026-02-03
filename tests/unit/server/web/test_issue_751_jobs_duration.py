@@ -52,7 +52,9 @@ class TestJobsDurationCalculation:
 
         assert len(jobs) == 1
         assert "duration_seconds" in jobs[0], "job_dict should include duration_seconds"
-        assert jobs[0]["duration_seconds"] == 155, "Duration should be 155 seconds (2m 35s)"
+        assert (
+            jobs[0]["duration_seconds"] == 155
+        ), "Duration should be 155 seconds (2m 35s)"
 
     def test_duration_seconds_none_when_job_not_completed(self):
         """
@@ -91,7 +93,9 @@ class TestJobsDurationCalculation:
 
         assert len(jobs) == 1
         assert "duration_seconds" in jobs[0], "job_dict should include duration_seconds"
-        assert jobs[0]["duration_seconds"] is None, "Running job should have duration_seconds=None"
+        assert (
+            jobs[0]["duration_seconds"] is None
+        ), "Running job should have duration_seconds=None"
 
     def test_duration_seconds_none_when_not_started(self):
         """
@@ -130,7 +134,9 @@ class TestJobsDurationCalculation:
 
         assert len(jobs) == 1
         assert "duration_seconds" in jobs[0], "job_dict should include duration_seconds"
-        assert jobs[0]["duration_seconds"] is None, "Queued job should have duration_seconds=None"
+        assert (
+            jobs[0]["duration_seconds"] is None
+        ), "Queued job should have duration_seconds=None"
 
     def test_duration_seconds_handles_long_duration(self):
         """
@@ -168,7 +174,9 @@ class TestJobsDurationCalculation:
             jobs, total, pages = _get_all_jobs()
 
         assert len(jobs) == 1
-        assert jobs[0]["duration_seconds"] == 5400, "Duration should be 5400 seconds (1h 30m)"
+        assert (
+            jobs[0]["duration_seconds"] == 5400
+        ), "Duration should be 5400 seconds (1h 30m)"
 
     def test_duration_seconds_handles_failed_job_with_timestamps(self):
         """
@@ -206,7 +214,9 @@ class TestJobsDurationCalculation:
             jobs, total, pages = _get_all_jobs()
 
         assert len(jobs) == 1
-        assert jobs[0]["duration_seconds"] == 45, "Failed job duration should be 45 seconds"
+        assert (
+            jobs[0]["duration_seconds"] == 45
+        ), "Failed job duration should be 45 seconds"
 
     def test_duration_seconds_handles_timezone_mismatch(self):
         """
@@ -249,4 +259,6 @@ class TestJobsDurationCalculation:
         assert len(jobs) == 1
         assert "duration_seconds" in jobs[0], "job_dict should include duration_seconds"
         # Duration should be calculated correctly (155 seconds = 2m 35s)
-        assert jobs[0]["duration_seconds"] == 155, "Duration should be 155 seconds (2m 35s)"
+        assert (
+            jobs[0]["duration_seconds"] == 155
+        ), "Duration should be 155 seconds (2m 35s)"

@@ -100,9 +100,7 @@ class TestGitLabCIEndpoints:
             "rate_limit": {"limit": 2000, "remaining": 1999, "reset": 1234567890},
         }
 
-        client.get(
-            f"/api/cicd/gitlab/{TEST_PROJECT_ID}/pipelines/{TEST_PIPELINE_ID}"
-        )
+        client.get(f"/api/cicd/gitlab/{TEST_PROJECT_ID}/pipelines/{TEST_PIPELINE_ID}")
 
         mock_handler.assert_called_once()
         call_args = mock_handler.call_args[0][0]
@@ -136,9 +134,7 @@ class TestGitLabCIEndpoints:
             "rate_limit": {"limit": 2000, "remaining": 1999, "reset": 1234567890},
         }
 
-        client.get(
-            f"/api/cicd/gitlab/{TEST_PROJECT_ID}/jobs/{TEST_JOB_ID}/logs"
-        )
+        client.get(f"/api/cicd/gitlab/{TEST_PROJECT_ID}/jobs/{TEST_JOB_ID}/logs")
 
         mock_handler.assert_called_once()
         call_args = mock_handler.call_args[0][0]

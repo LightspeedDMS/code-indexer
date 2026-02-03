@@ -61,7 +61,9 @@ class TestVoyageMultimodalClientInitialization:
     def test_init_missing_api_key(self, voyage_config):
         """Test initialization fails without API key."""
         with patch.dict(os.environ, {}, clear=True):
-            with pytest.raises(ValueError, match="VOYAGE_API_KEY environment variable is required"):
+            with pytest.raises(
+                ValueError, match="VOYAGE_API_KEY environment variable is required"
+            ):
                 VoyageMultimodalClient(voyage_config)
 
     def test_default_endpoint(self, mock_api_key, voyage_config):
@@ -82,13 +84,18 @@ class TestVoyageMultimodalClientInitialization:
         )
 
         # Verify config starts with wrong endpoint
-        assert config_with_default.api_endpoint == "https://api.voyageai.com/v1/embeddings"
+        assert (
+            config_with_default.api_endpoint == "https://api.voyageai.com/v1/embeddings"
+        )
 
         # Initialize multimodal client
         client = VoyageMultimodalClient(config_with_default)
 
         # Verify client OVERRODE the endpoint to multimodal
-        assert client.config.api_endpoint == "https://api.voyageai.com/v1/multimodalembeddings"
+        assert (
+            client.config.api_endpoint
+            == "https://api.voyageai.com/v1/multimodalembeddings"
+        )
         assert "multimodalembeddings" in client.config.api_endpoint
         assert "/v1/embeddings" not in client.config.api_endpoint
 
@@ -110,7 +117,7 @@ class TestImageEncoding:
         """Test encoding JPEG image with correct media type."""
         jpeg_path = tmp_path / "test.jpg"
         # Minimal JPEG header
-        jpeg_data = b"\xFF\xD8\xFF\xE0\x00\x10JFIF"
+        jpeg_data = b"\xff\xd8\xff\xe0\x00\x10JFIF"
         jpeg_path.write_bytes(jpeg_data)
 
         data_url = client._encode_image_to_base64(jpeg_path)
@@ -153,7 +160,7 @@ class TestMultimodalEmbeddingGeneration:
             "object": "list",
             "data": [{"embedding": [0.1] * 1024, "index": 0}],
             "model": "voyage-multimodal-3.5",
-            "usage": {"text_tokens": 10, "total_tokens": 10}
+            "usage": {"text_tokens": 10, "total_tokens": 10},
         }
         mock_response.raise_for_status = Mock()
 
@@ -163,22 +170,23 @@ class TestMultimodalEmbeddingGeneration:
         mock_client_cls.return_value = mock_client
 
         embedding = client.get_multimodal_embedding(
-            text="Sample code snippet",
-            image_paths=[]
+            text="Sample code snippet", image_paths=[]
         )
 
         assert len(embedding) == 1024
         assert all(isinstance(x, float) for x in embedding)
 
     @patch("httpx.Client")
-    def test_get_multimodal_embedding_with_images(self, mock_client_cls, client, sample_image_path):
+    def test_get_multimodal_embedding_with_images(
+        self, mock_client_cls, client, sample_image_path
+    ):
         """Test generating embedding for text + images."""
         mock_response = Mock()
         mock_response.json.return_value = {
             "object": "list",
             "data": [{"embedding": [0.2] * 1024, "index": 0}],
             "model": "voyage-multimodal-3.5",
-            "usage": {"text_tokens": 10, "image_pixels": 1, "total_tokens": 11}
+            "usage": {"text_tokens": 10, "image_pixels": 1, "total_tokens": 11},
         }
         mock_response.raise_for_status = Mock()
 
@@ -188,8 +196,7 @@ class TestMultimodalEmbeddingGeneration:
         mock_client_cls.return_value = mock_client
 
         embedding = client.get_multimodal_embedding(
-            text="Database schema diagram",
-            image_paths=[sample_image_path]
+            text="Database schema diagram", image_paths=[sample_image_path]
         )
 
         assert len(embedding) == 1024
@@ -209,27 +216,25 @@ class TestVoyageMultimodalBatchProcessing:
 
     EMBEDDING_DIM = 1024
 
-    def test_batch_embeddings_single_item(self, client, httpx_mock, sample_image_path, monkeypatch):
+    def test_batch_embeddings_single_item(
+        self, client, httpx_mock, sample_image_path, monkeypatch
+    ):
         """Test batch processing with single item."""
         # Mock token counting (voyage-multimodal-3.5 doesn't have a tokenizer)
-        monkeypatch.setattr(client, "_count_tokens_accurately", lambda text: len(text.split()))
+        monkeypatch.setattr(
+            client, "_count_tokens_accurately", lambda text: len(text.split())
+        )
 
         # Mock API response
         httpx_mock.add_response(
             method="POST",
             url="https://api.voyageai.com/v1/multimodalembeddings",
-            json={
-                "data": [
-                    {"embedding": [0.1] * self.EMBEDDING_DIM}
-                ]
-            }
+            json={"data": [{"embedding": [0.1] * self.EMBEDDING_DIM}]},
         )
 
         # Call batch method
         embeddings = client.get_multimodal_embeddings_batch(
-            items=[
-                {"text": "test query", "image_paths": [sample_image_path]}
-            ]
+            items=[{"text": "test query", "image_paths": [sample_image_path]}]
         )
 
         # Verify results
@@ -242,7 +247,9 @@ class TestVoyageMultimodalBatchProcessing:
         embeddings = client.get_multimodal_embeddings_batch(items=[])
         assert embeddings == []
 
-    def test_batch_splits_when_exceeding_token_limit(self, client, httpx_mock, sample_image_path, monkeypatch):
+    def test_batch_splits_when_exceeding_token_limit(
+        self, client, httpx_mock, sample_image_path, monkeypatch
+    ):
         """Test batch automatically splits when token limit would be exceeded."""
         # Mock token counting to simulate large token counts that trigger splitting
         # Each item will report 50000 tokens, safety limit is 108000 (90% of 120000)
@@ -259,7 +266,7 @@ class TestVoyageMultimodalBatchProcessing:
                     {"embedding": [0.1] * self.EMBEDDING_DIM},
                     {"embedding": [0.2] * self.EMBEDDING_DIM},
                 ]
-            }
+            },
         )
         httpx_mock.add_response(
             method="POST",
@@ -268,7 +275,7 @@ class TestVoyageMultimodalBatchProcessing:
                 "data": [
                     {"embedding": [0.3] * self.EMBEDDING_DIM},
                 ]
-            }
+            },
         )
 
         # Create items with text

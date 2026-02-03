@@ -54,9 +54,7 @@ class TestAnthropicKeyAutoSeeding:
                 test_key = "sk-ant-api03-jsonseeded12345678901234567"
                 claude_json_path.write_text(json.dumps({"apiKey": test_key}))
 
-                seeder = ApiKeyAutoSeeder(
-                    claude_json_path=str(claude_json_path)
-                )
+                seeder = ApiKeyAutoSeeder(claude_json_path=str(claude_json_path))
                 result = seeder.get_anthropic_key()
 
                 assert result == test_key
@@ -80,9 +78,7 @@ class TestAnthropicKeyAutoSeeding:
                 claude_json_path = Path(tmpdir) / ".claude.json"
                 claude_json_path.write_text(json.dumps({"apiKey": json_key}))
 
-                seeder = ApiKeyAutoSeeder(
-                    claude_json_path=str(claude_json_path)
-                )
+                seeder = ApiKeyAutoSeeder(claude_json_path=str(claude_json_path))
                 result = seeder.get_anthropic_key()
 
                 assert result == env_key

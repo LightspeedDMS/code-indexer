@@ -61,6 +61,7 @@ class GitHubProvider(RepositoryProviderBase):
 
         # Bug #83 Phase 1: Load timeout from config
         from code_indexer.server.utils.config_manager import ServerConfigManager
+
         config = ServerConfigManager().load_config()
         self._api_timeout = config.git_timeouts_config.github_api_timeout
 
@@ -442,10 +443,12 @@ class GitHubProvider(RepositoryProviderBase):
                     repositories[repo_idx].last_commit_date = commit_date
 
         except Exception as e:
-            logger.warning(format_error_log(
-                "GIT-GENERAL-065",
-                f"Failed to enrich repositories with commit info: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "GIT-GENERAL-065",
+                    f"Failed to enrich repositories with commit info: {e}",
+                )
+            )
 
         return repositories
 
@@ -686,10 +689,12 @@ class GitHubProvider(RepositoryProviderBase):
 
         except Exception as e:
             # Graceful degradation: Fall back to REST API without commit info
-            logger.warning(format_error_log(
-                "GIT-GENERAL-066",
-                f"GraphQL discovery failed, falling back to REST API: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "GIT-GENERAL-066",
+                    f"GraphQL discovery failed, falling back to REST API: {e}",
+                )
+            )
             return self._discover_via_rest_fallback(page, page_size, indexed_urls)
 
     def _discover_via_rest_fallback(

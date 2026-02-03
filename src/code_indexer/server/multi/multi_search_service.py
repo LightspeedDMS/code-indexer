@@ -102,9 +102,7 @@ class MultiSearchService:
 
         return response
 
-    def _search_threaded(
-        self, request: MultiSearchRequest
-    ) -> MultiSearchResponse:
+    def _search_threaded(self, request: MultiSearchRequest) -> MultiSearchResponse:
         """
         Execute search using ThreadPoolExecutor (semantic, FTS, temporal).
 
@@ -116,9 +114,7 @@ class MultiSearchService:
         Returns:
             MultiSearchResponse with aggregated results
         """
-        return self._execute_parallel_search(
-            request, self._search_single_repo_sync
-        )
+        return self._execute_parallel_search(request, self._search_single_repo_sync)
 
     def _search_regex_subprocess(
         self, request: MultiSearchRequest
@@ -181,16 +177,19 @@ class MultiSearchService:
             except TimeoutError:
                 error_msg = self._format_timeout_error(request, [repo_id])
                 errors[repo_id] = error_msg
-                logger.warning(format_error_log(
-                    "REPO-GENERAL-023",
-                    f"Search timeout for repo {repo_id} after {self.config.query_timeout_seconds}s"
-                ))
+                logger.warning(
+                    format_error_log(
+                        "REPO-GENERAL-023",
+                        f"Search timeout for repo {repo_id} after {self.config.query_timeout_seconds}s",
+                    )
+                )
             except Exception as e:
                 errors[repo_id] = f"Search failed: {str(e)}"
-                logger.error(format_error_log(
-                    "REPO-GENERAL-024",
-                    f"Search error for repo {repo_id}: {e}"
-                ))
+                logger.error(
+                    format_error_log(
+                        "REPO-GENERAL-024", f"Search error for repo {repo_id}: {e}"
+                    )
+                )
 
         # Aggregate results with optional score filtering
         aggregator = MultiResultAggregator(
@@ -299,10 +298,12 @@ class MultiSearchService:
             return results
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-025",
-                f"Failed semantic search for repository {repo_id}: {e}"
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-025",
+                    f"Failed semantic search for repository {repo_id}: {e}",
+                )
+            )
             raise
 
     def _search_fts_sync(
@@ -372,10 +373,12 @@ class MultiSearchService:
             return results
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-026",
-                f"Failed FTS search for repository {repo_id}: {e}"
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-026",
+                    f"Failed FTS search for repository {repo_id}: {e}",
+                )
+            )
             raise
 
     def _search_temporal_sync(
@@ -466,10 +469,12 @@ class MultiSearchService:
             return results
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-027",
-                f"Failed temporal search for repository {repo_id}: {e}"
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-027",
+                    f"Failed temporal search for repository {repo_id}: {e}",
+                )
+            )
             raise
 
     def _search_single_repo_subprocess(
@@ -567,10 +572,12 @@ class MultiSearchService:
                             results.append(result_dict)
 
                     except (ValueError, IndexError) as e:
-                        logger.warning(format_error_log(
-                            "REPO-GENERAL-028",
-                            f"Failed to parse subprocess output line: {line} - {e}"
-                        ))
+                        logger.warning(
+                            format_error_log(
+                                "REPO-GENERAL-028",
+                                f"Failed to parse subprocess output line: {line} - {e}",
+                            )
+                        )
                         continue
 
             return results
@@ -580,10 +587,12 @@ class MultiSearchService:
                 f"Subprocess timeout after {self.config.query_timeout_seconds}s"
             )
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-029",
-                f"Subprocess search failed for repo {repo_id}: {e}"
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-029",
+                    f"Subprocess search failed for repo {repo_id}: {e}",
+                )
+            )
             raise
         finally:
             # Cleanup temporary file

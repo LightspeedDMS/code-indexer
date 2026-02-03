@@ -94,17 +94,18 @@ def instrument_fastapi(
         return True
 
     except ImportError as e:
-        logger.warning(format_error_log(
-            "QUERY-GENERAL-014",
-            f"FastAPI instrumentation unavailable: {e}. "
-            "Install opentelemetry-instrumentation-fastapi for auto-tracing."
-        ))
+        logger.warning(
+            format_error_log(
+                "QUERY-GENERAL-014",
+                f"FastAPI instrumentation unavailable: {e}. "
+                "Install opentelemetry-instrumentation-fastapi for auto-tracing.",
+            )
+        )
         return False
     except Exception as e:
-        logger.error(format_error_log(
-            "QUERY-GENERAL-015",
-            f"Failed to instrument FastAPI: {e}"
-        ))
+        logger.error(
+            format_error_log("QUERY-GENERAL-015", f"Failed to instrument FastAPI: {e}")
+        )
         return False
 
 
@@ -129,10 +130,11 @@ def uninstrument_fastapi() -> bool:
         return True
 
     except Exception as e:
-        logger.error(format_error_log(
-            "QUERY-GENERAL-016",
-            f"Failed to uninstrument FastAPI: {e}"
-        ))
+        logger.error(
+            format_error_log(
+                "QUERY-GENERAL-016", f"Failed to uninstrument FastAPI: {e}"
+            )
+        )
         return False
 
 

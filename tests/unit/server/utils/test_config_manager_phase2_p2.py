@@ -76,14 +76,14 @@ class TestGitTimeoutsConfig:
             server_config = ServerConfig(
                 server_dir=tmpdir,
             )
-                manager.validate_config(server_config)
+            manager.validate_config(server_config)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ServerConfigManager(tmpdir)
             server_config = ServerConfig(
                 server_dir=tmpdir,
             )
-                manager.validate_config(server_config)
+            manager.validate_config(server_config)
 
     def test_valid_boundary_values(self):
         """All timeout values at minimum boundaries pass validation."""
@@ -148,7 +148,9 @@ class TestErrorHandlingConfig:
             manager = ServerConfigManager(tmpdir)
             server_config = ServerConfig(
                 server_dir=tmpdir,
-                error_handling_config=ErrorHandlingConfig(base_retry_delay_seconds=0.005),
+                error_handling_config=ErrorHandlingConfig(
+                    base_retry_delay_seconds=0.005
+                ),
             )
             with pytest.raises(ValueError, match="base_retry_delay_seconds"):
                 manager.validate_config(server_config)
@@ -464,4 +466,6 @@ class TestServerConfigP2Integration:
             # Verify web_security_config
             assert isinstance(loaded_config.web_security_config, WebSecurityConfig)
             assert loaded_config.web_security_config.csrf_max_age_seconds == 1200
-            assert loaded_config.web_security_config.web_session_timeout_seconds == 43200
+            assert (
+                loaded_config.web_security_config.web_session_timeout_seconds == 43200
+            )

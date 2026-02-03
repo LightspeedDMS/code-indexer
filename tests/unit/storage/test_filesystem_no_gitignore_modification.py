@@ -78,12 +78,13 @@ class TestFilesystemNoGitignoreModification:
         )
         # Filter out untracked files (??) - we only care about modified tracked files (M)
         modified_tracked_files = [
-            line for line in result.stdout.strip().split("\n")
+            line
+            for line in result.stdout.strip().split("\n")
             if line.strip() and not line.startswith("??")
         ]
-        assert len(modified_tracked_files) == 0, (
-            f"Tracked files were modified: {modified_tracked_files}"
-        )
+        assert (
+            len(modified_tracked_files) == 0
+        ), f"Tracked files were modified: {modified_tracked_files}"
 
     def test_create_collection_does_not_modify_gitignore_when_no_gitignore_exists(
         self, tmp_path
@@ -135,9 +136,9 @@ class TestFilesystemNoGitignoreModification:
         store.create_collection("test_collection", vector_size=1536)
 
         # Verify .gitignore was NOT created
-        assert not gitignore_path.exists(), (
-            ".gitignore was created when it should not have been!"
-        )
+        assert (
+            not gitignore_path.exists()
+        ), ".gitignore was created when it should not have been!"
 
     def test_create_collection_does_not_create_files_outside_base_path(self, tmp_path):
         """
@@ -177,9 +178,9 @@ class TestFilesystemNoGitignoreModification:
 
         # Verify no new files were created outside .code-indexer/
         new_files = final_files - initial_files
-        assert len(new_files) == 0, (
-            f"Files were created outside .code-indexer/: {new_files}"
-        )
+        assert (
+            len(new_files) == 0
+        ), f"Files were created outside .code-indexer/: {new_files}"
 
     def test_multiple_collections_do_not_modify_gitignore(self, tmp_path):
         """
@@ -228,6 +229,6 @@ class TestFilesystemNoGitignoreModification:
 
         # Verify .gitignore unchanged
         final_content = gitignore_path.read_text()
-        assert final_content == original_content, (
-            ".gitignore was modified after creating multiple collections!"
-        )
+        assert (
+            final_content == original_content
+        ), ".gitignore was modified after creating multiple collections!"

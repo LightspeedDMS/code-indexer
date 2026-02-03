@@ -184,11 +184,13 @@ class AutoRecoveryEngine:
                 )
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-048",
-                f"Failed to decide recovery action: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-048",
+                    f"Failed to decide recovery action: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return RecoveryAction(
                 recovery_type=RecoveryType.NONE.value,
                 is_required=False,
@@ -282,12 +284,14 @@ class AutoRecoveryEngine:
             raise
         except Exception as e:
             end_time = datetime.now(timezone.utc)
-            logger.error(format_error_log(
-                "REPO-GENERAL-049",
-                f"Recovery execution failed: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-049",
+                    f"Recovery execution failed: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
             # Return failed result for other exceptions
             return RecoveryResult(
@@ -560,19 +564,23 @@ class AutoRecoveryEngine:
                 )
                 return str(backup_path)
             else:
-                logger.warning(format_error_log(
-                    "REPO-GENERAL-050",
-                    "No .code-indexer directory found to backup",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "REPO-GENERAL-050",
+                        "No .code-indexer directory found to backup",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return str(backup_path)
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-051",
-                f"Failed to create backup: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-051",
+                    f"Failed to create backup: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise RecoveryFailedError(f"Backup creation failed: {str(e)}", "backup")
 
     def _get_smart_indexer(self):
@@ -606,11 +614,13 @@ class AutoRecoveryEngine:
             return smart_indexer
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-052",
-                f"Failed to create SmartIndexer: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-052",
+                    f"Failed to create SmartIndexer: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise RecoveryFailedError(
                 f"SmartIndexer creation failed: {str(e)}", "initialization"
             )
@@ -622,11 +632,13 @@ class AutoRecoveryEngine:
 
             return EmbeddingProviderFactory.create(self.config)
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-053",
-                f"Failed to create embedding provider: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-053",
+                    f"Failed to create embedding provider: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise RecoveryFailedError(
                 f"Embedding provider creation failed: {str(e)}", "initialization"
             )
@@ -643,11 +655,13 @@ class AutoRecoveryEngine:
             )
 
         except Exception as e:
-            logger.error(format_error_log(
-                "REPO-GENERAL-054",
-                f"Failed to create vector store client: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "REPO-GENERAL-054",
+                    f"Failed to create vector store client: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise RecoveryFailedError(
                 f"Vector store client creation failed: {str(e)}", "initialization"
             )
@@ -677,9 +691,11 @@ class AutoRecoveryEngine:
             return min(estimated_minutes, 120)
 
         except Exception as e:
-            logger.warning(format_error_log(
-                "REPO-GENERAL-055",
-                f"Failed to estimate recovery duration: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "REPO-GENERAL-055",
+                    f"Failed to estimate recovery duration: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             return 30  # Default estimate

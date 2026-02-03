@@ -694,9 +694,7 @@ class TestGitHubProviderServerSideSearch:
             )
 
         with patch.object(provider, "_make_api_request", side_effect=capture_request):
-            provider.discover_repositories(
-                page=1, page_size=50, search="myproject"
-            )
+            provider.discover_repositories(page=1, page_size=50, search="myproject")
 
         assert captured_endpoint == "search/repositories"
         assert "q" in captured_params
@@ -846,9 +844,7 @@ class TestGitHubProviderServerSideSearch:
             "_make_api_request",
             return_value=self._create_mock_response(search_response),
         ):
-            result = provider.discover_repositories(
-                page=1, page_size=50, search="data"
-            )
+            result = provider.discover_repositories(page=1, page_size=50, search="data")
 
         assert len(result.repositories) == 1
         assert result.repositories[0].name == "owner/data-services"

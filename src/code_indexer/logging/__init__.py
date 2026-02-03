@@ -2,4 +2,4 @@
 
 from .adaptive_logger import AdaptiveLogger
 
-__all__ = ['AdaptiveLogger']
+__all__ = ["AdaptiveLogger"]

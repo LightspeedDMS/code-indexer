@@ -41,11 +41,13 @@ class DeploymentLock:
                     pid = int(pid_str)
                 except ValueError:
                     # Invalid PID - treat as stale
-                    logger.warning(format_error_log(
-                        "GIT-GENERAL-001",
-                        f"Invalid PID in lock file: {pid_str}",
-                        extra={"correlation_id": get_correlation_id()},
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "GIT-GENERAL-001",
+                            f"Invalid PID in lock file: {pid_str}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                     self.lock_file.unlink()
                 else:
                     # Check if process is alive
@@ -66,11 +68,13 @@ class DeploymentLock:
                         self.lock_file.unlink()
 
             except IOError as e:
-                logger.error(format_error_log(
-                    "GIT-GENERAL-002",
-                    f"Error reading lock file: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.error(
+                    format_error_log(
+                        "GIT-GENERAL-002",
+                        f"Error reading lock file: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 raise
 
         # Create lock file with current PID
@@ -83,11 +87,13 @@ class DeploymentLock:
             )
             return True
         except IOError as e:
-            logger.error(format_error_log(
-                "GIT-GENERAL-003",
-                f"Error creating lock file: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.error(
+                format_error_log(
+                    "GIT-GENERAL-003",
+                    f"Error creating lock file: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
             raise
 
     def release(self) -> None:
@@ -106,11 +112,13 @@ class DeploymentLock:
             self.lock_file.unlink()
             logger.info("Lock released", extra={"correlation_id": get_correlation_id()})
         except (IOError, OSError, PermissionError) as e:
-            logger.warning(format_error_log(
-                "GIT-GENERAL-004",
-                f"Error removing lock file: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "GIT-GENERAL-004",
+                    f"Error removing lock file: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
     def is_stale(self) -> bool:
         """Check if lock file represents a stale lock (process is dead).

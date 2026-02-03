@@ -549,9 +549,7 @@ class TestGitLabProviderServerSideSearch:
             return mock_response
 
         with patch.object(provider, "_make_api_request", side_effect=capture_request):
-            provider.discover_repositories(
-                page=1, page_size=50, search="myproject"
-            )
+            provider.discover_repositories(page=1, page_size=50, search="myproject")
 
         # Verify search parameter is included in API request
         assert "search" in captured_params, "search parameter not passed to API request"
@@ -748,9 +746,7 @@ class TestGitLabProviderServerSideSearch:
         mock_response.raise_for_status = MagicMock()
 
         with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = provider.discover_repositories(
-                page=1, page_size=50, search="data"
-            )
+            result = provider.discover_repositories(page=1, page_size=50, search="data")
 
         # Only non-indexed repo should be returned
         assert (

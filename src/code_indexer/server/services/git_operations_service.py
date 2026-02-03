@@ -122,6 +122,7 @@ class GitOperationsService:
         else:
             # Use defaults when no config file exists
             from ..utils.config_manager import GitTimeoutsConfig, ApiLimitsConfig
+
             self._git_timeouts = GitTimeoutsConfig()
             self._api_limits = ApiLimitsConfig()
 
@@ -159,11 +160,13 @@ class GitOperationsService:
             metadata_file = user_dir / f"{repo_alias}_metadata.json"
 
             if not metadata_file.exists():
-                logger.warning(format_error_log(
-                    "CACHE-GENERAL-016",
-                    f"Cannot trigger migration: metadata file not found for {username}/{repo_alias}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "CACHE-GENERAL-016",
+                        f"Cannot trigger migration: metadata file not found for {username}/{repo_alias}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return
 
             with open(metadata_file, "r") as f:
@@ -171,11 +174,13 @@ class GitOperationsService:
 
             golden_repo_alias = repo_data.get("golden_repo_alias")
             if not golden_repo_alias:
-                logger.warning(format_error_log(
-                    "CACHE-GENERAL-017",
-                    f"Cannot trigger migration: golden_repo_alias not found in metadata for {username}/{repo_alias}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "CACHE-GENERAL-017",
+                        f"Cannot trigger migration: golden_repo_alias not found in metadata for {username}/{repo_alias}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return
 
             # Get golden repo path from golden repo manager
@@ -183,11 +188,13 @@ class GitOperationsService:
                 golden_repo_alias
                 not in self.activated_repo_manager.golden_repo_manager.golden_repos
             ):
-                logger.warning(format_error_log(
-                    "CACHE-GENERAL-018",
-                    f"Cannot trigger migration: golden repo '{golden_repo_alias}' not found for {username}/{repo_alias}",
-                    extra={"correlation_id": get_correlation_id()},
-                ))
+                logger.warning(
+                    format_error_log(
+                        "CACHE-GENERAL-018",
+                        f"Cannot trigger migration: golden repo '{golden_repo_alias}' not found for {username}/{repo_alias}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
                 return
 
             self.activated_repo_manager.golden_repo_manager.golden_repos[
@@ -214,11 +221,13 @@ class GitOperationsService:
 
         except Exception as e:
             # Don't fail the git operation if migration check fails
-            logger.warning(format_error_log(
-                "CACHE-GENERAL-019",
-                f"Failed to check/trigger migration for {username}/{repo_alias}: {str(e)}",
-                extra={"correlation_id": get_correlation_id()},
-            ))
+            logger.warning(
+                format_error_log(
+                    "CACHE-GENERAL-019",
+                    f"Failed to check/trigger migration for {username}/{repo_alias}: {str(e)}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
     def get_status(self, repo_alias: str, username: str) -> Dict[str, Any]:
         """
@@ -237,6 +246,7 @@ class GitOperationsService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         repo_path = self.activated_repo_manager.get_activated_repo_path(
@@ -265,6 +275,7 @@ class GitOperationsService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         # Extract file_paths if present
@@ -297,6 +308,7 @@ class GitOperationsService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         # Map REST parameter name to service method name
@@ -333,6 +345,7 @@ class GitOperationsService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         file_paths = kwargs.get("file_paths", [])
@@ -361,6 +374,7 @@ class GitOperationsService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         file_paths = kwargs.get("file_paths", [])
@@ -390,6 +404,7 @@ class GitOperationsService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         message = kwargs.get("message", "")
@@ -459,6 +474,7 @@ class GitOperationsService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         remote = kwargs.get("remote", "origin")
@@ -495,6 +511,7 @@ class GitOperationsService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         remote = kwargs.get("remote", "origin")
@@ -531,6 +548,7 @@ class GitOperationsService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         remote = kwargs.get("remote", "origin")
@@ -569,6 +587,7 @@ class GitOperationsService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         mode = kwargs.get("mode", "mixed")
@@ -609,6 +628,7 @@ class GitOperationsService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         confirmation_token = kwargs.get("confirmation_token")
@@ -638,6 +658,7 @@ class GitOperationsService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         repo_path = self.activated_repo_manager.get_activated_repo_path(
@@ -665,6 +686,7 @@ class GitOperationsService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         file_paths = kwargs.get("file_paths", [])
@@ -701,6 +723,7 @@ class GitOperationsService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         repo_path = self.activated_repo_manager.get_activated_repo_path(
@@ -728,6 +751,7 @@ class GitOperationsService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         branch_name = kwargs.get("branch_name", "")
@@ -757,6 +781,7 @@ class GitOperationsService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         branch_name = kwargs.get("branch_name", "")
@@ -787,6 +812,7 @@ class GitOperationsService:
         """
         # Track API call at service layer (Story #4 AC2)
         from .api_metrics_service import api_metrics_service
+
         api_metrics_service.increment_other_api_call()
 
         branch_name = kwargs.get("branch_name", "")
@@ -822,7 +848,10 @@ class GitOperationsService:
         try:
             cmd = ["git", "status", "--porcelain=v1"]
             result = run_git_command(
-                cmd, cwd=repo_path, timeout=self._git_timeouts.git_local_timeout, check=True
+                cmd,
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_local_timeout,
+                check=True,
             )
 
             # Parse porcelain v1 format: XY PATH
@@ -904,7 +933,9 @@ class GitOperationsService:
             # Story #686: Validate and apply pagination defaults
             if offset < 0:
                 offset = 0
-            effective_limit = self._api_limits.default_diff_lines if limit is None else limit
+            effective_limit = (
+                self._api_limits.default_diff_lines if limit is None else limit
+            )
             effective_limit = min(effective_limit, self._api_limits.max_diff_lines)
 
             cmd = ["git", "diff"]
@@ -932,7 +963,10 @@ class GitOperationsService:
                 cmd.extend(file_paths)
 
             result = run_git_command(
-                cmd, cwd=repo_path, timeout=self._git_timeouts.git_local_timeout, check=True
+                cmd,
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_local_timeout,
+                check=True,
             )
 
             full_diff_text = result.stdout
@@ -1038,7 +1072,10 @@ class GitOperationsService:
                 count_cmd.append(path)
 
             count_result = run_git_command(
-                count_cmd, cwd=repo_path, timeout=self._git_timeouts.git_local_timeout, check=True
+                count_cmd,
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_local_timeout,
+                check=True,
             )
             total_commits = int(count_result.stdout.strip())
 
@@ -1066,7 +1103,10 @@ class GitOperationsService:
                 cmd.append(path)
 
             result = run_git_command(
-                cmd, cwd=repo_path, timeout=self._git_timeouts.git_local_timeout, check=True
+                cmd,
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_local_timeout,
+                check=True,
             )
 
             commits = []
@@ -1132,7 +1172,12 @@ class GitOperationsService:
 
             cmd = ["git", "add"] + validated_paths
 
-            run_git_command(cmd, cwd=repo_path, timeout=self._git_timeouts.git_local_timeout, check=True)
+            run_git_command(
+                cmd,
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_local_timeout,
+                check=True,
+            )
 
             return {"success": True, "staged_files": validated_paths}
 
@@ -1162,7 +1207,12 @@ class GitOperationsService:
         try:
             cmd = ["git", "reset", "HEAD"] + file_paths
 
-            run_git_command(cmd, cwd=repo_path, timeout=self._git_timeouts.git_local_timeout, check=True)
+            run_git_command(
+                cmd,
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_local_timeout,
+                check=True,
+            )
 
             return {"success": True, "unstaged_files": file_paths}
 
@@ -1279,7 +1329,11 @@ class GitOperationsService:
             cmd = ["git", "commit", "-m", attributed_message]
 
             run_git_command(
-                cmd, cwd=repo_path, timeout=self._git_timeouts.git_local_timeout, check=True, env=env
+                cmd,
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_local_timeout,
+                check=True,
+                env=env,
             )
 
             # Get full commit hash using git rev-parse HEAD
@@ -1343,7 +1397,10 @@ class GitOperationsService:
                 cmd.append(branch)
 
             result = run_git_command(
-                cmd, cwd=repo_path, timeout=self._git_timeouts.git_remote_timeout, check=True
+                cmd,
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_remote_timeout,
+                check=True,
             )
 
             pushed_commits = 0
@@ -1397,7 +1454,10 @@ class GitOperationsService:
                 cmd.append(branch)
 
             result = run_git_command(
-                cmd, cwd=repo_path, timeout=self._git_timeouts.git_remote_timeout, check=False
+                cmd,
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_remote_timeout,
+                check=False,
             )
 
             conflicts = []
@@ -1500,7 +1560,12 @@ class GitOperationsService:
             target = commit_hash or "HEAD"
             cmd = ["git", "reset", f"--{mode}", target]
 
-            run_git_command(cmd, cwd=repo_path, timeout=self._git_timeouts.git_local_timeout, check=True)
+            run_git_command(
+                cmd,
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_local_timeout,
+                check=True,
+            )
 
             return {"success": True, "reset_mode": mode, "target_commit": target}
 

@@ -63,7 +63,9 @@ class MultiSearchConfig:
         """
         server_config = config_service.get_config()
         multi_search_limits = server_config.multi_search_limits_config
-        assert multi_search_limits is not None  # Guaranteed by ServerConfig.__post_init__
+        assert (
+            multi_search_limits is not None
+        )  # Guaranteed by ServerConfig.__post_init__
 
         return cls(
             max_workers=multi_search_limits.multi_search_max_workers,

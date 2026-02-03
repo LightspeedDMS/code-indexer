@@ -72,9 +72,7 @@ class SSOProvisioningHook:
         self.group_manager = group_manager
         self.group_mappings = group_mappings or []
 
-    def _determine_target_group(
-        self, external_groups: Optional[List[str]]
-    ) -> str:
+    def _determine_target_group(self, external_groups: Optional[List[str]]) -> str:
         """
         Determine target CIDX group based on external groups and configured mappings.
 
@@ -92,7 +90,9 @@ class SSOProvisioningHook:
             for mapping in self.group_mappings:
                 if mapping.get("external_group_id") == external_group_id:
                     cidx_group = mapping.get("cidx_group")
-                    external_name = mapping.get("external_group_name", external_group_id)
+                    external_name = mapping.get(
+                        "external_group_name", external_group_id
+                    )
                     logger.debug(
                         f"Matched external group '{external_name}' ({external_group_id}) to CIDX group '{cidx_group}'"
                     )
@@ -144,12 +144,16 @@ class SSOProvisioningHook:
             # If target group doesn't exist, fallback to default users group
             if target_group is None:
                 if target_group_name != DEFAULT_GROUP_USERS:
-                    logger.warning(format_error_log(
-                        "MCP-GENERAL-174",
-                        f"Configured group '{target_group_name}' not found, falling back to '{DEFAULT_GROUP_USERS}' group for user '{user_id}'"
-                    ))
+                    logger.warning(
+                        format_error_log(
+                            "MCP-GENERAL-174",
+                            f"Configured group '{target_group_name}' not found, falling back to '{DEFAULT_GROUP_USERS}' group for user '{user_id}'",
+                        )
+                    )
                     target_group_name = DEFAULT_GROUP_USERS
-                    target_group = self.group_manager.get_group_by_name(target_group_name)
+                    target_group = self.group_manager.get_group_by_name(
+                        target_group_name
+                    )
 
                 # If fallback group also doesn't exist, database is not initialized
                 if target_group is None:
@@ -193,11 +197,13 @@ class SSOProvisioningHook:
             raise
         except Exception as e:
             # AC6: Log RUNTIME errors but do not block authentication
-            logger.error(format_error_log(
-                "MCP-GENERAL-175",
-                f"SSO provisioning failed for user '{user_id}': {e}. "
-                f"User will have fallback cidx-meta-only access."
-            ))
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-175",
+                    f"SSO provisioning failed for user '{user_id}': {e}. "
+                    f"User will have fallback cidx-meta-only access.",
+                )
+            )
             return False
 
 

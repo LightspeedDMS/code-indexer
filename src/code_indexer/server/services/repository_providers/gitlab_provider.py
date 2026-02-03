@@ -62,6 +62,7 @@ class GitLabProvider(RepositoryProviderBase):
 
         # Bug #83 Phase 1: Load timeout from config
         from code_indexer.server.utils.config_manager import ServerConfigManager
+
         config = ServerConfigManager().load_config()
         self._api_timeout = config.git_timeouts_config.gitlab_api_timeout
 
@@ -344,10 +345,12 @@ class GitLabProvider(RepositoryProviderBase):
 
                 # Log error response body for debugging before raising
                 if response.status_code >= 400:
-                    logger.error(format_error_log(
-                        "GIT-GENERAL-067",
-                        f"GitLab GraphQL error {response.status_code}: {response.text}"
-                    ))
+                    logger.error(
+                        format_error_log(
+                            "GIT-GENERAL-067",
+                            f"GitLab GraphQL error {response.status_code}: {response.text}",
+                        )
+                    )
                 response.raise_for_status()
 
                 # Parse response and update repositories
@@ -362,10 +365,12 @@ class GitLabProvider(RepositoryProviderBase):
 
         except Exception as e:
             # Graceful degradation: Log warning but don't fail discovery
-            logger.warning(format_error_log(
-                "GIT-GENERAL-068",
-                f"Failed to enrich repositories with commit info: {e}"
-            ))
+            logger.warning(
+                format_error_log(
+                    "GIT-GENERAL-068",
+                    f"Failed to enrich repositories with commit info: {e}",
+                )
+            )
 
         return repositories
 

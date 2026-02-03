@@ -186,8 +186,10 @@ class RepositoryListingManager:
             details["branches_list"] = self.get_available_branches(alias)
         except Exception:
             logger.warning(
-                format_error_log("REPO-MIGRATE-001", "Could not get branches for {alias}: {e}"),
-                extra=get_log_extra("REPO-MIGRATE-001")
+                format_error_log(
+                    "REPO-MIGRATE-001", "Could not get branches for {alias}: {e}"
+                ),
+                extra=get_log_extra("REPO-MIGRATE-001"),
             )
             details["branches_list"] = [golden_repo["default_branch"]]
 
@@ -199,8 +201,10 @@ class RepositoryListingManager:
             details["last_updated"] = stats["last_updated"]
         except Exception:
             logger.warning(
-                format_error_log("REPO-MIGRATE-002", "Could not get statistics for {alias}: {e}"),
-                extra=get_log_extra("REPO-MIGRATE-002")
+                format_error_log(
+                    "REPO-MIGRATE-002", "Could not get statistics for {alias}: {e}"
+                ),
+                extra=get_log_extra("REPO-MIGRATE-002"),
             )
             details["file_count"] = 0
             details["index_size"] = 0
@@ -269,14 +273,19 @@ class RepositoryListingManager:
 
         except subprocess.TimeoutExpired:
             logger.warning(
-                format_error_log("REPO-MIGRATE-003", "Git ls-remote timed out for repository {alias}"),
-                extra=get_log_extra("REPO-MIGRATE-003")
+                format_error_log(
+                    "REPO-MIGRATE-003", "Git ls-remote timed out for repository {alias}"
+                ),
+                extra=get_log_extra("REPO-MIGRATE-003"),
             )
             return [golden_repo["default_branch"]]
         except Exception:
             logger.warning(
-                format_error_log("REPO-MIGRATE-004", "Failed to get branches for repository {alias}: {e}"),
-                extra=get_log_extra("REPO-MIGRATE-004")
+                format_error_log(
+                    "REPO-MIGRATE-004",
+                    "Failed to get branches for repository {alias}: {e}",
+                ),
+                extra=get_log_extra("REPO-MIGRATE-004"),
             )
             return [golden_repo["default_branch"]]
 
@@ -404,8 +413,10 @@ class RepositoryListingManager:
                 file_count += len(files)
         except Exception:
             logger.warning(
-                format_error_log("REPO-MIGRATE-005", "Failed to count files in {repo_path}: {e}"),
-                extra=get_log_extra("REPO-MIGRATE-005")
+                format_error_log(
+                    "REPO-MIGRATE-005", "Failed to count files in {repo_path}: {e}"
+                ),
+                extra=get_log_extra("REPO-MIGRATE-005"),
             )
 
         return file_count
@@ -432,8 +443,10 @@ class RepositoryListingManager:
                         pass
         except Exception:
             logger.warning(
-                format_error_log("REPO-MIGRATE-006", "Failed to calculate size for {repo_path}: {e}"),
-                extra=get_log_extra("REPO-MIGRATE-006")
+                format_error_log(
+                    "REPO-MIGRATE-006", "Failed to calculate size for {repo_path}: {e}"
+                ),
+                extra=get_log_extra("REPO-MIGRATE-006"),
             )
 
         return total_size
@@ -472,7 +485,10 @@ class RepositoryListingManager:
 
         except Exception:
             logger.warning(
-                format_error_log("REPO-MIGRATE-007", "Failed to get last modified time for {repo_path}: {e}"),
-                extra=get_log_extra("REPO-MIGRATE-007")
+                format_error_log(
+                    "REPO-MIGRATE-007",
+                    "Failed to get last modified time for {repo_path}: {e}",
+                ),
+                extra=get_log_extra("REPO-MIGRATE-007"),
             )
             return datetime.now(timezone.utc).isoformat()

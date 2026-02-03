@@ -136,9 +136,7 @@ def _mock_config_service(token_limit):
 class TestGitLogTruncationWithCacheHandle:
     """Test git_log handler truncation with cache_handle support."""
 
-    def test_large_log_returns_cache_handle(
-        self, mock_user, mock_payload_cache
-    ):
+    def test_large_log_returns_cache_handle(self, mock_user, mock_payload_cache):
         """Verify large log returns cache_handle when truncated.
 
         Story #35 AC1: When git log exceeds git_log_max_tokens, store full log
@@ -150,9 +148,7 @@ class TestGitLogTruncationWithCacheHandle:
         large_log_result = _mock_git_log_result(num_commits=100, body_lines=50)
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-            ) as mock_dir,
+            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_dir,
             patch(
                 "code_indexer.server.mcp.handlers._resolve_repo_path"
             ) as mock_resolve,
@@ -172,8 +168,8 @@ class TestGitLogTruncationWithCacheHandle:
             mock_git_service_class.return_value = mock_git_service
 
             mock_app.app.state.payload_cache = mock_payload_cache
-            mock_config_svc.return_value.get_config.return_value = (
-                _mock_config_service(LOW_TOKEN_LIMIT)
+            mock_config_svc.return_value.get_config.return_value = _mock_config_service(
+                LOW_TOKEN_LIMIT
             )
 
             result = handlers.handle_git_log(
@@ -206,9 +202,7 @@ class TestGitLogTruncationWithCacheHandle:
         small_log_result = _mock_git_log_result(num_commits=3, body_lines=2)
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-            ) as mock_dir,
+            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_dir,
             patch(
                 "code_indexer.server.mcp.handlers._resolve_repo_path"
             ) as mock_resolve,
@@ -228,8 +222,8 @@ class TestGitLogTruncationWithCacheHandle:
             mock_git_service_class.return_value = mock_git_service
 
             mock_app.app.state.payload_cache = mock_payload_cache
-            mock_config_svc.return_value.get_config.return_value = (
-                _mock_config_service(HIGH_TOKEN_LIMIT)
+            mock_config_svc.return_value.get_config.return_value = _mock_config_service(
+                HIGH_TOKEN_LIMIT
             )
 
             result = handlers.handle_git_log(
@@ -259,9 +253,7 @@ class TestGitLogTruncationWithCacheHandle:
         large_log_result = _mock_git_log_result(num_commits=100, body_lines=50)
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-            ) as mock_dir,
+            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_dir,
             patch(
                 "code_indexer.server.mcp.handlers._resolve_repo_path"
             ) as mock_resolve,
@@ -281,8 +273,8 @@ class TestGitLogTruncationWithCacheHandle:
             mock_git_service_class.return_value = mock_git_service
 
             mock_app.app.state.payload_cache = mock_payload_cache
-            mock_config_svc.return_value.get_config.return_value = (
-                _mock_config_service(LOW_TOKEN_LIMIT)
+            mock_config_svc.return_value.get_config.return_value = _mock_config_service(
+                LOW_TOKEN_LIMIT
             )
 
             result = handlers.handle_git_log(
@@ -310,9 +302,7 @@ class TestGitLogTruncationWithCacheHandle:
             for field in required_fields:
                 assert field in data, f"Missing required field: {field}"
 
-    def test_log_stores_serialized_json_in_cache(
-        self, mock_user, mock_payload_cache
-    ):
+    def test_log_stores_serialized_json_in_cache(self, mock_user, mock_payload_cache):
         """Verify full log is serialized to JSON and stored in cache.
 
         Story #35 AC4: Full log result should be JSON-serialized and stored.
@@ -322,9 +312,7 @@ class TestGitLogTruncationWithCacheHandle:
         large_log_result = _mock_git_log_result(num_commits=100, body_lines=50)
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-            ) as mock_dir,
+            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_dir,
             patch(
                 "code_indexer.server.mcp.handlers._resolve_repo_path"
             ) as mock_resolve,
@@ -344,8 +332,8 @@ class TestGitLogTruncationWithCacheHandle:
             mock_git_service_class.return_value = mock_git_service
 
             mock_app.app.state.payload_cache = mock_payload_cache
-            mock_config_svc.return_value.get_config.return_value = (
-                _mock_config_service(LOW_TOKEN_LIMIT)
+            mock_config_svc.return_value.get_config.return_value = _mock_config_service(
+                LOW_TOKEN_LIMIT
             )
 
             handlers.handle_git_log(
@@ -374,9 +362,7 @@ class TestGitLogTruncationWithCacheHandle:
         large_log_result = _mock_git_log_result(num_commits=100, body_lines=50)
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-            ) as mock_dir,
+            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_dir,
             patch(
                 "code_indexer.server.mcp.handlers._resolve_repo_path"
             ) as mock_resolve,
@@ -397,8 +383,8 @@ class TestGitLogTruncationWithCacheHandle:
 
             # No payload_cache available
             mock_app.app.state.payload_cache = None
-            mock_config_svc.return_value.get_config.return_value = (
-                _mock_config_service(LOW_TOKEN_LIMIT)
+            mock_config_svc.return_value.get_config.return_value = _mock_config_service(
+                LOW_TOKEN_LIMIT
             )
 
             result = handlers.handle_git_log(
@@ -415,9 +401,7 @@ class TestGitLogTruncationWithCacheHandle:
             assert data.get("cache_handle") is None
             assert data.get("truncated") is False
 
-    def test_log_preserves_backward_compatibility(
-        self, mock_user, mock_payload_cache
-    ):
+    def test_log_preserves_backward_compatibility(self, mock_user, mock_payload_cache):
         """Verify existing response fields are preserved.
 
         Story #35 AC6: Backward compatibility - existing fields must be preserved.
@@ -427,9 +411,7 @@ class TestGitLogTruncationWithCacheHandle:
         small_log_result = _mock_git_log_result(num_commits=5, body_lines=3)
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-            ) as mock_dir,
+            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_dir,
             patch(
                 "code_indexer.server.mcp.handlers._resolve_repo_path"
             ) as mock_resolve,
@@ -449,8 +431,8 @@ class TestGitLogTruncationWithCacheHandle:
             mock_git_service_class.return_value = mock_git_service
 
             mock_app.app.state.payload_cache = mock_payload_cache
-            mock_config_svc.return_value.get_config.return_value = (
-                _mock_config_service(HIGH_TOKEN_LIMIT)
+            mock_config_svc.return_value.get_config.return_value = _mock_config_service(
+                HIGH_TOKEN_LIMIT
             )
 
             result = handlers.handle_git_log(
@@ -500,9 +482,7 @@ class TestGitLogTruncationHelperIntegration:
         large_log_result = _mock_git_log_result(num_commits=100, body_lines=50)
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
-            ) as mock_dir,
+            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_dir,
             patch(
                 "code_indexer.server.mcp.handlers._resolve_repo_path"
             ) as mock_resolve,

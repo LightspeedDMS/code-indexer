@@ -5,7 +5,6 @@ Tests the get_default_prompt() function that loads the default analysis prompt.
 """
 
 
-
 class TestGetDefaultPrompt:
     """Test suite for get_default_prompt() function."""
 
@@ -36,7 +35,10 @@ class TestGetDefaultPrompt:
         prompt = get_default_prompt()
 
         # Verify it contains expected content from the markdown file
-        assert "CIDX Server Log Analysis Prompt" in prompt or "Log Database Access" in prompt
+        assert (
+            "CIDX Server Log Analysis Prompt" in prompt
+            or "Log Database Access" in prompt
+        )
 
     def test_get_default_prompt_contains_classification_instructions(self):
         """Test that prompt contains issue classification instructions."""

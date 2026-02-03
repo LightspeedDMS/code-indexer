@@ -279,9 +279,7 @@ class TestToolOutputSchemas:
         assert "success" in props
         assert "repositories" in props
 
-    @pytest.mark.xfail(
-        reason="Aspirational: git_clean missing 'success' in schema"
-    )
+    @pytest.mark.xfail(reason="Aspirational: git_clean missing 'success' in schema")
     def test_all_schemas_document_success_field(self):
         """Test that all output schemas document the 'success' field."""
         for tool_name, tool_def in TOOL_REGISTRY.items():

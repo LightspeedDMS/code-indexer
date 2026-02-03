@@ -277,8 +277,6 @@ def api_get_public_key(name: str) -> Response:
 
 
 @router.post("/{name}/hosts", response_model=KeyWithHostsResponse)
-def api_assign_host(
-    name: str, request: AssignHostRequest
-) -> KeyWithHostsResponse:
+def api_assign_host(name: str, request: AssignHostRequest) -> KeyWithHostsResponse:
     """Assign a host to an SSH key."""
     return assign_host(name, request)

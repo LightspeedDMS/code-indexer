@@ -29,9 +29,7 @@ def mock_user():
 @pytest.fixture
 def mock_wildcard_expansion():
     """Mock wildcard expansion to return patterns unchanged."""
-    with patch(
-        "code_indexer.server.mcp.handlers._expand_wildcard_patterns"
-    ) as mock:
+    with patch("code_indexer.server.mcp.handlers._expand_wildcard_patterns") as mock:
         mock.side_effect = lambda patterns: patterns
         yield mock
 
@@ -68,14 +66,18 @@ class TestMcpUsesUnifiedMultiSearchConfig:
         mock_config = Mock()
         mock_limits = Mock()
         # Set DIFFERENT values to prove which one is used
-        mock_limits.omni_max_workers = 100  # Wrong value (MCP-specific, should NOT be used)
+        mock_limits.omni_max_workers = (
+            100  # Wrong value (MCP-specific, should NOT be used)
+        )
         mock_limits.omni_per_repo_timeout_seconds = 999  # Wrong value
         mock_limits.multi_search_max_workers = 8  # Correct unified value
         mock_limits.multi_search_timeout_seconds = 60  # Correct unified value
         mock_config.multi_search_limits_config = mock_limits
         mock_config_service.get_config.return_value = mock_config
 
-        with patch("code_indexer.server.mcp.handlers.get_config_service") as mock_get_config:
+        with patch(
+            "code_indexer.server.mcp.handlers.get_config_service"
+        ) as mock_get_config:
             mock_get_config.return_value = mock_config_service
 
             # Patch MultiSearchConfig.from_config to track if it's called
@@ -83,7 +85,10 @@ class TestMcpUsesUnifiedMultiSearchConfig:
                 "code_indexer.server.multi.multi_search_config.MultiSearchConfig.from_config"
             ) as mock_from_config:
                 # Setup the mock to return a real config with unified values
-                from code_indexer.server.multi.multi_search_config import MultiSearchConfig
+                from code_indexer.server.multi.multi_search_config import (
+                    MultiSearchConfig,
+                )
+
                 mock_from_config.return_value = MultiSearchConfig(
                     max_workers=8,
                     query_timeout_seconds=60,
@@ -108,14 +113,13 @@ class TestMcpUsesUnifiedMultiSearchConfig:
                     mock_service_class.return_value = mock_service
 
                     from code_indexer.server.mcp.handlers import _omni_search_code
+
                     _omni_search_code(params, mock_user)
 
                     # CRITICAL ASSERTION: from_config MUST be called with config_service
                     mock_from_config.assert_called_once_with(mock_config_service)
 
-    def test_mcp_uses_unified_config_values(
-        self, mock_user, mock_wildcard_expansion
-    ):
+    def test_mcp_uses_unified_config_values(self, mock_user, mock_wildcard_expansion):
         """
         MCP must use unified config values (multi_search_*), not MCP-specific (omni_*).
 
@@ -147,12 +151,15 @@ class TestMcpUsesUnifiedMultiSearchConfig:
 
         captured_config = None
 
-        with patch("code_indexer.server.mcp.handlers.get_config_service") as mock_get_config:
+        with patch(
+            "code_indexer.server.mcp.handlers.get_config_service"
+        ) as mock_get_config:
             mock_get_config.return_value = mock_config_service
 
             with patch(
                 "code_indexer.server.multi.multi_search_service.MultiSearchService"
             ) as mock_service_class:
+
                 def capture_config(config):
                     nonlocal captured_config
                     captured_config = config
@@ -173,6 +180,7 @@ class TestMcpUsesUnifiedMultiSearchConfig:
                 mock_service_class.side_effect = capture_config
 
                 from code_indexer.server.mcp.handlers import _omni_search_code
+
                 _omni_search_code(params, mock_user)
 
         # CRITICAL ASSERTIONS: Must use unified values, not omni-specific

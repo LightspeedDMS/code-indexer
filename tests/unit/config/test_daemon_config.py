@@ -250,9 +250,9 @@ class TestGetDaemonConfig:
             "embedding_provider": "voyage-ai",
             "daemon": {
                 "enabled": True,
-                "ttl_minutes": 15
+                "ttl_minutes": 15,
                 # Missing other fields
-            }
+            },
         }
 
         config_path.write_text(json.dumps(old_config, indent=2))
@@ -287,7 +287,7 @@ class TestGetSocketPath:
         # Should be exactly /tmp/cidx/{16-char-hash}.sock
         assert len(socket_path.stem) == 16
         # Hash should be hexadecimal
-        assert all(c in '0123456789abcdef' for c in socket_path.stem)
+        assert all(c in "0123456789abcdef" for c in socket_path.stem)
 
     def test_get_socket_path_with_nested_project(self, tmp_path):
         """Socket path calculation for nested projects."""
@@ -364,7 +364,7 @@ class TestBackwardCompatibility:
             "codebase_dir": str(tmp_path),
             "file_extensions": ["py", "js"],
             "exclude_dirs": ["node_modules"],
-            "embedding_provider": "voyage-ai"
+            "embedding_provider": "voyage-ai",
         }
         config_path.write_text(json.dumps(old_config, indent=2))
 
@@ -389,7 +389,7 @@ class TestBackwardCompatibility:
             "daemon": {
                 "enabled": True
                 # Missing ttl_minutes and other fields
-            }
+            },
         }
         config_path.write_text(json.dumps(partial_config, indent=2))
 
@@ -416,8 +416,8 @@ class TestBackwardCompatibility:
                 "ttl_minutes": 10,
                 "socket_type": "unix",  # Deprecated
                 "socket_path": "/old/path.sock",  # Deprecated
-                "tcp_port": 50051  # Deprecated
-            }
+                "tcp_port": 50051,  # Deprecated
+            },
         }
         config_path.write_text(json.dumps(old_config, indent=2))
 
