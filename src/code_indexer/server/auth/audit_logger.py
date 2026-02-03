@@ -13,6 +13,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# Module-level logger for authentication events
+logger = logging.getLogger(__name__)
+
 
 class PasswordChangeAuditLogger:
     """
