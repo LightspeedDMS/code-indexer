@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.24] - 2026-02-03
+
+### Fixed
+
+- **Bug #135: Langfuse traces not appearing in dashboard** - Fixed span lifecycle issue where traces created via MCP tools were never sent to Langfuse. Root cause: `create_trace()` used `end_on_exit=False` pattern but never called `span.end()`. Langfuse SDK only sends completed spans during `flush()`. Fix: Store span in TraceObject, add `end_trace()` method to call `span.end()`, and call it in TraceStateManager before flush.
+
+---
+
 ## [8.8.23] - 2026-02-03
 
 ### Added

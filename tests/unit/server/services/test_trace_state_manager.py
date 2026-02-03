@@ -101,7 +101,7 @@ class TestTraceStateManagerBasicOperations:
 
         manager = TraceStateManager(mock_client)
 
-        manager.start_trace(session_id="session-1", topic="auth", user_id="user-456")
+        manager.start_trace(session_id="session-1", topic="auth", username="user-456")
 
         mock_client.create_trace.assert_called_once_with(
             name="research-session",

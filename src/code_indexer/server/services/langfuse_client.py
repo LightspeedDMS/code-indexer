@@ -108,6 +108,9 @@ class LangfuseClient:
         We use start_as_current_span() to create the root span (which creates
         the trace), then update_current_trace() to set session_id/user_id.
 
+        The span is stored in the returned TraceObject and must be ended via
+        end_trace() before flush() will send data to Langfuse.
+
         Args:
             name: Name of the trace (e.g., "research-session")
             session_id: MCP session ID
@@ -115,14 +118,14 @@ class LangfuseClient:
             user_id: Optional user identifier
 
         Returns:
-            Simple object with .id and .trace_id properties if successful, None otherwise
+            TraceObject with .id, .trace_id, and .span properties if successful, None otherwise
         """
         if not self._ensure_initialized():
             return None
 
         try:
             # Create root span with context (creates trace implicitly)
-            # Use end_on_exit=False so we control lifecycle manually
+            # Use end_on_exit=False so we control lifecycle manually via end_trace()
             span_cm = self._langfuse.start_as_current_span(
                 name=name,
                 metadata=metadata,
@@ -138,23 +141,57 @@ class LangfuseClient:
                 user_id=user_id,
             )
 
-            # Exit context (but don't end span yet - caller controls lifecycle)
+            # Exit context but keep span active - it will be ended in end_trace()
             span_cm.__exit__(None, None, None)
 
             logger.debug(f"Created trace: {name} (session={session_id}, trace_id={span.trace_id})")
 
-            # Return simple object with properties TraceStateManager expects
-            # TraceStateManager accesses trace.id in line 131
+            # Return object with span stored for later ending
+            # TraceStateManager accesses trace.id and we store span for end_trace()
             class TraceObject:
-                def __init__(self, trace_id: str):
+                def __init__(self, trace_id: str, span_obj: Any):
                     self.id = trace_id  # TraceStateManager expects .id
                     self.trace_id = trace_id  # Also provide .trace_id for consistency
+                    self.span = span_obj  # Store span for end_trace() to call .end()
 
-            return TraceObject(span.trace_id)
+            return TraceObject(span.trace_id, span)
 
         except Exception as e:
             logger.error(f"Failed to create trace '{name}': {e}")
             return None
+
+    def end_trace(self, trace_obj: Any) -> bool:
+        """
+        End a trace by ending its root span.
+
+        This MUST be called before flush() to ensure trace data is sent to Langfuse.
+        The Langfuse SDK only sends data for completed (ended) spans.
+
+        Args:
+            trace_obj: TraceObject returned from create_trace() containing the span
+
+        Returns:
+            True if span was ended successfully, False otherwise
+        """
+        if not self._config.enabled:
+            return False
+
+        if trace_obj is None:
+            return False
+
+        try:
+            # End the span - this marks it as complete so flush() will send it
+            if hasattr(trace_obj, 'span') and trace_obj.span is not None:
+                trace_obj.span.end()
+                logger.debug(f"Ended trace span: {trace_obj.trace_id}")
+                return True
+            else:
+                logger.warning(f"TraceObject has no span to end: {trace_obj.trace_id}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Failed to end trace {getattr(trace_obj, 'trace_id', 'unknown')}: {e}")
+            return False
 
     def create_span(
         self,

@@ -212,6 +212,10 @@ class TraceStateManager:
                 comment=feedback,
             )
 
+        # End the trace span - MUST be called before flush() or data won't be sent
+        # Bug #135 fix: Langfuse SDK only sends data for completed spans
+        self._langfuse.end_trace(context.trace)
+
         # Flush to ensure data is sent
         self._langfuse.flush()
 
@@ -221,17 +225,24 @@ class TraceStateManager:
         """
         Clean up all traces for a session.
 
-        Removes all traces from the session stack and flushes pending data.
+        Ends all traces, removes them from the stack, and flushes pending data.
         Called when MCP session terminates.
 
         Args:
             session_id: MCP session ID to clean up
         """
+        traces_to_end = []
         with self._lock:
             if session_id in self._session_trace_stacks:
-                trace_count = len(self._session_trace_stacks[session_id])
+                # Collect traces to end (outside lock to avoid holding during I/O)
+                traces_to_end = list(self._session_trace_stacks[session_id])
+                trace_count = len(traces_to_end)
                 del self._session_trace_stacks[session_id]
                 logger.info(f"Cleaned up {trace_count} traces for session {session_id}")
+
+        # End all traces - Bug #135 fix: must end spans before flush sends data
+        for context in traces_to_end:
+            self._langfuse.end_trace(context.trace)
 
         # Flush any pending data
         self._langfuse.flush()
