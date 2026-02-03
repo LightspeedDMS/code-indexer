@@ -173,7 +173,7 @@ class AutoSpanLogger:
             span = self.langfuse.create_span(
                 trace_id=trace_ctx.trace_id,
                 name=tool_name,
-                input=sanitized_input,
+                input_data=sanitized_input,
             )
         except Exception as span_creation_error:
             logger.warning(

@@ -134,7 +134,7 @@ class TestInterceptToolCallWithActiveTrace:
         )
 
         call_kwargs = mock_langfuse.create_span.call_args[1]
-        assert call_kwargs["input"] == arguments
+        assert call_kwargs["input_data"] == arguments
 
     @pytest.mark.asyncio
     async def test_captures_tool_output(
