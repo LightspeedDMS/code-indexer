@@ -276,17 +276,42 @@ Before ANY work: `git branch --show-current`
 - OK: `development`, `feature/*`, `bugfix/*`
 - WRONG: `staging`, `master` - STOP, ask user before proceeding
 
-### Version Management
+### CRITICAL: Deployment Workflow - NEVER SKIP
 
-- Bumps ONLY in `development`
-- Format: `vX.Y.Z` (e.g., `v8.8.18`)
-- Files: `__init__.py` + `CHANGELOG.md` + `README.md` + git tag
+**ABSOLUTE PROHIBITION**: NEVER commit directly to `master` or `staging`. ALL changes flow through `development` first.
+
+**The ONLY correct workflow**:
 
 ```
-development (bump, tag) → staging (merge, push → .20) → master (merge, push → .30)
+development → staging → master
+     ↓            ↓          ↓
+  (develop)    (.20)      (.30)
+   bump/tag    test     production
 ```
 
-*Recorded 2026-02-01*
+**Step-by-step**:
+
+1. **Development** (on `development` branch):
+   - Make code changes
+   - Run tests locally
+   - Bump version in `__init__.py`, `CHANGELOG.md`, `README.md`
+   - Create git tag: `git tag v8.8.X`
+   - Push: `git push origin development --tags`
+
+2. **Staging** (merge to `staging`):
+   - `git checkout staging && git merge development && git push origin staging`
+   - Auto-deploys to 192.168.60.20 (staging server)
+   - **E2E TEST ON STAGING** - verify fix works in production-like environment
+
+3. **Production** (merge to `master` ONLY after staging validation):
+   - `git checkout master && git merge staging && git push origin master`
+   - Auto-deploys to 192.168.60.30 (production server)
+
+**WHY THIS MATTERS**: Committing directly to master skips staging validation and can deploy untested code to production.
+
+**VIOLATION = DEPLOYMENT FAILURE**: If you commit to master without going through staging, you've broken the deployment pipeline.
+
+*Recorded 2026-02-01, Updated 2026-02-03 after Bug #137 deployment mistake*
 
 ---
 
