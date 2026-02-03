@@ -10865,7 +10865,12 @@ def handle_start_trace(
                 {"status": "error", "message": "Failed to create trace"}
             )
 
-        return _mcp_response({"status": "active", "trace_id": trace_ctx.trace_id})
+        # Bug #137 fix: Return session_id so HTTP clients know which session to use
+        return _mcp_response({
+            "status": "active",
+            "trace_id": trace_ctx.trace_id,
+            "session_id": session_id,
+        })
 
     except Exception as e:
         logger.error(
@@ -10907,9 +10912,11 @@ def handle_end_trace(
             )
 
         session_id = session_state.session_id
+        username = user.username
 
         # Get trace_id before ending
-        trace_ctx = service.trace_manager.get_active_trace(session_id)
+        # Bug #137 fix: Pass username for fallback lookup (HTTP client support)
+        trace_ctx = service.trace_manager.get_active_trace(session_id, username=username)
         if not trace_ctx:
             return _mcp_response(
                 {"status": "no_active_trace", "message": "No active trace to end"}
@@ -10921,8 +10928,10 @@ def handle_end_trace(
         feedback = args.get("feedback")
         outcome = args.get("outcome")
 
+        # Bug #137 fix: Pass username for fallback lookup (HTTP client support)
         success = service.trace_manager.end_trace(
-            session_id=session_id, score=score, feedback=feedback, outcome=outcome
+            session_id=session_id, score=score, feedback=feedback, outcome=outcome,
+            username=username
         )
 
         if success:

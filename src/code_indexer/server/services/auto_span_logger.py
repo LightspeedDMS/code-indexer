@@ -132,7 +132,8 @@ class AutoSpanLogger:
             Any exception raised by handler (after capturing in span if trace active)
         """
         # Check if there's an active trace for this session
-        trace_ctx = self.trace_manager.get_active_trace(session_id)
+        # Bug #137 fix: Pass username for fallback lookup (HTTP client support)
+        trace_ctx = self.trace_manager.get_active_trace(session_id, username=username)
 
         # Story #136 follow-up: Auto-trace creation
         if (

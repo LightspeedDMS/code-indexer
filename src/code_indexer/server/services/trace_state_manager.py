@@ -73,6 +73,10 @@ class TraceStateManager:
         """
         self._langfuse = langfuse_client
         self._session_trace_stacks: Dict[str, List[TraceContext]] = {}
+        # Bug #137 fix: Track username-to-session mapping for HTTP client fallback
+        # HTTP clients (like Claude Code's MCP) generate new session_ids per request,
+        # so we need to find traces by username when session_id lookup fails
+        self._username_to_session: Dict[str, str] = {}
         self._lock = threading.Lock()
 
     def start_trace(
@@ -136,6 +140,10 @@ class TraceStateManager:
                 self._session_trace_stacks[session_id] = []
             self._session_trace_stacks[session_id].append(context)
 
+            # Bug #137 fix: Record username-to-session mapping for HTTP client fallback
+            if username:
+                self._username_to_session[username] = session_id
+
             logger.info(
                 f"Started trace {trace.id} for session {session_id} "
                 f"(topic: {topic}, parent: {parent_trace_id})"
@@ -143,27 +151,47 @@ class TraceStateManager:
 
             return context
 
-    def get_active_trace(self, session_id: str) -> Optional[TraceContext]:
+    def get_active_trace(
+        self, session_id: str, username: Optional[str] = None
+    ) -> Optional[TraceContext]:
         """
         Get the currently active trace for a session.
 
         Returns the most recently started trace (top of stack).
 
+        Bug #137 fix: For HTTP clients that generate new session_ids per request,
+        falls back to username-based lookup if session_id lookup fails and username
+        is provided.
+
         Args:
             session_id: MCP session ID
+            username: Optional username for fallback lookup (HTTP client support)
 
         Returns:
             TraceContext if active trace exists, None otherwise
         """
         with self._lock:
-            if session_id not in self._session_trace_stacks:
-                return None
+            # Primary lookup: by session_id
+            if session_id in self._session_trace_stacks:
+                stack = self._session_trace_stacks[session_id]
+                if stack:
+                    return stack[-1]  # Top of stack
 
-            stack = self._session_trace_stacks[session_id]
-            if not stack:
-                return None
+            # Bug #137 fix: Fallback lookup by username for HTTP clients
+            # HTTP clients (like Claude Code's MCP) generate new session_ids per request,
+            # so we need to find traces by username when session_id lookup fails
+            if username and username in self._username_to_session:
+                original_session = self._username_to_session[username]
+                if original_session in self._session_trace_stacks:
+                    stack = self._session_trace_stacks[original_session]
+                    if stack:
+                        logger.debug(
+                            f"Found trace via username fallback: session {original_session} "
+                            f"for user {username} (requested session: {session_id})"
+                        )
+                        return stack[-1]
 
-            return stack[-1]  # Top of stack
+            return None
 
     def end_trace(
         self,
@@ -171,37 +199,61 @@ class TraceStateManager:
         score: Optional[float] = None,
         feedback: Optional[str] = None,
         outcome: Optional[str] = None,
+        username: Optional[str] = None,
     ) -> Optional[TraceContext]:
         """
         End the currently active trace for a session.
 
         Pops the most recent trace from the stack and optionally adds a score.
 
+        Bug #137 fix: For HTTP clients that generate new session_ids per request,
+        falls back to username-based lookup if session_id lookup fails and username
+        is provided.
+
         Args:
             session_id: MCP session ID
             score: Optional score value (0.0 to 1.0)
             feedback: Optional feedback text
             outcome: Optional outcome description (unused currently)
+            username: Optional username for fallback lookup (HTTP client support)
 
         Returns:
             TraceContext of ended trace if successful, None otherwise
         """
         with self._lock:
+            # Bug #137 fix: Try username-based fallback if session_id lookup fails
+            effective_session_id = session_id
             if session_id not in self._session_trace_stacks:
-                logger.warning(f"end_trace called for unknown session: {session_id}")
+                # Try username fallback
+                if username and username in self._username_to_session:
+                    effective_session_id = self._username_to_session[username]
+                    logger.debug(
+                        f"end_trace using username fallback: session {effective_session_id} "
+                        f"for user {username} (requested session: {session_id})"
+                    )
+                else:
+                    logger.warning(f"end_trace called for unknown session: {session_id}")
+                    return None
+
+            if effective_session_id not in self._session_trace_stacks:
+                logger.warning(f"end_trace called for unknown session: {effective_session_id}")
                 return None
 
-            stack = self._session_trace_stacks[session_id]
+            stack = self._session_trace_stacks[effective_session_id]
             if not stack:
                 logger.warning(
-                    f"end_trace called with empty stack for session: {session_id}"
+                    f"end_trace called with empty stack for session: {effective_session_id}"
                 )
                 return None
 
             # Pop from stack
             context = stack.pop()
 
-            logger.info(f"Ended trace {context.trace_id} for session {session_id}")
+            # Bug #137 fix: Clean up username mapping if stack is now empty
+            if not stack and username and username in self._username_to_session:
+                del self._username_to_session[username]
+
+            logger.info(f"Ended trace {context.trace_id} for session {effective_session_id}")
 
         # Add score if provided (outside lock to avoid holding during I/O)
         if score is not None:
