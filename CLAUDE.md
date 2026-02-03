@@ -285,7 +285,7 @@ Before ANY work: `git branch --show-current`
 ```
 development → staging → master
      ↓            ↓          ↓
-  (develop)    (.20)      (.30)
+  (develop)    (.20)    (auto-deploy)
    bump/tag    test     production
 ```
 
@@ -305,13 +305,13 @@ development → staging → master
 
 3. **Production** (merge to `master` ONLY after staging validation):
    - `git checkout master && git merge staging && git push origin master`
-   - Auto-deploys to 192.168.60.30 (production server)
+   - Production auto-deploys by pulling from master (NO direct access)
 
 **WHY THIS MATTERS**: Committing directly to master skips staging validation and can deploy untested code to production.
 
 **VIOLATION = DEPLOYMENT FAILURE**: If you commit to master without going through staging, you've broken the deployment pipeline.
 
-*Recorded 2026-02-01, Updated 2026-02-03 after Bug #137 deployment mistake*
+*Recorded 2026-02-01, Updated 2026-02-03*
 
 ---
 
