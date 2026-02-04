@@ -200,3 +200,149 @@ class TestRegexSearchInputValidation:
             error_msg = parsed.get("error", "")
             assert not ("include_patterns" in error_msg.lower() and "list" in error_msg.lower())
             assert not ("exclude_patterns" in error_msg.lower() and "list" in error_msg.lower())
+
+
+class TestRegexSearchOmniValidation:
+    """Test input validation for omni-search mode (Bug #139).
+
+    Bug #139: include_patterns and exclude_patterns validation was bypassed
+    when repository_alias is an array (omni-search mode) because the code
+    routed to _omni_regex_search BEFORE the validation checks.
+    """
+
+    @pytest.mark.asyncio
+    async def test_omni_include_patterns_string_returns_error(self, mock_user):
+        """Bug #139: String include_patterns should return error for omni-search."""
+        # GIVEN: Omni-search with include_patterns as string (invalid type)
+        args = {
+            "repository_alias": ["repo1-global", "repo2-global"],
+            "pattern": "test.*",
+            "include_patterns": "*.py"  # Should be list, not string
+        }
+
+        # Mock dependencies
+        with patch('code_indexer.server.mcp.handlers._get_golden_repos_dir', return_value="/tmp/test"), \
+             patch('code_indexer.server.mcp.handlers.get_config_service'):
+
+            # WHEN: handle_regex_search is called
+            result = await handle_regex_search(args, mock_user)
+
+        # THEN: Should return error response
+        assert result is not None
+        data = result.get("content", [{}])[0].get("text", "{}")
+        parsed = json.loads(data)
+        assert parsed["success"] is False
+        assert "error" in parsed
+        assert "include_patterns" in parsed["error"].lower()
+        assert "list" in parsed["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_omni_exclude_patterns_string_returns_error(self, mock_user):
+        """Bug #139: String exclude_patterns should return error for omni-search."""
+        # GIVEN: Omni-search with exclude_patterns as string (invalid type)
+        args = {
+            "repository_alias": ["repo1-global", "repo2-global"],
+            "pattern": "test.*",
+            "exclude_patterns": "*.pyc"  # Should be list, not string
+        }
+
+        # Mock dependencies
+        with patch('code_indexer.server.mcp.handlers._get_golden_repos_dir', return_value="/tmp/test"), \
+             patch('code_indexer.server.mcp.handlers.get_config_service'):
+
+            # WHEN: handle_regex_search is called
+            result = await handle_regex_search(args, mock_user)
+
+        # THEN: Should return error response
+        assert result is not None
+        data = result.get("content", [{}])[0].get("text", "{}")
+        parsed = json.loads(data)
+        assert parsed["success"] is False
+        assert "error" in parsed
+        assert "exclude_patterns" in parsed["error"].lower()
+        assert "list" in parsed["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_omni_include_patterns_float_returns_error(self, mock_user):
+        """Bug #139: Float include_patterns should return error for omni-search."""
+        # GIVEN: Omni-search with include_patterns as float (invalid type)
+        args = {
+            "repository_alias": ["repo1-global", "repo2-global"],
+            "pattern": "test.*",
+            "include_patterns": 123.45
+        }
+
+        # Mock dependencies
+        with patch('code_indexer.server.mcp.handlers._get_golden_repos_dir', return_value="/tmp/test"), \
+             patch('code_indexer.server.mcp.handlers.get_config_service'):
+
+            # WHEN: handle_regex_search is called
+            result = await handle_regex_search(args, mock_user)
+
+        # THEN: Should return error response
+        assert result is not None
+        data = result.get("content", [{}])[0].get("text", "{}")
+        parsed = json.loads(data)
+        assert parsed["success"] is False
+        assert "error" in parsed
+        assert "include_patterns" in parsed["error"].lower()
+        assert "list" in parsed["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_omni_exclude_patterns_float_returns_error(self, mock_user):
+        """Bug #139: Float exclude_patterns should return error for omni-search."""
+        # GIVEN: Omni-search with exclude_patterns as float (invalid type)
+        args = {
+            "repository_alias": ["repo1-global", "repo2-global"],
+            "pattern": "test.*",
+            "exclude_patterns": 456.78
+        }
+
+        # Mock dependencies
+        with patch('code_indexer.server.mcp.handlers._get_golden_repos_dir', return_value="/tmp/test"), \
+             patch('code_indexer.server.mcp.handlers.get_config_service'):
+
+            # WHEN: handle_regex_search is called
+            result = await handle_regex_search(args, mock_user)
+
+        # THEN: Should return error response
+        assert result is not None
+        data = result.get("content", [{}])[0].get("text", "{}")
+        parsed = json.loads(data)
+        assert parsed["success"] is False
+        assert "error" in parsed
+        assert "exclude_patterns" in parsed["error"].lower()
+        assert "list" in parsed["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_omni_valid_patterns_list_succeeds(self, mock_user):
+        """Bug #139: Valid list patterns should work for omni-search."""
+        # GIVEN: Omni-search with valid list patterns
+        args = {
+            "repository_alias": ["repo1-global", "repo2-global"],
+            "pattern": "test.*",
+            "include_patterns": ["*.py", "*.js"],
+            "exclude_patterns": ["*.pyc"]
+        }
+
+        # Mock the omni-search to avoid actual execution
+        with patch('code_indexer.server.mcp.handlers._get_golden_repos_dir', return_value="/tmp/test"), \
+             patch('code_indexer.server.mcp.handlers.get_config_service'), \
+             patch('code_indexer.server.mcp.handlers._omni_regex_search') as mock_omni:
+
+            mock_omni.return_value = {
+                "content": [{"type": "text", "text": json.dumps({"success": True, "total_results": 0, "results": []})}]
+            }
+
+            # WHEN: handle_regex_search is called
+            result = await handle_regex_search(args, mock_user)
+
+        # THEN: Should NOT return validation error
+        assert result is not None
+        data = result.get("content", [{}])[0].get("text", "{}")
+        parsed = json.loads(data)
+        # Should not fail with validation error
+        if not parsed.get("success"):
+            error_msg = parsed.get("error", "")
+            assert not ("include_patterns" in error_msg.lower() and "list" in error_msg.lower())
+            assert not ("exclude_patterns" in error_msg.lower() and "list" in error_msg.lower())

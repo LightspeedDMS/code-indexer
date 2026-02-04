@@ -2712,6 +2712,20 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
     repository_alias = _parse_json_string_array(repository_alias)
     args["repository_alias"] = repository_alias  # Update args for downstream
 
+    # Bug #139: Validate include/exclude patterns BEFORE routing to omni-search
+    # This ensures validation runs for both single-repo and omni-search modes
+    include_patterns = args.get("include_patterns")
+    if include_patterns is not None and not isinstance(include_patterns, list):
+        return _mcp_response(
+            {"success": False, "error": "include_patterns must be a list of strings"}
+        )
+
+    exclude_patterns = args.get("exclude_patterns")
+    if exclude_patterns is not None and not isinstance(exclude_patterns, list):
+        return _mcp_response(
+            {"success": False, "error": "exclude_patterns must be a list of strings"}
+        )
+
     # Route to omni-search when repository_alias is an array
     if isinstance(repository_alias, list):
         return await _omni_regex_search(args, user)
@@ -2726,19 +2740,6 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
     if not pattern:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: pattern"}
-        )
-
-    # Validate optional pattern parameters are lists or None (GitHub Issue #130)
-    include_patterns = args.get("include_patterns")
-    if include_patterns is not None and not isinstance(include_patterns, list):
-        return _mcp_response(
-            {"success": False, "error": "include_patterns must be a list of strings"}
-        )
-
-    exclude_patterns = args.get("exclude_patterns")
-    if exclude_patterns is not None and not isinstance(exclude_patterns, list):
-        return _mcp_response(
-            {"success": False, "error": "exclude_patterns must be a list of strings"}
         )
 
     try:
