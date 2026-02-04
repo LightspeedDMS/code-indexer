@@ -815,10 +815,10 @@ class PasswordChangeAuditLogger:
             # Return in reverse chronological order (newest first)
             return list(reversed(log_entries))
 
-        except Exception:
+        except Exception as e:
             # Log the error for debugging, but return empty list for graceful degradation
             logger.warning(
-                format_error_log("AUTH-MIGRATE-009", "Failed to parse log file: {e}"),
+                format_error_log("AUTH-MIGRATE-009", f"Failed to parse log file: {e}"),
                 extra=get_log_extra("AUTH-MIGRATE-009"),
             )
             return []
