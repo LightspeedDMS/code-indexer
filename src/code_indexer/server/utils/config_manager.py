@@ -77,6 +77,7 @@ class ServerResourceConfig:
     git_restore_timeout: int = 300  # 5 minutes for git restore .
     cidx_fix_config_timeout: int = 60  # 1 minute for cidx fix-config
     cidx_index_timeout: int = 3600  # 1 hour for cidx index on large repos
+    cidx_scip_generate_timeout: int = 1800  # 30 minutes for cidx scip generate (AC4)
 
     # NOTE: Artificial resource limits (max_golden_repos, max_repo_size_bytes, max_jobs_per_user)
     # have been REMOVED from the codebase. They were nonsensical limitations that served no purpose.

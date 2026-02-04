@@ -37,7 +37,8 @@ class DatabaseSchema:
             created_at TEXT NOT NULL,
             last_refresh TEXT NOT NULL,
             enable_temporal BOOLEAN DEFAULT FALSE,
-            temporal_options TEXT
+            temporal_options TEXT,
+            enable_scip BOOLEAN DEFAULT FALSE
         )
     """
 
@@ -301,6 +302,7 @@ class DatabaseSchema:
 
             # Run schema migrations for existing databases
             self._migrate_self_monitoring_issues_schema(conn)
+            self._migrate_global_repos_schema(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
@@ -348,6 +350,34 @@ class DatabaseSchema:
             conn.commit()
             logger.info(
                 f"Migrated self_monitoring_issues schema: added {migrations_applied}"
+            )
+
+    def _migrate_global_repos_schema(self, conn: sqlite3.Connection) -> None:
+        """
+        Migrate global_repos table schema for existing databases.
+
+        Adds columns that were added after the initial table creation:
+        - enable_scip: Whether SCIP code intelligence indexing is enabled
+
+        This is safe to run multiple times - it only adds missing columns.
+        """
+        # Get existing columns
+        cursor = conn.execute("PRAGMA table_info(global_repos)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        migrations_applied = []
+
+        # Add missing columns
+        if "enable_scip" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE global_repos ADD COLUMN enable_scip BOOLEAN DEFAULT FALSE"
+            )
+            migrations_applied.append("enable_scip")
+
+        if migrations_applied:
+            conn.commit()
+            logger.info(
+                f"Migrated global_repos schema: added {migrations_applied}"
             )
 
 

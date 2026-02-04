@@ -42,6 +42,7 @@ class GlobalReposSqliteBackend:
         index_path: str,
         enable_temporal: bool = False,
         temporal_options: Optional[Dict[str, Any]] = None,
+        enable_scip: bool = False,
     ) -> None:
         """
         Register a new repository or update existing one.
@@ -53,6 +54,7 @@ class GlobalReposSqliteBackend:
             index_path: Path to the repository index.
             enable_temporal: Whether temporal indexing is enabled.
             temporal_options: Optional temporal indexing options (stored as JSON).
+            enable_scip: Whether SCIP code intelligence indexing is enabled.
         """
         now = datetime.now(timezone.utc).isoformat()
         temporal_json = json.dumps(temporal_options) if temporal_options else None
@@ -61,8 +63,8 @@ class GlobalReposSqliteBackend:
             conn.execute(
                 """INSERT OR REPLACE INTO global_repos
                    (alias_name, repo_name, repo_url, index_path, created_at,
-                    last_refresh, enable_temporal, temporal_options)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    last_refresh, enable_temporal, temporal_options, enable_scip)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     alias_name,
                     repo_name,
@@ -72,6 +74,7 @@ class GlobalReposSqliteBackend:
                     now,
                     enable_temporal,
                     temporal_json,
+                    enable_scip,
                 ),
             )
             return None
@@ -92,7 +95,7 @@ class GlobalReposSqliteBackend:
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             """SELECT alias_name, repo_name, repo_url, index_path, created_at,
-                      last_refresh, enable_temporal, temporal_options
+                      last_refresh, enable_temporal, temporal_options, enable_scip
                FROM global_repos WHERE alias_name = ?""",
             (alias_name,),
         )
@@ -110,6 +113,7 @@ class GlobalReposSqliteBackend:
             "last_refresh": row[5],
             "enable_temporal": bool(row[6]),
             "temporal_options": json.loads(row[7]) if row[7] else None,
+            "enable_scip": bool(row[8]),
         }
 
     def list_repos(self) -> Dict[str, Dict[str, Any]]:
@@ -212,6 +216,32 @@ class GlobalReposSqliteBackend:
         if updated:
             logger.debug(
                 f"Updated enable_temporal={enable_temporal} for repo: {alias_name}"
+            )
+        return updated
+
+    def update_enable_scip(self, alias_name: str, enable_scip: bool) -> bool:
+        """
+        Update the enable_scip flag for a repository.
+
+        Args:
+            alias_name: Alias of the repository to update (with -global suffix)
+            enable_scip: New value for enable_scip flag
+
+        Returns:
+            True if record was updated, False if not found.
+        """
+
+        def operation(conn):
+            cursor = conn.execute(
+                "UPDATE global_repos SET enable_scip = ? WHERE alias_name = ?",
+                (1 if enable_scip else 0, alias_name),
+            )
+            return cursor.rowcount > 0
+
+        updated: bool = self._conn_manager.execute_atomic(operation)
+        if updated:
+            logger.debug(
+                f"Updated enable_scip={enable_scip} for repo: {alias_name}"
             )
         return updated
 

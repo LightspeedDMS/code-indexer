@@ -43,6 +43,7 @@ class RefreshScheduler:
         cleanup_manager: CleanupManager,
         resource_config: Optional["ServerResourceConfig"] = None,
         background_job_manager: Optional["BackgroundJobManager"] = None,
+        registry: Optional["GlobalRegistry"] = None,
     ):
         """
         Initialize the refresh scheduler.
@@ -54,12 +55,8 @@ class RefreshScheduler:
             cleanup_manager: Cleanup manager for old index removal
             resource_config: Optional resource configuration for timeouts (server mode)
             background_job_manager: Optional job manager for dashboard visibility (server mode)
+            registry: Optional registry instance (for testing); if None, creates SQLite backend (production)
         """
-        # Lazy import to avoid circular dependency (Story #713)
-        from code_indexer.server.utils.registry_factory import (
-            get_server_global_registry,
-        )
-
         self.golden_repos_dir = Path(golden_repos_dir)
         self.config_source = config_source
         self.query_tracker = query_tracker
@@ -69,7 +66,16 @@ class RefreshScheduler:
 
         # Initialize managers
         self.alias_manager = AliasManager(str(self.golden_repos_dir / "aliases"))
-        self.registry = get_server_global_registry(str(self.golden_repos_dir))
+
+        # Use injected registry if provided (testing), otherwise create SQLite backend (production)
+        if registry is not None:
+            self.registry = registry
+        else:
+            # Lazy import to avoid circular dependency (Story #713)
+            from code_indexer.server.utils.registry_factory import (
+                get_server_global_registry,
+            )
+            self.registry = get_server_global_registry(str(self.golden_repos_dir))
 
         # Thread management
         self._running = False
@@ -286,6 +292,14 @@ class RefreshScheduler:
                 # Get golden repo path from alias (registry path becomes stale after refresh)
                 golden_repo_path = current_target
 
+                # AC6: Reconcile registry with filesystem at START of refresh
+                # This ensures registry flags reflect actual index state before refresh begins
+                detected_indexes = self._detect_existing_indexes(Path(golden_repo_path))
+                self._reconcile_registry_with_filesystem(alias_name, detected_indexes)
+                logger.info(
+                    f"Reconciled registry with filesystem at START for {alias_name}: {detected_indexes}"
+                )
+
                 # Skip refresh for local:// repos (no remote = no refresh = no versioning)
                 repo_url = repo_info.get("repo_url")
                 if repo_url and repo_url.startswith("local://"):
@@ -337,6 +351,14 @@ class RefreshScheduler:
 
                 # Update registry timestamp
                 self.registry.update_refresh_timestamp(alias_name)
+
+                # AC6: Reconcile registry with filesystem at END of refresh
+                # This captures any new indexes created during refresh (semantic, FTS, temporal, SCIP)
+                detected_indexes = self._detect_existing_indexes(Path(new_index_path))
+                self._reconcile_registry_with_filesystem(alias_name, detected_indexes)
+                logger.info(
+                    f"Reconciled registry with filesystem at END for {alias_name}: {detected_indexes}"
+                )
 
                 logger.info(f"Refresh complete for {alias_name}")
                 return {
@@ -568,6 +590,49 @@ class RefreshScheduler:
                         f"Temporal indexing timed out after {cidx_index_timeout} seconds"
                     )
 
+            # Step 5c: Run cidx scip generate for code intelligence indexing (if enabled)
+            # Read SCIP settings from registry
+            enable_scip = (
+                repo_info.get("enable_scip", False) if repo_info else False
+            )
+
+            if enable_scip:
+                # Get SCIP timeout from resource config or use default (AC4)
+                scip_timeout = 1800  # Default: 30 minutes
+                if self.resource_config:
+                    scip_timeout = getattr(
+                        self.resource_config, "cidx_scip_generate_timeout", 1800
+                    )
+
+                scip_command = ["cidx", "scip", "generate"]
+                logger.info(f"SCIP indexing enabled for {alias_name}")
+
+                logger.info(
+                    f"Running cidx scip generate: {' '.join(scip_command)}"
+                )
+                try:
+                    result = subprocess.run(
+                        scip_command,
+                        cwd=str(versioned_path),
+                        capture_output=True,
+                        text=True,
+                        timeout=scip_timeout,
+                        check=True,
+                    )
+                    logger.info("cidx scip generate completed successfully")
+                except subprocess.CalledProcessError as e:
+                    # AC5: SCIP failures should raise RuntimeError
+                    logger.error(f"SCIP indexing failed: {e.stderr}")
+                    raise RuntimeError(f"SCIP indexing failed: {e.stderr}")
+                except subprocess.TimeoutExpired:
+                    # AC5: SCIP timeout should raise RuntimeError
+                    logger.error(
+                        f"SCIP indexing timed out after {scip_timeout} seconds"
+                    )
+                    raise RuntimeError(
+                        f"SCIP indexing timed out after {scip_timeout} seconds"
+                    )
+
             # Step 6: Validate index exists
             index_dir = versioned_path / ".code-indexer" / "index"
             if not index_dir.exists():
@@ -593,3 +658,116 @@ class RefreshScheduler:
 
             # Re-raise with context
             raise RuntimeError(f"Failed to create new index: {e}")
+
+    def _detect_existing_indexes(self, repo_path: Path) -> Dict[str, bool]:
+        """
+        Detect which index types exist in the repository's .code-indexer directory.
+
+        Args:
+            repo_path: Path to the repository root
+
+        Returns:
+            Dictionary with index types as keys and existence as boolean values:
+            - semantic: True if semantic vector index exists
+            - fts: True if FTS (Tantivy) index exists
+            - temporal: True if temporal index exists
+            - scip: True if SCIP code intelligence indexes exist
+        """
+        code_indexer_dir = repo_path / ".code-indexer"
+
+        # Check semantic index: .code-indexer/index/ directory with collections
+        semantic_index_dir = code_indexer_dir / "index"
+        if semantic_index_dir.exists() and semantic_index_dir.is_dir():
+            # Check for collection subdirectories with vector data (exclude temporal collection)
+            collections = [
+                d
+                for d in semantic_index_dir.iterdir()
+                if d.is_dir() and d.name != "code-indexer-temporal"
+            ]
+            semantic_exists = len(collections) > 0
+        else:
+            semantic_exists = False
+
+        # Check FTS index: .code-indexer/tantivy_index/ directory (production path)
+        fts_index_dir = code_indexer_dir / "tantivy_index"
+        fts_exists = fts_index_dir.exists() and fts_index_dir.is_dir()
+
+        # Check temporal index: .code-indexer/index/code-indexer-temporal/ directory (production path)
+        temporal_index_dir = semantic_index_dir / "code-indexer-temporal"
+        temporal_exists = temporal_index_dir.exists() and temporal_index_dir.is_dir()
+
+        # Check SCIP indexes: delegate to _has_scip_indexes()
+        scip_exists = self._has_scip_indexes(repo_path)
+
+        return {
+            "semantic": semantic_exists,
+            "fts": fts_exists,
+            "temporal": temporal_exists,
+            "scip": scip_exists,
+        }
+
+    def _has_scip_indexes(self, repo_path: Path) -> bool:
+        """
+        Check if SCIP code intelligence indexes exist in the repository.
+
+        SCIP indexes are stored in .code-indexer/scip/ with .scip.db files
+        (one per language project).
+
+        Args:
+            repo_path: Path to the repository root
+
+        Returns:
+            True if at least one .scip.db file exists, False otherwise
+        """
+        scip_dir = repo_path / ".code-indexer" / "scip"
+
+        if not scip_dir.exists() or not scip_dir.is_dir():
+            return False
+
+        # Check for .scip.db files (converted SQLite indexes)
+        scip_db_files = list(scip_dir.glob("*.scip.db"))
+        return len(scip_db_files) > 0
+
+    def _reconcile_registry_with_filesystem(
+        self, alias_name: str, detected: Dict[str, bool]
+    ) -> None:
+        """
+        Reconcile registry flags with detected filesystem state.
+
+        Updates enable_temporal and enable_scip flags in the registry to match
+        what actually exists on disk. This ensures registry state stays in sync
+        with filesystem reality.
+
+        Args:
+            alias_name: Repository alias name (without -global suffix)
+            detected: Dictionary from _detect_existing_indexes() with existence flags
+        """
+        # Get current registry state
+        repo_info = self.registry.get_global_repo(alias_name)
+        if not repo_info:
+            logger.warning(
+                f"Cannot reconcile registry for {alias_name}: repo not found in registry"
+            )
+            return
+
+        # Reconcile temporal flag
+        registry_temporal = repo_info.get("enable_temporal", False)
+        filesystem_temporal = detected.get("temporal", False)
+
+        if registry_temporal != filesystem_temporal:
+            logger.info(
+                f"Reconciling temporal flag for {alias_name}: "
+                f"registry={registry_temporal} -> filesystem={filesystem_temporal}"
+            )
+            self.registry.update_enable_temporal(alias_name, filesystem_temporal)
+
+        # Reconcile SCIP flag
+        registry_scip = repo_info.get("enable_scip", False)
+        filesystem_scip = detected.get("scip", False)
+
+        if registry_scip != filesystem_scip:
+            logger.info(
+                f"Reconciling SCIP flag for {alias_name}: "
+                f"registry={registry_scip} -> filesystem={filesystem_scip}"
+            )
+            self.registry.update_enable_scip(alias_name, filesystem_scip)

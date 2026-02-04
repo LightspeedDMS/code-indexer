@@ -149,6 +149,7 @@ class GlobalRegistry:
         allow_reserved: bool = False,
         enable_temporal: bool = False,
         temporal_options: Optional[Dict[str, Union[int, str]]] = None,
+        enable_scip: bool = False,
     ) -> None:
         """
         Register a global repository.
@@ -161,6 +162,7 @@ class GlobalRegistry:
             allow_reserved: If True, allow reserved names (internal use only)
             enable_temporal: Whether to enable temporal indexing (git history search)
             temporal_options: Temporal indexing options (max_commits, since_date, diff_context)
+            enable_scip: Whether to enable SCIP code intelligence indexing
 
         Raises:
             ReservedNameError: If alias_name is a reserved name and allow_reserved=False
@@ -193,6 +195,7 @@ class GlobalRegistry:
                 index_path=index_path,
                 enable_temporal=enable_temporal,
                 temporal_options=temporal_options,
+                enable_scip=enable_scip,
             )
             logger.info(f"Registered global repo (SQLite): {alias_name}")
         else:
@@ -209,6 +212,8 @@ class GlobalRegistry:
                 # Temporal indexing settings (Story #527)
                 "enable_temporal": enable_temporal,
                 "temporal_options": temporal_options,
+                # SCIP code intelligence settings (Story #70)
+                "enable_scip": enable_scip,
             }
 
             self._save_registry()
@@ -286,4 +291,44 @@ class GlobalRegistry:
                 self._registry_data[alias_name]["last_refresh"] = datetime.now(
                     timezone.utc
                 ).isoformat()
+                self._save_registry()
+
+    def update_enable_temporal(self, alias_name: str, enable_temporal: bool) -> None:
+        """
+        Update the enable_temporal flag for a global repo.
+
+        Args:
+            alias_name: Global alias name
+            enable_temporal: New value for enable_temporal flag
+
+        Raises:
+            RuntimeError: If save fails
+        """
+        if self._use_sqlite and self._sqlite_backend is not None:
+            # SQLite backend (Story #702)
+            self._sqlite_backend.update_enable_temporal(alias_name, enable_temporal)
+        else:
+            # JSON file storage (backward compatible)
+            if alias_name in self._registry_data:
+                self._registry_data[alias_name]["enable_temporal"] = enable_temporal
+                self._save_registry()
+
+    def update_enable_scip(self, alias_name: str, enable_scip: bool) -> None:
+        """
+        Update the enable_scip flag for a global repo.
+
+        Args:
+            alias_name: Global alias name
+            enable_scip: New value for enable_scip flag
+
+        Raises:
+            RuntimeError: If save fails
+        """
+        if self._use_sqlite and self._sqlite_backend is not None:
+            # SQLite backend (Story #702)
+            self._sqlite_backend.update_enable_scip(alias_name, enable_scip)
+        else:
+            # JSON file storage (backward compatible)
+            if alias_name in self._registry_data:
+                self._registry_data[alias_name]["enable_scip"] = enable_scip
                 self._save_registry()
