@@ -3256,6 +3256,7 @@ def create_app() -> FastAPI:
         resource_config=server_config.resource_config,
         use_sqlite=True,
         db_path=db_path_str,
+        background_jobs_config=server_config.background_jobs_config,
     )
     # Inject BackgroundJobManager into GoldenRepoManager for async operations
     golden_repo_manager.background_job_manager = background_job_manager
