@@ -224,6 +224,142 @@ class TestGlobalReposSqliteBackend:
         assert updated is not None
         assert updated["last_refresh"] != initial_refresh
 
+    def test_update_enable_temporal_updates_existing_repo(self, tmp_path: Path) -> None:
+        """
+        Bug #131: GlobalReposSqliteBackend.update_enable_temporal() method.
+        Given a database with an existing repo with enable_temporal=False
+        When update_enable_temporal() is called with enable_temporal=True
+        Then the enable_temporal flag is updated and True is returned.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GlobalReposSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GlobalReposSqliteBackend(str(db_path))
+        backend.register_repo(
+            alias_name="python-mock-global",
+            repo_name="python-mock",
+            repo_url="https://github.com/test/python-mock.git",
+            index_path="/path/to/index",
+            enable_temporal=False,
+            temporal_options=None,
+        )
+
+        # Verify initial state
+        initial = backend.get_repo("python-mock-global")
+        assert initial is not None
+        assert initial["enable_temporal"] is False
+
+        # Update enable_temporal flag
+        result = backend.update_enable_temporal("python-mock-global", True)
+
+        # Verify update succeeded
+        assert result is True
+
+        # Verify flag was updated in database
+        updated = backend.get_repo("python-mock-global")
+        assert updated is not None
+        assert updated["enable_temporal"] is True
+
+        # Verify database stores True as 1
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute(
+            "SELECT enable_temporal FROM global_repos WHERE alias_name = ?",
+            ("python-mock-global",),
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row[0] == 1  # True stored as 1
+
+    def test_update_enable_temporal_returns_false_for_nonexistent_repo(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Bug #131: GlobalReposSqliteBackend.update_enable_temporal() method.
+        Given a database without the specified repo
+        When update_enable_temporal() is called
+        Then False is returned (rowcount=0).
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GlobalReposSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GlobalReposSqliteBackend(str(db_path))
+
+        # Attempt to update nonexistent repo
+        result = backend.update_enable_temporal("nonexistent-global", True)
+
+        # Verify operation failed gracefully
+        assert result is False
+
+    def test_update_enable_temporal_converts_false_to_zero(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Bug #131: GlobalReposSqliteBackend.update_enable_temporal() method.
+        Given a database with an existing repo with enable_temporal=True
+        When update_enable_temporal() is called with enable_temporal=False
+        Then the flag is updated to False and stored as 0 in database.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GlobalReposSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GlobalReposSqliteBackend(str(db_path))
+        backend.register_repo(
+            alias_name="temporal-repo-global",
+            repo_name="temporal-repo",
+            repo_url="https://github.com/test/temporal.git",
+            index_path="/path/to/index",
+            enable_temporal=True,
+            temporal_options={"time_range": "all"},
+        )
+
+        # Verify initial state
+        initial = backend.get_repo("temporal-repo-global")
+        assert initial is not None
+        assert initial["enable_temporal"] is True
+
+        # Update enable_temporal to False
+        result = backend.update_enable_temporal("temporal-repo-global", False)
+
+        # Verify update succeeded
+        assert result is True
+
+        # Verify flag was updated
+        updated = backend.get_repo("temporal-repo-global")
+        assert updated is not None
+        assert updated["enable_temporal"] is False
+
+        # Verify database stores False as 0
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute(
+            "SELECT enable_temporal FROM global_repos WHERE alias_name = ?",
+            ("temporal-repo-global",),
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row[0] == 0  # False stored as 0
+
 
 class TestUsersSqliteBackend:
     """Tests for UsersSqliteBackend with normalized tables."""

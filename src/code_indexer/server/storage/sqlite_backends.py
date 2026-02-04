@@ -189,6 +189,32 @@ class GlobalReposSqliteBackend:
             logger.debug(f"Updated last_refresh for repo: {alias_name}")
         return updated
 
+    def update_enable_temporal(self, alias_name: str, enable_temporal: bool) -> bool:
+        """
+        Update the enable_temporal flag for a repository.
+
+        Args:
+            alias_name: Alias of the repository to update (with -global suffix)
+            enable_temporal: New value for enable_temporal flag
+
+        Returns:
+            True if record was updated, False if not found.
+        """
+
+        def operation(conn):
+            cursor = conn.execute(
+                "UPDATE global_repos SET enable_temporal = ? WHERE alias_name = ?",
+                (1 if enable_temporal else 0, alias_name),
+            )
+            return cursor.rowcount > 0
+
+        updated: bool = self._conn_manager.execute_atomic(operation)
+        if updated:
+            logger.debug(
+                f"Updated enable_temporal={enable_temporal} for repo: {alias_name}"
+            )
+        return updated
+
     def close(self) -> None:
         """Close database connections."""
         self._conn_manager.close_all()
@@ -1286,6 +1312,35 @@ class GoldenRepoMetadataSqliteBackend:
             (alias,),
         )
         return cursor.fetchone() is not None
+
+    def update_enable_temporal(self, alias: str, enable: bool) -> bool:
+        """
+        Update the enable_temporal flag for a golden repository.
+
+        Bug #131: This method is called after successful temporal index creation
+        to update the enable_temporal flag in the database.
+
+        Args:
+            alias: Alias of the repository to update.
+            enable: New value for enable_temporal flag.
+
+        Returns:
+            True if a record was updated, False if alias not found.
+        """
+
+        def operation(conn):
+            cursor = conn.execute(
+                "UPDATE golden_repos_metadata SET enable_temporal = ? WHERE alias = ?",
+                (1 if enable else 0, alias),
+            )
+            return cursor.rowcount > 0
+
+        updated: bool = self._conn_manager.execute_atomic(operation)
+        if updated:
+            logger.info(
+                f"Updated enable_temporal={enable} for golden repo: {alias}"
+            )
+        return updated
 
     def close(self) -> None:
         """Close database connections."""
