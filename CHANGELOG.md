@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.30] - 2026-02-04
+
+### Fixed
+
+- **Bug #139: regex_search validation bypass for omni-search mode** - Fixed validation for `include_patterns` and `exclude_patterns` being bypassed when `repository_alias` is an array (omni-search mode). Root cause: routing to `_omni_regex_search` happened BEFORE validation code, so validation never executed for array inputs. Fix: Moved validation before the routing check so it runs for both single-repo and omni-search modes.
+
+---
+
 ## [8.8.29] - 2026-02-04
 
 ### Added
