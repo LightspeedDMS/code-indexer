@@ -7843,7 +7843,7 @@ HANDLER_REGISTRY["gitlab_ci_get_pipeline"] = handle_gitlab_ci_get_pipeline
 HANDLER_REGISTRY["gitlab_ci_search_logs"] = handle_gitlab_ci_search_logs
 
 
-def handle_gitlab_ci_get_job_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gitlab_ci_get_job_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gitlab_ci_get_job_logs tool.
 
@@ -7891,7 +7891,7 @@ def handle_gitlab_ci_get_job_logs(args: Dict[str, Any], user: User) -> Dict[str,
 
         # Create client and get job logs (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        logs = client.get_job_logs(project_id=project_id, job_id=job_id)
+        logs = await client.get_job_logs(project_id=project_id, job_id=job_id)
 
         return _mcp_response(
             {

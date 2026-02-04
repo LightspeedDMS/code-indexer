@@ -127,7 +127,7 @@ class PasswordChangeAuditLogger:
 
         logger.warning(
             format_error_log(
-                "AUTH-MIGRATE-001", "PASSWORD_CHANGE_FAILURE: {json.dumps(log_entry)}"
+                "AUTH-MIGRATE-001", f"PASSWORD_CHANGE_FAILURE: {json.dumps(log_entry)}"
             ),
             extra=get_log_extra("AUTH-MIGRATE-001"),
         )
@@ -160,7 +160,7 @@ class PasswordChangeAuditLogger:
         logger.warning(
             format_error_log(
                 "AUTH-MIGRATE-002",
-                "PASSWORD_CHANGE_RATE_LIMIT: {json.dumps(log_entry)}",
+                f"PASSWORD_CHANGE_RATE_LIMIT: {json.dumps(log_entry)}",
             ),
             extra=get_log_extra("AUTH-MIGRATE-002"),
         )
@@ -187,7 +187,7 @@ class PasswordChangeAuditLogger:
         logger.warning(
             format_error_log(
                 "AUTH-MIGRATE-003",
-                "PASSWORD_CHANGE_CONCURRENT_CONFLICT: {json.dumps(log_entry)}",
+                f"PASSWORD_CHANGE_CONCURRENT_CONFLICT: {json.dumps(log_entry)}",
             ),
             extra=get_log_extra("AUTH-MIGRATE-003"),
         )
@@ -292,7 +292,7 @@ class PasswordChangeAuditLogger:
 
         logger.error(
             format_error_log(
-                "AUTH-MIGRATE-004", "SECURITY_INCIDENT: {json.dumps(log_entry)}"
+                "AUTH-MIGRATE-004", f"SECURITY_INCIDENT: {json.dumps(log_entry)}"
             ),
             extra=get_log_extra("AUTH-MIGRATE-004"),
         )
@@ -324,7 +324,7 @@ class PasswordChangeAuditLogger:
 
         logger.warning(
             format_error_log(
-                "AUTH-MIGRATE-005", "AUTHENTICATION_FAILURE: {json.dumps(log_entry)}"
+                "AUTH-MIGRATE-005", f"AUTHENTICATION_FAILURE: {json.dumps(log_entry)}"
             ),
             extra=get_log_extra("AUTH-MIGRATE-005"),
         )
@@ -549,7 +549,7 @@ class PasswordChangeAuditLogger:
 
         logger.warning(
             format_error_log(
-                "AUTH-MIGRATE-007", "PR_CREATION_FAILURE: {json.dumps(log_entry)}"
+                "AUTH-MIGRATE-007", f"PR_CREATION_FAILURE: {json.dumps(log_entry)}"
             ),
             extra=get_log_extra("AUTH-MIGRATE-007"),
         )
@@ -724,7 +724,7 @@ class PasswordChangeAuditLogger:
 
         logger.warning(
             format_error_log(
-                "AUTH-MIGRATE-008", "IMPERSONATION_DENIED: {json.dumps(log_entry)}"
+                "AUTH-MIGRATE-008", f"IMPERSONATION_DENIED: {json.dumps(log_entry)}"
             ),
             extra=get_log_extra("AUTH-MIGRATE-008"),
         )
