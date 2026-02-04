@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.29] - 2026-02-04
+
+### Added
+
+- **Story #70: Auto-Refresh Index Reconciliation** - Auto-refresh now detects ALL index types on disk (semantic, FTS, temporal, SCIP) and reconciles registry metadata to match filesystem reality. Features:
+  - `_detect_existing_indexes()` scans for semantic, FTS, temporal, and SCIP indexes
+  - `_reconcile_registry_with_filesystem()` enables flags when indexes found, disables when missing
+  - `enable_scip` field added to global_repos schema with migration support
+  - Step 5c SCIP indexing added to refresh workflow with configurable timeout (1800s default)
+  - Graceful failure handling - reconciliation failures logged but don't block refresh
+  - Continuous reconciliation runs at START (before indexing) and END (after creation)
+
+---
+
 ## [8.8.28] - 2026-02-03
 
 ### Fixed
