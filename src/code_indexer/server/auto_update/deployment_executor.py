@@ -23,6 +23,7 @@ class DeploymentExecutor:
     def __init__(
         self,
         repo_path: Path,
+        branch: str = "master",
         service_name: str = "cidx-server",
         server_url: str = "http://localhost:8000",
         drain_timeout: int = 300,
@@ -32,12 +33,14 @@ class DeploymentExecutor:
 
         Args:
             repo_path: Path to git repository
+            branch: Git branch to pull from (default: master)
             service_name: Systemd service name (default: cidx-server)
             server_url: CIDX server URL for maintenance API (default: http://localhost:8000)
             drain_timeout: Max seconds to wait for drain (default: 300)
             drain_poll_interval: Seconds between drain status checks (default: 10)
         """
         self.repo_path = repo_path
+        self.branch = branch
         self.service_name = service_name
         self.server_url = server_url
         self.drain_timeout = drain_timeout
@@ -289,7 +292,7 @@ class DeploymentExecutor:
         """
         try:
             result = subprocess.run(
-                ["git", "pull", "origin", "master"],
+                ["git", "pull", "origin", self.branch],
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,

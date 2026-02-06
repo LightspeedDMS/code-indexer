@@ -37,6 +37,7 @@ def main():
         deployment_lock = DeploymentLock(lock_file=lock_file)
         deployment_executor = DeploymentExecutor(
             repo_path=repo_path,
+            branch=branch,
             service_name="cidx-server",
         )
 

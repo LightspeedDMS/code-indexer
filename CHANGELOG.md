@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.33] - 2026-02-06
+
+### Fixed
+
+- **Bug #155: Auto-updater ignores CIDX_AUTO_UPDATE_BRANCH environment variable** - Fixed `DeploymentExecutor` hardcoding "master" branch in `git_pull()` instead of using the configured branch. Root cause: When three-tier branching strategy was implemented (v8.8.19), the branch parameter was wired to `ChangeDetector` but NOT to `DeploymentExecutor`. This caused staging server to detect changes on `origin/staging` but pull from `origin/master` (no changes), resulting in "Already up to date" and failed deployments. Fix: Added `branch` parameter to `DeploymentExecutor.__init__()` and wired it through `run_once.py`.
+
+---
+
 ## [8.8.32] - 2026-02-06
 
 ### Fixed
