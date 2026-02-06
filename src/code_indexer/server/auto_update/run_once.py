@@ -28,7 +28,7 @@ def main():
         repo_path = Path(
             os.environ.get("CIDX_SERVER_REPO_PATH", "/home/sebabattig/cidx-server")
         )
-        branch = os.environ.get("CIDX_AUTO_UPDATE_BRANCH", "master")
+        branch = os.environ.get("CIDX_AUTO_UPDATE_BRANCH") or "master"
         lock_file = Path("/tmp/cidx-auto-update.lock")
         check_interval = 60  # seconds (not used in oneshot mode)
 
