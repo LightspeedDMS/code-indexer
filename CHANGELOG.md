@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.35] - 2026-02-06
+
+### Fixed
+
+- **Bug #156: Auto-updater pip install uses wrong Python environment** - Fixed `pip_install()` using hardcoded `"python3"` which installs to system Python instead of the pipx venv where code-indexer is actually running. Changed to `sys.executable` to use the same Python interpreter that's running the auto-updater, ensuring dependencies are installed in the correct environment.
+
+---
+
 ## [8.8.34] - 2026-02-06
 
 ### Fixed

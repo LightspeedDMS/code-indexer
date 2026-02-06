@@ -7,6 +7,7 @@ from typing import Optional
 import subprocess
 import logging
 import time
+import sys
 
 import requests
 from code_indexer.server.logging_utils import format_error_log
@@ -330,7 +331,7 @@ class DeploymentExecutor:
         try:
             result = subprocess.run(
                 [
-                    "python3",
+                    sys.executable,
                     "-m",
                     "pip",
                     "install",
