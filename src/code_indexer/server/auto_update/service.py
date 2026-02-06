@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from .change_detector import ChangeDetector
     from .deployment_lock import DeploymentLock
     from .deployment_executor import DeploymentExecutor
+from code_indexer.server.auto_update.deployment_executor import PENDING_REDEPLOY_MARKER
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,9 @@ class AutoUpdateService:
 
         Checks for changes and triggers deployment if needed.
         Only runs when in IDLE state to prevent concurrent operations.
+
+        Issue #154: Also checks for pending-redeploy marker and forces deployment
+        if present, bypassing normal change detection flow.
         """
         # Validate components are injected before use
         assert (
@@ -86,6 +90,24 @@ class AutoUpdateService:
         assert (
             self.deployment_executor is not None
         ), "deployment_executor must be set before calling poll_once()"
+
+        # Issue #154: Check for pending-redeploy marker FIRST (before state checks)
+        if PENDING_REDEPLOY_MARKER.exists():
+            logger.info(
+                "Pending redeploy marker found, forcing deployment",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            try:
+                PENDING_REDEPLOY_MARKER.unlink()
+            except Exception as e:
+                logger.warning(
+                    f"Could not remove marker: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
+            # Force deployment without change detection
+            self.deployment_executor.execute()
+            return
 
         # Skip if not in IDLE state
         if self.current_state != ServiceState.IDLE:

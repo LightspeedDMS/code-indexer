@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.36] - 2026-02-06
+
+### Added
+
+- **Issue #154: Self-Healing Auto-Updater Python Environment Detection** - Complete solution for Python environment mismatch between auto-updater service (system Python) and main server (pipx venv). Features:
+  - `_get_server_python()` method reads cidx-server.service and extracts the actual Python interpreter path from ExecStart line
+  - `_ensure_auto_updater_uses_server_python()` updates the auto-updater service file to use the same Python as the server
+  - Two-cycle self-healing flow: first cycle updates service file and creates pending-redeploy marker, second cycle installs to correct environment
+  - `poll_once()` checks for pending-redeploy marker and forces deployment when found
+  - Modified `pip_install()` to use `_get_server_python()` for correct environment targeting
+  - Idempotent design - safe to run multiple times, no marker created if no changes needed
+  - Graceful fallback to sys.executable if service file parsing fails
+
+---
+
 ## [8.8.35] - 2026-02-06
 
 ### Fixed

@@ -14,6 +14,10 @@ from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 
+# Issue #154: Pending redeploy marker for self-healing Python environment
+PENDING_REDEPLOY_MARKER = Path("/tmp/cidx-pending-redeploy")
+AUTO_UPDATE_SERVICE_NAME = "cidx-auto-update"
+
 
 class DeploymentExecutor:
     """Executes deployment commands: git pull, pip install, systemd restart.
@@ -115,7 +119,7 @@ class DeploymentExecutor:
                         f"Using dynamic drain timeout from server: {recommended_timeout}s",
                         extra={"correlation_id": get_correlation_id()},
                     )
-                    return recommended_timeout
+                    return int(recommended_timeout)  # Explicit cast for mypy
 
             logger.warning(
                 format_error_log(
@@ -322,16 +326,238 @@ class DeploymentExecutor:
             )
             return False
 
+    def _get_server_python(self) -> str:
+        """Extract Python interpreter from server's service file ExecStart line.
+
+        Issue #154: Reads cidx-server.service to find the actual Python being used,
+        so pip install targets the correct environment (e.g., pipx venv, not system Python).
+
+        Returns:
+            Python interpreter path from ExecStart, or sys.executable on error
+        """
+        service_path = Path(f"/etc/systemd/system/{self.service_name}.service")
+        try:
+            result = subprocess.run(
+                ["cat", str(service_path)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            if result.returncode != 0:
+                logger.warning(
+                    f"Could not read {service_path}, using sys.executable",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return sys.executable
+
+            # Parse ExecStart line
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if line.startswith("ExecStart="):
+                    exec_command = line.split("=", 1)[1].strip()
+                    python_path = exec_command.split()[0]
+                    if Path(python_path).exists():
+                        logger.info(
+                            f"Using server Python: {python_path}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                        return python_path
+
+            logger.warning(
+                "Could not parse ExecStart, using sys.executable",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return sys.executable
+
+        except Exception as e:
+            logger.warning(
+                f"Error reading service file: {e}, using sys.executable",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return sys.executable
+
+    def _read_service_file(self, service_path: Path) -> Optional[str]:
+        """Read systemd service file content.
+
+        Args:
+            service_path: Path to service file
+
+        Returns:
+            Service file content as string, or None on error
+        """
+        try:
+            result = subprocess.run(
+                ["cat", str(service_path)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            if result.returncode != 0:
+                logger.warning(
+                    f"Could not read {service_path}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return None
+
+            return result.stdout
+
+        except Exception as e:
+            logger.warning(
+                f"Error reading {service_path}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return None
+
+    def _write_service_file_and_reload(
+        self, service_path: Path, content: str
+    ) -> bool:
+        """Write systemd service file via sudo tee and reload daemon.
+
+        Args:
+            service_path: Path to service file
+            content: New service file content
+
+        Returns:
+            True if successful, False on error
+        """
+        try:
+            # Write via sudo tee
+            result = subprocess.run(
+                ["sudo", "tee", str(service_path)],
+                input=content,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-032",
+                        f"Failed to write {service_path}: {result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            # Reload systemd
+            result = subprocess.run(
+                ["sudo", "systemctl", "daemon-reload"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-033",
+                        f"Failed to reload systemd: {result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-034",
+                    f"Error writing service file: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+    def _ensure_auto_updater_uses_server_python(self) -> bool:
+        """Ensure auto-updater service uses same Python as main server.
+
+        Issue #154: Self-healing mechanism to fix Python environment mismatches.
+        If auto-updater uses different Python than server (e.g., /usr/bin/python3
+        vs /opt/pipx/venvs/code-indexer/bin/python), updates the auto-updater
+        service file and creates pending-redeploy marker.
+
+        Returns:
+            True if config is correct or was updated, False on error
+        """
+        try:
+            server_python = self._get_server_python()
+            auto_update_service = Path(
+                f"/etc/systemd/system/{AUTO_UPDATE_SERVICE_NAME}.service"
+            )
+
+            # Read current service file
+            current_content = self._read_service_file(auto_update_service)
+            if current_content is None:
+                return False
+
+            # Check and update ExecStart line
+            new_lines = []
+            needs_update = False
+
+            for line in current_content.splitlines():
+                if line.strip().startswith("ExecStart="):
+                    exec_part = line.split("=", 1)[1].strip()
+                    current_python = exec_part.split()[0]
+
+                    if current_python != server_python:
+                        new_exec = exec_part.replace(current_python, server_python, 1)
+                        new_lines.append(f"ExecStart={new_exec}")
+                        needs_update = True
+                        logger.info(
+                            f"Updating auto-updater Python: {current_python} -> {server_python}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    else:
+                        new_lines.append(line)
+                else:
+                    new_lines.append(line)
+
+            if not needs_update:
+                logger.info(
+                    "Auto-updater already uses correct Python",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            # Write updated service file
+            new_content = "\n".join(new_lines) + "\n"
+            if not self._write_service_file_and_reload(auto_update_service, new_content):
+                return False
+
+            # Create pending-redeploy marker
+            PENDING_REDEPLOY_MARKER.touch()
+            logger.info(
+                f"Created pending-redeploy marker: {PENDING_REDEPLOY_MARKER}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+            return True
+
+        except Exception as e:
+            logger.exception(
+                f"Error ensuring auto-updater Python: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
     def pip_install(self) -> bool:
         """Execute pip install to update dependencies.
+
+        Issue #154: Uses _get_server_python() to install into the correct environment
+        (e.g., pipx venv, not system Python).
 
         Returns:
             True if successful, False otherwise
         """
         try:
+            python_path = self._get_server_python()
             result = subprocess.run(
                 [
-                    sys.executable,
+                    python_path,
                     "-m",
                     "pip",
                     "install",
@@ -810,7 +1036,7 @@ class DeploymentExecutor:
             False if installation failed or unsupported architecture.
         """
         installer = RipgrepInstaller()
-        return installer.install()
+        return bool(installer.install())  # Explicit cast for mypy
 
     def execute(self) -> bool:
         """Execute complete deployment: git pull + pip install.
@@ -854,7 +1080,10 @@ class DeploymentExecutor:
         # Step 5: Ensure git safe.directory configured
         self._ensure_git_safe_directory()
 
-        # Step 6: Ensure ripgrep is installed
+        # Step 6: Issue #154 - Ensure auto-updater uses server Python
+        self._ensure_auto_updater_uses_server_python()
+
+        # Step 7: Ensure ripgrep is installed
         self.ensure_ripgrep()
 
         logger.info(
