@@ -414,6 +414,8 @@ class ClaudeIntegrationConfig:
     scheduled_catchup_enabled: bool = False
     # Interval in minutes for scheduled catch-up scanning (default: 60 = 1 hour)
     scheduled_catchup_interval_minutes: int = 60
+    # Research Assistant Claude CLI timeout in seconds (default: 20 minutes)
+    research_assistant_timeout_seconds: int = 1200
 
 
 @dataclass

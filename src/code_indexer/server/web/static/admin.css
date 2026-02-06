@@ -1103,3 +1103,183 @@ button.danger, .button.danger {
         gap: 0.5rem;
     }
 }
+
+/* ============================================================================
+   Server Clock (Story #89)
+   ============================================================================ */
+
+.server-clock {
+    font-size: 0.85rem;
+    color: var(--pico-muted-color);
+    margin-bottom: 0.5rem;
+    padding: 0.25rem 0;
+}
+
+.server-clock .clock-display {
+    font-family: 'Courier New', Courier, monospace;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+/* ============================================================================
+   Research Assistant - Markdown Rendering Styles
+   ============================================================================ */
+
+/* Message content with markdown rendering */
+.message-content {
+    line-height: 1.6;
+}
+
+/* Code blocks with syntax highlighting */
+.message-content pre {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 12px;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 0.75rem 0;
+}
+
+.message-content code {
+    font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+    font-size: 0.9em;
+}
+
+/* Inline code */
+.message-content p code,
+.message-content li code {
+    background: #2d2d2d;
+    color: #e06c75;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+/* Code blocks inside pre tags (already have dark background) */
+.message-content pre code {
+    background: transparent;
+    color: inherit;
+    padding: 0;
+}
+
+/* Syntax highlighting for codehilite */
+.message-content .codehilite {
+    margin: 0.75rem 0;
+}
+
+.message-content .codehilite pre {
+    margin: 0;
+}
+
+/* Headers in markdown */
+.message-content h1,
+.message-content h2,
+.message-content h3,
+.message-content h4,
+.message-content h5,
+.message-content h6 {
+    margin-top: 1rem;
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+    line-height: 1.3;
+}
+
+.message-content h1 { font-size: 1.5rem; }
+.message-content h2 { font-size: 1.3rem; }
+.message-content h3 { font-size: 1.15rem; }
+.message-content h4 { font-size: 1.05rem; }
+.message-content h5 { font-size: 0.95rem; }
+.message-content h6 { font-size: 0.85rem; }
+
+/* First heading doesn't need top margin */
+.message-content h1:first-child,
+.message-content h2:first-child,
+.message-content h3:first-child,
+.message-content h4:first-child,
+.message-content h5:first-child,
+.message-content h6:first-child {
+    margin-top: 0;
+}
+
+/* Lists */
+.message-content ul,
+.message-content ol {
+    margin: 0.75rem 0;
+    padding-left: 1.5rem;
+}
+
+.message-content li {
+    margin: 0.25rem 0;
+}
+
+/* Nested lists */
+.message-content li ul,
+.message-content li ol {
+    margin: 0.25rem 0;
+}
+
+/* Links */
+.message-content a {
+    color: var(--pico-primary);
+    text-decoration: underline;
+}
+
+.message-content a:hover {
+    color: var(--pico-primary-hover);
+}
+
+/* Paragraphs */
+.message-content p {
+    margin: 0.75rem 0;
+}
+
+.message-content p:first-child {
+    margin-top: 0;
+}
+
+.message-content p:last-child {
+    margin-bottom: 0;
+}
+
+/* Blockquotes */
+.message-content blockquote {
+    border-left: 4px solid var(--pico-primary);
+    padding-left: 1rem;
+    margin: 0.75rem 0;
+    color: var(--pico-muted-color);
+    font-style: italic;
+}
+
+/* Tables */
+.message-content table {
+    width: 100%;
+    margin: 0.75rem 0;
+    border-collapse: collapse;
+}
+
+.message-content table th,
+.message-content table td {
+    padding: 0.5rem;
+    border: 1px solid var(--pico-muted-border-color);
+    text-align: left;
+}
+
+.message-content table th {
+    background: var(--pico-card-sectioning-background-color);
+    font-weight: 600;
+}
+
+/* Strong and emphasis */
+.message-content strong {
+    font-weight: 600;
+}
+
+.message-content em {
+    font-style: italic;
+}
+
+/* Horizontal rules */
+.message-content hr {
+    border: none;
+    border-top: 1px solid var(--pico-muted-border-color);
+    margin: 1rem 0;
+}

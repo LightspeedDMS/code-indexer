@@ -8,11 +8,15 @@
     <link rel="stylesheet" href="/admin/static/pico.min.css">
     <link rel="stylesheet" href="/admin/static/admin.css">
     <script src="/admin/static/htmx.min.js"></script>
+    <script src="/admin/static/js/server_clock.js" defer></script>
 </head>
 <body>
     <main class="container">
         {% if show_nav %}
         <header class="admin-header">
+            <div id="server-clock" class="server-clock" data-initial-timestamp="{{ get_server_time() }}">
+                Server: <span class="clock-display">Loading...</span>
+            </div>
             <nav class="admin-nav">
                 <ul>
                     <li><a href="/admin/" {% if current_page == 'dashboard' %}aria-current="page"{% endif %}>Dashboard</a></li>
@@ -24,6 +28,8 @@
                     <li><a href="/admin/jobs" {% if current_page == 'jobs' %}aria-current="page"{% endif %}>Jobs</a></li>
                     <li><a href="/admin/logs" {% if current_page == 'logs' %}aria-current="page"{% endif %}>Logs</a></li>
                     <li><a href="/admin/self-monitoring" {% if current_page == 'self-monitoring' %}aria-current="page"{% endif %}>Self-Monitoring</a></li>
+                    <li><a href="/admin/diagnostics" {% if current_page == 'diagnostics' %}aria-current="page"{% endif %}>Diagnostics</a></li>
+                    <li><a href="/admin/research" {% if current_page == 'research' %}aria-current="page"{% endif %}>Research Assistant</a></li>
                     <li><a href="/admin/query" {% if current_page == 'query' %}aria-current="page"{% endif %}>Query</a></li>
                     <li><a href="/admin/config" {% if current_page == 'config' %}aria-current="page"{% endif %}>Config</a></li>
                     <li><a href="/admin/api-keys" {% if current_page == 'api-keys' %}aria-current="page"{% endif %}>API Keys</a></li>

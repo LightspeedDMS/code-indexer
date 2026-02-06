@@ -1,0 +1,37 @@
+{# Combined response for /send endpoint - includes messages and sidebar OOB update #}
+
+{# Main content: messages (this replaces #chat-messages) #}
+{% for message in messages %}
+<div class="chat-message {{ message.role }}">
+    <div class="message-content">{{ message.content | safe }}</div>
+    <div class="message-timestamp">{{ message.created_at | relative_time }}</div>
+</div>
+{% endfor %}
+
+{% if error %}
+<div class="chat-message error">
+    <div class="message-content">Error: {{ error }}</div>
+</div>
+{% endif %}
+
+{% if polling %}
+{# HTMX polling trigger - polls every 5 seconds with no timeout (Bug #148 fix) #}
+<div hx-get="/admin/research/poll/{{ job_id }}?session_id={{ active_session_id }}"
+     hx-trigger="load delay:5s"
+     hx-target="#chat-messages"
+     hx-swap="innerHTML"
+     hx-timeout="0">
+    <div class="chat-message working">
+        <div class="message-content">Working...</div>
+    </div>
+</div>
+{% endif %}
+
+{# Out-of-band update for sidebar - ensures session list is in sync #}
+<div id="sessions-sidebar" hx-swap-oob="innerHTML">
+    {% if sessions %}
+        {% include 'partials/research_sessions_list.html' %}
+    {% else %}
+        {% include 'partials/research_empty_state.html' %}
+    {% endif %}
+</div>

@@ -1,0 +1,860 @@
+{% extends "base.html" %}
+
+{% block title %}Research Assistant - CIDX Admin{% endblock %}
+
+{% block content %}
+<div class="research-container">
+    <h1>Research Assistant</h1>
+    <p>AI-powered assistant for investigating CIDX server anomalies and code analysis.</p>
+
+    <div class="research-layout">
+        <!-- Left Column: Session Sidebar (Story #143 - Session Management) -->
+        <aside class="research-sidebar">
+            <div class="sidebar-header">
+                <h3>Sessions</h3>
+                <button hx-post="/admin/research/sessions"
+                        hx-target="#sessions-sidebar"
+                        hx-swap="innerHTML"
+                        class="new-session-btn"
+                        title="Create New Session">
+                    + New
+                </button>
+            </div>
+            <div id="sessions-sidebar">
+                {% if sessions %}
+                    {% include 'partials/research_sessions_list.html' %}
+                {% else %}
+                    {% include 'partials/research_empty_state.html' %}
+                {% endif %}
+            </div>
+        </aside>
+
+        <!-- Right Column: Chat Area -->
+        <section class="research-chat-area">
+            <div class="chat-container">
+                <div class="chat-messages" id="chat-messages">
+                    {% if messages %}
+                        {% for message in messages %}
+                        <div class="chat-message {{ message.role }}">
+                            <div class="message-content">{{ message.content | safe }}</div>
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <p class="welcome-message">Welcome to the Research Assistant. Type your question below to get started.</p>
+                    {% endif %}
+                </div>
+
+                <!-- Story #142 AC4: Jump to bottom button (hidden by default) -->
+                <button id="jump-to-bottom" class="jump-to-bottom hidden" style="display: none;">
+                    ↓ Jump to bottom
+                </button>
+
+                <!-- Story #144: Attached Files List (AC4) -->
+                <div id="attached-files-container" class="attached-files-container" style="display: none;">
+                    <div id="attached-files" class="attached-files-list">
+                        <!-- Files list populated dynamically -->
+                    </div>
+                </div>
+
+                <!-- Story #144: Upload Progress Indicator (AC3) -->
+                <div id="upload-progress" class="upload-progress" style="display: none;">
+                    <div class="progress-bar">
+                        <div class="progress-fill"></div>
+                    </div>
+                    <span class="progress-text">Uploading...</span>
+                </div>
+
+                <!-- Story #144: File Upload Input (hidden) (AC1) -->
+                <input type="file"
+                       id="file-upload-input"
+                       multiple
+                       accept=".txt,.log,.json,.yaml,.yml,.py,.md,.csv,.xml,.html,.cfg,.conf,.ini"
+                       style="display: none;">
+
+                <form
+                    hx-post="/admin/research/send"
+                    hx-target="#chat-messages"
+                    hx-swap="innerHTML"
+                    hx-on::before-request="document.getElementById('active-session-id').value = document.querySelector('.session-item.active')?.dataset.sessionId || currentSessionId || '';"
+                    hx-on::after-request="if(event.detail.successful) { document.getElementById('user-prompt').value = ''; }"
+                    class="chat-input-container"
+                >
+                    <input type="hidden" name="session_id" id="active-session-id" value="{{ active_session_id or '' }}">
+                    <div class="input-row">
+                        <!-- Story #144: Attach Files Button (AC1) -->
+                        <button type="button"
+                                id="attach-files-btn"
+                                class="attach-files-btn"
+                                title="Attach files to conversation"
+                                onclick="document.getElementById('file-upload-input').click()">
+                            Attach Files
+                        </button>
+
+                        <textarea
+                            id="user-prompt"
+                            name="user_prompt"
+                            class="chat-input"
+                            placeholder="Ask about server anomalies, logs, or code..."
+                            rows="3"
+                            required
+                        ></textarea>
+                        <button
+                            id="send-btn"
+                            type="submit"
+                            class="send-button"
+                        >
+                            Send
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </section>
+    </div>
+</div>
+
+<style>
+.research-container {
+    max-width: 100%;
+    padding: 0;
+    /* Bug #154: Prevent page scroll - contain everything in viewport */
+    /* Account for: server clock + nav bars + page chrome + bottom margin */
+    height: calc(100vh - 220px);
+    overflow: hidden;
+}
+
+.research-container h1 {
+    margin-bottom: 0.5rem;
+}
+
+.research-container > p {
+    color: var(--muted-color);
+    margin-bottom: 1.5rem;
+}
+
+.research-layout {
+    display: grid;
+    grid-template-columns: 250px 1fr;
+    gap: 1.5rem;
+    /* Bug #154: Fill container height minus title/description area, with bottom margin */
+    height: calc(100% - 80px);
+    margin-bottom: 1rem;
+}
+
+/* Sidebar Styles */
+.research-sidebar {
+    background-color: var(--card-background-color);
+    border: 1px solid var(--muted-border-color);
+    border-radius: 0.25rem;
+    padding: 1rem;
+    /* Bug #154: Enable independent scrolling when many sessions */
+    overflow-y: auto;
+    height: 100%;
+}
+
+.research-sidebar h3 {
+    margin-top: 0;
+    margin-bottom: 0.75rem;
+    font-size: 1rem;
+}
+
+/* Story #143: Session Management Styles */
+.sidebar-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+}
+
+.new-session-btn {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.875rem;
+    background-color: var(--primary);
+    color: white;
+    border: none;
+    border-radius: 0.25rem;
+    cursor: pointer;
+}
+
+.new-session-btn:hover {
+    opacity: 0.9;
+}
+
+.sessions-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.session-item {
+    padding: 0.5rem;
+    border: 1px solid var(--muted-border-color);
+    border-radius: 0.25rem;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.session-item:hover {
+    background-color: var(--background-color);
+}
+
+.session-item.active {
+    background-color: var(--primary);
+    color: white;
+    border-color: var(--primary);
+}
+
+.session-name {
+    font-weight: 500;
+    font-size: 0.875rem;
+    margin-bottom: 0.25rem;
+}
+
+.session-timestamp {
+    font-size: 0.75rem;
+    color: var(--muted-color);
+}
+
+.session-item.active .session-timestamp {
+    color: rgba(255, 255, 255, 0.8);
+}
+
+.session-actions {
+    display: flex;
+    gap: 0.25rem;
+    margin-top: 0.25rem;
+}
+
+.session-actions button {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.7rem;
+    border: 1px solid var(--muted-border-color);
+    background-color: #4a5568;
+    color: white;
+    border-radius: 0.25rem;
+    cursor: pointer;
+    width: auto;
+    min-width: 24px;
+}
+
+.session-actions button:hover {
+    background-color: #5a6678;
+}
+
+.session-actions .delete-btn {
+    background-color: #9b2c2c;
+}
+
+.session-actions .delete-btn:hover {
+    background-color: #c53030;
+}
+
+.empty-state {
+    text-align: center;
+    padding: 2rem 1rem;
+}
+
+.empty-state h3 {
+    margin-top: 0;
+    font-size: 1rem;
+}
+
+.empty-state p {
+    color: var(--muted-color);
+    font-size: 0.875rem;
+    margin-bottom: 1rem;
+}
+
+.error-message {
+    padding: 0.75rem;
+    background-color: #fee;
+    border: 1px solid #c33;
+    border-radius: 0.25rem;
+    color: #c33;
+    margin: 0.5rem 0;
+}
+
+/* Chat Area Styles */
+.research-chat-area {
+    background-color: var(--card-background-color);
+    border: 1px solid var(--muted-border-color);
+    border-radius: 0.25rem;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    /* Bug #154: Fill grid cell height, prevent overflow */
+    height: 100%;
+    overflow: hidden;
+}
+
+.chat-container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+.chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    margin-bottom: 1rem;
+    padding: 1rem;
+    border: 1px solid var(--muted-border-color);
+    border-radius: 0.25rem;
+    background-color: var(--background-color);
+    /* Bug #154: Let flexbox handle height - parent container is constrained */
+    min-height: 0;  /* Allow flex shrinking */
+}
+
+.welcome-message {
+    color: var(--muted-color);
+    text-align: center;
+    margin-top: 2rem;
+}
+
+.chat-input-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.input-row {
+    display: flex;
+    flex-direction: row;
+    gap: 0.75rem;
+    align-items: flex-end;
+    width: 100%;
+}
+
+.chat-input {
+    flex: 1 1 auto;
+    resize: vertical;
+    min-height: 60px;
+    font-family: inherit;
+    font-size: 0.95rem;
+    width: 100%;
+    margin-bottom: 0;
+}
+
+.send-button {
+    flex: 0 0 auto;
+    width: auto !important;
+    margin-bottom: 0;
+    white-space: nowrap;
+    padding: 0.5rem 1.5rem;
+}
+
+/* Story #144: File Upload Styles */
+.attach-files-btn {
+    flex: 0 0 auto;
+    width: auto !important;
+    padding: 0.5rem 1rem;
+    background-color: var(--secondary, #6c757d);
+    color: white;
+    border: none;
+    border-radius: 0.25rem;
+    cursor: pointer;
+    font-size: 0.875rem;
+    white-space: nowrap;
+    transition: background-color 0.2s;
+    margin-bottom: 0;
+}
+
+.attach-files-btn:hover {
+    background-color: var(--secondary-hover, #5a6268);
+    opacity: 0.9;
+}
+
+.attached-files-container {
+    margin-bottom: 0.75rem;
+    padding: 0.75rem;
+    background-color: var(--background-color);
+    border: 1px solid var(--muted-border-color);
+    border-radius: 0.25rem;
+}
+
+.attached-files-list h4 {
+    margin: 0 0 0.5rem 0;
+    font-size: 0.875rem;
+    color: var(--muted-color);
+}
+
+.file-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem;
+    border: 1px solid var(--muted-border-color);
+    border-radius: 0.25rem;
+    margin-bottom: 0.5rem;
+    background-color: white;
+    transition: background-color 0.2s;
+}
+
+.file-item:hover {
+    background-color: var(--background-color);
+}
+
+.file-item:last-child {
+    margin-bottom: 0;
+}
+
+.file-link {
+    flex: 1;
+    color: var(--primary);
+    text-decoration: none;
+    font-size: 0.875rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.file-link:hover {
+    text-decoration: underline;
+}
+
+.file-size {
+    font-size: 0.75rem;
+    color: var(--muted-color);
+    white-space: nowrap;
+}
+
+.file-time {
+    font-size: 0.75rem;
+    color: var(--muted-color);
+    white-space: nowrap;
+}
+
+.delete-file-btn {
+    padding: 0.25rem 0.5rem;
+    background-color: #dc3545;
+    color: white;
+    border: none;
+    border-radius: 0.25rem;
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    transition: background-color 0.2s;
+}
+
+.delete-file-btn:hover {
+    background-color: #c82333;
+}
+
+.upload-progress {
+    padding: 0.75rem;
+    background-color: var(--background-color);
+    border: 1px solid var(--muted-border-color);
+    border-radius: 0.25rem;
+    margin-bottom: 0.75rem;
+}
+
+.progress-bar {
+    width: 100%;
+    height: 6px;
+    background-color: #e9ecef;
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 0.5rem;
+}
+
+.progress-fill {
+    height: 100%;
+    background-color: var(--primary);
+    width: 100%;
+    animation: progress-animation 1.5s ease-in-out infinite;
+}
+
+@keyframes progress-animation {
+    0% {
+        transform: translateX(-100%);
+    }
+    100% {
+        transform: translateX(100%);
+    }
+}
+
+.progress-text {
+    font-size: 0.875rem;
+    color: var(--muted-color);
+}
+
+/* Message Styles (for future use) */
+.chat-message {
+    margin-bottom: 1rem;
+    padding: 0.75rem;
+    border-radius: 0.25rem;
+}
+
+.chat-message.user {
+    background-color: var(--primary);
+    color: white;
+    margin-left: 20%;
+    text-align: right;
+}
+
+.chat-message.assistant {
+    background-color: var(--card-background-color);
+    border: 1px solid var(--muted-border-color);
+    margin-right: 20%;
+}
+
+/* Story #142 AC3: Message Timestamps */
+.message-timestamp {
+    font-size: 0.75rem;
+    color: var(--muted-color);
+    margin-top: 0.25rem;
+    opacity: 0.8;
+}
+
+.chat-message.user .message-timestamp {
+    color: rgba(255, 255, 255, 0.8);
+}
+
+.chat-message.working {
+    background-color: var(--card-background-color);
+    border: 1px solid var(--muted-border-color);
+    margin-right: 20%;
+    font-style: italic;
+    color: var(--muted-color);
+}
+
+.chat-message.error {
+    background-color: #fee;
+    border: 1px solid #c33;
+    color: #c33;
+    margin-right: 20%;
+}
+
+/* Story #142 AC4: Jump to bottom button */
+.jump-to-bottom {
+    position: absolute;
+    bottom: 80px;
+    right: 20px;
+    background-color: var(--primary);
+    color: white;
+    border: none;
+    border-radius: 20px;
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+    z-index: 10;
+    transition: opacity 0.3s;
+}
+
+.jump-to-bottom:hover {
+    background-color: var(--primary-hover, var(--primary));
+    opacity: 0.9;
+}
+
+.jump-to-bottom.hidden {
+    display: none !important;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+    .research-layout {
+        grid-template-columns: 1fr;
+    }
+
+    .research-sidebar {
+        order: 2;
+    }
+
+    .research-chat-area {
+        order: 1;
+    }
+}
+</style>
+
+<script>
+// Bug #154: Smart Auto-Scroll for Research Assistant Chat
+(function() {
+    const chatMessages = document.getElementById('chat-messages');
+    const jumpButton = document.getElementById('jump-to-bottom');
+
+    if (!chatMessages || !jumpButton) {
+        return;
+    }
+
+    // Track if auto-scroll is enabled (user at bottom)
+    let autoScrollEnabled = true;
+    const SCROLL_THRESHOLD = 50; // pixels from bottom to consider "at bottom"
+
+    // Check if user is at bottom
+    function isAtBottom() {
+        return chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < SCROLL_THRESHOLD;
+    }
+
+    // Scroll to bottom helper
+    function scrollToBottom() {
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    // Update jump button visibility
+    function updateJumpButton() {
+        if (isAtBottom()) {
+            jumpButton.classList.add('hidden');
+            jumpButton.style.display = 'none';
+        } else {
+            jumpButton.classList.remove('hidden');
+            jumpButton.style.display = 'block';
+        }
+    }
+
+    // Update auto-scroll state when user scrolls
+    chatMessages.addEventListener('scroll', function() {
+        autoScrollEnabled = isAtBottom();
+        updateJumpButton();
+    });
+
+    // Jump to bottom on button click
+    jumpButton.addEventListener('click', function() {
+        scrollToBottom();
+        autoScrollEnabled = true;
+        updateJumpButton();
+    });
+
+    // When HTMX swaps content, scroll if auto-scroll is enabled OR force flag is set
+    // Bug #154c: window.forceScrollOnNextSwap forces scroll on session load
+    document.body.addEventListener('htmx:afterSwap', function(event) {
+        if (event.detail.target && event.detail.target.id === 'chat-messages') {
+            // Use setTimeout to ensure DOM has fully rendered before scrolling
+            // 100ms delay allows browser to complete layout calculation
+            setTimeout(function() {
+                // Scroll if: (1) force flag set (session load), OR (2) auto-scroll enabled (user at bottom)
+                if (window.forceScrollOnNextSwap || autoScrollEnabled) {
+                    scrollToBottom();
+                    // Reset force flag after use
+                    window.forceScrollOnNextSwap = false;
+                    // Re-enable auto-scroll for subsequent messages in this session
+                    autoScrollEnabled = true;
+                }
+                updateJumpButton();
+            }, 100);
+        }
+    });
+
+    // When user sends a message, ALWAYS scroll to bottom and re-enable auto-scroll
+    document.body.addEventListener('htmx:beforeRequest', function(event) {
+        // Check if this is the send form
+        if (event.detail.elt && event.detail.elt.matches('form[hx-post="/admin/research/send"]')) {
+            autoScrollEnabled = true;
+            // Use setTimeout to ensure scroll happens after any pending DOM updates
+            setTimeout(function() {
+                scrollToBottom();
+            }, 0);
+        }
+    });
+
+    // Initial scroll to bottom on page load
+    scrollToBottom();
+})();
+
+// Bug #154: Enter to send, Alt/Shift+Enter for newline
+(function() {
+    const textarea = document.getElementById('user-prompt');
+    const form = textarea ? textarea.closest('form') : null;
+
+    if (!textarea || !form) return;
+
+    textarea.addEventListener('keydown', function(e) {
+        // Enter without modifiers = submit
+        if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+            e.preventDefault();
+            // Only submit if there's content
+            if (textarea.value.trim()) {
+                // Trigger HTMX request
+                htmx.trigger(form, 'submit');
+            }
+        }
+        // Alt+Enter or Shift+Enter = newline (default behavior, no action needed)
+    });
+})();
+
+// Story #144: File Upload and Management
+(function() {
+    // Track current active session ID
+    let currentSessionId = '{{ active_session_id }}';
+
+    // XSS protection: escape HTML special characters
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // Format file size for display
+    function formatFileSize(bytes) {
+        if (bytes === 0) return '0 Bytes';
+        const k = 1024;
+        const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+    }
+
+    // Format timestamp for display
+    function formatTimestamp(isoString) {
+        const date = new Date(isoString);
+        const now = new Date();
+        const diffMs = now - date;
+        const diffMins = Math.floor(diffMs / 60000);
+
+        if (diffMins < 1) return 'just now';
+        if (diffMins < 60) return diffMins + ' min ago';
+        if (diffMins < 1440) return Math.floor(diffMins / 60) + ' hours ago';
+
+        // Absolute format for older files
+        const month = date.toLocaleString('default', { month: 'short' });
+        const day = date.getDate();
+        const hours = date.getHours().toString().padStart(2, '0');
+        const mins = date.getMinutes().toString().padStart(2, '0');
+        return month + ' ' + day + ', ' + hours + ':' + mins;
+    }
+
+    // Load and display attached files for current session
+    function loadAttachedFiles() {
+        if (!currentSessionId) {
+            document.getElementById('attached-files-container').style.display = 'none';
+            return;
+        }
+
+        fetch('/admin/research/sessions/' + currentSessionId + '/files')
+            .then(response => response.json())
+            .then(data => {
+                const files = data.files || [];
+                const container = document.getElementById('attached-files-container');
+                const filesList = document.getElementById('attached-files');
+
+                if (files.length === 0) {
+                    container.style.display = 'none';
+                    return;
+                }
+
+                // Build files list HTML
+                let html = '<h4>Attached Files</h4>';
+                files.forEach(file => {
+                    html += '<div class="file-item">';
+                    html += '  <a href="/admin/research/sessions/' + currentSessionId + '/files/' + encodeURIComponent(file.filename) + '" ';
+                    html += '     target="_blank" class="file-link">' + escapeHtml(file.filename) + '</a>';
+                    html += '  <span class="file-size">' + formatFileSize(file.size) + '</span>';
+                    html += '  <span class="file-time">' + formatTimestamp(file.uploaded_at) + '</span>';
+                    html += '  <button onclick="deleteFile(\'' + encodeURIComponent(file.filename) + '\')" ';
+                    html += '          class="delete-file-btn" title="Delete">×</button>';
+                    html += '</div>';
+                });
+
+                filesList.innerHTML = html;
+                container.style.display = 'block';
+            })
+            .catch(error => {
+                console.error('Failed to load attached files:', error);
+            });
+    }
+
+    // Handle file upload
+    const fileInput = document.getElementById('file-upload-input');
+    const progressContainer = document.getElementById('upload-progress');
+
+    fileInput.addEventListener('change', function(e) {
+        const files = e.target.files;
+        if (files.length === 0) return;
+
+        if (!currentSessionId) {
+            alert('Please select or create a session first');
+            fileInput.value = '';
+            return;
+        }
+
+        // Show progress indicator
+        progressContainer.style.display = 'block';
+
+        // Upload files one by one
+        const uploadPromises = Array.from(files).map(file => {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            return fetch('/admin/research/sessions/' + currentSessionId + '/upload', {
+                method: 'POST',
+                body: formData
+            }).then(response => response.json());
+        });
+
+        Promise.all(uploadPromises)
+            .then(results => {
+                // Hide progress indicator
+                progressContainer.style.display = 'none';
+
+                // Check for errors
+                const errors = results.filter(r => !r.success);
+                if (errors.length > 0) {
+                    alert('Some files failed to upload: ' + errors.map(e => e.error).join(', '));
+                }
+
+                // Reload file list
+                loadAttachedFiles();
+
+                // Clear file input
+                fileInput.value = '';
+            })
+            .catch(error => {
+                progressContainer.style.display = 'none';
+                alert('Upload failed: ' + error.message);
+                fileInput.value = '';
+            });
+    });
+
+    // Delete file with confirmation
+    window.deleteFile = function(filename) {
+        if (!confirm('Delete file "' + filename + '"?')) {
+            return;
+        }
+
+        fetch('/admin/research/sessions/' + currentSessionId + '/files/' + encodeURIComponent(filename), {
+            method: 'DELETE'
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                loadAttachedFiles();
+            } else {
+                alert('Failed to delete file: ' + (data.error || 'Unknown error'));
+            }
+        })
+        .catch(error => {
+            alert('Failed to delete file: ' + error.message);
+        });
+    };
+
+    // Update current session ID when session changes (for future session switching)
+    document.body.addEventListener('htmx:afterSwap', function(event) {
+        // Detect session list updates
+        if (event.detail.target && event.detail.target.id === 'sessions-sidebar') {
+            // Session list was updated - check for new active session
+            const activeSession = document.querySelector('.session-item.active');
+            if (activeSession && activeSession.dataset.sessionId) {
+                currentSessionId = activeSession.dataset.sessionId;
+                // Update hidden form field
+                const hiddenField = document.getElementById('active-session-id');
+                if (hiddenField) {
+                    hiddenField.value = currentSessionId;
+                }
+                loadAttachedFiles();
+            }
+        }
+        // Also update when chat messages are loaded (session was clicked)
+        if (event.detail.target && event.detail.target.id === 'chat-messages') {
+            const activeSession = document.querySelector('.session-item.active');
+            if (activeSession && activeSession.dataset.sessionId) {
+                currentSessionId = activeSession.dataset.sessionId;
+                const hiddenField = document.getElementById('active-session-id');
+                if (hiddenField) {
+                    hiddenField.value = currentSessionId;
+                }
+            }
+        }
+    });
+
+    // Load files on page load
+    loadAttachedFiles();
+})();
+</script>
+{% endblock %}

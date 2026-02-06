@@ -1,0 +1,26 @@
+{% for message in messages %}
+<div class="chat-message {{ message.role }}">
+    <div class="message-content">{{ message.content | safe }}</div>
+</div>
+{% endfor %}
+
+{% if error %}
+<div class="chat-message error">
+    <div class="message-content">Error: {{ error }}</div>
+</div>
+{% endif %}
+
+{% if polling %}
+{# HTMX polling trigger - polls every 5 seconds with no timeout (Bug #148 fix) #}
+{# Bug #151 fix: Include session_id query param for database fallback #}
+<div hx-get="/admin/research/poll/{{ job_id }}?session_id={{ active_session_id }}"
+     hx-trigger="load delay:5s"
+     hx-target="#chat-messages"
+     hx-swap="innerHTML"
+     hx-timeout="0">
+    <div class="chat-message working">
+        <div class="message-content">Working...</div>
+    </div>
+</div>
+{% endif %}
+

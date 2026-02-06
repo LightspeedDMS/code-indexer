@@ -162,6 +162,7 @@ class ConfigService:
                 ),
                 "max_concurrent_claude_cli": config.claude_integration_config.max_concurrent_claude_cli,
                 "description_refresh_interval_hours": config.claude_integration_config.description_refresh_interval_hours,
+                "research_assistant_timeout_seconds": config.claude_integration_config.research_assistant_timeout_seconds,
             },
             # OIDC/SSO authentication
             "oidc": {
@@ -505,6 +506,8 @@ class ConfigService:
             claude_config.max_concurrent_claude_cli = int(value)
         elif key == "description_refresh_interval_hours":
             claude_config.description_refresh_interval_hours = int(value)
+        elif key == "research_assistant_timeout_seconds":
+            claude_config.research_assistant_timeout_seconds = int(value)
         else:
             raise ValueError(f"Unknown claude_cli setting: {key}")
 

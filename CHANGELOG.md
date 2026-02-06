@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.32] - 2026-02-06
+
+### Fixed
+
+- **Bug #154: Research Assistant Chat UI Improvements** - Complete overhaul of the Research Assistant page to implement traditional AI chatbot layout:
+  - Fixed viewport height constraints to prevent page scroll - sessions sidebar and messages area scroll independently
+  - Input box now pinned to bottom, always visible regardless of message count
+  - Smart auto-scroll: enabled when user at bottom, disabled when scrolled up, re-enabled on scroll to bottom
+  - Force scroll to bottom when switching sessions or sending messages
+  - Enter key sends message, Shift/Alt+Enter inserts newline
+  - Removed inaccurate relative timestamps from messages
+  - Claude CLI project folder cleanup on session deletion to prevent orphaned JSONL files
+
+---
+
 ## [8.8.31] - 2026-02-04
 
 ### Fixed

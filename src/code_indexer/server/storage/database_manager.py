@@ -235,6 +235,37 @@ class DatabaseSchema:
         ON self_monitoring_issues(scan_id)
     """
 
+    # Story #141: Research Assistant tables
+    CREATE_RESEARCH_SESSIONS_TABLE = """
+        CREATE TABLE IF NOT EXISTS research_sessions (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            folder_path TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            claude_session_id TEXT
+        )
+    """
+
+    CREATE_RESEARCH_MESSAGES_TABLE = """
+        CREATE TABLE IF NOT EXISTS research_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES research_sessions(id) ON DELETE CASCADE
+        )
+    """
+
+    CREATE_DIAGNOSTIC_RESULTS_TABLE = """
+        CREATE TABLE IF NOT EXISTS diagnostic_results (
+            category TEXT PRIMARY KEY,
+            results_json TEXT NOT NULL,
+            run_at TEXT NOT NULL
+        )
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -297,12 +328,18 @@ class DatabaseSchema:
             # Story #72: Self-monitoring indexes
             conn.execute(self.CREATE_SELF_MONITORING_SCANS_STARTED_AT_INDEX)
             conn.execute(self.CREATE_SELF_MONITORING_ISSUES_SCAN_ID_INDEX)
+            # Story #141: Research Assistant tables
+            conn.execute(self.CREATE_RESEARCH_SESSIONS_TABLE)
+            conn.execute(self.CREATE_RESEARCH_MESSAGES_TABLE)
+            # Diagnostic results persistence
+            conn.execute(self.CREATE_DIAGNOSTIC_RESULTS_TABLE)
 
             conn.commit()
 
             # Run schema migrations for existing databases
             self._migrate_self_monitoring_issues_schema(conn)
             self._migrate_global_repos_schema(conn)
+            self._migrate_research_sessions_schema(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
@@ -378,6 +415,34 @@ class DatabaseSchema:
             conn.commit()
             logger.info(
                 f"Migrated global_repos schema: added {migrations_applied}"
+            )
+
+    def _migrate_research_sessions_schema(self, conn: sqlite3.Connection) -> None:
+        """
+        Migrate research_sessions table schema for existing databases.
+
+        Adds columns that were added after the initial table creation:
+        - claude_session_id: UUID for Claude CLI session continuity (Bug fix for session resume)
+
+        This is safe to run multiple times - it only adds missing columns.
+        """
+        # Get existing columns
+        cursor = conn.execute("PRAGMA table_info(research_sessions)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        migrations_applied = []
+
+        # Add missing columns
+        if "claude_session_id" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE research_sessions ADD COLUMN claude_session_id TEXT"
+            )
+            migrations_applied.append("claude_session_id")
+
+        if migrations_applied:
+            conn.commit()
+            logger.info(
+                f"Migrated research_sessions schema: added {migrations_applied}"
             )
 
 

@@ -1768,6 +1768,71 @@
     </article>
 </details>
 
+<!-- Claude Integration Settings Section -->
+<details class="config-section" id="section-claude-integration">
+    <summary>
+        <h2>Claude Integration</h2>
+    </summary>
+    <article>
+        <p class="section-description">
+            Configures Claude CLI integration settings for repository analysis and research assistant features. Max concurrent processes controls parallelism for description generation jobs. Description refresh interval determines how often repository descriptions are regenerated. Research assistant timeout limits execution time for Claude research sessions.
+        </p>
+        <!-- Display Mode -->
+        <div id="display-claude-integration">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Max Concurrent Claude CLI</td>
+                        <td class="config-value">{{ config.claude_cli.max_concurrent_claude_cli }}</td>
+                        <td class="config-note"><small>Maximum parallel Claude CLI processes (default: 2)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Description Refresh Interval (hours)</td>
+                        <td class="config-value">{{ config.claude_cli.description_refresh_interval_hours }}</td>
+                        <td class="config-note"><small>How often to regenerate repository descriptions (default: 24)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Research Assistant Timeout (seconds)</td>
+                        <td class="config-value">{{ config.claude_cli.research_assistant_timeout_seconds }}</td>
+                        <td class="config-note"><small>Timeout for Research Assistant Claude CLI execution (default: 1200 = 20 minutes)</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('claude-integration')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-claude-integration" method="post" action="/admin/config/claude_cli" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.claude_cli %}
+            <div class="validation-error">{{ validation_errors.claude_cli }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="claude-max-concurrent">
+                    Max Concurrent Claude CLI
+                    <input type="number" id="claude-max-concurrent" name="max_concurrent_claude_cli" value="{{ config.claude_cli.max_concurrent_claude_cli }}" min="1" max="10">
+                    <small>Maximum parallel Claude CLI processes (1-10, default: 2)</small>
+                </label>
+                <label for="claude-refresh-interval">
+                    Description Refresh Interval (hours)
+                    <input type="number" id="claude-refresh-interval" name="description_refresh_interval_hours" value="{{ config.claude_cli.description_refresh_interval_hours }}" min="1">
+                    <small>How often to regenerate repository descriptions (default: 24)</small>
+                </label>
+                <label for="claude-research-timeout">
+                    Research Assistant Timeout (seconds)
+                    <input type="number" id="claude-research-timeout" name="research_assistant_timeout_seconds" value="{{ config.claude_cli.research_assistant_timeout_seconds }}" min="60" max="7200">
+                    <small>Timeout for Research Assistant Claude CLI execution (60-7200, default: 1200 = 20 minutes)</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('claude-integration')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 <!-- Multi-Search Settings Section (Story #25, Story #29 - Consolidated) -->
 <details class="config-section" id="section-multi-search">
     <summary>

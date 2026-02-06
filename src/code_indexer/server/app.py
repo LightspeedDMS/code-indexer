@@ -80,7 +80,7 @@ from .auth.oauth.routes import router as oauth_router
 from .mcp.protocol import mcp_router
 from .global_routes.routes import router as global_routes_router
 from .global_routes.git_settings import router as git_settings_router
-from .web import web_router, user_router, login_router, init_session_manager
+from .web import web_router, user_router, login_router, api_router, init_session_manager
 from .routers.ssh_keys import router as ssh_keys_router
 from .routers.scip_queries import router as scip_queries_router
 from .routers.files import router as files_router
@@ -90,6 +90,8 @@ from .routers.cache import router as cache_router
 from .routers.delegation_callbacks import router as delegation_callbacks_router
 from .routers.maintenance_router import router as maintenance_router
 from .routers.api_keys import router as api_keys_router
+from .routers.diagnostics import router as diagnostics_router
+from .routers.research_assistant import router as research_assistant_router
 from .services.maintenance_service import get_maintenance_state
 from .routers.groups import (
     router as groups_router,
@@ -8176,6 +8178,8 @@ def create_app() -> FastAPI:
     app.include_router(delegation_callbacks_router)
     app.include_router(maintenance_router)
     app.include_router(api_keys_router)
+    app.include_router(diagnostics_router)
+    app.include_router(research_assistant_router)
 
     # Mount Web Admin UI routes and static files
     from fastapi.staticfiles import StaticFiles
@@ -8201,6 +8205,9 @@ def create_app() -> FastAPI:
 
     # Include login router at root level for unified authentication
     app.include_router(login_router, tags=["authentication"])
+
+    # Include API router for public API endpoints (Story #89)
+    app.include_router(api_router, prefix="/api", tags=["api"])
 
     # RFC 8414 compliance: OAuth discovery at root level for Claude.ai compatibility
     @app.get("/.well-known/oauth-authorization-server")

@@ -1,0 +1,23 @@
+{# Partial template for delete session response with OOB swaps #}
+{# This template handles updating both sidebar and chat area after session deletion #}
+
+{# Update sidebar - this is the primary swap target #}
+{% if sessions %}
+    {% include 'partials/research_sessions_list.html' %}
+{% else %}
+    {% include 'partials/research_empty_state.html' %}
+{% endif %}
+
+{# OOB swap for chat messages area - updates chat to show new active session or clear #}
+<div id="chat-messages" hx-swap-oob="innerHTML">
+    {% if messages %}
+        {% for message in messages %}
+        <div class="chat-message {{ message.role }}">
+            <div class="message-content">{{ message.content | safe }}</div>
+            <div class="message-timestamp">{{ message.created_at | relative_time }}</div>
+        </div>
+        {% endfor %}
+    {% else %}
+        <p class="welcome-message">Welcome to the Research Assistant. Type your question below to get started.</p>
+    {% endif %}
+</div>

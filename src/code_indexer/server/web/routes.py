@@ -76,6 +76,18 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 # Add enumerate to Jinja2 globals for honeycomb template (Story #712 AC1)
 templates.env.globals["enumerate"] = enumerate
 
+
+# Helper function for server time in templates (Story #89)
+def _get_server_time_for_template() -> str:
+    """Get current server time for Jinja2 templates (Story #89)."""
+    from datetime import datetime, timezone as tz
+    current_time = datetime.now(tz.utc)
+    return current_time.isoformat().replace('+00:00', 'Z')
+
+
+# Add server time function to Jinja2 globals for server clock (Story #89)
+templates.env.globals["get_server_time"] = _get_server_time_for_template
+
 # Create router
 web_router = APIRouter()
 # Create user router for non-admin user routes
@@ -235,6 +247,21 @@ def _get_dashboard_service():
     return dashboard_service
 
 
+def _get_server_time() -> str:
+    """
+    Get current server time for template context (Story #89).
+
+    Returns current UTC time in ISO 8601 format for server clock initialization.
+
+    Returns:
+        ISO 8601 formatted timestamp string (e.g., "2026-02-04T14:32:15.123456Z")
+    """
+    from datetime import datetime, timezone as tz
+
+    current_time = datetime.now(tz.utc)
+    return current_time.isoformat().replace('+00:00', 'Z')
+
+
 @web_router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
     """
@@ -274,6 +301,7 @@ def dashboard(request: Request):
             "username": session.username,
             "current_page": "dashboard",
             "show_nav": True,
+            "server_time": _get_server_time(),
             "health": dashboard_data.health,
             "job_counts": dashboard_data.job_counts,
             "repo_counts": dashboard_data.repo_counts,
@@ -4397,6 +4425,8 @@ def _get_current_config() -> dict:
         "auth": auth_config,
         # Story #20: Provider API Keys
         "provider_api_keys": provider_api_keys_config,
+        # Claude CLI integration settings (for Claude Integration config section)
+        "claude_cli": claude_cli_config,
         # Story #25: Multi-search limits configuration
         "multi_search": settings.get("multi_search", {}),
         # Story #26: Background jobs configuration
@@ -8118,3 +8148,46 @@ def redirect_user_login(redirect_to: Optional[str] = None):
             status_code=status.HTTP_301_MOVED_PERMANENTLY,
         )
     return RedirectResponse(url="/login", status_code=status.HTTP_301_MOVED_PERMANENTLY)
+
+
+# ============================================================================
+# API Router - Public API Endpoints (Story #89)
+# ============================================================================
+
+# Create API router for public API endpoints (no auth required)
+api_router = APIRouter()
+
+
+@api_router.get("/server-time")
+def get_server_time() -> Dict[str, str]:
+    """
+    Get current server time for client clock synchronization.
+
+    Story #89: Server Clock in Navigation
+
+    Returns current server time in ISO 8601 format with timezone information.
+    This endpoint is lightweight and does not require authentication,
+    allowing clients to synchronize their clock displays with server time.
+
+    Returns:
+        Dictionary with 'timestamp' (ISO 8601 UTC) and 'timezone' ('UTC')
+
+    Example Response:
+        {
+            "timestamp": "2026-02-04T14:32:15Z",
+            "timezone": "UTC"
+        }
+    """
+    from datetime import datetime, timezone as tz
+
+    # Get current UTC time
+    current_time = datetime.now(tz.utc)
+
+    # Format as ISO 8601 with Z suffix for UTC (preserves microseconds)
+    # Replace '+00:00' with 'Z' for standard UTC notation
+    timestamp = current_time.isoformat().replace('+00:00', 'Z')
+
+    return {
+        "timestamp": timestamp,
+        "timezone": "UTC"
+    }

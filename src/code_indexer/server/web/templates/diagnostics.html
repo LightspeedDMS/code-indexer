@@ -1,0 +1,288 @@
+{% extends "base.html" %}
+
+{% block title %}Diagnostics - CIDX Admin{% endblock %}
+
+{% block content %}
+<div class="diagnostics-header">
+    <h1>Diagnostics</h1>
+    <div class="diagnostics-actions">
+        <button
+            id="run-all-btn"
+            hx-post="/admin/diagnostics/run-all"
+            hx-target="#diagnostics-results"
+            hx-swap="innerHTML"
+        >
+            Run All Diagnostics
+        </button>
+    </div>
+</div>
+
+<p>Run comprehensive diagnostic checks across five categories to verify system health and configuration.</p>
+
+<!-- Diagnostics Results Section with HTMX Polling -->
+<section id="diagnostics-results" class="diagnostics-section">
+
+    <!-- Initial state - shows category sections with "Not yet run" status -->
+    <div class="diagnostics-categories">
+
+        <!-- Category 1: CLI Tool Dependencies -->
+        <details class="diagnostic-category">
+            <summary>
+                <h3>CLI Tool Dependencies</h3>
+                <span class="category-status not-run">Not yet run</span>
+            </summary>
+            <div class="category-content">
+                <p>Diagnostics for CLI tools have not been run yet.</p>
+                <button
+                    class="outline"
+                    hx-post="/admin/diagnostics/run/cli_tools"
+                    hx-target="#diagnostics-results"
+                    hx-swap="innerHTML"
+                >
+                    Re-run CLI Tools
+                </button>
+            </div>
+        </details>
+
+        <!-- Category 2: SDK Prerequisites -->
+        <details class="diagnostic-category">
+            <summary>
+                <h3>SDK Prerequisites</h3>
+                <span class="category-status not-run">Not yet run</span>
+            </summary>
+            <div class="category-content">
+                <p>Diagnostics for SDK prerequisites have not been run yet.</p>
+                <button
+                    class="outline"
+                    hx-post="/admin/diagnostics/run/sdk_prerequisites"
+                    hx-target="#diagnostics-results"
+                    hx-swap="innerHTML"
+                >
+                    Re-run SDK Prerequisites
+                </button>
+            </div>
+        </details>
+
+        <!-- Category 3: External API Integrations -->
+        <details class="diagnostic-category">
+            <summary>
+                <h3>External API Integrations</h3>
+                <span class="category-status not-run">Not yet run</span>
+            </summary>
+            <div class="category-content">
+                <p>Diagnostics for external APIs have not been run yet.</p>
+                <button
+                    class="outline"
+                    hx-post="/admin/diagnostics/run/external_apis"
+                    hx-target="#diagnostics-results"
+                    hx-swap="innerHTML"
+                >
+                    Re-run External APIs
+                </button>
+            </div>
+        </details>
+
+        <!-- Category 4: Credential & Connectivity -->
+        <details class="diagnostic-category">
+            <summary>
+                <h3>Credential & Connectivity</h3>
+                <span class="category-status not-run">Not yet run</span>
+            </summary>
+            <div class="category-content">
+                <p>Diagnostics for credentials have not been run yet.</p>
+                <button
+                    class="outline"
+                    hx-post="/admin/diagnostics/run/credentials"
+                    hx-target="#diagnostics-results"
+                    hx-swap="innerHTML"
+                >
+                    Re-run Credentials
+                </button>
+            </div>
+        </details>
+
+        <!-- Category 5: Core Infrastructure -->
+        <details class="diagnostic-category">
+            <summary>
+                <h3>Core Infrastructure</h3>
+                <span class="category-status not-run">Not yet run</span>
+            </summary>
+            <div class="category-content">
+                <p>Diagnostics for infrastructure have not been run yet.</p>
+                <button
+                    class="outline"
+                    hx-post="/admin/diagnostics/run/infrastructure"
+                    hx-target="#diagnostics-results"
+                    hx-swap="innerHTML"
+                >
+                    Re-run Infrastructure
+                </button>
+            </div>
+        </details>
+
+    </div>
+</section>
+
+<style>
+.diagnostics-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.diagnostics-actions button {
+    margin-bottom: 0;
+}
+
+.diagnostics-categories {
+    margin-top: 2rem;
+}
+
+.diagnostic-category {
+    margin-bottom: 1rem;
+    border: 1px solid var(--muted-border-color);
+    border-radius: 0.25rem;
+    padding: 0.5rem;
+}
+
+.diagnostic-category summary {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+    list-style: none;
+    padding: 0.5rem;
+}
+
+.diagnostic-category summary::-webkit-details-marker {
+    display: none;
+}
+
+.diagnostic-category summary h3 {
+    margin: 0;
+    font-size: 1.1rem;
+    flex: 1;
+}
+
+.diagnostic-category summary .category-status {
+    margin-left: auto;
+}
+
+.category-status {
+    padding: 0.25rem 0.75rem;
+    border-radius: 0.25rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    white-space: nowrap;
+}
+
+.category-status.not-run {
+    background-color: var(--muted-color);
+    color: var(--contrast);
+}
+
+.category-status.running {
+    background-color: var(--primary);
+    color: white;
+}
+
+.category-status.working {
+    background-color: var(--success);
+    color: white;
+}
+
+.category-status.warning {
+    background-color: var(--warning);
+    color: white;
+}
+
+.category-status.error {
+    background-color: var(--error);
+    color: white;
+}
+
+.category-status.not-configured {
+    background-color: var(--muted-color);
+    color: var(--contrast);
+}
+
+.category-status.not-applicable {
+    background-color: var(--muted-color);
+    color: var(--contrast);
+    opacity: 0.6;
+}
+
+.category-content {
+    padding: 1rem;
+    border-top: 1px solid var(--muted-border-color);
+    margin-top: 0.5rem;
+}
+
+.category-content p {
+    margin-bottom: 1rem;
+}
+
+.diagnostic-item {
+    padding: 0.75rem;
+    margin-bottom: 0.5rem;
+    border-radius: 0.25rem;
+    background-color: var(--card-background-color);
+}
+
+.diagnostic-item-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.diagnostic-item-name {
+    font-weight: 600;
+}
+
+.diagnostic-item-message {
+    color: var(--muted-color);
+    font-size: 0.875rem;
+}
+
+/* Status icons */
+.status-icon {
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    line-height: 1;
+}
+
+/* Spinner animation */
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.status-icon.spinner {
+    animation: spin 1s linear infinite;
+}
+
+/* Icon definitions using Unicode */
+.status-icon.spinner::before {
+    content: "⟳";
+    font-size: 1.2em;
+}
+
+.status-icon.check::before {
+    content: "✓";
+}
+
+.status-icon.error::before {
+    content: "✗";
+}
+
+.status-icon.info::before {
+    content: "ℹ";
+}
+</style>
+{% endblock %}
