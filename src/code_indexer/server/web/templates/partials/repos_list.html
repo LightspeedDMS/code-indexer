@@ -6,6 +6,7 @@
             <th>Name</th>
             <th>User</th>
             <th>Golden Repo</th>
+            <th>Indexes</th>
             <th>Activated Date</th>
             <th>File Count</th>
             <th>Status</th>
@@ -23,6 +24,11 @@
             </td>
             <td>{{ repo.username }}</td>
             <td>{{ repo.golden_repo_alias or 'Composite' }}</td>
+            <td class="indexes-cell" style="white-space: nowrap;">
+                <span id="index-badges-{{ repo.user_alias }}">
+                    <span class="no-indexes">Loading...</span>
+                </span>
+            </td>
             <td>{{ repo.activated_at[:10] if repo.activated_at else 'N/A' }}</td>
             <td>{{ repo.file_count if repo.file_count is defined else 'N/A' }}</td>
             <td class="status-cell">
@@ -42,6 +48,7 @@
             </td>
             <td class="actions-cell">
                 <button class="outline small" onclick="toggleDetails('{{ repo.username }}', '{{ repo.user_alias }}')" title="View details">Details</button>
+                <button class="small" onclick="triggerActivatedRepoReindex('{{ repo.user_alias }}')" title="Re-index repository">Reindex</button>
                 <button class="outline small danger" onclick="confirmDeactivate('{{ repo.username }}', '{{ repo.user_alias }}')" title="Deactivate repository">Deactivate</button>
             </td>
         </tr>
@@ -138,6 +145,115 @@
                         </div>
                         {% endif %}
                     </div>
+
+                    <!-- Activated Repository Management Section (Story #160) -->
+                    <div class="activated-repo-management">
+                        <h4>Repository Management</h4>
+
+                        <!-- Indexes Management -->
+                        <div class="indexes-management">
+                            <h5>Indexes</h5>
+                            <div class="indexes-status-grid">
+                                <div class="index-status-item">
+                                    <label>Semantic:</label>
+                                    <span class="index-status" id="index-status-semantic-{{ repo.user_alias }}">
+                                        <span class="status-icon not-present">-</span> <span class="status-text">Loading...</span>
+                                    </span>
+                                </div>
+                                <div class="index-status-item">
+                                    <label>FTS (Full-Text Search):</label>
+                                    <span class="index-status" id="index-status-fts-{{ repo.user_alias }}">
+                                        <span class="status-icon not-present">-</span> <span class="status-text">Loading...</span>
+                                    </span>
+                                </div>
+                                <div class="index-status-item">
+                                    <label>Temporal (Git History):</label>
+                                    <span class="index-status" id="index-status-temporal-{{ repo.user_alias }}">
+                                        <span class="status-icon not-present">-</span> <span class="status-text">Loading...</span>
+                                    </span>
+                                </div>
+                                <div class="index-status-item">
+                                    <label>SCIP (Code Intelligence):</label>
+                                    <span class="index-status" id="index-status-scip-{{ repo.user_alias }}">
+                                        <span class="status-icon not-present">-</span> <span class="status-text">Loading...</span>
+                                    </span>
+                                </div>
+                            </div>
+
+                            <!-- Add Index Button and Form -->
+                            <div class="add-index-container" id="add-index-container-{{ repo.user_alias }}">
+                                <button class="outline small" onclick="showActivatedRepoAddIndexForm('{{ repo.user_alias }}')">Add Index</button>
+
+                                <div id="add-index-form-{{ repo.user_alias }}" class="add-index-form" style="display: none;">
+                                    <label for="add-index-type-{{ repo.user_alias }}">Select Index Type:</label>
+                                    <select id="add-index-type-{{ repo.user_alias }}" name="index_type">
+                                        <option value="">-- Select Index Type --</option>
+                                        <option value="semantic">Semantic</option>
+                                        <option value="fts">FTS (Full-Text Search)</option>
+                                        <option value="temporal">Temporal (Git History)</option>
+                                        <option value="scip">SCIP (Code Intelligence)</option>
+                                    </select>
+                                    <div class="form-actions">
+                                        <button class="small" onclick="submitActivatedRepoAddIndex('{{ repo.user_alias }}')">Submit</button>
+                                        <button class="outline small" onclick="hideActivatedRepoAddIndexForm('{{ repo.user_alias }}')">Cancel</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Job Progress Container -->
+                            <div id="job-progress-{{ repo.user_alias }}" class="job-progress-container" style="display: none;">
+                                <div class="job-progress-header">
+                                    <span class="job-status-text">Job Status: <span id="job-status-text-{{ repo.user_alias }}">pending</span></span>
+                                    <span class="spinner" id="job-spinner-{{ repo.user_alias }}"></span>
+                                </div>
+                                <div class="job-progress-details" id="job-progress-details-{{ repo.user_alias }}"></div>
+                            </div>
+                        </div>
+
+                        <!-- Branch Management -->
+                        <div class="branch-management" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e0e0e0;">
+                            <h5>Branch Management</h5>
+                            <div class="branch-actions">
+                                <button class="outline small" onclick="showBranchSelector('{{ repo.user_alias }}')" title="Switch to different branch">Switch Branch</button>
+                                <button class="outline small" onclick="syncWithGoldenRepo('{{ repo.user_alias }}')" title="Sync with golden repository source">Sync with Golden</button>
+                            </div>
+                        </div>
+
+                        <!-- Health Status Section -->
+                        <div class="health-status-section" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e0e0e0;">
+                            <div class="health-header">
+                                <h5>HNSW Index Health</h5>
+                                <button
+                                    id="health-refresh-{{ repo.user_alias }}"
+                                    class="outline small"
+                                    onclick="refreshActivatedRepoHealthData('{{ repo.user_alias }}')"
+                                    title="Refresh health data (bypass cache)"
+                                >
+                                    Refresh
+                                </button>
+                            </div>
+
+                            <!-- Health Status Indicator -->
+                            <div
+                                id="health-indicator-{{ repo.user_alias }}"
+                                class="health-indicator-container"
+                                onclick="toggleActivatedRepoHealthDetails('{{ repo.user_alias }}')"
+                                style="cursor: pointer;"
+                            >
+                                <span class="health-status health-unknown">Deep health check</span>
+                            </div>
+
+                            <!-- Detailed Health Check Results -->
+                            <div
+                                id="health-details-{{ repo.user_alias }}"
+                                class="health-details-container"
+                                style="display: none;"
+                                data-loaded="false"
+                            >
+                                <!-- Details loaded dynamically via JavaScript -->
+                            </div>
+                        </div>
+                    </div>
                 </article>
             </td>
         </tr>
@@ -179,3 +295,248 @@
     </ul>
 </nav>
 {% endif %}
+
+<!-- Branch Selector Modal -->
+<dialog id="branch-selector-modal">
+    <article>
+        <header>
+            <button aria-label="Close" rel="prev" onclick="closeBranchSelector()"></button>
+            <h3>Select Branch</h3>
+        </header>
+        <div id="branch-loading" style="display: none;">
+            <span class="spinner"></span> Loading branches...
+        </div>
+        <div id="branch-error" style="display: none;"></div>
+        <ul id="branch-list" style="list-style: none; padding: 0;"></ul>
+        <footer>
+            <button class="secondary" onclick="closeBranchSelector()">Cancel</button>
+        </footer>
+    </article>
+</dialog>
+
+<style>
+.index-badge {
+    display: inline-block;
+    padding: 2px 6px;
+    margin: 1px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+.index-badge.semantic {
+    background-color: #e3f2fd;
+    color: #1565c0;
+}
+.index-badge.fts {
+    background-color: #f3e5f5;
+    color: #7b1fa2;
+}
+.index-badge.temporal {
+    background-color: #fff3e0;
+    color: #e65100;
+}
+.index-badge.scip {
+    background-color: #e8f5e9;
+    color: #2e7d32;
+}
+.no-indexes {
+    color: #999;
+    font-style: italic;
+}
+.activated-repo-management {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid #e0e0e0;
+}
+.indexes-management h5,
+.branch-management h5,
+.health-status-section h5 {
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+    font-size: 1rem;
+}
+.indexes-status-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+.index-status-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.25rem 0;
+}
+.index-status-item label {
+    margin: 0;
+    font-weight: 500;
+}
+.index-status .status-icon.present {
+    color: var(--pico-color-green-550);
+}
+.index-status .status-icon.not-present {
+    color: #999;
+}
+.add-index-container {
+    margin-top: 0.5rem;
+}
+.add-index-form {
+    margin-top: 0.5rem;
+    padding: 0.5rem;
+    background-color: #f5f5f5;
+    border-radius: 4px;
+}
+.add-index-form label {
+    display: block;
+    margin-bottom: 0.25rem;
+}
+.add-index-form select {
+    width: 100%;
+    margin-bottom: 0.5rem;
+}
+.branch-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+.job-progress-container {
+    margin-top: 0.5rem;
+    padding: 0.5rem;
+    background-color: #f9f9f9;
+    border-radius: 4px;
+    border: 1px solid #e0e0e0;
+}
+.job-progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+.job-status-text {
+    font-weight: 500;
+}
+.job-progress-details {
+    font-size: 0.9rem;
+}
+.health-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+.health-indicator-container {
+    padding: 0.5rem;
+    background-color: #f5f5f5;
+    border-radius: 4px;
+    margin-bottom: 0.5rem;
+}
+.health-details-container {
+    margin-top: 0.5rem;
+}
+#branch-list li {
+    margin-bottom: 0.5rem;
+}
+#branch-list button {
+    width: 100%;
+}
+</style>
+
+<script>
+// Track open add-index forms for HTMX refresh preservation
+let openActivatedRepoAddIndexForms = new Set();
+let openActivatedRepoHealthDetails = new Set();
+
+// Load index status on page load for all visible repos
+document.addEventListener('DOMContentLoaded', function() {
+    loadAllActivatedRepoIndexes();
+});
+
+// Reload index status after HTMX content replacement
+document.body.addEventListener('htmx:afterSettle', function(event) {
+    const target = event.detail.target;
+    if (target && target.id === 'repos-list-section') {
+        requestAnimationFrame(() => {
+            loadAllActivatedRepoIndexes();
+            restoreOpenActivatedRepoAddIndexForms();
+            restoreOpenActivatedRepoHealthDetails();
+        });
+    }
+});
+
+/**
+ * Load index status for all activated repositories on the page
+ */
+function loadAllActivatedRepoIndexes() {
+    const badges = document.querySelectorAll('[id^="index-badges-"]');
+    badges.forEach(async (badge) => {
+        const userAlias = badge.id.replace('index-badges-', '');
+        try {
+            const indexData = await fetchActivatedRepoIndexes(userAlias);
+            updateIndexBadges(userAlias, indexData);
+            updateIndexStatusGrid(userAlias, indexData);
+        } catch (error) {
+            console.error(`Failed to load indexes for ${userAlias}:`, error);
+            badge.innerHTML = '<span class="no-indexes">Error</span>';
+        }
+    });
+}
+
+/**
+ * Update index status grid in details section
+ */
+function updateIndexStatusGrid(userAlias, indexData) {
+    const indexTypes = ['semantic', 'fts', 'temporal', 'scip'];
+    indexTypes.forEach(type => {
+        const statusSpan = document.getElementById(`index-status-${type}-${userAlias}`);
+        if (statusSpan) {
+            const hasIndex = indexData[`has_${type}`];
+            statusSpan.innerHTML = hasIndex
+                ? '<span class="status-icon present">✓</span> <span class="status-text">Present</span>'
+                : '<span class="status-icon not-present">-</span> <span class="status-text">Not Present</span>';
+        }
+    });
+}
+
+/**
+ * Restore open add-index forms after HTMX refresh
+ */
+function restoreOpenActivatedRepoAddIndexForms() {
+    console.log('[CIDX] restoreOpenActivatedRepoAddIndexForms() called');
+    console.log('[CIDX] openActivatedRepoAddIndexForms size:', openActivatedRepoAddIndexForms.size);
+
+    if (openActivatedRepoAddIndexForms.size > 0) {
+        openActivatedRepoAddIndexForms.forEach(userAlias => {
+            const form = document.getElementById(`add-index-form-${userAlias}`);
+            if (form) {
+                form.style.display = 'block';
+                console.log('[CIDX] Restored add-index form for:', userAlias);
+            }
+        });
+    }
+}
+
+/**
+ * Restore open health details panels after HTMX refresh
+ */
+function restoreOpenActivatedRepoHealthDetails() {
+    console.log('[CIDX] restoreOpenActivatedRepoHealthDetails() called');
+    console.log('[CIDX] openActivatedRepoHealthDetails size:', openActivatedRepoHealthDetails.size);
+
+    openActivatedRepoHealthDetails.forEach(userAlias => {
+        const detailsContainer = document.getElementById(`health-details-${userAlias}`);
+        const indicator = document.getElementById(`health-indicator-${userAlias}`);
+
+        if (detailsContainer) {
+            detailsContainer.style.display = 'block';
+            if (indicator) {
+                indicator.classList.add('expanded');
+            }
+            detailsContainer.dataset.loaded = 'false';
+            loadActivatedRepoHealthDetails(userAlias, false).then(() => {
+                console.log('[CIDX] Health details reloaded for:', userAlias);
+            }).catch(err => {
+                console.error('[CIDX] Failed to reload health details for:', userAlias, err);
+            });
+        }
+    });
+}
+</script>

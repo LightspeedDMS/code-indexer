@@ -93,6 +93,7 @@ from .routers.api_keys import router as api_keys_router
 from .routers.diagnostics import router as diagnostics_router
 from .routers.research_assistant import router as research_assistant_router
 from .routers.repository_health import router as repository_health_router
+from .routers.activated_repos import router as activated_repos_router
 from .services.maintenance_service import get_maintenance_state
 from .routers.groups import (
     router as groups_router,
@@ -8182,6 +8183,7 @@ def create_app() -> FastAPI:
     app.include_router(diagnostics_router)
     app.include_router(research_assistant_router)
     app.include_router(repository_health_router)
+    app.include_router(activated_repos_router)
 
     # Mount Web Admin UI routes and static files
     from fastapi.staticfiles import StaticFiles

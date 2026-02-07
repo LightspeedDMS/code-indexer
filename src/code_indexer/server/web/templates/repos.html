@@ -202,5 +202,19 @@ document.body.addEventListener('htmx:afterSettle', function(event) {
         checkForSyncing();
     }
 });
+
+// Load activated repository management functions (Story #160)
+(function() {
+    const script = document.createElement('script');
+    script.src = '/admin/static/js/activated_repo_management.js';
+    document.head.appendChild(script);
+})();
+
+// Load repository health functions (Story #60)
+(function() {
+    const script = document.createElement('script');
+    script.src = '/admin/static/js/repo_health.js';
+    document.head.appendChild(script);
+})();
 </script>
 {% endblock %}
