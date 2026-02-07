@@ -93,7 +93,7 @@ class CommitterResolutionService:
         # Step 1: Extract hostname from golden repo's push remote URL
         hostname = self.remote_discovery_service.extract_hostname(golden_repo_url)
         if hostname is None:
-            logger.warning(
+            self.logger.warning(
                 format_error_log(
                     "SVC-MIGRATE-001",
                     "Cannot extract hostname from URL, using default email",
@@ -113,7 +113,7 @@ class CommitterResolutionService:
         managed_keys = key_list_result.managed
 
         if not managed_keys:
-            logger.warning(
+            self.logger.warning(
                 format_error_log(
                     "SVC-MIGRATE-002", "No managed SSH keys found, using default email"
                 ),
@@ -148,7 +148,7 @@ class CommitterResolutionService:
                     )
                     return key_metadata.email, key_metadata.name
                 else:
-                    logger.warning(
+                    self.logger.warning(
                         format_error_log(
                             "SVC-MIGRATE-003",
                             "Working key has no email configured, using default email",
@@ -159,7 +159,7 @@ class CommitterResolutionService:
                     return default_email, key_metadata.name
 
         # Step 4: No key worked, use default
-        logger.warning(
+        self.logger.warning(
             format_error_log(
                 "SVC-MIGRATE-004",
                 "No SSH key authenticated to hostname, using default email",
