@@ -616,8 +616,62 @@ curl -s -X POST http://localhost:8000/mcp-public -H "Content-Type: application/j
 
 ### Claude CLI Integration
 
+The CIDX server uses two separate mechanisms for executing Claude CLI commands, each optimized for different use cases:
+
+#### 1. ClaudeCliManager (Queue-Based)
+
+**Location**: `src/code_indexer/server/services/claude_cli_manager.py`
+
+**Architecture**:
+- Thread pool with configurable worker count (default: 2)
+- Work queue for job submission
+- Controlled concurrency via `max_concurrent_claude_cli` setting
+
+**Used For**:
+- Golden repository registration (generates repo description)
+- Catch-up processing for repos registered before Claude integration
+
+**Configuration**:
+- Web UI Config Screen: "Max Concurrent Claude CLI" setting
+- Respects server-wide concurrency limits
+- Jobs queued when all workers busy
+
+**Key Methods**:
+```python
+manager.submit_work(job_id, repo_path, prompt)  # Queues work
+manager.get_job_status(job_id)                  # Check status
+```
+
+#### 2. ResearchAssistantService (Direct Threading)
+
+**Location**: `src/code_indexer/server/services/research_assistant_service.py`
+
+**Architecture**:
+- Direct `threading.Thread(daemon=True)` per request
+- No queue, no concurrency limits
+- Messages persisted to SQLite immediately
+- In-memory `_jobs` dict for active job tracking
+
+**Used For**:
+- Admin Web UI "Research Assistant" tab
+- Interactive chat investigations with Claude
+
+**Behavior**:
+- Submit message → immediate thread spawn
+- Response stored in SQLite when complete
+- Navigate away and back → response persists (fetched from DB)
+- If job not in `_jobs` memory dict, falls back to database lookup
+
+**Why Separate Systems**:
+- ClaudeCliManager: Batch processing, needs rate limiting for API costs
+- ResearchAssistantService: Interactive UX, immediate response expected
+
+#### General Guidelines
+
 - NO FALLBACKS - research and propose solutions
 - JSON errors: Use `_validate_and_debug_prompt()`, check non-ASCII/long lines/quotes
+
+*Recorded 2026-02-06*
 
 ---
 
