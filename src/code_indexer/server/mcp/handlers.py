@@ -7518,7 +7518,7 @@ HANDLER_REGISTRY["gh_actions_cancel_run"] = handle_gh_actions_cancel_run
 # ============================================================================
 
 
-def handle_gitlab_ci_list_pipelines(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gitlab_ci_list_pipelines(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gitlab_ci_list_pipelines tool.
 
@@ -7568,7 +7568,7 @@ def handle_gitlab_ci_list_pipelines(args: Dict[str, Any], user: User) -> Dict[st
 
         # Create client and list pipelines (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        pipelines = client.list_pipelines(project_id=project_id, ref=ref, status=status)
+        pipelines = await client.list_pipelines(project_id=project_id, ref=ref, status=status)
 
         return _mcp_response(
             {
@@ -7623,7 +7623,7 @@ def handle_gitlab_ci_list_pipelines(args: Dict[str, Any], user: User) -> Dict[st
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_gitlab_ci_get_pipeline(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gitlab_ci_get_pipeline(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gitlab_ci_get_pipeline tool.
 
@@ -7671,7 +7671,7 @@ def handle_gitlab_ci_get_pipeline(args: Dict[str, Any], user: User) -> Dict[str,
 
         # Create client and get pipeline details (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        pipeline_info = client.get_pipeline(
+        pipeline_info = await client.get_pipeline(
             project_id=project_id, pipeline_id=pipeline_id
         )
 
@@ -7723,7 +7723,7 @@ def handle_gitlab_ci_get_pipeline(args: Dict[str, Any], user: User) -> Dict[str,
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_gitlab_ci_search_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gitlab_ci_search_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gitlab_ci_search_logs tool.
 
@@ -7781,7 +7781,7 @@ def handle_gitlab_ci_search_logs(args: Dict[str, Any], user: User) -> Dict[str, 
 
         # Create client and search logs (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        matches = client.search_logs(
+        matches = await client.search_logs(
             project_id=project_id,
             pipeline_id=pipeline_id,
             pattern=pattern,
@@ -7942,7 +7942,7 @@ async def handle_gitlab_ci_get_job_logs(args: Dict[str, Any], user: User) -> Dic
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_gitlab_ci_retry_pipeline(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gitlab_ci_retry_pipeline(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gitlab_ci_retry_pipeline tool.
 
@@ -7990,7 +7990,7 @@ def handle_gitlab_ci_retry_pipeline(args: Dict[str, Any], user: User) -> Dict[st
 
         # Create client and retry pipeline (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        result = client.retry_pipeline(project_id=project_id, pipeline_id=pipeline_id)
+        result = await client.retry_pipeline(project_id=project_id, pipeline_id=pipeline_id)
 
         return _mcp_response(
             {
@@ -8041,7 +8041,7 @@ def handle_gitlab_ci_retry_pipeline(args: Dict[str, Any], user: User) -> Dict[st
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_gitlab_ci_cancel_pipeline(
+async def handle_gitlab_ci_cancel_pipeline(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -8091,7 +8091,7 @@ def handle_gitlab_ci_cancel_pipeline(
 
         # Create client and cancel pipeline (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        result = client.cancel_pipeline(project_id=project_id, pipeline_id=pipeline_id)
+        result = await client.cancel_pipeline(project_id=project_id, pipeline_id=pipeline_id)
 
         return _mcp_response(
             {

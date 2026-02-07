@@ -128,8 +128,13 @@ class TestHandlerRegistry:
             "github_actions_get_job_logs",
             "github_actions_retry_run",
             "github_actions_cancel_run",
-            # GitLab CI handlers (async httpx client)
+            # GitLab CI handlers (Bug #160 - must be async for httpx client)
+            "gitlab_ci_list_pipelines",
+            "gitlab_ci_get_pipeline",
+            "gitlab_ci_search_logs",
             "gitlab_ci_get_job_logs",
+            "gitlab_ci_retry_pipeline",
+            "gitlab_ci_cancel_pipeline",
         }
 
         for handler_name, handler_func in HANDLER_REGISTRY.items():
