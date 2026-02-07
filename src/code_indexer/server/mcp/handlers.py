@@ -6893,7 +6893,7 @@ HANDLER_REGISTRY["scip_context"] = scip_context
 
 
 # Story #633: GitHub Actions Monitoring Handlers
-def handle_gh_actions_list_runs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gh_actions_list_runs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gh_actions_list_runs tool.
 
@@ -6943,7 +6943,7 @@ def handle_gh_actions_list_runs(args: Dict[str, Any], user: User) -> Dict[str, A
 
         # Create client and list runs
         client = GitHubActionsClient(token)
-        runs = client.list_runs(repository=repository, branch=branch, status=status)
+        runs = await client.list_runs(repository=repository, branch=branch, status=status)
 
         return _mcp_response(
             {
@@ -6998,7 +6998,7 @@ def handle_gh_actions_list_runs(args: Dict[str, Any], user: User) -> Dict[str, A
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gh_actions_get_run tool.
 
@@ -7046,7 +7046,7 @@ def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[str, Any
 
         # Create client and get run details
         client = GitHubActionsClient(token)
-        run_info = client.get_run(repository=repository, run_id=run_id)
+        run_info = await client.get_run(repository=repository, run_id=run_id)
 
         return _mcp_response(
             {
@@ -7096,7 +7096,7 @@ def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[str, Any
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_gh_actions_search_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gh_actions_search_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gh_actions_search_logs tool.
 
@@ -7151,7 +7151,7 @@ def handle_gh_actions_search_logs(args: Dict[str, Any], user: User) -> Dict[str,
 
         # Create client and search logs
         client = GitHubActionsClient(token)
-        matches = client.search_logs(
+        matches = await client.search_logs(
             repository=repository,
             run_id=run_id,
             pattern=pattern,
@@ -7207,7 +7207,7 @@ def handle_gh_actions_search_logs(args: Dict[str, Any], user: User) -> Dict[str,
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_gh_actions_get_job_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gh_actions_get_job_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gh_actions_get_job_logs tool.
 
@@ -7255,7 +7255,7 @@ def handle_gh_actions_get_job_logs(args: Dict[str, Any], user: User) -> Dict[str
 
         # Create client and get job logs
         client = GitHubActionsClient(token)
-        logs = client.get_job_logs(repository=repository, job_id=job_id)
+        logs = await client.get_job_logs(repository=repository, job_id=job_id)
 
         return _mcp_response(
             {
@@ -7306,7 +7306,7 @@ def handle_gh_actions_get_job_logs(args: Dict[str, Any], user: User) -> Dict[str
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_gh_actions_retry_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gh_actions_retry_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gh_actions_retry_run tool.
 
@@ -7354,7 +7354,7 @@ def handle_gh_actions_retry_run(args: Dict[str, Any], user: User) -> Dict[str, A
 
         # Create client and retry run
         client = GitHubActionsClient(token)
-        result = client.retry_run(repository=repository, run_id=run_id)
+        result = await client.retry_run(repository=repository, run_id=run_id)
 
         return _mcp_response(
             {
@@ -7405,7 +7405,7 @@ def handle_gh_actions_retry_run(args: Dict[str, Any], user: User) -> Dict[str, A
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_gh_actions_cancel_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gh_actions_cancel_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for gh_actions_cancel_run tool.
 
@@ -7453,7 +7453,7 @@ def handle_gh_actions_cancel_run(args: Dict[str, Any], user: User) -> Dict[str, 
 
         # Create client and cancel run
         client = GitHubActionsClient(token)
-        result = client.cancel_run(repository=repository, run_id=run_id)
+        result = await client.cancel_run(repository=repository, run_id=run_id)
 
         return _mcp_response(
             {
@@ -8153,7 +8153,7 @@ HANDLER_REGISTRY["gitlab_ci_cancel_pipeline"] = handle_gitlab_ci_cancel_pipeline
 # =============================================================================
 
 
-def handle_github_actions_list_runs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_github_actions_list_runs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for github_actions_list_runs tool.
 
@@ -8214,7 +8214,7 @@ def handle_github_actions_list_runs(args: Dict[str, Any], user: User) -> Dict[st
 
         # Create client and list runs (CRITICAL: keyword)
         client = GitHubActionsClient(token)
-        runs = client.list_runs(repository=repository, branch=branch, status=status)
+        runs = await client.list_runs(repository=repository, branch=branch, status=status)
 
         # Apply limit to results
         if limit:
@@ -8275,7 +8275,7 @@ def handle_github_actions_list_runs(args: Dict[str, Any], user: User) -> Dict[st
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_github_actions_get_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_github_actions_get_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for github_actions_get_run tool.
 
@@ -8332,7 +8332,7 @@ def handle_github_actions_get_run(args: Dict[str, Any], user: User) -> Dict[str,
 
         # Create client and get run details (CRITICAL: keyword)
         client = GitHubActionsClient(token)
-        run_details = client.get_run(repository=repository, run_id=run_id)
+        run_details = await client.get_run(repository=repository, run_id=run_id)
 
         return _mcp_response(
             {
@@ -8382,7 +8382,7 @@ def handle_github_actions_get_run(args: Dict[str, Any], user: User) -> Dict[str,
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_github_actions_search_logs(
+async def handle_github_actions_search_logs(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -8447,7 +8447,7 @@ def handle_github_actions_search_logs(
 
         # Create client and search logs (CRITICAL: keyword)
         client = GitHubActionsClient(token)
-        matches = client.search_logs(
+        matches = await client.search_logs(
             repository=repository, run_id=run_id, pattern=query
         )
 
@@ -8502,7 +8502,7 @@ def handle_github_actions_search_logs(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_github_actions_get_job_logs(
+async def handle_github_actions_get_job_logs(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -8561,7 +8561,7 @@ def handle_github_actions_get_job_logs(
 
         # Create client and get job logs (CRITICAL: keyword)
         client = GitHubActionsClient(token)
-        logs = client.get_job_logs(repository=repository, job_id=job_id)
+        logs = await client.get_job_logs(repository=repository, job_id=job_id)
 
         return _mcp_response(
             {
@@ -8612,7 +8612,7 @@ def handle_github_actions_get_job_logs(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_github_actions_retry_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_github_actions_retry_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Handler for github_actions_retry_run tool.
 
@@ -8669,7 +8669,7 @@ def handle_github_actions_retry_run(args: Dict[str, Any], user: User) -> Dict[st
 
         # Create client and retry run (CRITICAL: keyword)
         client = GitHubActionsClient(token)
-        result = client.retry_run(repository=repository, run_id=run_id)
+        result = await client.retry_run(repository=repository, run_id=run_id)
 
         return _mcp_response(
             {
@@ -8721,7 +8721,7 @@ def handle_github_actions_retry_run(args: Dict[str, Any], user: User) -> Dict[st
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_github_actions_cancel_run(
+async def handle_github_actions_cancel_run(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """
@@ -8780,7 +8780,7 @@ def handle_github_actions_cancel_run(
 
         # Create client and cancel run (CRITICAL: keyword)
         client = GitHubActionsClient(token)
-        result = client.cancel_run(repository=repository, run_id=run_id)
+        result = await client.cancel_run(repository=repository, run_id=run_id)
 
         return _mcp_response(
             {

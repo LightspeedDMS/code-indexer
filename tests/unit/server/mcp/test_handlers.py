@@ -109,7 +109,28 @@ class TestHandlerRegistry:
         # Handlers that must remain async:
         # - execute_delegation_function: uses httpx.AsyncClient
         # - poll_delegation_job: uses asyncio.Future for callback-based completion
-        async_exceptions = {"execute_delegation_function", "poll_delegation_job"}
+        # - GitHub/GitLab CI handlers: use async httpx-based clients
+        # - regex_search: uses async search implementation
+        async_exceptions = {
+            "execute_delegation_function",
+            "poll_delegation_job",
+            "regex_search",
+            # GitHub Actions handlers (Bug #158 - must be async for httpx client)
+            "gh_actions_list_runs",
+            "gh_actions_get_run",
+            "gh_actions_search_logs",
+            "gh_actions_get_job_logs",
+            "gh_actions_retry_run",
+            "gh_actions_cancel_run",
+            "github_actions_list_runs",
+            "github_actions_get_run",
+            "github_actions_search_logs",
+            "github_actions_get_job_logs",
+            "github_actions_retry_run",
+            "github_actions_cancel_run",
+            # GitLab CI handlers (async httpx client)
+            "gitlab_ci_get_job_logs",
+        }
 
         for handler_name, handler_func in HANDLER_REGISTRY.items():
             if handler_name in async_exceptions:
