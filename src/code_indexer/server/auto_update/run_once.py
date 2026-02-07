@@ -26,7 +26,7 @@ def main():
     try:
         # Configuration
         repo_path = Path(
-            os.environ.get("CIDX_SERVER_REPO_PATH", "/home/sebabattig/cidx-server")
+            os.environ.get("CIDX_SERVER_REPO_PATH", "/opt/code-indexer-repo")
         )
         branch = os.environ.get("CIDX_AUTO_UPDATE_BRANCH") or "master"
         lock_file = Path("/tmp/cidx-auto-update.lock")

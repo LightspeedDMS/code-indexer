@@ -50,14 +50,110 @@ class TestSyncResultDataClass:
 class TestAnthropicApiKeySync:
     """Test Anthropic API key synchronization."""
 
-    def test_sync_anthropic_key_writes_to_claude_json(self):
+    def test_sync_anthropic_key_writes_to_claude_json(self, monkeypatch, tmp_path):
         """AC: Anthropic key synced to ~/.claude.json with apiKey field."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            claude_json_path = Path(tmpdir) / ".claude.json"
+        # Monkeypatch Path.home() to isolate ~/.bashrc writes
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
+        claude_json_path = tmp_path / ".claude.json"
+
+        service = ApiKeySyncService(
+            claude_config_path=str(claude_json_path),
+            systemd_env_path=str(tmp_path / "env"),
+        )
+
+        result = service.sync_anthropic_key(
+            "sk-ant-api03-test123456789012345678901234567890123"
+        )
+
+        assert result.success is True
+        assert claude_json_path.exists()
+
+        config = json.loads(claude_json_path.read_text())
+        assert (
+            config["apiKey"] == "sk-ant-api03-test123456789012345678901234567890123"
+        )
+
+    def test_sync_anthropic_key_preserves_existing_fields(self, monkeypatch, tmp_path):
+        """AC: Sync preserves existing fields in ~/.claude.json."""
+        # Monkeypatch Path.home() to isolate ~/.bashrc writes
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        claude_json_path = tmp_path / ".claude.json"
+
+        # Create existing config with other fields
+        existing = {
+            "primaryApiKey": "old-primary",
+            "otherField": "preserved-value",
+            "nested": {"key": "value"},
+        }
+        claude_json_path.write_text(json.dumps(existing, indent=2))
+
+        service = ApiKeySyncService(
+            claude_config_path=str(claude_json_path),
+            systemd_env_path=str(tmp_path / "env"),
+        )
+
+        service.sync_anthropic_key(
+            "sk-ant-api03-newkey123456789012345678901234567890"
+        )
+
+        config = json.loads(claude_json_path.read_text())
+        assert (
+            config["apiKey"] == "sk-ant-api03-newkey123456789012345678901234567890"
+        )
+        assert config["otherField"] == "preserved-value"
+        assert config["nested"] == {"key": "value"}
+
+    def test_sync_anthropic_key_sets_environment_variable(self, monkeypatch, tmp_path):
+        """AC: Anthropic key synced to os.environ['ANTHROPIC_API_KEY']."""
+        # Monkeypatch Path.home() to isolate ~/.bashrc writes
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        # Clear env var if set
+        original_value = os.environ.pop("ANTHROPIC_API_KEY", None)
+
+        try:
             service = ApiKeySyncService(
-                claude_config_path=str(claude_json_path),
-                systemd_env_path=str(Path(tmpdir) / "env"),
+                claude_config_path=str(tmp_path / ".claude.json"),
+                systemd_env_path=str(tmp_path / "env"),
+            )
+
+            service.sync_anthropic_key(
+                "sk-ant-api03-envtest12345678901234567890123456"
+            )
+
+            assert os.environ.get("ANTHROPIC_API_KEY") == (
+                "sk-ant-api03-envtest12345678901234567890123456"
+            )
+        finally:
+            # Restore original value
+            if original_value is not None:
+                os.environ["ANTHROPIC_API_KEY"] = original_value
+            else:
+                os.environ.pop("ANTHROPIC_API_KEY", None)
+
+
+class TestAnthropicKeyCredentialsRemoval:
+    """Test removal of legacy credentials file during Anthropic key sync."""
+
+    def test_sync_anthropic_key_removes_credentials_file(self, monkeypatch, tmp_path):
+        """AC: Sync removes ~/.claude/.credentials.json if it exists."""
+        # Monkeypatch Path.home() to isolate ~/.bashrc writes
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        credentials_path = tmp_path / ".claude" / ".credentials.json"
+        credentials_path.parent.mkdir(parents=True, exist_ok=True)
+        credentials_path.write_text('{"oauth_token": "old_token"}')
+
+        # Clear env var if set
+        original_value = os.environ.pop("ANTHROPIC_API_KEY", None)
+
+        try:
+            service = ApiKeySyncService(
+                claude_config_path=str(tmp_path / ".claude.json"),
+                systemd_env_path=str(tmp_path / "env"),
+                claude_credentials_path=str(credentials_path),
             )
 
             result = service.sync_anthropic_key(
@@ -65,204 +161,126 @@ class TestAnthropicApiKeySync:
             )
 
             assert result.success is True
-            assert claude_json_path.exists()
-
-            config = json.loads(claude_json_path.read_text())
             assert (
-                config["apiKey"] == "sk-ant-api03-test123456789012345678901234567890123"
-            )
+                not credentials_path.exists()
+            ), "Credentials file should be removed after sync"
+        finally:
+            if original_value is not None:
+                os.environ["ANTHROPIC_API_KEY"] = original_value
+            else:
+                os.environ.pop("ANTHROPIC_API_KEY", None)
 
-    def test_sync_anthropic_key_preserves_existing_fields(self):
-        """AC: Sync preserves existing fields in ~/.claude.json."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            claude_json_path = Path(tmpdir) / ".claude.json"
-
-            # Create existing config with other fields
-            existing = {
-                "primaryApiKey": "old-primary",
-                "otherField": "preserved-value",
-                "nested": {"key": "value"},
-            }
-            claude_json_path.write_text(json.dumps(existing, indent=2))
-
-            service = ApiKeySyncService(
-                claude_config_path=str(claude_json_path),
-                systemd_env_path=str(Path(tmpdir) / "env"),
-            )
-
-            service.sync_anthropic_key(
-                "sk-ant-api03-newkey123456789012345678901234567890"
-            )
-
-            config = json.loads(claude_json_path.read_text())
-            assert (
-                config["apiKey"] == "sk-ant-api03-newkey123456789012345678901234567890"
-            )
-            assert config["otherField"] == "preserved-value"
-            assert config["nested"] == {"key": "value"}
-
-    def test_sync_anthropic_key_sets_environment_variable(self):
-        """AC: Anthropic key synced to os.environ['ANTHROPIC_API_KEY']."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Clear env var if set
-            original_value = os.environ.pop("ANTHROPIC_API_KEY", None)
-
-            try:
-                service = ApiKeySyncService(
-                    claude_config_path=str(Path(tmpdir) / ".claude.json"),
-                    systemd_env_path=str(Path(tmpdir) / "env"),
-                )
-
-                service.sync_anthropic_key(
-                    "sk-ant-api03-envtest12345678901234567890123456"
-                )
-
-                assert os.environ.get("ANTHROPIC_API_KEY") == (
-                    "sk-ant-api03-envtest12345678901234567890123456"
-                )
-            finally:
-                # Restore original value
-                if original_value is not None:
-                    os.environ["ANTHROPIC_API_KEY"] = original_value
-                else:
-                    os.environ.pop("ANTHROPIC_API_KEY", None)
-
-
-class TestAnthropicKeyCredentialsRemoval:
-    """Test removal of legacy credentials file during Anthropic key sync."""
-
-    def test_sync_anthropic_key_removes_credentials_file(self):
-        """AC: Sync removes ~/.claude/.credentials.json if it exists."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            credentials_path = Path(tmpdir) / ".claude" / ".credentials.json"
-            credentials_path.parent.mkdir(parents=True, exist_ok=True)
-            credentials_path.write_text('{"oauth_token": "old_token"}')
-
-            # Clear env var if set
-            original_value = os.environ.pop("ANTHROPIC_API_KEY", None)
-
-            try:
-                service = ApiKeySyncService(
-                    claude_config_path=str(Path(tmpdir) / ".claude.json"),
-                    systemd_env_path=str(Path(tmpdir) / "env"),
-                    claude_credentials_path=str(credentials_path),
-                )
-
-                result = service.sync_anthropic_key(
-                    "sk-ant-api03-test123456789012345678901234567890123"
-                )
-
-                assert result.success is True
-                assert (
-                    not credentials_path.exists()
-                ), "Credentials file should be removed after sync"
-            finally:
-                if original_value is not None:
-                    os.environ["ANTHROPIC_API_KEY"] = original_value
-                else:
-                    os.environ.pop("ANTHROPIC_API_KEY", None)
-
-    def test_sync_anthropic_key_succeeds_when_credentials_file_missing(self):
+    def test_sync_anthropic_key_succeeds_when_credentials_file_missing(
+        self, monkeypatch, tmp_path
+    ):
         """Sync should succeed even if credentials file doesn't exist."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Don't create credentials file
-            original_value = os.environ.pop("ANTHROPIC_API_KEY", None)
+        # Monkeypatch Path.home() to isolate ~/.bashrc writes
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-            try:
-                service = ApiKeySyncService(
-                    claude_config_path=str(Path(tmpdir) / ".claude.json"),
-                    systemd_env_path=str(Path(tmpdir) / "env"),
-                    claude_credentials_path=str(
-                        Path(tmpdir) / ".claude" / ".credentials.json"
-                    ),
-                )
+        # Don't create credentials file
+        original_value = os.environ.pop("ANTHROPIC_API_KEY", None)
 
-                result = service.sync_anthropic_key(
-                    "sk-ant-api03-test123456789012345678901234567890123"
-                )
+        try:
+            service = ApiKeySyncService(
+                claude_config_path=str(tmp_path / ".claude.json"),
+                systemd_env_path=str(tmp_path / "env"),
+                claude_credentials_path=str(
+                    tmp_path / ".claude" / ".credentials.json"
+                ),
+            )
 
-                assert result.success is True
-            finally:
-                if original_value is not None:
-                    os.environ["ANTHROPIC_API_KEY"] = original_value
-                else:
-                    os.environ.pop("ANTHROPIC_API_KEY", None)
+            result = service.sync_anthropic_key(
+                "sk-ant-api03-test123456789012345678901234567890123"
+            )
+
+            assert result.success is True
+        finally:
+            if original_value is not None:
+                os.environ["ANTHROPIC_API_KEY"] = original_value
+            else:
+                os.environ.pop("ANTHROPIC_API_KEY", None)
 
 
 class TestVoyageAIApiKeySync:
     """Test VoyageAI API key synchronization."""
 
-    def test_sync_voyageai_key_sets_environment_variable(self):
+    def test_sync_voyageai_key_sets_environment_variable(self, monkeypatch, tmp_path):
         """AC: VoyageAI key synced to os.environ['VOYAGE_API_KEY']."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Clear env var if set
-            original_value = os.environ.pop("VOYAGE_API_KEY", None)
+        # Monkeypatch Path.home() to isolate ~/.bashrc writes
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-            try:
-                service = ApiKeySyncService(
-                    claude_config_path=str(Path(tmpdir) / ".claude.json"),
-                    systemd_env_path=str(Path(tmpdir) / "env"),
-                )
+        # Clear env var if set
+        original_value = os.environ.pop("VOYAGE_API_KEY", None)
 
-                service.sync_voyageai_key("pa-voyagetest123456789")
+        try:
+            service = ApiKeySyncService(
+                claude_config_path=str(tmp_path / ".claude.json"),
+                systemd_env_path=str(tmp_path / "env"),
+            )
 
-                assert os.environ.get("VOYAGE_API_KEY") == "pa-voyagetest123456789"
-            finally:
-                # Restore original value
-                if original_value is not None:
-                    os.environ["VOYAGE_API_KEY"] = original_value
-                else:
-                    os.environ.pop("VOYAGE_API_KEY", None)
+            service.sync_voyageai_key("pa-voyagetest123456789")
 
-    def test_sync_voyageai_key_writes_to_systemd_env_file(self):
+            assert os.environ.get("VOYAGE_API_KEY") == "pa-voyagetest123456789"
+        finally:
+            # Restore original value
+            if original_value is not None:
+                os.environ["VOYAGE_API_KEY"] = original_value
+            else:
+                os.environ.pop("VOYAGE_API_KEY", None)
+
+    def test_sync_voyageai_key_writes_to_systemd_env_file(self, monkeypatch, tmp_path):
         """AC: VoyageAI key written to systemd environment file."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            systemd_env_path = Path(tmpdir) / "env"
-            original_value = os.environ.pop("VOYAGE_API_KEY", None)
+        # Monkeypatch Path.home() to isolate ~/.bashrc writes
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-            try:
-                service = ApiKeySyncService(
-                    claude_config_path=str(Path(tmpdir) / ".claude.json"),
-                    systemd_env_path=str(systemd_env_path),
-                )
+        systemd_env_path = tmp_path / "env"
+        original_value = os.environ.pop("VOYAGE_API_KEY", None)
 
-                service.sync_voyageai_key("pa-systemdvoyage12345")
+        try:
+            service = ApiKeySyncService(
+                claude_config_path=str(tmp_path / ".claude.json"),
+                systemd_env_path=str(systemd_env_path),
+            )
 
-                assert systemd_env_path.exists()
-                content = systemd_env_path.read_text()
-                assert "VOYAGE_API_KEY=pa-systemdvoyage12345" in content
-            finally:
-                if original_value is not None:
-                    os.environ["VOYAGE_API_KEY"] = original_value
-                else:
-                    os.environ.pop("VOYAGE_API_KEY", None)
+            service.sync_voyageai_key("pa-systemdvoyage12345")
 
-    def test_sync_voyageai_key_idempotent(self):
+            assert systemd_env_path.exists()
+            content = systemd_env_path.read_text()
+            assert "VOYAGE_API_KEY=pa-systemdvoyage12345" in content
+        finally:
+            if original_value is not None:
+                os.environ["VOYAGE_API_KEY"] = original_value
+            else:
+                os.environ.pop("VOYAGE_API_KEY", None)
+
+    def test_sync_voyageai_key_idempotent(self, monkeypatch, tmp_path):
         """AC: Sync is idempotent - no-op if already synced with same key."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            api_key = "pa-idempotent123456789"
-            original_value = os.environ.pop("VOYAGE_API_KEY", None)
+        # Monkeypatch Path.home() to isolate ~/.bashrc writes
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-            try:
-                service = ApiKeySyncService(
-                    claude_config_path=str(Path(tmpdir) / ".claude.json"),
-                    systemd_env_path=str(Path(tmpdir) / "env"),
-                )
+        api_key = "pa-idempotent123456789"
+        original_value = os.environ.pop("VOYAGE_API_KEY", None)
 
-                # First sync
-                result1 = service.sync_voyageai_key(api_key)
-                assert result1.success is True
-                assert result1.already_synced is False
+        try:
+            service = ApiKeySyncService(
+                claude_config_path=str(tmp_path / ".claude.json"),
+                systemd_env_path=str(tmp_path / "env"),
+            )
 
-                # Second sync with same key should be idempotent
-                result2 = service.sync_voyageai_key(api_key)
-                assert result2.success is True
-                assert result2.already_synced is True
-            finally:
-                if original_value is not None:
-                    os.environ["VOYAGE_API_KEY"] = original_value
-                else:
-                    os.environ.pop("VOYAGE_API_KEY", None)
+            # First sync
+            result1 = service.sync_voyageai_key(api_key)
+            assert result1.success is True
+            assert result1.already_synced is False
+
+            # Second sync with same key should be idempotent
+            result2 = service.sync_voyageai_key(api_key)
+            assert result2.success is True
+            assert result2.already_synced is True
+        finally:
+            if original_value is not None:
+                os.environ["VOYAGE_API_KEY"] = original_value
+            else:
+                os.environ.pop("VOYAGE_API_KEY", None)
 
 
 class TestBashrcUpdates:

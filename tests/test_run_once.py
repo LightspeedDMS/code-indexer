@@ -49,14 +49,14 @@ class TestRunOnceMainFunction:
     @patch("code_indexer.server.auto_update.run_once.DeploymentLock")
     @patch("code_indexer.server.auto_update.run_once.ChangeDetector")
     @patch.dict("os.environ", {}, clear=True)
-    def test_main_uses_default_repo_path_when_env_not_set(
+    def test_main_uses_production_safe_default_path(
         self,
         mock_change_detector,
         mock_deployment_lock,
         mock_deployment_executor,
         mock_service,
     ):
-        """main() should use default repo path when CIDX_SERVER_REPO_PATH not set."""
+        """Bug #156: main() should use /opt/code-indexer-repo as production-safe default."""
         from code_indexer.server.auto_update.run_once import main
 
         # Mock service instance
@@ -66,9 +66,9 @@ class TestRunOnceMainFunction:
         with patch.object(sys, "exit") as mock_exit:
             main()
 
-        # Verify ChangeDetector initialized with default path
+        # Verify ChangeDetector initialized with production-safe default path
         mock_change_detector.assert_called_once_with(
-            repo_path=Path("/home/sebabattig/cidx-server"), branch="master"
+            repo_path=Path("/opt/code-indexer-repo"), branch="master"
         )
 
         mock_exit.assert_called_once_with(0)
@@ -100,7 +100,8 @@ class TestRunOnceMainFunction:
             lock_file=Path("/tmp/cidx-auto-update.lock")
         )
         mock_deployment_executor.assert_called_once_with(
-            repo_path=Path("/home/sebabattig/cidx-server"),
+            repo_path=Path("/opt/code-indexer-repo"),
+            branch="master",
             service_name="cidx-server",
         )
         mock_service.assert_called_once()
@@ -273,7 +274,7 @@ class TestRunOnceMainFunction:
 
         # Verify ChangeDetector initialized with default "master" branch
         mock_change_detector.assert_called_once_with(
-            repo_path=Path("/home/sebabattig/cidx-server"), branch="master"
+            repo_path=Path("/opt/code-indexer-repo"), branch="master"
         )
 
         mock_exit.assert_called_once_with(0)
@@ -302,7 +303,7 @@ class TestRunOnceMainFunction:
 
         # Verify ChangeDetector initialized with custom "staging" branch
         mock_change_detector.assert_called_once_with(
-            repo_path=Path("/home/sebabattig/cidx-server"), branch="staging"
+            repo_path=Path("/opt/code-indexer-repo"), branch="staging"
         )
 
         mock_exit.assert_called_once_with(0)
@@ -331,7 +332,7 @@ class TestRunOnceMainFunction:
 
         # Verify ChangeDetector initialized with "development" branch
         mock_change_detector.assert_called_once_with(
-            repo_path=Path("/home/sebabattig/cidx-server"), branch="development"
+            repo_path=Path("/opt/code-indexer-repo"), branch="development"
         )
 
         mock_exit.assert_called_once_with(0)

@@ -1187,3 +1187,247 @@ class TestSubprocessGlobProtections:
         for i, result in enumerate(results):
             assert isinstance(result, list), f"Result {i} should be list"
             assert len(result) > 0, f"Result {i} should have matches"
+
+
+class TestRipgrepInternalDirectoryExclusion:
+    """Test that ripgrep always excludes CIDX internal directories (Bug #158)."""
+
+    @pytest.fixture
+    def ripgrep_service(self, test_repo):
+        """Create service with ripgrep engine."""
+        with patch("code_indexer.global_repos.regex_search.shutil.which") as mock_which:
+            mock_which.return_value = "/usr/bin/rg"
+            return RegexSearchService(test_repo)
+
+    @pytest.mark.asyncio
+    async def test_excludes_code_indexer_directory(self, ripgrep_service, test_repo):
+        """Test that .code-indexer/ is always excluded from ripgrep searches (Bug #158)."""
+        # Create .code-indexer directory with test content
+        code_indexer_dir = test_repo / ".code-indexer"
+        code_indexer_dir.mkdir()
+        (code_indexer_dir / "index.json").write_text('{"test": "data"}')
+
+        with patch(
+            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+        ) as mock_executor_class:
+            mock_executor = MagicMock()
+            mock_executor_class.return_value = mock_executor
+
+            # Mock successful execution
+            mock_result = MagicMock()
+            mock_result.timed_out = False
+            mock_result.status = "success"
+            mock_executor.execute_with_limits.return_value = mock_result
+
+            with patch("builtins.open", create=True) as mock_open:
+                mock_open.return_value.__enter__.return_value.read.return_value = ""
+
+                try:
+                    await ripgrep_service._search_ripgrep(
+                        pattern="test",
+                        search_path=test_repo,
+                        include_patterns=None,
+                        exclude_patterns=None,
+                        case_sensitive=True,
+                        context_lines=0,
+                        max_results=100,
+                        timeout_seconds=10,
+                    )
+                except Exception:
+                    pass  # We only care about command construction
+
+        # Verify command includes .code-indexer exclusion
+        call_args = mock_executor.execute_with_limits.call_args
+        cmd = call_args.kwargs["command"]
+
+        # Should have -g !.code-indexer/** in command
+        assert "-g" in cmd, "Command should have -g flags"
+        assert "!.code-indexer/**" in cmd, "Bug #158: Must exclude .code-indexer/"
+
+    @pytest.mark.asyncio
+    async def test_excludes_git_directory(self, ripgrep_service, test_repo):
+        """Test that .git/ is always excluded from ripgrep searches (Bug #158)."""
+        # Create .git directory with test content
+        git_dir = test_repo / ".git"
+        git_dir.mkdir()
+        (git_dir / "config").write_text("[core]\n    repositoryformatversion = 0\n")
+
+        with patch(
+            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+        ) as mock_executor_class:
+            mock_executor = MagicMock()
+            mock_executor_class.return_value = mock_executor
+
+            # Mock successful execution
+            mock_result = MagicMock()
+            mock_result.timed_out = False
+            mock_result.status = "success"
+            mock_executor.execute_with_limits.return_value = mock_result
+
+            with patch("builtins.open", create=True) as mock_open:
+                mock_open.return_value.__enter__.return_value.read.return_value = ""
+
+                try:
+                    await ripgrep_service._search_ripgrep(
+                        pattern="core",
+                        search_path=test_repo,
+                        include_patterns=None,
+                        exclude_patterns=None,
+                        case_sensitive=True,
+                        context_lines=0,
+                        max_results=100,
+                        timeout_seconds=10,
+                    )
+                except Exception:
+                    pass  # We only care about command construction
+
+        # Verify command includes .git exclusion
+        call_args = mock_executor.execute_with_limits.call_args
+        cmd = call_args.kwargs["command"]
+
+        # Should have -g !.git/** in command
+        assert "-g" in cmd, "Command should have -g flags"
+        assert "!.git/**" in cmd, "Bug #158: Must exclude .git/"
+
+    @pytest.mark.asyncio
+    async def test_timeout_error_includes_context(self, ripgrep_service, test_repo):
+        """Test that TimeoutError includes pattern and path context (Bug #159)."""
+        from unittest.mock import AsyncMock
+
+        with patch(
+            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+        ) as mock_executor_class:
+            mock_executor = MagicMock()
+            mock_executor_class.return_value = mock_executor
+
+            # Mock timeout with AsyncMock
+            mock_result = MagicMock()
+            mock_result.timed_out = True
+            mock_result.timeout_seconds = 30
+            mock_executor.execute_with_limits = AsyncMock(return_value=mock_result)
+
+            with pytest.raises(TimeoutError) as exc_info:
+                await ripgrep_service._search_ripgrep(
+                    pattern="test_pattern",
+                    search_path=test_repo,
+                    include_patterns=None,
+                    exclude_patterns=None,
+                    case_sensitive=True,
+                    context_lines=0,
+                    max_results=100,
+                    timeout_seconds=30,
+                )
+
+            # Verify error message includes pattern and path (Bug #159)
+            error_msg = str(exc_info.value)
+            assert "test_pattern" in error_msg, "Bug #159: TimeoutError must include pattern"
+            assert str(test_repo) in error_msg, "Bug #159: TimeoutError must include path"
+            assert "30 seconds" in error_msg, "TimeoutError must include timeout duration"
+
+
+class TestGrepInternalDirectoryExclusion:
+    """Test that grep always excludes CIDX internal directories (Bug #158)."""
+
+    @pytest.fixture
+    def grep_service(self, test_repo):
+        """Create service with grep engine (ripgrep not available)."""
+        with patch("code_indexer.global_repos.regex_search.shutil.which") as mock_which:
+            # Return None for "rg" but return grep path for "grep"
+            def which_side_effect(cmd):
+                if cmd == "rg":
+                    return None
+                elif cmd == "grep":
+                    return "/usr/bin/grep"
+                return None
+            mock_which.side_effect = which_side_effect
+            return RegexSearchService(test_repo)
+
+    @pytest.mark.asyncio
+    async def test_excludes_code_indexer_directory(self, grep_service, test_repo):
+        """Test that .code-indexer/ is always excluded from grep searches (Bug #158)."""
+        # Create .code-indexer directory with test content
+        code_indexer_dir = test_repo / ".code-indexer"
+        code_indexer_dir.mkdir()
+        (code_indexer_dir / "index.json").write_text('{"test": "data"}')
+
+        with patch(
+            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+        ) as mock_executor_class:
+            mock_executor = MagicMock()
+            mock_executor_class.return_value = mock_executor
+
+            # Mock successful execution
+            mock_result = MagicMock()
+            mock_result.timed_out = False
+            mock_result.status = "success"
+            mock_executor.execute_with_limits.return_value = mock_result
+
+            with patch("builtins.open", create=True) as mock_open:
+                mock_open.return_value.__enter__.return_value.read.return_value = ""
+
+                try:
+                    await grep_service._search_grep(
+                        pattern="test",
+                        search_path=test_repo,
+                        include_patterns=None,
+                        exclude_patterns=None,
+                        case_sensitive=True,
+                        context_lines=0,
+                        max_results=100,
+                        timeout_seconds=10,
+                    )
+                except Exception:
+                    pass  # We only care about command construction
+
+        # Verify command includes .code-indexer exclusion
+        call_args = mock_executor.execute_with_limits.call_args
+        cmd = call_args.kwargs["command"]
+
+        # Should have --exclude-dir .code-indexer in command
+        assert "--exclude-dir" in cmd, "Command should have --exclude-dir flags"
+        assert ".code-indexer" in cmd, "Bug #158: Must exclude .code-indexer/"
+
+    @pytest.mark.asyncio
+    async def test_excludes_git_directory(self, grep_service, test_repo):
+        """Test that .git/ is always excluded from grep searches (Bug #158)."""
+        # Create .git directory with test content
+        git_dir = test_repo / ".git"
+        git_dir.mkdir()
+        (git_dir / "config").write_text("[core]\n    repositoryformatversion = 0\n")
+
+        with patch(
+            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+        ) as mock_executor_class:
+            mock_executor = MagicMock()
+            mock_executor_class.return_value = mock_executor
+
+            # Mock successful execution
+            mock_result = MagicMock()
+            mock_result.timed_out = False
+            mock_result.status = "success"
+            mock_executor.execute_with_limits.return_value = mock_result
+
+            with patch("builtins.open", create=True) as mock_open:
+                mock_open.return_value.__enter__.return_value.read.return_value = ""
+
+                try:
+                    await grep_service._search_grep(
+                        pattern="core",
+                        search_path=test_repo,
+                        include_patterns=None,
+                        exclude_patterns=None,
+                        case_sensitive=True,
+                        context_lines=0,
+                        max_results=100,
+                        timeout_seconds=10,
+                    )
+                except Exception:
+                    pass  # We only care about command construction
+
+        # Verify command includes .git exclusion
+        call_args = mock_executor.execute_with_limits.call_args
+        cmd = call_args.kwargs["command"]
+
+        # Should have --exclude-dir .git in command
+        assert "--exclude-dir" in cmd, "Command should have --exclude-dir flags"
+        assert ".git" in cmd, "Bug #158: Must exclude .git/"

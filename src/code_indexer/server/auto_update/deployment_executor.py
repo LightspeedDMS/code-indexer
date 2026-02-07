@@ -8,6 +8,7 @@ import subprocess
 import logging
 import time
 import sys
+import pwd
 
 import requests
 from code_indexer.server.logging_utils import format_error_log
@@ -1024,6 +1025,41 @@ class DeploymentExecutor:
             )
             return False
 
+    def _get_service_user_home(self) -> Optional[Path]:
+        """Get home directory for the service user from systemd service file.
+
+        Reads the systemd service file, extracts the User= value, and looks up
+        the user's home directory using pwd.getpwnam.
+
+        Returns:
+            Path to service user's home directory, or None if:
+            - Service file doesn't exist
+            - No User= line in service file (service runs as current user)
+            - User lookup fails
+        """
+        service_path = Path(f"/etc/systemd/system/{self.service_name}.service")
+
+        try:
+            if not service_path.exists():
+                return None
+
+            content = service_path.read_text()
+            service_user = self._extract_service_user(content)
+
+            if not service_user:
+                return None
+
+            # Look up user's home directory
+            pw_record = pwd.getpwnam(service_user)
+            return Path(pw_record.pw_dir)
+
+        except (KeyError, FileNotFoundError, PermissionError) as e:
+            logger.debug(
+                f"Could not determine service user home: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return None
+
     def ensure_ripgrep(self) -> bool:
         """
         Ensure ripgrep is installed (x86_64 Linux only).
@@ -1035,7 +1071,8 @@ class DeploymentExecutor:
             True if ripgrep is available (already installed or successfully installed),
             False if installation failed or unsupported architecture.
         """
-        installer = RipgrepInstaller()
+        home_dir = self._get_service_user_home()
+        installer = RipgrepInstaller(home_dir=home_dir)
         return bool(installer.install())  # Explicit cast for mypy
 
     def execute(self) -> bool:
@@ -1083,8 +1120,21 @@ class DeploymentExecutor:
         # Step 6: Issue #154 - Ensure auto-updater uses server Python
         self._ensure_auto_updater_uses_server_python()
 
-        # Step 7: Ensure ripgrep is installed
-        self.ensure_ripgrep()
+        # Step 7: Ensure ripgrep is installed (Bug #157: log result)
+        ripgrep_result = self.ensure_ripgrep()
+        if ripgrep_result:
+            logger.info(
+                "Ripgrep installation successful",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        else:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-035",
+                    "Ripgrep installation failed",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         logger.info(
             "Deployment execution completed successfully",

@@ -4392,7 +4392,33 @@ def _get_current_config() -> dict:
         auth_config = asdict(AuthConfig())
 
     # Story #20: Provider API Keys (Anthropic/VoyageAI)
-    claude_cli_config = settings.get("claude_cli", {})
+    # Bug #153: Provide defaults when claude_cli is None or empty dict
+    claude_cli_raw = settings.get("claude_cli")
+    if not claude_cli_raw:
+        # If None or empty dict, use full defaults
+        claude_cli_config = {
+            "max_concurrent_claude_cli": 3,
+            "description_refresh_interval_hours": 24,
+            "research_assistant_timeout_seconds": 300,
+        }
+    else:
+        # If dict exists, merge with defaults (preserve existing values)
+        claude_cli_config = {
+            "max_concurrent_claude_cli": claude_cli_raw.get(
+                "max_concurrent_claude_cli", 3
+            ),
+            "description_refresh_interval_hours": claude_cli_raw.get(
+                "description_refresh_interval_hours", 24
+            ),
+            "research_assistant_timeout_seconds": claude_cli_raw.get(
+                "research_assistant_timeout_seconds", 300
+            ),
+        }
+        # Preserve additional keys like API keys
+        for key, value in claude_cli_raw.items():
+            if key not in claude_cli_config:
+                claude_cli_config[key] = value
+
     provider_api_keys_config = {
         "anthropic_configured": bool(claude_cli_config.get("anthropic_api_key")),
         "voyageai_configured": bool(claude_cli_config.get("voyageai_api_key")),

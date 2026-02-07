@@ -40,6 +40,7 @@ class DirectoryExplorerService:
 
     DEFAULT_EXCLUDE_PATTERNS = [
         ".git",
+        ".code-indexer",
         ".svn",
         ".hg",
         "node_modules",
@@ -112,8 +113,10 @@ class DirectoryExplorerService:
             """Check if entry should be excluded."""
             import pathspec
 
-            # Always exclude .git
+            # Always exclude .git and .code-indexer
             if name == ".git":
+                return True
+            if name == ".code-indexer":
                 return True
 
             # Check hidden files

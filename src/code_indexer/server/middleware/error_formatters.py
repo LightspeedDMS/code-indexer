@@ -44,7 +44,7 @@ def _serialize_value_for_json(value: Any) -> Any:
     """
     Serialize value to ensure JSON compatibility.
 
-    Handles datetime, Path objects, nested dicts, and lists recursively.
+    Handles datetime, Path, bytes, callable objects, nested dicts, and lists recursively.
 
     Args:
         value: Value to serialize
@@ -56,6 +56,10 @@ def _serialize_value_for_json(value: Any) -> Any:
         return value.isoformat()
     elif isinstance(value, Path):
         return str(value)
+    elif isinstance(value, bytes):
+        return f"<bytes:{len(value)} bytes>"
+    elif callable(value):
+        return f"<function:{getattr(value, '__name__', 'unknown')}>"
     elif isinstance(value, dict):
         return {k: _serialize_value_for_json(v) for k, v in value.items()}
     elif isinstance(value, (list, tuple)):

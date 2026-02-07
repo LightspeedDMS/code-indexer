@@ -248,6 +248,10 @@ class RegexSearchService:
             for pat in exclude_patterns:
                 cmd.extend(["-g", f"!{pat}"])
 
+        # Always exclude CIDX internal directories (Bug #158)
+        cmd.extend(["-g", "!.code-indexer/**"])
+        cmd.extend(["-g", "!.git/**"])
+
         cmd.append(str(search_path))
 
         # Create temp file for output
@@ -267,7 +271,8 @@ class RegexSearchService:
 
                 if result.timed_out:
                     raise TimeoutError(
-                        f"Search timed out after {result.timeout_seconds} seconds"
+                        f"Search timed out after {result.timeout_seconds} seconds "
+                        f"(pattern='{pattern}', path='{search_path}')"
                     )
 
                 if result.status == ExecutionStatus.ERROR:
@@ -566,6 +571,9 @@ class RegexSearchService:
             if exclude_patterns:
                 for pat in exclude_patterns:
                     cmd.extend(["--exclude", pat])
+            # Always exclude CIDX internal directories (Bug #158)
+            cmd.extend(["--exclude-dir", ".code-indexer"])
+            cmd.extend(["--exclude-dir", ".git"])
             cmd.append(str(search_path))
 
         # Create temp file for output
@@ -585,7 +593,8 @@ class RegexSearchService:
 
                 if result.timed_out:
                     raise TimeoutError(
-                        f"Search timed out after {result.timeout_seconds} seconds"
+                        f"Search timed out after {result.timeout_seconds} seconds "
+                        f"(pattern='{pattern}', path='{search_path}')"
                     )
 
                 if result.status == ExecutionStatus.ERROR:

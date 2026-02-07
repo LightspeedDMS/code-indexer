@@ -42,6 +42,24 @@ def repo_with_hidden(tmp_path):
 
 
 @pytest.fixture
+def repo_with_code_indexer(tmp_path):
+    """Create a repository with .code-indexer directory (internal CIDX data)."""
+    (tmp_path / ".code-indexer").mkdir()
+    (tmp_path / ".code-indexer" / "index").mkdir()
+    (tmp_path / ".code-indexer" / "index" / "vectors.json").write_text(
+        '{"embeddings": []}'
+    )
+    (tmp_path / ".code-indexer" / "scip").mkdir()
+    (tmp_path / ".code-indexer" / "scip" / "index.scip.db").write_bytes(b"sqlite3")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("[core]")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("print('hello')")
+
+    return tmp_path
+
+
+@pytest.fixture
 def repo_with_excludes(tmp_path):
     """Create a repository with common excluded directories."""
     (tmp_path / "src").mkdir()
@@ -349,6 +367,44 @@ class TestHiddenFileHandling:
         # Also check the .git directory is not in the tree structure
         assert not any(c.name == ".git" for c in result.root.children if c.is_directory)
 
+    def test_code_indexer_always_excluded(self, repo_with_code_indexer):
+        """Test .code-indexer directory always excluded regardless of include_hidden."""
+        service = DirectoryExplorerService(repo_with_code_indexer)
+        result = service.generate_tree(include_hidden=True)
+
+        # .code-indexer directory should never appear
+        # Check that .code-indexer/ is not in the output (the directory)
+        assert ".code-indexer/" not in result.tree_string
+        # Also check the .code-indexer directory is not in the tree structure
+        assert not any(
+            c.name == ".code-indexer" for c in result.root.children if c.is_directory
+        )
+
+    def test_both_git_and_code_indexer_excluded(self, repo_with_code_indexer):
+        """Test both .git and .code-indexer are excluded together."""
+        service = DirectoryExplorerService(repo_with_code_indexer)
+        result = service.generate_tree(include_hidden=True)
+
+        # Neither .git nor .code-indexer should appear
+        assert ".git/" not in result.tree_string
+        assert ".code-indexer/" not in result.tree_string
+
+        # Verify in tree structure
+        hidden_dirs = [
+            c.name for c in result.root.children if c.is_directory and c.name.startswith(".")
+        ]
+        assert ".git" not in hidden_dirs
+        assert ".code-indexer" not in hidden_dirs
+
+    def test_code_indexer_excluded_by_default(self, repo_with_code_indexer):
+        """Test .code-indexer directory excluded by default (include_hidden=False)."""
+        service = DirectoryExplorerService(repo_with_code_indexer)
+        result = service.generate_tree()
+
+        # .code-indexer should not appear
+        assert ".code-indexer" not in result.tree_string
+        assert not any(c.name == ".code-indexer" for c in result.root.children)
+
 
 class TestShowStats:
     """Tests for show_stats parameter."""
@@ -530,6 +586,10 @@ class TestDefaultExcludePatterns:
     def test_default_excludes_contain_git(self):
         """Test .git is in default excludes."""
         assert ".git" in DirectoryExplorerService.DEFAULT_EXCLUDE_PATTERNS
+
+    def test_default_excludes_contain_code_indexer(self):
+        """Test .code-indexer is in default excludes."""
+        assert ".code-indexer" in DirectoryExplorerService.DEFAULT_EXCLUDE_PATTERNS
 
     def test_default_excludes_contain_node_modules(self):
         """Test node_modules is in default excludes."""
