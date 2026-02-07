@@ -17,8 +17,11 @@ import difflib
 import json
 import logging
 import pathspec
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, TYPE_CHECKING
 from pathlib import Path
+
+if TYPE_CHECKING:
+    from code_indexer.services.hnsw_health_service import HNSWHealthService
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.auth import dependencies
 from code_indexer.server.utils.registry_factory import get_server_global_registry
@@ -48,6 +51,22 @@ logger = logging.getLogger(__name__)
 
 # Initialize SCIP Audit Repository singleton
 scip_audit_repository = SCIPAuditRepository()
+
+# Module-level singleton for HNSWHealthService (Story #59 - fix caching bug)
+_hnsw_health_service: Optional["HNSWHealthService"] = None
+
+
+def _get_hnsw_health_service() -> "HNSWHealthService":
+    """Get or create HNSWHealthService singleton.
+
+    Returns singleton instance with 5-minute cache TTL.
+    Cache persists across requests.
+    """
+    global _hnsw_health_service
+    if _hnsw_health_service is None:
+        from code_indexer.services.hnsw_health_service import HNSWHealthService
+        _hnsw_health_service = HNSWHealthService(cache_ttl_seconds=300)
+    return _hnsw_health_service
 
 
 def _parse_json_string_array(value: Any) -> Any:
@@ -2102,6 +2121,64 @@ def check_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e), "health": {}})
 
 
+def check_hnsw_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Check HNSW index health and integrity for a repository.
+
+    Performs comprehensive health check on the repository's HNSW index including:
+    - File existence and readability
+    - HNSW loadability
+    - Integrity validation (connections, inbound links)
+    - File metadata (size, modification time)
+
+    Results are cached for 5 minutes unless force_refresh=True.
+    """
+    try:
+        from pathlib import Path
+
+        repository_alias = params.get("repository_alias")
+        force_refresh = params.get("force_refresh", False)
+
+        if not repository_alias:
+            return _mcp_response(
+                {"success": False, "error": "Missing required parameter: repository_alias"}
+            )
+
+        # Resolve repository alias to clone path
+        repo = app_module.golden_repo_manager.get_golden_repo(repository_alias)
+        if not repo:
+            return _mcp_response(
+                {"success": False, "error": f"Repository not found: {repository_alias}"}
+            )
+
+        # Construct index path (assumes default collection name)
+        clone_path = Path(repo.clone_path)
+        index_path = clone_path / ".code-indexer" / "index" / "default" / "index.bin"
+
+        # Get singleton service instance (cache persists across requests)
+        health_service = _get_hnsw_health_service()
+
+        # Perform health check
+        result = health_service.check_health(
+            index_path=str(index_path),
+            force_refresh=force_refresh,
+        )
+
+        # Use mode='json' to serialize datetime objects to ISO format strings
+        return _mcp_response(
+            {
+                "success": True,
+                "health": result.model_dump(mode="json"),
+            }
+        )
+
+    except Exception as e:
+        logger.exception(
+            f"Error in check_hnsw_health: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
 def add_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Add a golden repository (admin only).
 
@@ -3221,6 +3298,7 @@ HANDLER_REGISTRY: Dict[str, Any] = {
     "browse_directory": browse_directory,
     "get_branches": get_branches,
     "check_health": check_health,
+    "check_hnsw_health": check_hnsw_health,
     "add_golden_repo": add_golden_repo,
     "remove_golden_repo": remove_golden_repo,
     "refresh_golden_repo": refresh_golden_repo,

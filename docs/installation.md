@@ -119,6 +119,9 @@ For contributors or those who want to modify CIDX:
 git clone https://github.com/LightspeedDMS/code-indexer.git
 cd code-indexer
 
+# Initialize submodule (required for custom hnswlib build)
+git submodule update --init --recursive
+
 # Install in editable mode with dev dependencies
 pip install -e ".[dev]"
 

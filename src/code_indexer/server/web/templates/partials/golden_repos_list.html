@@ -244,6 +244,41 @@
                         </div>
                     </div>
                     {% endif %}
+
+                    <!-- Health Status Section (Story #60) -->
+                    <div class="health-status-section" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e0e0e0;">
+                        <div class="health-header">
+                            <h4>HNSW Index Health</h4>
+                            <button
+                                id="health-refresh-{{ repo.alias }}"
+                                class="outline small"
+                                onclick="refreshHealthData('{{ repo.alias }}')"
+                                title="Refresh health data (bypass cache)"
+                            >
+                                Refresh
+                            </button>
+                        </div>
+
+                        <!-- Health Status Indicator (AC1, AC2) -->
+                        <div
+                            id="health-indicator-{{ repo.alias }}"
+                            class="health-indicator-container"
+                            onclick="toggleHealthDetails('{{ repo.alias }}')"
+                            style="cursor: pointer;"
+                        >
+                            <span class="health-status health-unknown">Deep health check</span>
+                        </div>
+
+                        <!-- Detailed Health Check Results (AC3, AC4, AC5) -->
+                        <div
+                            id="health-details-{{ repo.alias }}"
+                            class="health-details-container"
+                            style="display: none;"
+                            data-loaded="false"
+                        >
+                            <!-- Details loaded dynamically via JavaScript -->
+                        </div>
+                    </div>
                 </article>
             </td>
         </tr>

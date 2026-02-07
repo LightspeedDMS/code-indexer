@@ -228,6 +228,13 @@ function restoreOpenAddIndexForms() {
     document.head.appendChild(script);
 })();
 
+// Load repository health functions (Story #60)
+(function() {
+    const script = document.createElement('script');
+    script.src = '/admin/static/js/repo_health.js';
+    document.head.appendChild(script);
+})();
+
 function showActivateModal(alias) {
     const modal = document.getElementById('activate-modal');
     const aliasInput = document.getElementById('activate-golden-alias');
@@ -267,6 +274,10 @@ document.body.addEventListener('htmx:afterSettle', function(event) {
         requestAnimationFrame(() => {
             restoreOpenDetails();
             restoreOpenAddIndexForms();
+            // Restore health details panels (graceful handling if repo_health.js not loaded)
+            if (typeof restoreOpenHealthDetails === 'function') {
+                restoreOpenHealthDetails();
+            }
         });
     } else {
         // Still check for indexing on other swaps

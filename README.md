@@ -392,12 +392,17 @@ Contributions welcome! We appreciate bug reports, feature suggestions, and code 
 # 1. Clone and install
 git clone https://github.com/YOUR_USERNAME/code-indexer.git
 cd code-indexer
+
+# 2. Initialize submodule (required for custom hnswlib build)
+git submodule update --init --recursive
+
+# 3. Install in editable mode
 pip install -e ".[dev]"
 
-# 2. Install pre-commit hooks (REQUIRED)
+# 4. Install pre-commit hooks (REQUIRED)
 pre-commit install
 
-# 3. Run tests
+# 5. Run tests
 ./fast-automation.sh
 ```
 

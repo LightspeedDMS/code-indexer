@@ -7498,6 +7498,181 @@ def _status_impl(ctx):
 
 
 @cli.command()
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.option("--quiet", "-q", is_flag=True, help="Minimal output")
+@click.option("--index-path", type=click.Path(), help="Custom index path")
+def health(output_json: bool, quiet: bool, index_path: Optional[str]):
+    """Check HNSW index health and integrity.
+
+    Performs comprehensive health checks on your HNSW index to verify:
+    - Index file exists and is accessible
+    - File integrity and readability
+    - HNSW graph structure validity
+    - Connection integrity across all nodes
+
+    \b
+    EXIT CODES:
+      0 - Index is healthy
+      1 - Index has integrity issues (corrupted)
+      2 - Index not found (run 'cidx index' to create)
+      3 - Index not readable (permission issues)
+
+    \b
+    EXAMPLES:
+      cidx health                    # Check default index
+      cidx health --json             # JSON output
+      cidx health --quiet            # Minimal output
+      cidx health --index-path /custom/path/index.bin
+    """
+    # Lazy import to avoid startup overhead
+    from .services.hnsw_health_service import HNSWHealthService
+
+    # Determine index path
+    if index_path is None:
+        # Auto-detect index path from config
+        project_root = Path.cwd()
+        config_path = project_root / ".code-indexer" / "config.json"
+
+        if config_path.exists():
+            # Load config to get voyage model (determines collection directory)
+            from .config import Config
+
+            try:
+                with open(config_path, "r") as f:
+                    config_data = json.load(f)
+                config = Config(**config_data)
+                collection_name = config.voyage_ai.model  # e.g., "voyage-code-3"
+                index_path_obj = (
+                    project_root
+                    / ".code-indexer"
+                    / "index"
+                    / collection_name
+                    / "hnsw_index.bin"
+                )
+                index_path = str(index_path_obj)
+            except Exception:
+                # Fallback to legacy path if config loading fails
+                index_path_obj = project_root / ".code-indexer" / "index" / "hnsw.bin"
+                index_path = str(index_path_obj)
+        else:
+            # No config found, use legacy path
+            index_path_obj = project_root / ".code-indexer" / "index" / "hnsw.bin"
+            index_path = str(index_path_obj)
+
+    # Create health service and perform check
+    service = HNSWHealthService(cache_ttl_seconds=300)
+    result = service.check_health(index_path, force_refresh=False)
+
+    # Determine exit code based on result
+    exit_code = 0
+    if not result.valid:
+        if not result.file_exists:
+            exit_code = 2  # Index not found
+        elif not result.readable:
+            exit_code = 3  # Index not readable (permissions)
+        else:
+            exit_code = 1  # Index unhealthy (integrity issues)
+
+    # Output based on flags
+    if output_json:
+        # JSON output
+        output_data = result.model_dump(mode="json")
+        click.echo(json.dumps(output_data, indent=2, default=str))
+        sys.exit(exit_code)
+
+    if quiet:
+        # Quiet output - single line
+        if result.valid:
+            click.echo("HEALTHY")
+        elif not result.file_exists:
+            click.echo("NOT_FOUND")
+        elif not result.readable:
+            click.echo("NOT_READABLE")
+        else:
+            click.echo("UNHEALTHY")
+        sys.exit(exit_code)
+
+    # Human-readable output
+    console.print("\nHNSW Index Health Check", style="bold cyan")
+    console.print("=" * 50)
+
+    # Status line
+    if result.valid:
+        console.print("Status: ", style="bold", end="")
+        console.print("HEALTHY", style="bold green")
+    elif not result.file_exists:
+        console.print("Status: ", style="bold", end="")
+        console.print("NOT FOUND", style="bold red")
+    elif not result.readable:
+        console.print("Status: ", style="bold", end="")
+        console.print("NOT READABLE", style="bold red")
+    else:
+        console.print("Status: ", style="bold", end="")
+        console.print("UNHEALTHY", style="bold red")
+
+    console.print()
+
+    # File information
+    console.print(f"Index Location: {result.index_path}")
+
+    if result.file_size_bytes is not None:
+        # Format file size in human-readable format
+        size_gb = result.file_size_bytes / (1024**3)
+        if size_gb >= 1.0:
+            size_str = f"{size_gb:.1f} GB"
+        else:
+            size_mb = result.file_size_bytes / (1024**2)
+            if size_mb >= 1.0:
+                size_str = f"{size_mb:.1f} MB"
+            else:
+                size_kb = result.file_size_bytes / 1024
+                size_str = f"{size_kb:.1f} KB"
+        console.print(f"File Size: {size_str}")
+
+    if result.last_modified is not None:
+        console.print(
+            f"Last Modified: {result.last_modified.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
+    # Integrity metrics (if available)
+    if result.element_count is not None:
+        console.print()
+        console.print("Integrity Metrics:", style="bold")
+        console.print(f"  Element Count: {result.element_count:,}")
+        if result.connections_checked is not None:
+            console.print(f"  Connections Checked: {result.connections_checked:,}")
+        if result.min_inbound is not None:
+            console.print(f"  Min Inbound: {result.min_inbound}")
+        if result.max_inbound is not None:
+            console.print(f"  Max Inbound: {result.max_inbound}")
+
+    # Errors (if any)
+    if result.errors:
+        console.print()
+        console.print("Errors Found:", style="bold red")
+        for error in result.errors:
+            console.print(f"  - {error}", style="red")
+
+        # Recommendation for unhealthy index
+        if not result.valid and result.file_exists:
+            console.print()
+            console.print("Recommendation:", style="bold yellow")
+            console.print('  Re-index with "cidx index --force"', style="yellow")
+
+    # No index found - suggest indexing
+    if not result.file_exists:
+        console.print()
+        console.print("No index found. Create an index with:", style="yellow")
+        console.print("  cidx index", style="bold yellow")
+
+    # Timing information
+    console.print()
+    console.print(f"Check Duration: {result.check_duration_ms:.0f} ms")
+
+    sys.exit(exit_code)
+
+
+@cli.command()
 @click.pass_context
 def optimize(ctx):
     """[REMOVED] Optimize vector database - not needed for FilesystemVectorStore."""
