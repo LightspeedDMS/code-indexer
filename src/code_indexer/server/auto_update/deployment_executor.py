@@ -471,6 +471,36 @@ class DeploymentExecutor:
 
         try:
             python_path = self._get_server_python()
+
+            # Install pybind11 first - required because setup.py imports it at module level
+            pybind_result = subprocess.run(
+                [
+                    python_path,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--break-system-packages",
+                    "pybind11",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+
+            if pybind_result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-047",
+                        f"pybind11 installation failed: {pybind_result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            logger.info(
+                "pybind11 installed successfully",
+                extra={"correlation_id": get_correlation_id()},
+            )
             result = subprocess.run(
                 [
                     python_path,

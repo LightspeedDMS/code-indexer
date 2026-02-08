@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.9.4] - 2026-02-08
+
+### Fixed
+
+- **pybind11 pre-installation for hnswlib build** - The hnswlib setup.py imports pybind11 at module level (not as a build dependency), so it must be installed before pip can even parse setup.py. Added explicit `pip install pybind11` step before building custom hnswlib.
+
+---
+
 ## [8.9.3] - 2026-02-08
 
 ### Added
