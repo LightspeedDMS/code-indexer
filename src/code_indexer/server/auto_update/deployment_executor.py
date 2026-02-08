@@ -367,6 +367,77 @@ class DeploymentExecutor:
             )
             return False
 
+    def build_custom_hnswlib(self) -> bool:
+        """Build and install custom hnswlib from third_party/hnswlib submodule.
+
+        The custom hnswlib fork includes the check_integrity() method for HNSW
+        index validation. This must be built from source and installed to replace
+        the standard pip-installed hnswlib.
+
+        Returns:
+            True if successful or submodule not present, False on build failure
+        """
+        hnswlib_path = self.repo_path / "third_party" / "hnswlib"
+
+        # Skip if submodule not initialized (not a fatal error)
+        if not hnswlib_path.exists() or not (hnswlib_path / "setup.py").exists():
+            logger.warning(
+                "Custom hnswlib submodule not found, skipping build",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        try:
+            python_path = self._get_server_python()
+            result = subprocess.run(
+                [
+                    python_path,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--break-system-packages",
+                    "--force-reinstall",
+                    "--no-deps",
+                    ".",
+                ],
+                cwd=hnswlib_path,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout for compilation
+            )
+
+            if result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-042",
+                        f"Custom hnswlib build failed: {result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            logger.info(
+                "Custom hnswlib build and install successful",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except subprocess.TimeoutExpired:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-043",
+                    "Custom hnswlib build timed out after 5 minutes",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        except Exception as e:
+            logger.exception(
+                f"Custom hnswlib build exception: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
     def _get_server_python(self) -> str:
         """Extract Python interpreter from server's service file ExecStart line.
 
@@ -1143,6 +1214,17 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-041",
                     "Deployment failed at git submodule update step",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+        # Step 1.6: Build custom hnswlib with check_integrity() method
+        if not self.build_custom_hnswlib():
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-044",
+                    "Deployment failed at custom hnswlib build step",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.9.2] - 2026-02-08
+
+### Fixed
+
+- **Auto-updater custom hnswlib build** - v8.9.1 only initialized the git submodule but didn't build and install the custom hnswlib. Added `build_custom_hnswlib()` method that runs `pip install --force-reinstall` from `third_party/hnswlib` to compile and install the custom version with `check_integrity()` method for HNSW index validation.
+
+---
+
 ## [8.9.1] - 2026-02-08
 
 ### Fixed
