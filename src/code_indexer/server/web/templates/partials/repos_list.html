@@ -25,7 +25,7 @@
             <td>{{ repo.username }}</td>
             <td>{{ repo.golden_repo_alias or 'Composite' }}</td>
             <td class="indexes-cell" style="white-space: nowrap;">
-                <span id="index-badges-{{ repo.user_alias }}">
+                <span id="index-badges-{{ repo.username }}-{{ repo.user_alias }}" data-owner="{{ repo.username }}" data-alias="{{ repo.user_alias }}">
                     <span class="no-indexes">Loading...</span>
                 </span>
             </td>
@@ -120,30 +120,6 @@
                             <span class="error-text">{{ repo.error_message }}</span>
                         </div>
                         {% endif %}
-                        {% if repo.temporal_status %}
-                        <div class="detail-item">
-                            <label>Temporal Indexing:</label>
-                            {% if repo.temporal_status.format == 'v2' %}
-                            <span class="status-indicator status-active" title="Temporal indexing active with v2 format">
-                                Active (v2) - {{ repo.temporal_status.file_count }} files indexed
-                            </span>
-                            {% elif repo.temporal_status.format == 'v1' %}
-                            <span class="status-indicator status-error" title="Legacy v1 format detected - non-functional">
-                                Legacy v1 (non-functional) - Re-index required: cidx index --index-commits --reconcile
-                            </span>
-                            {% elif repo.temporal_status.format == 'none' %}
-                            <span style="color: #888;" title="Git history not indexed">
-                                Not enabled (git history not indexed)
-                            </span>
-                            {% elif repo.temporal_status.format == 'error' %}
-                            <span class="status-indicator status-error" title="{{ repo.temporal_status.error }}">
-                                Error: {{ repo.temporal_status.message }}
-                            </span>
-                            {% else %}
-                            <span style="color: #888;">{{ repo.temporal_status.message }}</span>
-                            {% endif %}
-                        </div>
-                        {% endif %}
                     </div>
 
                     <!-- Activated Repository Management Section (Story #160) -->
@@ -226,7 +202,7 @@
                                 <button
                                     id="health-refresh-{{ repo.user_alias }}"
                                     class="outline small"
-                                    onclick="refreshActivatedRepoHealthData('{{ repo.user_alias }}')"
+                                    onclick="refreshActivatedRepoHealthData('{{ repo.user_alias }}', '{{ repo.username }}')"
                                     title="Refresh health data (bypass cache)"
                                 >
                                     Refresh
@@ -237,7 +213,7 @@
                             <div
                                 id="health-indicator-{{ repo.user_alias }}"
                                 class="health-indicator-container"
-                                onclick="toggleActivatedRepoHealthDetails('{{ repo.user_alias }}')"
+                                onclick="toggleActivatedRepoHealthDetails('{{ repo.user_alias }}', '{{ repo.username }}')"
                                 style="cursor: pointer;"
                             >
                                 <span class="health-status health-unknown">Deep health check</span>
@@ -425,7 +401,6 @@
 }
 .health-indicator-container {
     padding: 0.5rem;
-    background-color: #f5f5f5;
     border-radius: 4px;
     margin-bottom: 0.5rem;
 }
@@ -468,14 +443,30 @@ document.body.addEventListener('htmx:afterSettle', function(event) {
 function loadAllActivatedRepoIndexes() {
     const badges = document.querySelectorAll('[id^="index-badges-"]');
     badges.forEach(async (badge) => {
-        const userAlias = badge.id.replace('index-badges-', '');
+        const owner = badge.dataset.owner;  // Get owner from data-owner attribute
+        const userAlias = badge.dataset.alias;  // Get alias from data-alias attribute
+        const badgeId = `${owner}-${userAlias}`;  // Unique identifier for this repo
         try {
-            const indexData = await fetchActivatedRepoIndexes(userAlias);
-            updateIndexBadges(userAlias, indexData);
-            updateIndexStatusGrid(userAlias, indexData);
+            const indexData = await fetchActivatedRepoIndexes(userAlias, owner);
+            updateIndexBadges(badgeId, indexData);
+            // Note: updateIndexStatusGrid uses different IDs (just userAlias),
+            // so we update it separately when details are expanded
         } catch (error) {
-            console.error(`Failed to load indexes for ${userAlias}:`, error);
+            console.error(`Failed to load indexes for ${owner}/${userAlias}:`, error);
             badge.innerHTML = '<span class="no-indexes">Error</span>';
+        }
+    });
+}
+
+/**
+ * Update index status grid to show error/not-available state
+ */
+function updateIndexStatusGridError(userAlias) {
+    const indexTypes = ['semantic', 'fts', 'temporal', 'scip'];
+    indexTypes.forEach(type => {
+        const statusSpan = document.getElementById(`index-status-${type}-${userAlias}`);
+        if (statusSpan) {
+            statusSpan.innerHTML = '<span class="status-icon not-present">-</span> <span class="status-text">N/A</span>';
         }
     });
 }
@@ -485,10 +476,25 @@ function loadAllActivatedRepoIndexes() {
  */
 function updateIndexStatusGrid(userAlias, indexData) {
     const indexTypes = ['semantic', 'fts', 'temporal', 'scip'];
+
+    // Convert API response format (indexes array) to lookup object
+    // API returns: {indexes: [{index_type: "semantic", exists: true}, ...]}
+    const indexExists = {};
+    if (indexData.indexes && Array.isArray(indexData.indexes)) {
+        indexData.indexes.forEach(idx => {
+            indexExists[idx.index_type] = idx.exists;
+        });
+    } else {
+        // Fallback for legacy flat format
+        indexTypes.forEach(type => {
+            indexExists[type] = indexData[`has_${type}`] || false;
+        });
+    }
+
     indexTypes.forEach(type => {
         const statusSpan = document.getElementById(`index-status-${type}-${userAlias}`);
         if (statusSpan) {
-            const hasIndex = indexData[`has_${type}`];
+            const hasIndex = indexExists[type];
             statusSpan.innerHTML = hasIndex
                 ? '<span class="status-icon present">✓</span> <span class="status-text">Present</span>'
                 : '<span class="status-icon not-present">-</span> <span class="status-text">Not Present</span>';

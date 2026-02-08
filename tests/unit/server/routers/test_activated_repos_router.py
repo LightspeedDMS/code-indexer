@@ -337,22 +337,44 @@ class TestAddIndexType:
 class TestGetHealth:
     """Tests for GET /api/activated-repos/{user_alias}/health endpoint."""
 
-    def test_get_health_success(
+    def test_get_health_success_single_collection(
         self, authenticated_client, mock_activated_repo_manager
     ):
-        """Test successful health check retrieval."""
+        """Test successful health check with single collection."""
         # Arrange
         user_alias = "my-backend"
         repo_path = "/home/user/.cidx-server/data/activated-repos/testuser/my-backend"
+        index_base_path = f"{repo_path}/.code-indexer/index"
 
         mock_activated_repo_manager.get_activated_repo_path.return_value = repo_path
 
         with patch("code_indexer.server.routers.activated_repos.Path") as mock_path_cls:
-            # Create a function to build mock Path objects with proper __truediv__ support
+            # Create mock directory structure
             def create_mock_path(path_str):
                 mock_p = Mock()
                 mock_p.__str__ = lambda self: path_str
-                mock_p.exists = Mock(return_value=True)
+
+                # Repository path exists
+                if path_str == repo_path:
+                    mock_p.exists.return_value = True
+                # Index base path exists
+                elif path_str == index_base_path:
+                    mock_p.exists.return_value = True
+                    # Mock iterdir to return collection directories
+                    collection_dir = create_mock_path(f"{index_base_path}/voyage-code-3")
+                    mock_p.iterdir.return_value = [collection_dir]
+                # Collection directory
+                elif "voyage-code-3" in path_str and not path_str.endswith(".bin"):
+                    mock_p.exists.return_value = True
+                    mock_p.is_dir.return_value = True
+                    mock_p.name = "voyage-code-3"
+                # HNSW index file
+                elif path_str.endswith("hnsw_index.bin"):
+                    mock_p.exists.return_value = True
+                    mock_p.is_dir.return_value = False
+                else:
+                    mock_p.exists.return_value = False
+                    mock_p.is_dir.return_value = False
 
                 # Support chaining with / operator
                 def truediv(self, other):
@@ -362,25 +384,32 @@ class TestGetHealth:
                 mock_p.__truediv__ = truediv
                 return mock_p
 
-            # Mock Path class to return our mock path objects
             mock_path_cls.side_effect = create_mock_path
 
             with patch(
-                "code_indexer.services.hnsw_health_service.HNSWHealthService"
+                "code_indexer.server.routers.activated_repos.HNSWHealthService"
             ) as mock_health_service_cls:
+                from code_indexer.services.hnsw_health_service import HealthCheckResult
+
                 mock_health_service = Mock()
                 mock_health_service_cls.return_value = mock_health_service
-                mock_health_service.check_health.return_value = {
-                    "status": "healthy",
-                    "collections": [
-                        {
-                            "name": "voyage-code-3",
-                            "status": "healthy",
-                            "hnsw_integrity": "valid",
-                            "document_count": 1500,
-                        }
-                    ],
-                }
+
+                # Mock check_health to return HealthCheckResult object (not dict)
+                mock_health_service.check_health.return_value = HealthCheckResult(
+                    valid=True,
+                    file_exists=True,
+                    readable=True,
+                    loadable=True,
+                    element_count=1500,
+                    connections_checked=7500,
+                    min_inbound=5,
+                    max_inbound=10,
+                    index_path=f"{index_base_path}/voyage-code-3/hnsw_index.bin",
+                    file_size_bytes=1024000,
+                    errors=[],
+                    check_duration_ms=45.5,
+                    from_cache=False,
+                )
 
                 # Act
                 response = authenticated_client.get(
@@ -393,7 +422,134 @@ class TestGetHealth:
         assert data["user_alias"] == user_alias
         assert data["status"] == "healthy"
         assert len(data["collections"]) == 1
-        assert data["collections"][0]["name"] == "voyage-code-3"
+
+        collection = data["collections"][0]
+        assert collection["collection_name"] == "voyage-code-3"
+        assert collection["index_type"] == "semantic"
+        assert collection["valid"] is True
+        assert collection["element_count"] == 1500
+        assert collection["connections_checked"] == 7500
+        assert collection["min_inbound"] == 5
+        assert collection["max_inbound"] == 10
+        assert collection["file_size_bytes"] == 1024000
+
+        # Verify check_health was called with FILE path, not directory
+        mock_health_service.check_health.assert_called_once()
+        call_args = mock_health_service.check_health.call_args
+        assert call_args[1]["index_path"].endswith("hnsw_index.bin")
+
+    def test_get_health_success_multiple_collections(
+        self, authenticated_client, mock_activated_repo_manager
+    ):
+        """Test successful health check with multiple collections."""
+        # Arrange
+        user_alias = "my-backend"
+        repo_path = "/home/user/.cidx-server/data/activated-repos/testuser/my-backend"
+        index_base_path = f"{repo_path}/.code-indexer/index"
+
+        mock_activated_repo_manager.get_activated_repo_path.return_value = repo_path
+
+        with patch("code_indexer.server.routers.activated_repos.Path") as mock_path_cls:
+            # Create mock directory structure with multiple collections
+            def create_mock_path(path_str):
+                mock_p = Mock()
+                mock_p.__str__ = lambda self: path_str
+
+                if path_str == repo_path:
+                    mock_p.exists.return_value = True
+                elif path_str == index_base_path:
+                    mock_p.exists.return_value = True
+                    # Return two collection directories
+                    collection1 = create_mock_path(f"{index_base_path}/voyage-code-3")
+                    collection2 = create_mock_path(f"{index_base_path}/voyage-code-3-temporal")
+                    mock_p.iterdir.return_value = [collection1, collection2]
+                elif any(coll in path_str for coll in ["voyage-code-3", "temporal"]) and not path_str.endswith(".bin"):
+                    mock_p.exists.return_value = True
+                    mock_p.is_dir.return_value = True
+                    if "temporal" in path_str:
+                        mock_p.name = "voyage-code-3-temporal"
+                    else:
+                        mock_p.name = "voyage-code-3"
+                elif path_str.endswith("hnsw_index.bin"):
+                    mock_p.exists.return_value = True
+                    mock_p.is_dir.return_value = False
+                else:
+                    mock_p.exists.return_value = False
+                    mock_p.is_dir.return_value = False
+
+                def truediv(self, other):
+                    new_path = f"{path_str}/{other}" if not path_str.endswith('/') else f"{path_str}{other}"
+                    return create_mock_path(new_path)
+
+                mock_p.__truediv__ = truediv
+                return mock_p
+
+            mock_path_cls.side_effect = create_mock_path
+
+            with patch(
+                "code_indexer.server.routers.activated_repos.HNSWHealthService"
+            ) as mock_health_service_cls:
+                from code_indexer.services.hnsw_health_service import HealthCheckResult
+
+                mock_health_service = Mock()
+                mock_health_service_cls.return_value = mock_health_service
+
+                # Return different results for each collection
+                def mock_check_health(index_path, force_refresh=False):
+                    if "temporal" in index_path:
+                        return HealthCheckResult(
+                            valid=False,
+                            file_exists=True,
+                            readable=True,
+                            loadable=False,
+                            element_count=None,
+                            connections_checked=None,
+                            min_inbound=None,
+                            max_inbound=None,
+                            index_path=index_path,
+                            file_size_bytes=512000,
+                            errors=["Failed to load index"],
+                            check_duration_ms=20.0,
+                            from_cache=False,
+                        )
+                    else:
+                        return HealthCheckResult(
+                            valid=True,
+                            file_exists=True,
+                            readable=True,
+                            loadable=True,
+                            element_count=1500,
+                            connections_checked=7500,
+                            min_inbound=5,
+                            max_inbound=10,
+                            index_path=index_path,
+                            file_size_bytes=1024000,
+                            errors=[],
+                            check_duration_ms=45.5,
+                            from_cache=False,
+                        )
+
+                mock_health_service.check_health.side_effect = mock_check_health
+
+                # Act
+                response = authenticated_client.get(
+                    f"/api/activated-repos/{user_alias}/health"
+                )
+
+        # Assert
+        assert response.status_code == 200
+        data = response.json()
+        assert data["user_alias"] == user_alias
+        assert data["status"] == "unhealthy"  # One collection is unhealthy
+        assert len(data["collections"]) == 2
+
+        # Verify both collections are present
+        collection_names = [c["collection_name"] for c in data["collections"]]
+        assert "voyage-code-3" in collection_names
+        assert "voyage-code-3-temporal" in collection_names
+
+        # Verify check_health was called twice with FILE paths
+        assert mock_health_service.check_health.call_count == 2
 
     def test_get_health_repo_not_found(
         self, authenticated_client, mock_activated_repo_manager

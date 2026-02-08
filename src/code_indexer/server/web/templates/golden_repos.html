@@ -133,14 +133,6 @@
     </article>
 </dialog>
 
-<!-- Auto-refresh for indexing repositories -->
-<div id="auto-refresh-container" style="display: none;"
-    hx-get="/admin/partials/golden-repos-list"
-    hx-trigger="every 10s"
-    hx-target="#repos-list-section"
-    hx-swap="innerHTML">
-</div>
-
 <script>
 // Track open details rows and add-index forms
 let openDetailsSet = new Set();
@@ -235,6 +227,13 @@ function restoreOpenAddIndexForms() {
     document.head.appendChild(script);
 })();
 
+// Load activated repository management functions (Story #161)
+(function() {
+    const script = document.createElement('script');
+    script.src = '/admin/static/js/activated_repo_management.js';
+    document.head.appendChild(script);
+})();
+
 function showActivateModal(alias) {
     const modal = document.getElementById('activate-modal');
     const aliasInput = document.getElementById('activate-golden-alias');
@@ -250,26 +249,11 @@ function closeActivateModal() {
     modal.close();
 }
 
-// Enable auto-refresh when there are indexing repositories
-function checkForIndexing() {
-    const indexingIndicators = document.querySelectorAll('.status-indexing');
-    const autoRefreshContainer = document.getElementById('auto-refresh-container');
-    if (indexingIndicators.length > 0) {
-        autoRefreshContainer.style.display = 'block';
-    } else {
-        autoRefreshContainer.style.display = 'none';
-    }
-}
-
-// Check on page load
-document.addEventListener('DOMContentLoaded', checkForIndexing);
-
 // Check after htmx swaps and restore open details and forms
 document.body.addEventListener('htmx:afterSettle', function(event) {
     // Only restore for repos list swaps
     const target = event.detail.target;
     if (target && target.id === 'repos-list-section') {
-        checkForIndexing();
         // Use requestAnimationFrame to ensure DOM is fully ready
         requestAnimationFrame(() => {
             restoreOpenDetails();
@@ -279,9 +263,6 @@ document.body.addEventListener('htmx:afterSettle', function(event) {
                 restoreOpenHealthDetails();
             }
         });
-    } else {
-        // Still check for indexing on other swaps
-        checkForIndexing();
     }
 });
 </script>

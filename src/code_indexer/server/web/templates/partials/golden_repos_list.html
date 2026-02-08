@@ -219,32 +219,6 @@
                         </div>
                     </div>
 
-                    <!-- Temporal Status Section -->
-                    {% if repo.temporal_status and repo.global_alias %}
-                    <div class="temporal-status-section" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e0e0e0;">
-                        <h4>Temporal Indexing Status</h4>
-                        <div class="detail-item">
-                            {% if repo.temporal_status.format == 'v2' %}
-                            <span class="status-indicator status-active" title="Temporal indexing active with v2 format" style="background-color: #4caf50; color: white; padding: 4px 8px; border-radius: 4px; font-weight: 500;">
-                                Active (v2) - {{ repo.temporal_status.file_count }} files indexed
-                            </span>
-                            {% elif repo.temporal_status.format == 'v1' %}
-                            <span class="status-indicator status-error" title="Legacy v1 format detected - non-functional" style="background-color: #f44336; color: white; padding: 4px 8px; border-radius: 4px; font-weight: 500;">
-                                Legacy v1 (non-functional) - Re-index required: cidx index --index-commits --reconcile
-                            </span>
-                            {% elif repo.temporal_status.format == 'error' %}
-                            <span class="status-indicator status-error" title="{{ repo.temporal_status.message }}" style="background-color: #f44336; color: white; padding: 4px 8px; border-radius: 4px; font-weight: 500;">
-                                Error: {{ repo.temporal_status.message }}
-                            </span>
-                            {% else %}
-                            <span style="color: #888; padding: 4px 8px;" title="Git history not indexed">
-                                Not enabled (git history not indexed)
-                            </span>
-                            {% endif %}
-                        </div>
-                    </div>
-                    {% endif %}
-
                     <!-- Health Status Section (Story #60) -->
                     <div class="health-status-section" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e0e0e0;">
                         <div class="health-header">
@@ -279,6 +253,84 @@
                             <!-- Details loaded dynamically via JavaScript -->
                         </div>
                     </div>
+
+                    <!-- Global Activated Repository Section (Story #161) -->
+                    {% if repo.global_alias %}
+                    <div class="global-activated-section" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e0e0e0;">
+                        <h4>Global Activated Repository</h4>
+                        <p class="global-activated-info">
+                            This golden repository has been globally activated as
+                            <code class="global-alias">{{ repo.global_alias }}</code>.
+                            Below are the metrics for the globally activated copy used for queries.
+                        </p>
+
+                        <!-- Global Activated Indexes -->
+                        <div class="global-indexes-section" style="margin-top: 0.5rem;">
+                            <h5>Indexes</h5>
+                            <div class="indexes-status-grid">
+                                <div class="index-status-item">
+                                    <label>Semantic:</label>
+                                    <span class="index-status" id="global-index-status-semantic-{{ repo.alias }}">
+                                        <span class="status-icon not-present">-</span> <span class="status-text">Loading...</span>
+                                    </span>
+                                </div>
+                                <div class="index-status-item">
+                                    <label>FTS (Full-Text Search):</label>
+                                    <span class="index-status" id="global-index-status-fts-{{ repo.alias }}">
+                                        <span class="status-icon not-present">-</span> <span class="status-text">Loading...</span>
+                                    </span>
+                                </div>
+                                <div class="index-status-item">
+                                    <label>Temporal (Git History):</label>
+                                    <span class="index-status" id="global-index-status-temporal-{{ repo.alias }}">
+                                        <span class="status-icon not-present">-</span> <span class="status-text">Loading...</span>
+                                    </span>
+                                </div>
+                                <div class="index-status-item">
+                                    <label>SCIP (Code Intelligence):</label>
+                                    <span class="index-status" id="global-index-status-scip-{{ repo.alias }}">
+                                        <span class="status-icon not-present">-</span> <span class="status-text">Loading...</span>
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Global Activated Health Status -->
+                        <div class="global-health-section" style="margin-top: 1rem;">
+                            <div class="health-header">
+                                <h5>HNSW Index Health</h5>
+                                <button
+                                    id="global-health-refresh-{{ repo.alias }}"
+                                    class="outline small"
+                                    onclick="refreshGlobalHealthData('{{ repo.alias }}')"
+                                    title="Refresh global activated health data (bypass cache)"
+                                >
+                                    Refresh
+                                </button>
+                            </div>
+
+                            <!-- Health Status Indicator -->
+                            <div
+                                id="global-health-indicator-{{ repo.alias }}"
+                                class="health-indicator-container"
+                                onclick="toggleGlobalHealthDetails('{{ repo.alias }}')"
+                                style="cursor: pointer;"
+                            >
+                                <span class="health-status health-unknown">Deep health check</span>
+                            </div>
+
+                            <!-- Detailed Health Check Results -->
+                            <div
+                                id="global-health-details-{{ repo.alias }}"
+                                class="health-details-container"
+                                style="display: none;"
+                                data-loaded="false"
+                            >
+                                <!-- Details loaded dynamically via JavaScript -->
+                            </div>
+                        </div>
+                    </div>
+                    {% endif %}
                 </article>
             </td>
         </tr>
@@ -370,4 +422,326 @@
     font-size: 0.8rem;
     font-style: italic;
 }
+
+/* Global Activated Section Styles (Story #161) */
+.global-activated-section {
+    padding: 1rem;
+    border-radius: 4px;
+}
+.global-activated-section h4 {
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+}
+.global-activated-section h5 {
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+    font-size: 1rem;
+}
+.global-activated-info {
+    font-size: 0.9rem;
+    color: #666;
+    margin-bottom: 1rem;
+}
+.global-indexes-section,
+.global-health-section {
+    margin-top: 1rem;
+}
 </style>
+
+<script>
+/**
+ * Golden Repos Dual-View JavaScript Functions (Story #161)
+ *
+ * Provides functionality for loading and displaying global activated repository data
+ * within golden repository cards.
+ */
+
+// Load global activated data when details are expanded
+document.addEventListener('DOMContentLoaded', function() {
+    loadAllGlobalActivatedData();
+});
+
+// Reload after HTMX content replacement
+document.body.addEventListener('htmx:afterSettle', function(event) {
+    const target = event.detail.target;
+    if (target && target.id === 'golden-repos-section') {
+        requestAnimationFrame(() => {
+            loadAllGlobalActivatedData();
+        });
+    }
+});
+
+/**
+ * Load global activated data for all golden repos with global_alias
+ */
+function loadAllGlobalActivatedData() {
+    // Find all global activated sections
+    const globalSections = document.querySelectorAll('.global-activated-section');
+
+    globalSections.forEach(section => {
+        // Extract repo alias from the section's parent structure
+        const detailsRow = section.closest('.details-row');
+        if (!detailsRow) return;
+
+        const detailsId = detailsRow.id;
+        const repoAlias = detailsId.replace('details-', '');
+
+        // Get global alias from the code element
+        const globalAliasCode = section.querySelector('code.global-alias');
+        if (!globalAliasCode) return;
+
+        const globalAlias = globalAliasCode.textContent.trim();
+
+        // Load indexes only (health data loaded on user click)
+        loadGlobalActivatedIndexes(repoAlias, globalAlias);
+    });
+}
+
+/**
+ * Fetch and display global activated indexes
+ * @param {string} repoAlias - Golden repo alias
+ * @param {string} globalAlias - Global activated alias (e.g., "repo-global")
+ */
+async function loadGlobalActivatedIndexes(repoAlias, globalAlias) {
+    try {
+        // Use new /api/repositories/{repo_alias}/indexes endpoint (Story #161)
+        // This endpoint supports multi-strategy resolution (golden repos, -global suffix, activated repos)
+        const url = `/api/repositories/${encodeURIComponent(globalAlias)}/indexes`;
+
+        const response = await fetch(url, {
+            credentials: 'same-origin'
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const indexData = await response.json();
+
+        // Update index status grid
+        const indexTypes = ['semantic', 'fts', 'temporal', 'scip'];
+        indexTypes.forEach(type => {
+            const statusSpan = document.getElementById(`global-index-status-${type}-${repoAlias}`);
+            if (statusSpan) {
+                const hasIndex = indexData[`has_${type}`];
+                statusSpan.innerHTML = hasIndex
+                    ? '<span class="status-icon present">✓</span> <span class="status-text">Present</span>'
+                    : '<span class="status-icon not-present">-</span> <span class="status-text">Not Present</span>';
+            }
+        });
+    } catch (error) {
+        console.error(`Failed to load global activated indexes for ${globalAlias}:`, error);
+
+        // Check if it's a 404 (repo not found) or other error
+        const is404 = error.message && error.message.includes('404');
+        const displayText = is404 ? 'N/A' : 'Error';
+
+        // Show appropriate state based on error type
+        const indexTypes = ['semantic', 'fts', 'temporal', 'scip'];
+        indexTypes.forEach(type => {
+            const statusSpan = document.getElementById(`global-index-status-${type}-${repoAlias}`);
+            if (statusSpan) {
+                statusSpan.innerHTML = `<span class="status-icon not-present">-</span> <span class="status-text">${displayText}</span>`;
+            }
+        });
+    }
+}
+
+/**
+ * Fetch and display global activated health indicator
+ * @param {string} repoAlias - Golden repo alias
+ * @param {string} globalAlias - Global activated alias
+ */
+async function loadGlobalActivatedHealthIndicator(repoAlias, globalAlias) {
+    try {
+        // Use new /api/repositories/{repo_alias}/health endpoint (Story #161)
+        // This endpoint supports multi-strategy resolution (golden repos, -global suffix, activated repos)
+        const url = `/api/repositories/${encodeURIComponent(globalAlias)}/health`;
+
+        const response = await fetch(url, {
+            credentials: 'same-origin'
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const healthData = await response.json();
+
+        // Update health indicator using renderHealthIndicator from repo_health.js
+        const indicatorContainer = document.getElementById(`global-health-indicator-${repoAlias}`);
+        if (indicatorContainer && typeof renderHealthIndicator === 'function') {
+            indicatorContainer.innerHTML = renderHealthIndicator(healthData);
+        }
+    } catch (error) {
+        console.error(`Failed to load global activated health for ${globalAlias}:`, error);
+
+        // Check if it's a 404 (repo not found/indexed) or other error
+        const is404 = error.message && error.message.includes('404');
+        const indicatorContainer = document.getElementById(`global-health-indicator-${repoAlias}`);
+
+        if (indicatorContainer) {
+            if (is404) {
+                // Neutral message for missing/unindexed repo
+                indicatorContainer.innerHTML = '<span class="health-status health-info" style="background-color: #e0e0e0; color: #666;">Not indexed yet</span>';
+            } else {
+                // Error state for actual errors
+                indicatorContainer.innerHTML = '<span class="health-status health-unknown">Error loading health</span>';
+            }
+        }
+    }
+}
+
+/**
+ * Toggle global health details expansion
+ * @param {string} repoAlias - Golden repo alias
+ */
+async function toggleGlobalHealthDetails(repoAlias) {
+    const detailsContainer = document.getElementById(`global-health-details-${repoAlias}`);
+    const indicator = document.getElementById(`global-health-indicator-${repoAlias}`);
+
+    if (!detailsContainer) {
+        console.error(`Global health details container not found for: ${repoAlias}`);
+        return;
+    }
+
+    // Toggle visibility
+    const isExpanded = detailsContainer.style.display !== 'none';
+
+    if (isExpanded) {
+        // Collapse
+        detailsContainer.style.display = 'none';
+        if (indicator) {
+            indicator.classList.remove('expanded');
+        }
+    } else {
+        // Expand
+        detailsContainer.style.display = 'block';
+        if (indicator) {
+            indicator.classList.add('expanded');
+        }
+
+        // Load health data if not already loaded
+        if (detailsContainer.dataset.loaded !== 'true') {
+            // Get global alias
+            const globalAliasCode = detailsContainer.closest('.global-activated-section').querySelector('code.global-alias');
+            if (globalAliasCode) {
+                const globalAlias = globalAliasCode.textContent.trim();
+                await loadGlobalHealthDetails(repoAlias, globalAlias, false);
+            }
+        }
+    }
+}
+
+/**
+ * Load and display global health details
+ * @param {string} repoAlias - Golden repo alias
+ * @param {string} globalAlias - Global activated alias
+ * @param {boolean} forceRefresh - Whether to bypass cache
+ */
+async function loadGlobalHealthDetails(repoAlias, globalAlias, forceRefresh = false) {
+    const detailsContainer = document.getElementById(`global-health-details-${repoAlias}`);
+    const refreshBtn = document.getElementById(`global-health-refresh-${repoAlias}`);
+
+    if (!detailsContainer) {
+        return;
+    }
+
+    try {
+        // Show loading spinner
+        detailsContainer.innerHTML = `
+            <div class="health-loading">
+                <span class="spinner"></span> Loading health data...
+            </div>
+        `;
+
+        // Disable refresh button during load
+        if (refreshBtn) {
+            refreshBtn.disabled = true;
+        }
+
+        // Fetch health data using /api/repositories/{repo_alias}/health endpoint (Story #161)
+        const url = `/api/repositories/${encodeURIComponent(globalAlias)}/health${forceRefresh ? '?force_refresh=true' : ''}`;
+
+        const response = await fetch(url, {
+            credentials: 'same-origin'
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const healthData = await response.json();
+
+        // Render details using renderHealthDetails from repo_health.js
+        if (typeof renderHealthDetails === 'function') {
+            detailsContainer.innerHTML = renderHealthDetails(healthData);
+        } else {
+            detailsContainer.innerHTML = '<p class="health-info">Health data loaded successfully.</p>';
+        }
+        detailsContainer.dataset.loaded = 'true';
+
+        // Update indicator if present
+        const indicatorContainer = document.getElementById(`global-health-indicator-${repoAlias}`);
+        if (indicatorContainer && typeof renderHealthIndicator === 'function') {
+            indicatorContainer.innerHTML = renderHealthIndicator(healthData);
+        }
+
+    } catch (error) {
+        console.error(`Failed to load global health details for ${globalAlias}:`, error);
+
+        // Check if it's a 404 (repo not found/indexed) or other error
+        const is404 = error.message && error.message.includes('404');
+
+        if (is404) {
+            // Neutral message for missing/unindexed repo
+            detailsContainer.innerHTML = `
+                <p class="health-info" style="color: #666; font-style: italic;">
+                    Global repository not indexed yet. Index data will appear here once the repository is indexed.
+                </p>
+            `;
+        } else {
+            // Error state for actual errors
+            detailsContainer.innerHTML = `
+                <p class="health-error">Failed to load health data: ${escapeHtml(error.message)}</p>
+                <button class="outline small" onclick="loadGlobalHealthDetails('${escapeHtml(repoAlias)}', '${escapeHtml(globalAlias)}', false)">Retry</button>
+            `;
+        }
+    } finally {
+        // Re-enable refresh button
+        if (refreshBtn) {
+            refreshBtn.disabled = false;
+        }
+    }
+}
+
+/**
+ * Refresh global health data with force_refresh=true
+ * @param {string} repoAlias - Golden repo alias
+ */
+async function refreshGlobalHealthData(repoAlias) {
+    // Get global alias
+    const globalAliasCode = document.querySelector(`#details-${repoAlias} .global-activated-section code.global-alias`);
+    if (!globalAliasCode) {
+        console.error(`Global alias not found for: ${repoAlias}`);
+        return;
+    }
+
+    const globalAlias = globalAliasCode.textContent.trim();
+
+    // Reset loaded flag to force reload
+    const detailsContainer = document.getElementById(`global-health-details-${repoAlias}`);
+    if (detailsContainer) {
+        detailsContainer.dataset.loaded = 'false';
+    }
+
+    // Reload health indicator
+    await loadGlobalActivatedHealthIndicator(repoAlias, globalAlias);
+
+    // If details are expanded, reload them too
+    if (detailsContainer && detailsContainer.style.display !== 'none') {
+        await loadGlobalHealthDetails(repoAlias, globalAlias, true);
+    }
+}
+
+</script>

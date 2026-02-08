@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.9.0] - 2026-02-08
+
+### Fixed
+
+- **Story #160/161: Activated Repository Management UI Improvements** - Multiple fixes for the Repository Management page:
+  - Fixed temporal index detection: Changed path from `index/temporal` to `index/code-indexer-temporal/hnsw_index.bin` to correctly detect temporal indexes
+  - Fixed admin viewing other users' repos: Added `owner` query parameter to `/health` and `/indexes` endpoints
+  - Fixed duplicate HTML element IDs when same repo alias exists for multiple users
+  - Fixed indexes API response format parsing in JavaScript (array format vs flat booleans)
+  - Fixed 404 errors for repos without indexes: Now returns empty indexes array instead of error
+  - Removed inconsistent "Temporal Indexing Status" section from Golden Repos template
+  - Removed conflicting "Temporal Indexing" field from Activated Repos card (badge is now single source of truth)
+
+---
+
 ## [8.8.39] - 2026-02-07
 
 ### Fixed

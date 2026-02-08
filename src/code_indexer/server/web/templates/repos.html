@@ -102,15 +102,6 @@
     {% include "partials/repos_list.html" %}
 </section>
 
-<!-- Auto-refresh for syncing repositories -->
-<div id="auto-refresh-container" style="display: none;"
-    hx-get="/admin/partials/repos-list"
-    hx-trigger="every 10s"
-    hx-target="#repos-list-section"
-    hx-swap="innerHTML"
-    hx-include="#filter-form">
-</div>
-
 <script>
 // Track open details rows
 let openDetailsSet = new Set();
@@ -172,49 +163,23 @@ function restoreOpenDetails() {
     }
 }
 
-// Enable auto-refresh when there are syncing repositories
-function checkForSyncing() {
-    const syncingIndicators = document.querySelectorAll('.status-syncing');
-    const autoRefreshContainer = document.getElementById('auto-refresh-container');
-    if (syncingIndicators.length > 0) {
-        autoRefreshContainer.style.display = 'block';
-    } else {
-        autoRefreshContainer.style.display = 'none';
-    }
-}
-
-// Check on page load
-document.addEventListener('DOMContentLoaded', checkForSyncing);
-
 // Check after htmx swaps and restore open details
 document.body.addEventListener('htmx:afterSettle', function(event) {
     // Only restore for repos list swaps
     const target = event.detail.target;
     if (target && target.id === 'repos-list-section') {
-        checkForSyncing();
         // Use requestAnimationFrame to ensure DOM is fully ready
         requestAnimationFrame(() => {
             restoreOpenDetails();
             restoreOpenHealthDetails();  // Restore health details panels (Bug fix for Story #60)
         });
-    } else {
-        // Still check for syncing on other swaps
-        checkForSyncing();
     }
 });
-
-// Load activated repository management functions (Story #160)
-(function() {
-    const script = document.createElement('script');
-    script.src = '/admin/static/js/activated_repo_management.js';
-    document.head.appendChild(script);
-})();
-
-// Load repository health functions (Story #60)
-(function() {
-    const script = document.createElement('script');
-    script.src = '/admin/static/js/repo_health.js';
-    document.head.appendChild(script);
-})();
 </script>
+
+<!-- Load scripts synchronously in dependency order (Bug #170 fix) -->
+<!-- repo_health.js MUST load first - defines renderHealthIndicator, renderHealthDetails, escapeHtml -->
+<script src="/admin/static/js/repo_health.js"></script>
+<!-- activated_repo_management.js loads second - depends on repo_health.js functions -->
+<script src="/admin/static/js/activated_repo_management.js"></script>
 {% endblock %}

@@ -16,10 +16,15 @@
 /**
  * Fetch index status for an activated repository
  * @param {string} userAlias - User alias of the activated repository
+ * @param {string} owner - Repository owner username (for admin checking other users' repos)
  * @returns {Promise<object>} Index status with has_semantic, has_fts, has_temporal, has_scip
  */
-async function fetchActivatedRepoIndexes(userAlias) {
-    const url = `/api/activated-repos/${encodeURIComponent(userAlias)}/indexes`;
+async function fetchActivatedRepoIndexes(userAlias, owner = null) {
+    let url = `/api/activated-repos/${encodeURIComponent(userAlias)}/indexes`;
+
+    if (owner) {
+        url += `?owner=${encodeURIComponent(owner)}`;
+    }
 
     const response = await fetch(url, {
         credentials: 'same-origin'
@@ -39,7 +44,7 @@ async function fetchActivatedRepoIndexes(userAlias) {
 /**
  * Update index status badges in the UI
  * @param {string} userAlias - User alias
- * @param {object} indexData - Index status data
+ * @param {object} indexData - Index status data (API response with indexes array)
  */
 function updateIndexBadges(userAlias, indexData) {
     const badgesContainer = document.getElementById(`index-badges-${userAlias}`);
@@ -47,20 +52,45 @@ function updateIndexBadges(userAlias, indexData) {
         return;
     }
 
+    // Convert API response format (indexes array) to flat boolean format
+    // API returns: {indexes: [{index_type: "semantic", exists: true}, ...]}
+    // We need: {has_semantic: true, has_fts: false, ...}
+    let has_semantic = false;
+    let has_fts = false;
+    let has_temporal = false;
+    let has_scip = false;
+
+    if (indexData.indexes && Array.isArray(indexData.indexes)) {
+        indexData.indexes.forEach(idx => {
+            if (idx.exists) {
+                if (idx.index_type === 'semantic') has_semantic = true;
+                else if (idx.index_type === 'fts') has_fts = true;
+                else if (idx.index_type === 'temporal') has_temporal = true;
+                else if (idx.index_type === 'scip') has_scip = true;
+            }
+        });
+    } else {
+        // Fallback for legacy flat format (if API returns has_* directly)
+        has_semantic = indexData.has_semantic || false;
+        has_fts = indexData.has_fts || false;
+        has_temporal = indexData.has_temporal || false;
+        has_scip = indexData.has_scip || false;
+    }
+
     let html = '';
-    if (indexData.has_semantic) {
+    if (has_semantic) {
         html += '<span class="index-badge semantic" title="Semantic search available">Semantic</span>';
     }
-    if (indexData.has_fts) {
+    if (has_fts) {
         html += '<span class="index-badge fts" title="Full-text search available">FTS</span>';
     }
-    if (indexData.has_temporal) {
+    if (has_temporal) {
         html += '<span class="index-badge temporal" title="Git history search available">Temporal</span>';
     }
-    if (indexData.has_scip) {
+    if (has_scip) {
         html += '<span class="index-badge scip" title="SCIP code intelligence available">SCIP</span>';
     }
-    if (!indexData.has_semantic && !indexData.has_fts && !indexData.has_temporal && !indexData.has_scip) {
+    if (!has_semantic && !has_fts && !has_temporal && !has_scip) {
         html = '<span class="no-indexes">None</span>';
     }
 
@@ -279,10 +309,24 @@ async function triggerActivatedRepoReindex(userAlias) {
  * Fetch health data for an activated repository
  * @param {string} userAlias - User alias
  * @param {boolean} forceRefresh - Whether to bypass cache
+ * @param {string} owner - Repository owner username (for admin checking other users' repos)
  * @returns {Promise<object>} Health check result
  */
-async function fetchActivatedRepoHealth(userAlias, forceRefresh = false) {
-    const url = `/api/activated-repos/${encodeURIComponent(userAlias)}/health${forceRefresh ? '?force_refresh=true' : ''}`;
+async function fetchActivatedRepoHealth(userAlias, forceRefresh = false, owner = null) {
+    let url = `/api/activated-repos/${encodeURIComponent(userAlias)}/health`;
+    const params = new URLSearchParams();
+
+    if (forceRefresh) {
+        params.append('force_refresh', 'true');
+    }
+
+    if (owner) {
+        params.append('owner', owner);
+    }
+
+    if (params.toString()) {
+        url += '?' + params.toString();
+    }
 
     const response = await fetch(url, {
         credentials: 'same-origin'
@@ -302,8 +346,9 @@ async function fetchActivatedRepoHealth(userAlias, forceRefresh = false) {
 /**
  * Toggle health details expansion for activated repository
  * @param {string} userAlias - User alias
+ * @param {string} owner - Repository owner username (for admin checking other users' repos)
  */
-async function toggleActivatedRepoHealthDetails(userAlias) {
+async function toggleActivatedRepoHealthDetails(userAlias, owner = null) {
     const detailsContainer = document.getElementById(`health-details-${userAlias}`);
     const indicator = document.getElementById(`health-indicator-${userAlias}`);
 
@@ -338,7 +383,7 @@ async function toggleActivatedRepoHealthDetails(userAlias) {
 
         // Load health data if not already loaded
         if (detailsContainer.dataset.loaded !== 'true') {
-            await loadActivatedRepoHealthDetails(userAlias, false);
+            await loadActivatedRepoHealthDetails(userAlias, false, owner);
         }
     }
 }
@@ -347,8 +392,9 @@ async function toggleActivatedRepoHealthDetails(userAlias) {
  * Load and display health details for activated repository
  * @param {string} userAlias - User alias
  * @param {boolean} forceRefresh - Whether to bypass cache
+ * @param {string} owner - Repository owner username (for admin checking other users' repos)
  */
-async function loadActivatedRepoHealthDetails(userAlias, forceRefresh = false) {
+async function loadActivatedRepoHealthDetails(userAlias, forceRefresh = false, owner = null) {
     const detailsContainer = document.getElementById(`health-details-${userAlias}`);
     const refreshBtn = document.getElementById(`health-refresh-${userAlias}`);
 
@@ -370,7 +416,7 @@ async function loadActivatedRepoHealthDetails(userAlias, forceRefresh = false) {
         }
 
         // Fetch health data
-        const healthData = await fetchActivatedRepoHealth(userAlias, forceRefresh);
+        const healthData = await fetchActivatedRepoHealth(userAlias, forceRefresh, owner);
 
         // Render details (reuse renderHealthDetails from repo_health.js)
         if (typeof renderHealthDetails === 'function') {
@@ -390,7 +436,7 @@ async function loadActivatedRepoHealthDetails(userAlias, forceRefresh = false) {
         console.error(`Failed to load health data for ${userAlias}:`, error);
         detailsContainer.innerHTML = `
             <p class="health-error">Failed to load health data: ${escapeHtml(error.message)}</p>
-            <button class="outline small" onclick="loadActivatedRepoHealthDetails('${escapeHtml(userAlias)}', false)">Retry</button>
+            <button class="outline small" onclick="loadActivatedRepoHealthDetails('${escapeHtml(userAlias)}', false, ${owner ? `'${escapeHtml(owner)}'` : 'null'})">Retry</button>
         `;
     } finally {
         // Re-enable refresh button
@@ -403,8 +449,9 @@ async function loadActivatedRepoHealthDetails(userAlias, forceRefresh = false) {
 /**
  * Refresh health data with force_refresh=true for activated repository
  * @param {string} userAlias - User alias
+ * @param {string} owner - Repository owner username (for admin checking other users' repos)
  */
-async function refreshActivatedRepoHealthData(userAlias) {
+async function refreshActivatedRepoHealthData(userAlias, owner = null) {
     // Reset loaded flag to force reload
     const detailsContainer = document.getElementById(`health-details-${userAlias}`);
     if (detailsContainer) {
@@ -412,7 +459,7 @@ async function refreshActivatedRepoHealthData(userAlias) {
     }
 
     // Load with force_refresh=true
-    await loadActivatedRepoHealthDetails(userAlias, true);
+    await loadActivatedRepoHealthDetails(userAlias, true, owner);
 }
 
 /**

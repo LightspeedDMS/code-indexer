@@ -50,6 +50,15 @@ class RepositoryHealthResult(BaseModel):
     from_cache: bool = False
 
 
+class IndexesStatusResponse(BaseModel):
+    """Index availability status for a repository."""
+
+    has_semantic: bool = Field(description="Semantic index available")
+    has_fts: bool = Field(description="Full-text search index available")
+    has_temporal: bool = Field(description="Temporal (git history) index available")
+    has_scip: bool = Field(description="SCIP code intelligence index available")
+
+
 # Create router with prefix and tags
 router = APIRouter(prefix="/api/repositories", tags=["repository-health"])
 
@@ -66,6 +75,19 @@ def _get_golden_repo_manager():
         raise RuntimeError(
             "golden_repo_manager not initialized. "
             "Server must set app.state.golden_repo_manager during startup."
+        )
+    return manager
+
+
+def _get_activated_repo_manager():
+    """Get activated repository manager from app state."""
+    from code_indexer.server import app as app_module
+
+    manager = getattr(app_module.app.state, "activated_repo_manager", None)
+    if manager is None:
+        raise RuntimeError(
+            "activated_repo_manager not initialized. "
+            "Server must set app.state.activated_repo_manager during startup."
         )
     return manager
 
@@ -113,18 +135,45 @@ async def get_repository_health(
         HTTPException 500: Health check failed unexpectedly
     """
     try:
-        # Resolve repository alias to clone path
+        # Multi-strategy repository resolution (Story #58)
+        # Strategy 1: Try as golden repo (exact match)
         golden_repo_manager = _get_golden_repo_manager()
         repo = golden_repo_manager.get_golden_repo(repo_alias)
+        repo_path = None
+        resolved_alias = repo_alias
 
+        # Strategy 2: If not found and ends with -global, try without suffix
+        if not repo and repo_alias.endswith("-global"):
+            base_alias = repo_alias[:-7]  # Remove "-global" suffix
+            repo = golden_repo_manager.get_golden_repo(base_alias)
+            if repo:
+                resolved_alias = base_alias
+
+        # Strategy 3: Try as user-activated repo
         if not repo:
+            activated_repo_manager = _get_activated_repo_manager()
+            potential_path = activated_repo_manager.get_activated_repo_path(
+                current_user.username, repo_alias
+            )
+            # Validate path exists before using it
+            if Path(potential_path).exists():
+                repo_path = potential_path
+
+        # If still not found via any strategy, return 404
+        if not repo and not repo_path:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Repository not found: {repo_alias}",
+                detail=f"Repository '{repo_alias}' not found",
             )
 
-        # Resolve index path
-        clone_path = Path(repo.clone_path)
+        # Resolve index path using actual filesystem path
+        if repo:
+            # Golden repo path
+            actual_path = golden_repo_manager.get_actual_repo_path(resolved_alias)
+            clone_path = Path(actual_path)
+        else:
+            # Activated repo path
+            clone_path = Path(repo_path)
         index_base_path = clone_path / ".code-indexer" / "index"
 
         # Check if index directory exists
@@ -229,4 +278,140 @@ async def get_repository_health(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Health check failed: {str(e)}",
+        )
+
+
+@router.get(
+    "/{repo_alias}/indexes",
+    response_model=IndexesStatusResponse,
+    responses={
+        200: {"description": "Index status retrieved successfully"},
+        404: {"description": "Repository not found"},
+        500: {"description": "Failed to check index status"},
+    },
+)
+async def get_repository_indexes(
+    repo_alias: str,
+    current_user: User = Depends(get_current_user_hybrid),
+) -> IndexesStatusResponse:
+    """
+    Get index availability status for a repository.
+
+    Checks for the presence of semantic, FTS, temporal, and SCIP indexes
+    in the repository using the same multi-strategy resolution as the health endpoint.
+
+    Index detection logic:
+    - Semantic: {repo_path}/.code-indexer/index/voyage-code-3/hnsw_index.bin exists
+    - FTS: {repo_path}/.code-indexer/index/tantivy/ directory exists
+    - Temporal: {repo_path}/.code-indexer/index/temporal/ OR
+                {repo_path}/.code-indexer/index/code-indexer-temporal/ directory exists
+                with hnsw_index.bin
+    - SCIP: {repo_path}/.code-indexer/scip/ directory exists with .scip.db files
+
+    Resolution strategy:
+    1. Try as golden repo (exact match)
+    2. If ends with -global, try without suffix
+    3. Try as user-activated repo
+
+    Args:
+        repo_alias: Repository alias (e.g., 'backend', 'python-mock-global')
+        current_user: Authenticated user (injected by auth dependency)
+
+    Returns:
+        IndexesStatusResponse with boolean flags for each index type
+
+    Raises:
+        HTTPException 404: Repository not found
+        HTTPException 500: Failed to check index status
+    """
+    try:
+        # Multi-strategy repository resolution (same as health endpoint)
+        # Strategy 1: Try as golden repo (exact match)
+        golden_repo_manager = _get_golden_repo_manager()
+        repo = golden_repo_manager.get_golden_repo(repo_alias)
+        repo_path = None
+        resolved_alias = repo_alias
+
+        # Strategy 2: If not found and ends with -global, try without suffix
+        if not repo and repo_alias.endswith("-global"):
+            base_alias = repo_alias[:-7]  # Remove "-global" suffix
+            repo = golden_repo_manager.get_golden_repo(base_alias)
+            if repo:
+                resolved_alias = base_alias
+
+        # Strategy 3: Try as user-activated repo
+        if not repo:
+            activated_repo_manager = _get_activated_repo_manager()
+            potential_path = activated_repo_manager.get_activated_repo_path(
+                current_user.username, repo_alias
+            )
+            # Validate path exists before using it
+            if Path(potential_path).exists():
+                repo_path = potential_path
+
+        # If still not found via any strategy, return 404
+        if not repo and not repo_path:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Repository '{repo_alias}' not found",
+            )
+
+        # Resolve actual filesystem path
+        if repo:
+            # Golden repo path
+            actual_path = golden_repo_manager.get_actual_repo_path(resolved_alias)
+            clone_path = Path(actual_path)
+        else:
+            # Activated repo path
+            clone_path = Path(repo_path)
+
+        # Check for each index type
+        index_base_path = clone_path / ".code-indexer" / "index"
+
+        # Semantic index: voyage-code-3/hnsw_index.bin
+        semantic_path = index_base_path / "voyage-code-3" / "hnsw_index.bin"
+        has_semantic = semantic_path.exists() and semantic_path.is_file()
+
+        # FTS index: tantivy/ directory
+        fts_path = index_base_path / "tantivy"
+        has_fts = fts_path.exists() and fts_path.is_dir()
+
+        # Temporal index: temporal/ OR code-indexer-temporal/ directory with hnsw_index.bin
+        temporal_path1 = index_base_path / "temporal"
+        temporal_path2 = index_base_path / "code-indexer-temporal"
+        has_temporal = False
+
+        if temporal_path1.exists() and temporal_path1.is_dir():
+            temporal_bin = temporal_path1 / "hnsw_index.bin"
+            has_temporal = temporal_bin.exists() and temporal_bin.is_file()
+        elif temporal_path2.exists() and temporal_path2.is_dir():
+            temporal_bin = temporal_path2 / "hnsw_index.bin"
+            has_temporal = temporal_bin.exists() and temporal_bin.is_file()
+
+        # SCIP index: scip/ directory with .scip.db files
+        scip_path = clone_path / ".code-indexer" / "scip"
+        has_scip = False
+        if scip_path.exists() and scip_path.is_dir():
+            # Check if there are any .scip.db files
+            scip_files = list(scip_path.glob("*.scip.db"))
+            has_scip = len(scip_files) > 0
+
+        return IndexesStatusResponse(
+            has_semantic=has_semantic,
+            has_fts=has_fts,
+            has_temporal=has_temporal,
+            has_scip=has_scip,
+        )
+
+    except HTTPException:
+        # Re-raise HTTP exceptions (404, etc.)
+        raise
+    except Exception as e:
+        logger.error(
+            f"Failed to check indexes for repository {repo_alias}: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to check index status: {str(e)}",
         )

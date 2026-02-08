@@ -11,11 +11,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user_hybrid
-from code_indexer.server.auth.user_manager import User
+from code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.services.hnsw_health_service import HNSWHealthService
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,9 @@ class IndexStatus(BaseModel):
     index_type: str = Field(description="Index type: semantic, fts, temporal, or scip")
     exists: bool = Field(description="Whether the index exists")
     healthy: bool = Field(description="Whether the index is healthy")
-    last_updated: Optional[str] = Field(default=None, description="Last update timestamp")
+    last_updated: Optional[str] = Field(
+        default=None, description="Last update timestamp"
+    )
     file_size_bytes: Optional[int] = Field(default=None, description="Index file size")
 
 
@@ -45,7 +48,8 @@ class ReindexRequest(BaseModel):
     """Request body for POST /api/activated-repos/{user_alias}/reindex."""
 
     index_types: Optional[List[str]] = Field(
-        default=None, description="Index types to reindex (semantic, fts, temporal, scip). If null, reindex all existing."
+        default=None,
+        description="Index types to reindex (semantic, fts, temporal, scip). If null, reindex all existing.",
     )
 
 
@@ -69,8 +73,14 @@ class HealthCheckResponse(BaseModel):
     """Response for GET /api/activated-repos/{user_alias}/health."""
 
     user_alias: str
-    status: str
-    collections: List[Dict[str, Any]]
+    overall_healthy: bool = Field(description="Whether all collections are healthy")
+    status: str = Field(description="Overall status: 'healthy' or 'unhealthy'")
+    total_collections: int = Field(description="Total number of collections checked")
+    healthy_count: int = Field(description="Number of healthy collections")
+    unhealthy_count: int = Field(description="Number of unhealthy collections")
+    collections: List[Dict[str, Any]] = Field(
+        description="Per-collection health details"
+    )
 
 
 class SyncRequest(BaseModel):
@@ -161,7 +171,9 @@ def _check_index_status(index_path: Path, index_type: str) -> IndexStatus:
     try:
         stat = index_path.stat()
         file_size = stat.st_size
-        last_updated = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+        last_updated = datetime.fromtimestamp(
+            stat.st_mtime, tz=timezone.utc
+        ).isoformat()
     except Exception as e:
         logger.warning(f"Failed to get file metadata for {index_path}: {e}")
         file_size = None
@@ -190,6 +202,7 @@ def _check_index_status(index_path: Path, index_type: str) -> IndexStatus:
 async def get_indexes_status(
     user_alias: str,
     current_user: User = Depends(get_current_user_hybrid),
+    owner: Optional[str] = Query(None, description="Repository owner username (admin only)"),
 ) -> IndexesStatusResponse:
     """
     Get index status for an activated repository.
@@ -200,6 +213,7 @@ async def get_indexes_status(
     Args:
         user_alias: User's alias for the activated repository
         current_user: Authenticated user (injected by auth dependency)
+        owner: Optional owner username (only used if current_user is admin)
 
     Returns:
         IndexesStatusResponse with status of all indexes
@@ -212,9 +226,17 @@ async def get_indexes_status(
         # Get activated repo manager
         activated_manager = _get_activated_repo_manager()
 
+        # Determine which username to use
+        # Admin users can specify owner parameter to check other users' repos
+        # Non-admin users always use their own username (owner parameter ignored)
+        if owner and current_user.role == UserRole.ADMIN:
+            target_username = owner
+        else:
+            target_username = current_user.username
+
         # Get repository path
         repo_path = activated_manager.get_activated_repo_path(
-            current_user.username, user_alias
+            target_username, user_alias
         )
 
         # Check if repository exists
@@ -222,15 +244,22 @@ async def get_indexes_status(
         if not repo_path_obj.exists():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Activated repository '{user_alias}' not found"
+                detail=f"Activated repository '{user_alias}' not found",
             )
 
-        # Check index directory
+        # Check index directory - if it doesn't exist, return all indexes as not present
         index_dir = repo_path_obj / ".code-indexer" / "index"
         if not index_dir.exists():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Index directory not found for repository '{user_alias}'"
+            # Return empty indexes array - repo exists but hasn't been indexed yet
+            return IndexesStatusResponse(
+                user_alias=user_alias,
+                indexes=[
+                    IndexStatus(index_type="semantic", exists=False, healthy=False),
+                    IndexStatus(index_type="fts", exists=False, healthy=False),
+                    IndexStatus(index_type="temporal", exists=False, healthy=False),
+                    IndexStatus(index_type="scip", exists=False, healthy=False),
+                ],
+                repo_path=repo_path,
             )
 
         # Check each index type
@@ -244,8 +273,8 @@ async def get_indexes_status(
         fts_path = index_dir / "tantivy"
         indexes.append(_check_index_status(fts_path, "fts"))
 
-        # Temporal index
-        temporal_path = index_dir / "temporal"
+        # Temporal index (collection name is code-indexer-temporal)
+        temporal_path = index_dir / "code-indexer-temporal" / "hnsw_index.bin"
         indexes.append(_check_index_status(temporal_path, "temporal"))
 
         # SCIP index
@@ -264,7 +293,7 @@ async def get_indexes_status(
         logger.error(f"Failed to get index status: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve index status: {str(e)}"
+            detail=f"Failed to retrieve index status: {str(e)}",
         )
 
 
@@ -316,7 +345,7 @@ async def trigger_reindex(
         if not repo_path_obj.exists():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Activated repository '{user_alias}' not found"
+                detail=f"Activated repository '{user_alias}' not found",
             )
 
         # Determine which index types to reindex
@@ -335,7 +364,7 @@ async def trigger_reindex(
         job_id = job_manager.submit_job(
             job_func=reindex_job,
             job_name=f"reindex-{user_alias}",
-            metadata={"user_alias": user_alias, "index_types": index_types}
+            metadata={"user_alias": user_alias, "index_types": index_types},
         )
 
         return ReindexResponse(
@@ -349,8 +378,12 @@ async def trigger_reindex(
     except Exception as e:
         logger.error(f"Failed to trigger reindex for {user_alias}: {e}")
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND if "not found" in str(e).lower() else status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to trigger reindex: {str(e)}"
+            status_code=(
+                status.HTTP_404_NOT_FOUND
+                if "not found" in str(e).lower()
+                else status.HTTP_500_INTERNAL_SERVER_ERROR
+            ),
+            detail=f"Failed to trigger reindex: {str(e)}",
         )
 
 
@@ -393,7 +426,7 @@ async def add_index_type(
     if index_type not in valid_index_types:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid index type '{index_type}'. Must be one of: {', '.join(valid_index_types)}"
+            detail=f"Invalid index type '{index_type}'. Must be one of: {', '.join(valid_index_types)}",
         )
 
     try:
@@ -411,7 +444,7 @@ async def add_index_type(
         if not repo_path_obj.exists():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Activated repository '{user_alias}' not found"
+                detail=f"Activated repository '{user_alias}' not found",
             )
 
         # Submit add index job
@@ -424,7 +457,7 @@ async def add_index_type(
         job_id = job_manager.submit_job(
             job_func=add_index_job,
             job_name=f"add-index-{index_type}-{user_alias}",
-            metadata={"user_alias": user_alias, "index_type": index_type}
+            metadata={"user_alias": user_alias, "index_type": index_type},
         )
 
         return AddIndexResponse(
@@ -438,8 +471,12 @@ async def add_index_type(
     except Exception as e:
         logger.error(f"Failed to add index type {index_type} for {user_alias}: {e}")
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND if "not found" in str(e).lower() else status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to add index type: {str(e)}"
+            status_code=(
+                status.HTTP_404_NOT_FOUND
+                if "not found" in str(e).lower()
+                else status.HTTP_500_INTERNAL_SERVER_ERROR
+            ),
+            detail=f"Failed to add index type: {str(e)}",
         )
 
 
@@ -455,6 +492,7 @@ async def add_index_type(
 async def get_health(
     user_alias: str,
     current_user: User = Depends(get_current_user_hybrid),
+    owner: Optional[str] = Query(None, description="Repository owner username (admin only)"),
 ) -> HealthCheckResponse:
     """
     Get health check status for an activated repository.
@@ -464,6 +502,7 @@ async def get_health(
     Args:
         user_alias: User's alias for the activated repository
         current_user: Authenticated user (injected by auth dependency)
+        owner: Optional owner username (only used if current_user is admin)
 
     Returns:
         HealthCheckResponse with overall status and collection-level health
@@ -476,9 +515,17 @@ async def get_health(
         # Get activated repo manager
         activated_manager = _get_activated_repo_manager()
 
+        # Determine which username to use
+        # Admin users can specify owner parameter to check other users' repos
+        # Non-admin users always use their own username (owner parameter ignored)
+        if owner and current_user.role == UserRole.ADMIN:
+            target_username = owner
+        else:
+            target_username = current_user.username
+
         # Get repository path
         repo_path = activated_manager.get_activated_repo_path(
-            current_user.username, user_alias
+            target_username, user_alias
         )
 
         # Check if repository exists
@@ -486,21 +533,96 @@ async def get_health(
         if not repo_path_obj.exists():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Activated repository '{user_alias}' not found"
+                detail=f"Activated repository '{user_alias}' not found",
             )
-
-        # Import HNSWHealthService
-        from code_indexer.services.hnsw_health_service import HNSWHealthService
 
         # Run health check
         health_service = HNSWHealthService()
         index_dir = repo_path_obj / ".code-indexer" / "index"
-        health_result = health_service.check_health(str(index_dir))
+
+        # Check if index directory exists
+        if not index_dir.exists():
+            return HealthCheckResponse(
+                user_alias=user_alias,
+                overall_healthy=True,
+                status="healthy",
+                total_collections=0,
+                healthy_count=0,
+                unhealthy_count=0,
+                collections=[],
+            )
+
+        # Iterate through collection directories
+        collections: List[Dict[str, Any]] = []
+
+        for collection_dir in index_dir.iterdir():
+            if not collection_dir.is_dir():
+                continue
+
+            hnsw_file = collection_dir / "hnsw_index.bin"
+            if not hnsw_file.exists():
+                continue
+
+            collection_name = collection_dir.name
+
+            # Determine index type from collection name
+            if "temporal" in collection_name.lower():
+                index_type = "temporal"
+            elif "multimodal" in collection_name.lower():
+                index_type = "multimodal"
+            else:
+                index_type = "semantic"
+
+            # Perform health check for this collection
+            health_result = health_service.check_health(
+                index_path=str(hnsw_file),
+                force_refresh=False,
+            )
+
+            # Convert to collection health dict
+            collection_health = {
+                "collection_name": collection_name,
+                "index_type": index_type,
+                "valid": health_result.valid,
+                "file_exists": health_result.file_exists,
+                "readable": health_result.readable,
+                "loadable": health_result.loadable,
+                "element_count": health_result.element_count,
+                "connections_checked": health_result.connections_checked,
+                "min_inbound": health_result.min_inbound,
+                "max_inbound": health_result.max_inbound,
+                "file_size_bytes": health_result.file_size_bytes,
+                "errors": health_result.errors,
+                "check_duration_ms": health_result.check_duration_ms,
+            }
+            collections.append(collection_health)
+
+        # If no collections found, return empty result
+        if not collections:
+            return HealthCheckResponse(
+                user_alias=user_alias,
+                overall_healthy=True,
+                status="healthy",
+                total_collections=0,
+                healthy_count=0,
+                unhealthy_count=0,
+                collections=[],
+            )
+
+        # Aggregate results
+        healthy_count = sum(1 for c in collections if c["valid"])
+        unhealthy_count = len(collections) - healthy_count
+        overall_healthy = unhealthy_count == 0
+        health_status = "healthy" if overall_healthy else "unhealthy"
 
         return HealthCheckResponse(
             user_alias=user_alias,
-            status=health_result["status"],
-            collections=health_result["collections"],
+            overall_healthy=overall_healthy,
+            status=health_status,
+            total_collections=len(collections),
+            healthy_count=healthy_count,
+            unhealthy_count=unhealthy_count,
+            collections=collections,
         )
 
     except HTTPException:
@@ -509,7 +631,7 @@ async def get_health(
         logger.error(f"Failed to get health for {user_alias}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to check health: {str(e)}"
+            detail=f"Failed to check health: {str(e)}",
         )
 
 
@@ -560,7 +682,7 @@ async def sync_repository(
         if not repo_path_obj.exists():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Activated repository '{user_alias}' not found"
+                detail=f"Activated repository '{user_alias}' not found",
             )
 
         # Submit sync job
@@ -573,7 +695,7 @@ async def sync_repository(
         job_id = job_manager.submit_job(
             job_func=sync_job,
             job_name=f"sync-{user_alias}",
-            metadata={"user_alias": user_alias, "reindex": request.reindex}
+            metadata={"user_alias": user_alias, "reindex": request.reindex},
         )
 
         return SyncResponse(
@@ -587,8 +709,12 @@ async def sync_repository(
     except Exception as e:
         logger.error(f"Failed to sync repository {user_alias}: {e}")
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND if "not found" in str(e).lower() else status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to sync repository: {str(e)}"
+            status_code=(
+                status.HTTP_404_NOT_FOUND
+                if "not found" in str(e).lower()
+                else status.HTTP_500_INTERNAL_SERVER_ERROR
+            ),
+            detail=f"Failed to sync repository: {str(e)}",
         )
 
 
@@ -641,7 +767,7 @@ async def switch_branch(
         if not repo_path_obj.exists():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Activated repository '{user_alias}' not found"
+                detail=f"Activated repository '{user_alias}' not found",
             )
 
         # Submit branch switch job
@@ -654,7 +780,7 @@ async def switch_branch(
         job_id = job_manager.submit_job(
             job_func=switch_branch_job,
             job_name=f"switch-branch-{user_alias}",
-            metadata={"user_alias": user_alias, "branch_name": request.branch_name}
+            metadata={"user_alias": user_alias, "branch_name": request.branch_name},
         )
 
         return SwitchBranchResponse(
@@ -668,8 +794,12 @@ async def switch_branch(
     except Exception as e:
         logger.error(f"Failed to switch branch for {user_alias}: {e}")
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND if "not found" in str(e).lower() else status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to switch branch: {str(e)}"
+            status_code=(
+                status.HTTP_404_NOT_FOUND
+                if "not found" in str(e).lower()
+                else status.HTTP_500_INTERNAL_SERVER_ERROR
+            ),
+            detail=f"Failed to switch branch: {str(e)}",
         )
 
 
@@ -716,7 +846,7 @@ async def list_branches(
         if not repo_path_obj.exists():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Activated repository '{user_alias}' not found"
+                detail=f"Activated repository '{user_alias}' not found",
             )
 
         # Get branches using git
@@ -753,11 +883,11 @@ async def list_branches(
         logger.error(f"Git command failed for {user_alias}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list branches: {e.stderr}"
+            detail=f"Failed to list branches: {e.stderr}",
         )
     except Exception as e:
         logger.error(f"Failed to list branches for {user_alias}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list branches: {str(e)}"
+            detail=f"Failed to list branches: {str(e)}",
         )

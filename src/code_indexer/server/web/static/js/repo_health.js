@@ -355,17 +355,34 @@ async function refreshHealthData(repoAlias) {
 /**
  * Restore open health details panels after HTMX content replacement.
  * Called from htmx:afterSettle handler to maintain state across refreshes.
+ *
+ * Bug Fix: After HTMX replaces DOM, the new elements are empty.
+ * We must both show the container AND reload the health data.
  */
 function restoreOpenHealthDetails() {
+    console.log('[CIDX] restoreOpenHealthDetails() called, openHealthDetailsSet size:', openHealthDetailsSet.size);
+
     openHealthDetailsSet.forEach(repoAlias => {
         const detailsContainer = document.getElementById(`health-details-${repoAlias}`);
         const indicator = document.getElementById(`health-indicator-${repoAlias}`);
 
+        console.log('[CIDX] Restoring health details for:', repoAlias, 'container found:', !!detailsContainer);
+
         if (detailsContainer) {
+            // Show the container
             detailsContainer.style.display = 'block';
             if (indicator) {
                 indicator.classList.add('expanded');
             }
+
+            // CRITICAL: Reload the health data since HTMX replaced the DOM
+            // The new container is empty after DOM replacement
+            detailsContainer.dataset.loaded = 'false';
+            loadHealthDetails(repoAlias, false).then(() => {
+                console.log('[CIDX] Health details reloaded for:', repoAlias);
+            }).catch(err => {
+                console.error('[CIDX] Failed to reload health details for:', repoAlias, err);
+            });
         }
     });
 }
@@ -377,6 +394,7 @@ function restoreOpenHealthDetails() {
  * @returns {string} Escaped HTML
  */
 function escapeHtml(text) {
+    if (!text) return '';
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
@@ -387,3 +405,6 @@ window.toggleHealthDetails = toggleHealthDetails;
 window.loadHealthDetails = loadHealthDetails;
 window.refreshHealthData = refreshHealthData;
 window.restoreOpenHealthDetails = restoreOpenHealthDetails;
+window.renderHealthIndicator = renderHealthIndicator;
+window.renderHealthDetails = renderHealthDetails;
+window.escapeHtml = escapeHtml;
