@@ -327,6 +327,46 @@ class DeploymentExecutor:
             )
             return False
 
+    def git_submodule_update(self) -> bool:
+        """Initialize and update git submodules.
+
+        Required for custom hnswlib build from third_party/hnswlib submodule.
+        The custom build includes check_integrity() method for HNSW index validation.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            result = subprocess.run(
+                ["git", "submodule", "update", "--init", "--recursive"],
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-040",
+                        f"Git submodule update failed: {result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            logger.info(
+                f"Git submodule update successful: {result.stdout.strip() or 'submodules initialized'}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.exception(
+                f"Git submodule update exception: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
     def _get_server_python(self) -> str:
         """Extract Python interpreter from server's service file ExecStart line.
 
@@ -1092,6 +1132,17 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-020",
                     "Deployment failed at git pull step",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+        # Step 1.5: Git submodule update (for custom hnswlib build)
+        if not self.git_submodule_update():
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-041",
+                    "Deployment failed at git submodule update step",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
