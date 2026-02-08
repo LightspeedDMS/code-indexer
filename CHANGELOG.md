@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.9.3] - 2026-02-08
+
+### Added
+
+- **Idempotent build dependency installation** - Added `_ensure_build_dependencies()` method that automatically installs C++ build tools (gcc-c++, python3-devel, libgomp) required for compiling custom hnswlib. Works on both Rocky Linux (dnf) and Amazon Linux (yum) with automatic package manager detection. This ensures clean production servers get the required build tools automatically.
+
+---
+
 ## [8.9.2] - 2026-02-08
 
 ### Fixed

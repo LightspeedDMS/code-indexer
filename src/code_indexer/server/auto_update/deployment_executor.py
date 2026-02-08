@@ -367,6 +367,77 @@ class DeploymentExecutor:
             )
             return False
 
+    def _ensure_build_dependencies(self) -> bool:
+        """Ensure C++ build dependencies are installed for compiling hnswlib.
+
+        Required packages: gcc-c++ (g++), python3-devel, libgomp (OpenMP).
+        Uses dnf with fallback to yum for compatibility with Rocky/Amazon Linux.
+
+        Returns:
+            True if dependencies are available, False on installation failure
+        """
+        # Check if g++ already exists (idempotent check)
+        result = subprocess.run(
+            ["which", "g++"],
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode == 0:
+            logger.debug(
+                f"C++ compiler already available: {result.stdout.strip()}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        # g++ not found - install build dependencies
+        logger.info(
+            "C++ compiler not found, installing build dependencies",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+        packages = ["gcc-c++", "python3-devel", "libgomp"]
+
+        # Try dnf first (Rocky Linux 8+, Amazon Linux 2023)
+        for pkg_manager in ["dnf", "yum"]:
+            result = subprocess.run(
+                ["which", pkg_manager],
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode == 0:
+                install_cmd = ["sudo", pkg_manager, "install", "-y"] + packages
+                result = subprocess.run(
+                    install_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+
+                if result.returncode == 0:
+                    logger.info(
+                        f"Build dependencies installed via {pkg_manager}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return True
+                else:
+                    logger.warning(
+                        f"{pkg_manager} install failed: {result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    # Try next package manager
+                    continue
+
+        logger.error(
+            format_error_log(
+                "DEPLOY-GENERAL-045",
+                "Failed to install build dependencies - no compatible package manager",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return False
+
     def build_custom_hnswlib(self) -> bool:
         """Build and install custom hnswlib from third_party/hnswlib submodule.
 
@@ -386,6 +457,17 @@ class DeploymentExecutor:
                 extra={"correlation_id": get_correlation_id()},
             )
             return True
+
+        # Ensure build dependencies are installed (idempotent)
+        if not self._ensure_build_dependencies():
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-046",
+                    "Cannot build custom hnswlib - build dependencies unavailable",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
 
         try:
             python_path = self._get_server_python()
