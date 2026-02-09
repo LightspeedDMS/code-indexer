@@ -5,11 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.9.15] - 2026-02-09
+
+### Fixed
+
+- **Auto-updater: Only initialize required submodule** - Changed `git submodule update --init --recursive` to `git submodule update --init third_party/hnswlib`. The `--recursive` flag attempted to initialize ALL submodules (including test-fixtures), each requiring its own safe.directory entry. Since production only needs the custom hnswlib build, we now initialize only that specific submodule.
+
+---
+
 ## [8.9.14] - 2026-02-09
 
 ### Fixed
 
-- **Auto-updater: Fixed submodule "dubious ownership" error** - Git's `safe.directory` check applies to each repository independently. Submodules like `third_party/hnswlib` need their own safe.directory entries. Added `_ensure_submodule_safe_directory()` method that configures git safe.directory for submodule paths before running `git submodule update --init --recursive`.
+- **Auto-updater: Fixed submodule "dubious ownership" error** - Git's `safe.directory` check applies to each repository independently. Submodules like `third_party/hnswlib` need their own safe.directory entries. Added `_ensure_submodule_safe_directory()` method that configures git safe.directory for submodule paths before running `git submodule update`.
 
 ---
 

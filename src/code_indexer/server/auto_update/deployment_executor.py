@@ -391,10 +391,14 @@ class DeploymentExecutor:
             return True  # Non-fatal, continue with deployment
 
     def git_submodule_update(self) -> bool:
-        """Initialize and update git submodules.
+        """Initialize and update the hnswlib submodule only.
 
         Required for custom hnswlib build from third_party/hnswlib submodule.
         The custom build includes check_integrity() method for HNSW index validation.
+
+        Note: Only initializes third_party/hnswlib, not test fixture submodules.
+        Production servers don't need test-fixtures/* submodules, and initializing
+        all submodules with --recursive causes safe.directory errors.
 
         Returns:
             True if successful, False otherwise
@@ -404,8 +408,9 @@ class DeploymentExecutor:
             self._ensure_submodule_safe_directory()
 
             # Service runs as root, no sudo needed
+            # Only initialize the specific submodule we need (not --recursive)
             result = subprocess.run(
-                ["git", "submodule", "update", "--init", "--recursive"],
+                ["git", "submodule", "update", "--init", "third_party/hnswlib"],
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,

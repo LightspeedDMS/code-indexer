@@ -107,3 +107,33 @@ class TestEnsureSubmoduleSafeDirectory:
 
         # Verify _ensure_submodule_safe_directory was called
         mock_ensure.assert_called_once()
+
+    def test_git_submodule_update_only_initializes_hnswlib(self):
+        """git_submodule_update should only init third_party/hnswlib, not all submodules.
+
+        Production servers don't need test fixtures. Using --recursive would try to
+        initialize all submodules (including test-fixtures/*) which fail safe.directory
+        checks.
+        """
+        executor = DeploymentExecutor(
+            repo_path=Path("/home/user/code-indexer"),
+        )
+
+        with patch.object(executor, "_ensure_submodule_safe_directory", return_value=True):
+            with patch(
+                "code_indexer.server.auto_update.deployment_executor.subprocess.run"
+            ) as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+                executor.git_submodule_update()
+
+        # Verify git command uses specific path, not --recursive
+        call_args = mock_run.call_args[0][0]
+        assert "git" in call_args
+        assert "submodule" in call_args
+        assert "update" in call_args
+        assert "--init" in call_args
+        # Should NOT use --recursive (which inits ALL submodules)
+        assert "--recursive" not in call_args
+        # Should specify the specific submodule path
+        assert "third_party/hnswlib" in call_args
