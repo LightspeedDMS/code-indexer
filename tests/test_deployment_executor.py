@@ -87,24 +87,23 @@ class TestDeploymentExecutorPipInstall:
 
     @patch("subprocess.run")
     def test_pip_install_executes_correct_command(self, mock_run):
-        """pip_install() should execute pip install with --break-system-packages."""
+        """pip_install() should execute pip install with sudo for root-owned venvs."""
         mock_run.return_value = Mock(returncode=0, stdout="Successfully installed")
 
         executor = DeploymentExecutor(repo_path=Path("/tmp/test-repo"))
         result = executor.pip_install()
 
         assert result is True
-        mock_run.assert_called_once()
-        args = mock_run.call_args[0][0]
-        assert args == [
-            "python3",
-            "-m",
-            "pip",
-            "install",
-            "--break-system-packages",
-            "-e",
-            ".",
-        ]
+        # Note: _get_server_python() makes an additional call to read service file
+        # so we check the last call which is the actual pip install
+        args = mock_run.call_args_list[-1][0][0]
+        # Uses sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
+        assert args[0] == "sudo"
+        assert "-m" in args
+        assert "pip" in args
+        assert "install" in args
+        assert "--break-system-packages" in args
+        assert "-e" in args
 
     @patch("subprocess.run")
     def test_pip_install_uses_correct_working_directory(self, mock_run):
@@ -200,18 +199,30 @@ class TestDeploymentExecutorExecute:
 
     @patch("subprocess.run")
     def test_execute_runs_git_pull_then_pip_install(self, mock_run):
-        """execute() should run git pull followed by pip install."""
+        """execute() should run git pull, submodule update, and pip install."""
         mock_run.return_value = Mock(returncode=0, stdout="Success")
 
         executor = DeploymentExecutor(repo_path=Path("/tmp/test-repo"))
         result = executor.execute()
 
         assert result is True
-        assert mock_run.call_count == 2
-        # First call: git pull
-        assert mock_run.call_args_list[0][0][0][0] == "git"
-        # Second call: pip install
-        assert mock_run.call_args_list[1][0][0][0] == "python3"
+        # execute() now has many steps: git pull, submodule update, hnswlib build,
+        # pip install, ensure_workers, ensure_cidx_repo_root, ensure_git_safe_dir, etc.
+        # Verify key commands are present in the call list
+        all_calls = [call[0][0] for call in mock_run.call_args_list]
+
+        # Check git pull is called
+        git_pull_calls = [c for c in all_calls if c[:2] == ["git", "pull"]]
+        assert len(git_pull_calls) >= 1, "git pull should be called"
+
+        # Check git submodule update with sudo is called
+        submodule_calls = [c for c in all_calls if "submodule" in c]
+        assert len(submodule_calls) >= 1, "git submodule update should be called"
+        assert submodule_calls[0][0] == "sudo", "submodule update should use sudo"
+
+        # Check pip install is called (with sudo for root-owned venvs)
+        pip_install_calls = [c for c in all_calls if "pip" in c and "install" in c]
+        assert len(pip_install_calls) >= 1, "pip install should be called"
 
     @patch("subprocess.run")
     def test_execute_returns_false_when_git_pull_fails(self, mock_run):

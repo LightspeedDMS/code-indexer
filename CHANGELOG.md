@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.9.5] - 2026-02-09
+
+### Fixed
+
+- **Auto-updater permissions for root-owned directories** - Fixed permission denied errors when auto-updater runs on production servers where `/opt/code-indexer-repo/` and `/opt/pipx/venvs/code-indexer/` are owned by root. Added `sudo` to:
+  - `git submodule update --init --recursive` command
+  - `pip install pybind11` command
+  - `pip install --force-reinstall` for custom hnswlib
+  - `pip install -e .` for main package installation
+
+---
+
 ## [8.9.4] - 2026-02-08
 
 ### Fixed

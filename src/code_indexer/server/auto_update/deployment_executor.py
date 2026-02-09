@@ -337,8 +337,10 @@ class DeploymentExecutor:
             True if successful, False otherwise
         """
         try:
+            # Use sudo because repo may be owned by root (e.g., /opt/code-indexer-repo/)
+            # and service runs as non-root user
             result = subprocess.run(
-                ["git", "submodule", "update", "--init", "--recursive"],
+                ["sudo", "git", "submodule", "update", "--init", "--recursive"],
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,
@@ -473,8 +475,10 @@ class DeploymentExecutor:
             python_path = self._get_server_python()
 
             # Install pybind11 first - required because setup.py imports it at module level
+            # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
             pybind_result = subprocess.run(
                 [
+                    "sudo",
                     python_path,
                     "-m",
                     "pip",
@@ -501,8 +505,10 @@ class DeploymentExecutor:
                 "pybind11 installed successfully",
                 extra={"correlation_id": get_correlation_id()},
             )
+            # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
             result = subprocess.run(
                 [
+                    "sudo",
                     python_path,
                     "-m",
                     "pip",
@@ -779,8 +785,10 @@ class DeploymentExecutor:
         """
         try:
             python_path = self._get_server_python()
+            # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
             result = subprocess.run(
                 [
+                    "sudo",
                     python_path,
                     "-m",
                     "pip",
