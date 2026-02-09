@@ -12,6 +12,7 @@ import logging
 import time
 import sys
 import pwd
+import shutil
 
 import requests
 from code_indexer.server.logging_utils import format_error_log
@@ -27,6 +28,11 @@ AUTO_UPDATE_SERVICE_NAME = "cidx-auto-update"
 # Note: Using /var/lib/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
 AUTO_UPDATE_STATUS_FILE = Path("/var/lib/cidx-auto-update-status.json")
 SYSTEMCTL_TIMEOUT_SECONDS = 30  # Timeout for systemctl restart operations
+
+# Hnswlib fallback constants (Bug #160)
+# Note: Using /var/tmp/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
+HNSWLIB_FALLBACK_PATH = Path("/var/tmp/cidx-hnswlib")
+HNSWLIB_REPO_URL = "https://github.com/LightspeedDMS/hnswlib.git"
 
 
 class DeploymentExecutor:
@@ -601,6 +607,98 @@ class DeploymentExecutor:
             )
             return False
 
+    def _clone_hnswlib_standalone(self) -> bool:
+        """Clone hnswlib to standalone location as fallback when submodule fails.
+
+        Bug #160: Fallback mechanism to bypass submodule lock file permission errors.
+        Clones LightspeedDMS/hnswlib fork (has check_integrity method) to /var/tmp.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Remove existing directory if present (clean slate)
+            if HNSWLIB_FALLBACK_PATH.exists():
+                try:
+                    shutil.rmtree(HNSWLIB_FALLBACK_PATH)
+                    logger.info(
+                        f"Removed existing fallback directory: {HNSWLIB_FALLBACK_PATH}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                except OSError as e:
+                    logger.error(
+                        format_error_log(
+                            "DEPLOY-GENERAL-070",
+                            f"Failed to remove existing fallback directory: {e}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+                    return False
+
+            # Add fallback path to git safe.directory
+            result = subprocess.run(
+                [
+                    "git",
+                    "config",
+                    "--global",
+                    "--add",
+                    "safe.directory",
+                    str(HNSWLIB_FALLBACK_PATH),
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                logger.warning(
+                    f"Could not add fallback path to safe.directory: {result.stderr}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                # Not fatal, continue with clone
+
+            # Clone hnswlib to fallback location
+            result = subprocess.run(
+                ["git", "clone", HNSWLIB_REPO_URL, str(HNSWLIB_FALLBACK_PATH)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            if result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-071",
+                        f"Failed to clone hnswlib standalone: {result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            logger.info(
+                f"Successfully cloned hnswlib to fallback location: {HNSWLIB_FALLBACK_PATH}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except subprocess.TimeoutExpired:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-071",
+                    "Hnswlib standalone clone timed out after 60 seconds",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-071",
+                    f"Exception during hnswlib standalone clone: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
     def _ensure_build_dependencies(self) -> bool:
         """Ensure C++ build dependencies are installed for compiling hnswlib.
 
@@ -672,17 +770,22 @@ class DeploymentExecutor:
         )
         return False
 
-    def build_custom_hnswlib(self) -> bool:
-        """Build and install custom hnswlib from third_party/hnswlib submodule.
+    def build_custom_hnswlib(self, hnswlib_path: Optional[Path] = None) -> bool:
+        """Build and install custom hnswlib from specified path or default submodule.
 
         The custom hnswlib fork includes the check_integrity() method for HNSW
         index validation. This must be built from source and installed to replace
         the standard pip-installed hnswlib.
 
+        Args:
+            hnswlib_path: Path to hnswlib source directory. If None, uses default
+                         submodule path (third_party/hnswlib).
+
         Returns:
             True if successful or submodule not present, False on build failure
         """
-        hnswlib_path = self.repo_path / "third_party" / "hnswlib"
+        if hnswlib_path is None:
+            hnswlib_path = self.repo_path / "third_party" / "hnswlib"
 
         # Skip if submodule not initialized (not a fatal error)
         if not hnswlib_path.exists() or not (hnswlib_path / "setup.py").exists():
@@ -788,6 +891,69 @@ class DeploymentExecutor:
             )
             return False
 
+    def _build_hnswlib_with_fallback(self) -> bool:
+        """Build custom hnswlib with fallback to standalone clone if submodule fails.
+
+        Bug #160: Unified method that tries submodule first, then falls back to
+        cloning hnswlib to standalone location if submodule has no setup.py.
+
+        Strategy:
+        1. Check if submodule path has setup.py
+        2. If yes: build from submodule (normal path)
+        3. If no: clone to fallback location and build from there
+
+        Returns:
+            True if either approach succeeds, False if both fail
+        """
+        submodule_path = self.repo_path / "third_party" / "hnswlib"
+        submodule_setup_py = submodule_path / "setup.py"
+
+        # Try submodule first if setup.py exists
+        if submodule_setup_py.exists():
+            logger.info(
+                "Building hnswlib from submodule path",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return self.build_custom_hnswlib(hnswlib_path=None)
+
+        # Submodule doesn't have setup.py - use fallback approach
+        logger.warning(
+            "Submodule setup.py not found, attempting fallback clone",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+        # Clone to standalone location
+        if not self._clone_hnswlib_standalone():
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-073",
+                    "Both submodule and fallback clone approaches failed",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+        # Build from fallback location
+        logger.info(
+            "Building hnswlib from fallback location",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        if not self.build_custom_hnswlib(hnswlib_path=HNSWLIB_FALLBACK_PATH):
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-072",
+                    "Fallback build failed",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+        logger.info(
+            "Successfully built hnswlib from fallback location",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return True
+
     def _get_server_python(self) -> str:
         """Extract Python interpreter from server's service file ExecStart line.
 
@@ -872,9 +1038,7 @@ class DeploymentExecutor:
             )
             return None
 
-    def _write_service_file_and_reload(
-        self, service_path: Path, content: str
-    ) -> bool:
+    def _write_service_file_and_reload(self, service_path: Path, content: str) -> bool:
         """Write systemd service file via sudo tee and reload daemon.
 
         Args:
@@ -987,7 +1151,9 @@ class DeploymentExecutor:
 
             # Write updated service file
             new_content = "\n".join(new_lines) + "\n"
-            if not self._write_service_file_and_reload(auto_update_service, new_content):
+            if not self._write_service_file_and_reload(
+                auto_update_service, new_content
+            ):
                 return False
 
             # Create pending-redeploy marker
@@ -1725,22 +1891,20 @@ class DeploymentExecutor:
             return True
 
         # Step 1.5: Git submodule update (for custom hnswlib build)
+        # Note: Still attempt submodule update, but fallback handles failure
         if not self.git_submodule_update():
-            logger.error(
-                format_error_log(
-                    "DEPLOY-GENERAL-041",
-                    "Deployment failed at git submodule update step",
-                    extra={"correlation_id": get_correlation_id()},
-                )
+            logger.warning(
+                "Git submodule update failed, fallback will attempt standalone clone",
+                extra={"correlation_id": get_correlation_id()},
             )
-            return False
 
-        # Step 1.6: Build custom hnswlib with check_integrity() method
-        if not self.build_custom_hnswlib():
+        # Step 1.6: Build custom hnswlib with check_integrity() method (with fallback)
+        # Bug #160: Uses fallback approach if submodule has no setup.py
+        if not self._build_hnswlib_with_fallback():
             logger.error(
                 format_error_log(
                     "DEPLOY-GENERAL-044",
-                    "Deployment failed at custom hnswlib build step",
+                    "Deployment failed at custom hnswlib build step (both submodule and fallback)",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )

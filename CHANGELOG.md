@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.9.18] - 2026-02-09
+
+### Added
+
+- **Auto-updater: Fallback clone approach for custom hnswlib** - When the git submodule fails to initialize (due to persistent lock file permission errors), the auto-updater now clones hnswlib directly to `/var/tmp/cidx-hnswlib/` and builds from there. This bypasses all submodule-related issues while still providing the custom hnswlib with `check_integrity()` method.
+
+---
+
 ## [8.9.17] - 2026-02-09
 
 ### Fixed
