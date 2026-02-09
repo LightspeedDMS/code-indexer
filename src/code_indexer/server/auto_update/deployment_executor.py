@@ -19,11 +19,13 @@ from code_indexer.server.logging_utils import format_error_log
 logger = logging.getLogger(__name__)
 
 # Issue #154: Pending redeploy marker for self-healing Python environment
-PENDING_REDEPLOY_MARKER = Path("/tmp/cidx-pending-redeploy")
+# Note: Using /var/lib/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
+PENDING_REDEPLOY_MARKER = Path("/var/lib/cidx-pending-redeploy")
 AUTO_UPDATE_SERVICE_NAME = "cidx-auto-update"
 
-# Self-restart mechanism constants (v8.9.8 - test trigger for self-restart validation)
-AUTO_UPDATE_STATUS_FILE = Path("/tmp/cidx-auto-update-status.json")
+# Self-restart mechanism constants
+# Note: Using /var/lib/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
+AUTO_UPDATE_STATUS_FILE = Path("/var/lib/cidx-auto-update-status.json")
 SYSTEMCTL_TIMEOUT_SECONDS = 30  # Timeout for systemctl restart operations
 
 

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.9.12] - 2026-02-09
+
+### Fixed
+
+- **Auto-updater: Fixed PrivateTmp isolation issue** - The auto-updater status files were being written to `/tmp/` which is isolated by systemd's `PrivateTmp=yes` setting. Status files written by the service were invisible to external processes. Moved status file locations from `/tmp/` to `/var/lib/`:
+  - `PENDING_REDEPLOY_MARKER`: `/tmp/cidx-pending-redeploy` → `/var/lib/cidx-pending-redeploy`
+  - `AUTO_UPDATE_STATUS_FILE`: `/tmp/cidx-auto-update-status.json` → `/var/lib/cidx-auto-update-status.json`
+
+---
+
 ## [8.9.11] - 2026-02-09
 
 ### Fixed
