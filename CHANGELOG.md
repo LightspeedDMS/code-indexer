@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.9.10] - 2026-02-09
+
+### Fixed
+
+- **Auto-updater: Added sudo to git_pull** - Fixed permission denied errors when auto-updater runs `git pull` on production servers where `/opt/code-indexer-repo/` is owned by root. The git_pull() method now uses `sudo git pull` to match other sudo-enabled commands.
+
+---
+
 ## [8.9.9] - 2026-02-09
 
 ### Fixed

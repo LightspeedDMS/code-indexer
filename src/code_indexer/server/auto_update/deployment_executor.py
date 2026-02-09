@@ -305,7 +305,7 @@ class DeploymentExecutor:
         """
         try:
             result = subprocess.run(
-                ["git", "pull", "origin", self.branch],
+                ["sudo", "git", "pull", "origin", self.branch],
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,
