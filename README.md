@@ -2,7 +2,7 @@
 
 AI-powered semantic code search for your codebase. Find code by meaning, not just keywords.
 
-**Version 8.9.5** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
+**Version 8.9.6** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
 
 ## Quick Navigation
 

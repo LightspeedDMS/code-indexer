@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.9.6] - 2026-02-09
+
+### Changed
+
+- **Version bump to verify auto-updater sudo fix** - This release tests that the v8.9.5 auto-updater fix (sudo for root-owned directories) works end-to-end. When deployed, the auto-updater should successfully initialize git submodules and build custom hnswlib without manual intervention.
+
+---
+
 ## [8.9.5] - 2026-02-09
 
 ### Fixed
