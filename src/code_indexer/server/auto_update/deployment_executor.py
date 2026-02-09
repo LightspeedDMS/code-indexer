@@ -479,7 +479,7 @@ class DeploymentExecutor:
             True if error is recoverable, False otherwise
         """
         recoverable_patterns = [
-            "config.lock",
+            "could not lock",  # Git error: "could not lock config file"
             "already exists",
             "could not get a repository handle",
             "worktree",

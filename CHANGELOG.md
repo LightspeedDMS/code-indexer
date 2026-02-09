@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.9.17] - 2026-02-09
+
+### Fixed
+
+- **Auto-updater: Fixed pattern matching for lock file errors** - Changed error pattern from `"config.lock"` to `"could not lock"` to match actual git error message format (`"error: could not lock config file"`). The v8.9.16 cleanup/retry code was not triggering because the pattern didn't match the real error.
+
+---
+
 ## [8.9.16] - 2026-02-09
 
 ### Added

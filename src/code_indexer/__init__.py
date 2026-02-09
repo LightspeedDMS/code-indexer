@@ -6,5 +6,5 @@ vector storage, providing blazing-fast semantic code search through
 HNSW graph indexing (O(log N) complexity).
 """
 
-__version__ = "8.9.16"
+__version__ = "8.9.17"
 __author__ = "Seba Battig"

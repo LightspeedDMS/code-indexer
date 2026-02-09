@@ -233,7 +233,7 @@ class TestSubmoduleRetryLogic:
         assert mock_run.call_count == 1
 
     def test_git_submodule_update_retries_on_config_lock_error(self):
-        """Should cleanup and retry when encountering config.lock error."""
+        """Should cleanup and retry when encountering 'could not lock' error."""
         executor = DeploymentExecutor(
             repo_path=Path("/home/user/code-indexer"),
         )
@@ -243,12 +243,12 @@ class TestSubmoduleRetryLogic:
                 with patch(
                     "code_indexer.server.auto_update.deployment_executor.subprocess.run"
                 ) as mock_run:
-                    # First attempt fails with config.lock error
+                    # First attempt fails with lock error (actual git error format)
                     # Second attempt succeeds
                     mock_run.side_effect = [
                         MagicMock(
                             returncode=1,
-                            stderr="Unable to create '.git/modules/third_party/hnswlib/config.lock'"
+                            stderr="error: could not lock config file .git/modules/third_party/hnswlib/config: Permission denied"
                         ),
                         MagicMock(returncode=0, stdout="success", stderr="")
                     ]
@@ -417,7 +417,7 @@ class TestSubmoduleRetryLogic:
                 ) as mock_run:
                     mock_run.return_value = MagicMock(
                         returncode=1,
-                        stderr="config.lock error"
+                        stderr="error: could not lock config file: Permission denied"
                     )
 
                     result = executor.git_submodule_update()
@@ -439,7 +439,7 @@ class TestSubmoduleRetryLogic:
                 ) as mock_run:
                     # Both attempts fail
                     mock_run.side_effect = [
-                        MagicMock(returncode=1, stderr="config.lock error"),
+                        MagicMock(returncode=1, stderr="error: could not lock config file: Permission denied"),
                         MagicMock(returncode=1, stderr="still failing")
                     ]
 
