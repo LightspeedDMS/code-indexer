@@ -319,12 +319,14 @@ class TestPipInstallUsesServerPython:
         assert result is True
         mock_get_python.assert_called_once()
 
-        # Verify subprocess.run was called with server Python
+        # Verify subprocess.run was called with sudo and server Python
+        # Uses sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
         calls = mock_run.call_args_list
         assert len(calls) == 1
         call_args = calls[0][0][0]
-        assert call_args[0] == server_python
-        assert call_args[1:] == ["-m", "pip", "install", "--break-system-packages", "-e", "."]
+        assert call_args[0] == "sudo"
+        assert call_args[1] == server_python
+        assert call_args[2:] == ["-m", "pip", "install", "--break-system-packages", "-e", "."]
 
     def test_pip_install_falls_back_when_get_server_python_fails(self, executor):
         """Test that pip_install still works when _get_server_python fails."""
@@ -351,10 +353,16 @@ class TestExecuteCallsEnsureAutoUpdater:
     @patch.object(DeploymentExecutor, "_ensure_cidx_repo_root", return_value=True)
     @patch.object(DeploymentExecutor, "_ensure_workers_config", return_value=True)
     @patch.object(DeploymentExecutor, "pip_install", return_value=True)
+    @patch.object(DeploymentExecutor, "build_custom_hnswlib", return_value=True)
+    @patch.object(DeploymentExecutor, "git_submodule_update", return_value=True)
+    @patch.object(DeploymentExecutor, "_calculate_auto_update_hash", return_value="same_hash")
     @patch.object(DeploymentExecutor, "git_pull", return_value=True)
     def test_execute_calls_ensure_auto_updater(
         self,
         mock_git_pull,
+        mock_calc_hash,
+        mock_git_submodule,
+        mock_build_hnswlib,
         mock_pip_install,
         mock_ensure_workers,
         mock_ensure_cidx_repo,
@@ -375,10 +383,16 @@ class TestExecuteCallsEnsureAutoUpdater:
     @patch.object(DeploymentExecutor, "_ensure_cidx_repo_root", return_value=True)
     @patch.object(DeploymentExecutor, "_ensure_workers_config", return_value=True)
     @patch.object(DeploymentExecutor, "pip_install", return_value=True)
+    @patch.object(DeploymentExecutor, "build_custom_hnswlib", return_value=True)
+    @patch.object(DeploymentExecutor, "git_submodule_update", return_value=True)
+    @patch.object(DeploymentExecutor, "_calculate_auto_update_hash", return_value="same_hash")
     @patch.object(DeploymentExecutor, "git_pull", return_value=True)
     def test_execute_continues_on_ensure_auto_updater_failure(
         self,
         mock_git_pull,
+        mock_calc_hash,
+        mock_git_submodule,
+        mock_build_hnswlib,
         mock_pip_install,
         mock_ensure_workers,
         mock_ensure_cidx_repo,

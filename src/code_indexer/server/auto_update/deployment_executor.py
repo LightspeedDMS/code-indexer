@@ -2,8 +2,11 @@
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.utils.ripgrep_installer import RipgrepInstaller
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
+import hashlib
+import json
 import subprocess
 import logging
 import time
@@ -18,6 +21,10 @@ logger = logging.getLogger(__name__)
 # Issue #154: Pending redeploy marker for self-healing Python environment
 PENDING_REDEPLOY_MARKER = Path("/tmp/cidx-pending-redeploy")
 AUTO_UPDATE_SERVICE_NAME = "cidx-auto-update"
+
+# Self-restart mechanism constants
+AUTO_UPDATE_STATUS_FILE = Path("/tmp/cidx-auto-update-status.json")
+SYSTEMCTL_TIMEOUT_SECONDS = 30  # Timeout for systemctl restart operations
 
 
 class DeploymentExecutor:
@@ -1306,8 +1313,155 @@ class DeploymentExecutor:
         installer = RipgrepInstaller(home_dir=home_dir)
         return bool(installer.install())  # Explicit cast for mypy
 
+    def _calculate_auto_update_hash(self) -> str:
+        """Calculate SHA256 hash of all auto_update/*.py files.
+
+        Used to detect when the auto-updater's own code has changed,
+        triggering a self-restart to load the new code.
+
+        Returns:
+            SHA256 hex digest of concatenated file contents, or empty string if no files found
+        """
+        try:
+            auto_update_dir = (
+                self.repo_path / "src" / "code_indexer" / "server" / "auto_update"
+            )
+            py_files = sorted(auto_update_dir.glob("*.py"))
+
+            if not py_files:
+                return ""
+
+            hasher = hashlib.sha256()
+            for py_file in py_files:
+                content = py_file.read_text()
+                hasher.update(content.encode("utf-8"))
+
+            return hasher.hexdigest()
+
+        except Exception as e:
+            logger.warning(
+                f"Error calculating auto_update hash: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return ""
+
+    def _write_status_file(self, status: str, details: str = "") -> None:
+        """Write deployment status to AUTO_UPDATE_STATUS_FILE.
+
+        Args:
+            status: Status value (pending_restart, in_progress, success, failed)
+            details: Optional details about the status
+        """
+        try:
+            # Get current version from package
+            try:
+                from code_indexer import __version__
+
+                version = __version__
+            except ImportError:
+                version = "unknown"
+
+            status_data = {
+                "status": status,
+                "version": version,
+                "timestamp": datetime.now().isoformat(),
+                "details": details,
+            }
+
+            with open(AUTO_UPDATE_STATUS_FILE, "w") as f:
+                json.dump(status_data, f, indent=2)
+
+            logger.debug(
+                f"Wrote status file: {status}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        except Exception as e:
+            logger.warning(
+                f"Could not write status file: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+    def _read_status_file(self) -> Optional[dict]:
+        """Read deployment status from AUTO_UPDATE_STATUS_FILE.
+
+        Returns:
+            Status dict with keys: status, version, timestamp, details
+            None if file doesn't exist or is corrupted
+        """
+        try:
+            if not AUTO_UPDATE_STATUS_FILE.exists():
+                return None
+
+            with open(AUTO_UPDATE_STATUS_FILE, "r") as f:
+                return json.load(f)
+
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(
+                f"Could not read status file: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return None
+
+    def _should_retry_on_startup(self) -> bool:
+        """Check if deployment should be retried based on status file.
+
+        Returns:
+            True if status is pending_restart or failed, False otherwise
+        """
+        status_data = self._read_status_file()
+
+        if status_data is None:
+            return False
+
+        status = status_data.get("status")
+        return status in ("pending_restart", "failed")
+
+    def _restart_auto_update_service(self) -> bool:
+        """Restart the cidx-auto-update systemd service.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            result = subprocess.run(
+                ["sudo", "systemctl", "restart", AUTO_UPDATE_SERVICE_NAME],
+                capture_output=True,
+                text=True,
+                timeout=SYSTEMCTL_TIMEOUT_SECONDS,
+            )
+
+            if result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-050",
+                        f"Failed to restart auto-update service: {result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            logger.info(
+                "Auto-update service restart initiated",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-051",
+                    f"Exception restarting auto-update service: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
     def execute(self) -> bool:
         """Execute complete deployment: git pull + pip install.
+
+        Self-restart mechanism: Detects when auto-updater's own code changes
+        and restarts the service to load new code (bootstrap problem solution).
 
         Returns:
             True if all steps successful, False otherwise
@@ -1316,6 +1470,9 @@ class DeploymentExecutor:
             "Starting deployment execution",
             extra={"correlation_id": get_correlation_id()},
         )
+
+        # Step 0: Calculate hash of auto_update code BEFORE git pull
+        hash_before = self._calculate_auto_update_hash()
 
         # Step 1: Git pull
         if not self.git_pull():
@@ -1327,6 +1484,20 @@ class DeploymentExecutor:
                 )
             )
             return False
+
+        # Step 1.1: Check if auto_update code itself changed
+        hash_after = self._calculate_auto_update_hash()
+        if hash_before and hash_after and hash_before != hash_after:
+            logger.info(
+                "Auto-updater code changed, initiating self-restart",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            self._write_status_file(
+                "pending_restart", "Auto-updater code updated, restarting service"
+            )
+            self._restart_auto_update_service()
+            # Return True - deployment will continue after restart
+            return True
 
         # Step 1.5: Git submodule update (for custom hnswlib build)
         if not self.git_submodule_update():

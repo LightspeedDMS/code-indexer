@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.9.7] - 2026-02-09
+
+### Added
+
+- **Auto-updater self-restart mechanism** - Solves the "bootstrap problem" where the auto-updater's own code needs to be updated. When the auto-updater detects changes to its own code after `git pull`:
+  1. Calculates SHA256 hash of all `auto_update/*.py` files before and after git pull
+  2. If hash changed, writes status file (`/tmp/cidx-auto-update-status.json`) with `pending_restart` state
+  3. Restarts `cidx-auto-update` systemd service and exits
+  4. On service restart, checks status file and retries deployment with the new code
+- **Retry-on-startup logic** - If the status file shows `pending_restart` or `failed` state, the auto-updater automatically retries deployment on startup. This ensures deployments eventually succeed even after failures.
+- **Deployment state tracking** - Status file tracks deployment state (`pending_restart`, `in_progress`, `success`, `failed`) with version and timestamp information for debugging.
+
+---
+
 ## [8.9.6] - 2026-02-09
 
 ### Changed

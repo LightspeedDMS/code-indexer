@@ -22,7 +22,11 @@ logger = logging.getLogger(__name__)
 
 
 def main():
-    """Execute one auto-update polling iteration."""
+    """Execute one auto-update polling iteration.
+
+    Self-restart mechanism: Checks for pending_restart/failed status on startup
+    and retries deployment if needed (bootstrap problem recovery).
+    """
     try:
         # Configuration
         repo_path = Path(
@@ -40,6 +44,38 @@ def main():
             branch=branch,
             service_name="cidx-server",
         )
+
+        # Check if we need to retry deployment from previous run
+        if deployment_executor._should_retry_on_startup():
+            logger.info(
+                "Pending deployment detected, retrying",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            deployment_executor._write_status_file(
+                "in_progress", "Retrying deployment after restart"
+            )
+
+            # Execute full deployment
+            success = deployment_executor.execute()
+
+            if success:
+                deployment_executor._write_status_file("success", "Deployment completed")
+                # Restart CIDX server after successful deployment
+                deployment_executor.restart_server()
+                logger.info(
+                    "Retry deployment completed successfully",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                deployment_executor._write_status_file(
+                    "failed", "Deployment failed during retry"
+                )
+                logger.error(
+                    "Retry deployment failed",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
+            sys.exit(0 if success else 1)
 
         # Initialize service
         service = AutoUpdateService(
