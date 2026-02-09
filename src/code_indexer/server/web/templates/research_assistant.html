@@ -497,18 +497,6 @@
     margin-right: 20%;
 }
 
-/* Story #142 AC3: Message Timestamps */
-.message-timestamp {
-    font-size: 0.75rem;
-    color: var(--muted-color);
-    margin-top: 0.25rem;
-    opacity: 0.8;
-}
-
-.chat-message.user .message-timestamp {
-    color: rgba(255, 255, 255, 0.8);
-}
-
 .chat-message.working {
     background-color: var(--card-background-color);
     border: 1px solid var(--muted-border-color);
@@ -666,7 +654,17 @@
                 htmx.trigger(form, 'submit');
             }
         }
-        // Alt+Enter or Shift+Enter = newline (default behavior, no action needed)
+        // Alt+Enter or Shift+Enter = insert newline explicitly
+        else if (e.key === 'Enter' && (e.altKey || e.shiftKey)) {
+            e.preventDefault();
+            // Insert newline at cursor position
+            const start = textarea.selectionStart;
+            const end = textarea.selectionEnd;
+            const value = textarea.value;
+            textarea.value = value.substring(0, start) + '\n' + value.substring(end);
+            // Move cursor after the newline
+            textarea.selectionStart = textarea.selectionEnd = start + 1;
+        }
     });
 })();
 

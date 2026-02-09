@@ -4,7 +4,6 @@
 {% for message in messages %}
 <div class="chat-message {{ message.role }}">
     <div class="message-content">{{ message.content | safe }}</div>
-    <div class="message-timestamp">{{ message.created_at | relative_time }}</div>
 </div>
 {% endfor %}
 

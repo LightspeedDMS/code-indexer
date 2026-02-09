@@ -84,6 +84,22 @@ cidx scip rebuild --force PROJECT  # Force rebuild even if succeeded
 
 **Example**: `cidx query "authentication" --language python --exclude-path "*/tests/*" --limit 5 --quiet`
 
+### ANTI-PATTERN WARNING: FTS Misuse
+
+**Never use --fts with natural language or concept descriptions.**
+
+| WRONG | WHY IT'S WRONG | CORRECT |
+|-------|----------------|---------|
+| `cidx query "authentication logic" --fts` | "authentication logic" is a concept | `cidx query "authentication logic" --quiet` |
+| `cidx query "timer display seconds" --fts` | Multiple words describing concept | `cidx query "timer display" --quiet` |
+| `cidx query "how does login work" --fts` | Question/description | `cidx query "login implementation" --quiet` |
+
+**When to use each mode**:
+- **Semantic (default)**: Concepts, descriptions, questions → "authentication flow", "error handling", "database connection"
+- **FTS (--fts)**: Single exact identifiers → `user_id`, `authenticate_user`, `DatabaseManager`
+
+**Quick test**: If it reads like English prose → Semantic. If it's a code identifier → FTS.
+
 ---
 
 ## FULL-TEXT SEARCH (FTS)

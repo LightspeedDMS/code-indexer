@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.9.9] - 2026-02-09
+
+### Fixed
+
+- **Research Assistant: Removed timestamps entirely** - Removed the clock/timestamp display from all Research Assistant message templates per user request. Timestamps were appearing inconsistently during HTMX swaps causing confusing UI behavior.
+- **Research Assistant: Alt-Enter now inserts newline** - Fixed Alt-Enter and Shift-Enter keyboard shortcuts to explicitly insert newline characters in the textarea. Previously relied on browser default behavior which was unreliable.
+
+### Changed
+
+- **FTS documentation: Added anti-pattern warnings** - Added explicit "COMMON MISTAKES" section to CLAUDE.md and SKILL.md documentation showing WRONG vs CORRECT usage patterns. Prevents confusion between semantic search (for concepts) and FTS mode (for exact identifiers).
+
+---
+
 ## [8.9.8] - 2026-02-09
 
 ### Changed
