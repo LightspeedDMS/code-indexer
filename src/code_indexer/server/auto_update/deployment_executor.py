@@ -336,6 +336,60 @@ class DeploymentExecutor:
             )
             return False
 
+    def _ensure_submodule_safe_directory(self) -> bool:
+        """Add submodule paths to git safe.directory config.
+
+        Git's "dubious ownership" check applies to each git repository independently.
+        Submodules are separate repositories and need their own safe.directory entries.
+
+        Returns:
+            True if successful or not needed, False on error
+        """
+        try:
+            # Known submodule paths
+            submodule_paths = [
+                self.repo_path / "third_party" / "hnswlib",
+            ]
+
+            for submodule_path in submodule_paths:
+                # Skip if submodule directory doesn't exist yet
+                if not submodule_path.exists():
+                    continue
+
+                # Add to global safe.directory (runs as root, so use root's config)
+                result = subprocess.run(
+                    [
+                        "git",
+                        "config",
+                        "--global",
+                        "--add",
+                        "safe.directory",
+                        str(submodule_path),
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+
+                if result.returncode != 0:
+                    logger.warning(
+                        f"Could not add submodule to safe.directory: {submodule_path}: {result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    logger.info(
+                        f"Added submodule to git safe.directory: {submodule_path}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+
+            return True
+
+        except Exception as e:
+            logger.warning(
+                f"Error configuring submodule safe.directory: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True  # Non-fatal, continue with deployment
+
     def git_submodule_update(self) -> bool:
         """Initialize and update git submodules.
 
@@ -346,6 +400,9 @@ class DeploymentExecutor:
             True if successful, False otherwise
         """
         try:
+            # Ensure submodule paths are in git safe.directory before update
+            self._ensure_submodule_safe_directory()
+
             # Service runs as root, no sudo needed
             result = subprocess.run(
                 ["git", "submodule", "update", "--init", "--recursive"],
