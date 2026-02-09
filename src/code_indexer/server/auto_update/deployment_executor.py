@@ -305,7 +305,7 @@ class DeploymentExecutor:
         """
         try:
             result = subprocess.run(
-                ["sudo", "git", "pull", "origin", self.branch],
+                ["git", "pull", "origin", self.branch],
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,
@@ -344,10 +344,9 @@ class DeploymentExecutor:
             True if successful, False otherwise
         """
         try:
-            # Use sudo because repo may be owned by root (e.g., /opt/code-indexer-repo/)
-            # and service runs as non-root user
+            # Service runs as root, no sudo needed
             result = subprocess.run(
-                ["sudo", "git", "submodule", "update", "--init", "--recursive"],
+                ["git", "submodule", "update", "--init", "--recursive"],
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,
