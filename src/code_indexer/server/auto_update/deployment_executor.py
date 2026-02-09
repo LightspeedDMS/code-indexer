@@ -390,6 +390,119 @@ class DeploymentExecutor:
             )
             return True  # Non-fatal, continue with deployment
 
+    def _cleanup_submodule_state(self, submodule_path: str) -> bool:
+        """Clean up partial submodule initialization state.
+
+        Removes both the git modules directory and the worktree directory
+        to allow fresh initialization. Uses sudo rm -rf since the service
+        runs as root.
+
+        Args:
+            submodule_path: Relative path to submodule (e.g., "third_party/hnswlib")
+
+        Returns:
+            True if cleanup successful, False on error
+        """
+        try:
+            git_modules_path = self.repo_path / ".git" / "modules" / submodule_path
+            worktree_path = self.repo_path / submodule_path
+
+            # Remove .git/modules/{submodule_path}
+            result = subprocess.run(
+                ["sudo", "rm", "-rf", str(git_modules_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-060",
+                        f"Failed to remove git modules directory: {result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            logger.info(
+                f"Removed git modules directory: {git_modules_path}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+            # Remove worktree directory
+            result = subprocess.run(
+                ["sudo", "rm", "-rf", str(worktree_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-061",
+                        f"Failed to remove worktree directory: {result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            logger.info(
+                f"Removed worktree directory: {worktree_path}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+            return True
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-062",
+                    f"Exception during submodule cleanup: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+    def _is_recoverable_submodule_error(self, stderr: str) -> bool:
+        """Check if submodule error is recoverable with cleanup and retry.
+
+        Recoverable errors indicate partial initialization state that can be
+        fixed by removing and retrying. Non-recoverable errors (network, auth)
+        should not trigger retry.
+
+        Args:
+            stderr: Error output from git submodule command
+
+        Returns:
+            True if error is recoverable, False otherwise
+        """
+        recoverable_patterns = [
+            "config.lock",
+            "already exists",
+            "could not get a repository handle",
+            "worktree",
+        ]
+
+        non_recoverable_patterns = [
+            "Could not resolve host",
+            "unable to access",
+            "Authentication failed",
+        ]
+
+        # Check non-recoverable first (takes precedence)
+        for pattern in non_recoverable_patterns:
+            if pattern in stderr:
+                return False
+
+        # Check recoverable patterns
+        for pattern in recoverable_patterns:
+            if pattern in stderr:
+                return True
+
+        return False
+
     def git_submodule_update(self) -> bool:
         """Initialize and update the hnswlib submodule only.
 
@@ -400,6 +513,10 @@ class DeploymentExecutor:
         Production servers don't need test-fixtures/* submodules, and initializing
         all submodules with --recursive causes safe.directory errors.
 
+        Resilient to partial initialization state: If update fails with recoverable
+        error (lock file, already exists, worktree config), cleans up state and
+        retries once. Does not retry non-recoverable errors (network, auth).
+
         Returns:
             True if successful, False otherwise
         """
@@ -407,24 +524,69 @@ class DeploymentExecutor:
             # Ensure submodule paths are in git safe.directory before update
             self._ensure_submodule_safe_directory()
 
+            submodule_path = "third_party/hnswlib"
+
+            # Attempt submodule update
             # Service runs as root, no sudo needed
             # Only initialize the specific submodule we need (not --recursive)
             result = subprocess.run(
-                ["git", "submodule", "update", "--init", "third_party/hnswlib"],
+                ["git", "submodule", "update", "--init", submodule_path],
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,
             )
 
             if result.returncode != 0:
-                logger.error(
-                    format_error_log(
-                        "DEPLOY-GENERAL-040",
-                        f"Git submodule update failed: {result.stderr}",
+                # Check if this is a recoverable error
+                if self._is_recoverable_submodule_error(result.stderr):
+                    logger.warning(
+                        f"Submodule update failed with recoverable error, attempting cleanup and retry: {result.stderr}",
                         extra={"correlation_id": get_correlation_id()},
                     )
-                )
-                return False
+
+                    # Clean up partial state
+                    if not self._cleanup_submodule_state(submodule_path):
+                        logger.error(
+                            format_error_log(
+                                "DEPLOY-GENERAL-063",
+                                "Failed to clean up submodule state, cannot retry",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
+                        return False
+
+                    # Retry once after cleanup
+                    logger.info(
+                        "Retrying submodule update after cleanup",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+
+                    result = subprocess.run(
+                        ["git", "submodule", "update", "--init", submodule_path],
+                        cwd=self.repo_path,
+                        capture_output=True,
+                        text=True,
+                    )
+
+                    if result.returncode != 0:
+                        logger.error(
+                            format_error_log(
+                                "DEPLOY-GENERAL-064",
+                                f"Submodule update retry failed: {result.stderr}",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
+                        return False
+                else:
+                    # Non-recoverable error, don't retry
+                    logger.error(
+                        format_error_log(
+                            "DEPLOY-GENERAL-040",
+                            f"Git submodule update failed (non-recoverable): {result.stderr}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+                    return False
 
             logger.info(
                 f"Git submodule update successful: {result.stdout.strip() or 'submodules initialized'}",

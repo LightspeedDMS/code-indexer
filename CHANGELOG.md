@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.9.16] - 2026-02-09
+
+### Added
+
+- **Auto-updater: Resilient submodule update with cleanup & retry** - When `git submodule update` fails due to partial initialization state (lock files, "already exists", worktree configuration errors), the auto-updater now automatically cleans up the corrupted state and retries. This handles scenarios where a previous failed deployment left the submodule in an inconsistent state. Non-recoverable errors (network, authentication) fail immediately without retry.
+
+---
+
 ## [8.9.15] - 2026-02-09
 
 ### Fixed
