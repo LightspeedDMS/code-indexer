@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 PENDING_REDEPLOY_MARKER = Path("/tmp/cidx-pending-redeploy")
 AUTO_UPDATE_SERVICE_NAME = "cidx-auto-update"
 
-# Self-restart mechanism constants
+# Self-restart mechanism constants (v8.9.8 - test trigger for self-restart validation)
 AUTO_UPDATE_STATUS_FILE = Path("/tmp/cidx-auto-update-status.json")
 SYSTEMCTL_TIMEOUT_SECONDS = 30  # Timeout for systemctl restart operations
 

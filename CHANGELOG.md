@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.9.8] - 2026-02-09
+
+### Changed
+
+- **Self-restart validation test** - This release triggers the self-restart mechanism on staging by modifying the auto-updater code. When deployed, the staging auto-updater (running v8.9.7) should detect the code change, write status file with `pending_restart`, restart its service, and complete deployment with the new code.
+
+---
+
 ## [8.9.7] - 2026-02-09
 
 ### Added
