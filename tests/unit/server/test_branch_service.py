@@ -157,18 +157,29 @@ class TestBranchService:
         assert master_branch.index_status.files_indexed == 100
 
     def test_list_branches_handles_non_git_repository(self):
-        """Test behavior when directory is not a git repository."""
+        """Test behavior when directory is not a git repository.
+
+        Updated for Story #163: BranchService now accepts non-git folders
+        and returns empty branch lists instead of raising ValueError.
+        """
         # Arrange - Create non-git directory
         non_git_dir = Path(tempfile.mkdtemp())
         try:
             git_service = GitTopologyService(non_git_dir)
 
-            # Act & Assert - BranchService constructor should raise ValueError
-            with pytest.raises(ValueError, match="Not a git repository"):
-                BranchService(
-                    git_topology_service=git_service,
-                    index_status_manager=self.index_status_manager,
-                )
+            # Act - BranchService should accept non-git repositories (Story #163)
+            branch_service = BranchService(
+                git_topology_service=git_service,
+                index_status_manager=self.index_status_manager,
+            )
+
+            # Assert - Should initialize successfully and return empty branch list
+            assert branch_service is not None
+            branches = branch_service.list_branches()
+            assert branches == []
+
+            # Clean up
+            branch_service.close()
         finally:
             shutil.rmtree(non_git_dir)
 

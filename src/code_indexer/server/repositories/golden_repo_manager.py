@@ -744,15 +744,18 @@ class GoldenRepoManager:
             source_path = repo_url
 
         try:
-            # For local:// URLs, the directory should already exist (no copy needed)
+            # For local:// URLs, use or create the target directory (no copy needed)
             if source_path is None:
                 if not os.path.exists(clone_path):
-                    raise GitOperationError(
-                        f"Local repository directory does not exist: {clone_path}"
+                    # AC4 Story #163: Auto-create folder for local:// URLs
+                    os.makedirs(clone_path, exist_ok=True)
+                    logging.info(
+                        f"Created local repository directory for {repo_url}: {clone_path}"
                     )
-                logging.info(
-                    f"Using existing local directory for {repo_url}: {clone_path}"
-                )
+                else:
+                    logging.info(
+                        f"Using existing local directory for {repo_url}: {clone_path}"
+                    )
                 return clone_path
 
             # Always use regular copy for golden repository registration

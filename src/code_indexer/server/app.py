@@ -1380,6 +1380,7 @@ activated_repo_manager: Optional[ActivatedRepoManager] = None
 repository_listing_manager: Optional[RepositoryListingManager] = None
 semantic_query_manager: Optional[SemanticQueryManager] = None
 workspace_cleanup_service: Optional[WorkspaceCleanupService] = None
+langfuse_sync_service: Optional[Any] = None  # Story #168: Langfuse trace sync service
 
 # Server startup time for health monitoring
 _server_start_time: Optional[str] = None
@@ -1879,18 +1880,35 @@ def migrate_legacy_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None
         from datetime import datetime, timezone
 
         # Register directly in metadata without background job (startup hasn't initialized background_job_manager yet)
+        created_at = datetime.now(timezone.utc).isoformat()
         repo = GoldenRepo(
             alias="cidx-meta",
             repo_url="local://cidx-meta",
             default_branch="main",  # Not used for local:// repos
             clone_path=str(cidx_meta_path),
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=created_at,
             enable_temporal=False,  # No temporal for local:// repos
         )
-        golden_repo_manager.golden_repos["cidx-meta"] = repo
-        golden_repo_manager._save_metadata()
+        with golden_repo_manager._operation_lock:
+            golden_repo_manager.golden_repos["cidx-meta"] = repo
+            # Persist to storage backend (SQLite or JSON)
+            if (
+                golden_repo_manager._use_sqlite
+                and golden_repo_manager._sqlite_backend is not None
+            ):
+                golden_repo_manager._sqlite_backend.add_repo(
+                    alias="cidx-meta",
+                    repo_url="local://cidx-meta",
+                    default_branch="main",
+                    clone_path=str(cidx_meta_path),
+                    created_at=created_at,
+                    enable_temporal=False,
+                    temporal_options=None,
+                )
+            else:
+                golden_repo_manager._save_metadata()
         logger.info(
-            "Legacy cidx-meta migrated: added to metadata.json",
+            "Legacy cidx-meta migrated: persisted to storage",
             extra={"correlation_id": get_correlation_id()},
         )
 
@@ -1920,7 +1938,16 @@ def migrate_legacy_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None
 
             # Update repo_url from None to local://cidx-meta
             repo.repo_url = "local://cidx-meta"
-            golden_repo_manager._save_metadata()
+            # Persist to storage backend (SQLite or JSON)
+            if (
+                golden_repo_manager._use_sqlite
+                and golden_repo_manager._sqlite_backend is not None
+            ):
+                golden_repo_manager._sqlite_backend.update_repo_url(
+                    "cidx-meta", "local://cidx-meta"
+                )
+            else:
+                golden_repo_manager._save_metadata()
             logger.info(
                 "Legacy cidx-meta migrated: repo_url updated to local://cidx-meta",
                 extra={"correlation_id": get_correlation_id()},
@@ -1998,16 +2025,33 @@ def bootstrap_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None:
                 # Continue with registration even if init fails - don't break server startup
 
         # Register directly in metadata without background job (startup hasn't initialized background_job_manager yet)
+        created_at = datetime.now(timezone.utc).isoformat()
         repo = GoldenRepo(
             alias="cidx-meta",
             repo_url="local://cidx-meta",
             default_branch="main",  # Not used for local:// repos
             clone_path=str(cidx_meta_path),
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=created_at,
             enable_temporal=False,  # No temporal for local:// repos
         )
-        golden_repo_manager.golden_repos["cidx-meta"] = repo
-        golden_repo_manager._save_metadata()
+        with golden_repo_manager._operation_lock:
+            golden_repo_manager.golden_repos["cidx-meta"] = repo
+            # Persist to storage backend (SQLite or JSON)
+            if (
+                golden_repo_manager._use_sqlite
+                and golden_repo_manager._sqlite_backend is not None
+            ):
+                golden_repo_manager._sqlite_backend.add_repo(
+                    alias="cidx-meta",
+                    repo_url="local://cidx-meta",
+                    default_branch="main",
+                    clone_path=str(cidx_meta_path),
+                    created_at=created_at,
+                    enable_temporal=False,
+                    temporal_options=None,
+                )
+            else:
+                golden_repo_manager._save_metadata()
         logger.info(
             "Bootstrapped cidx-meta at local://cidx-meta",
             extra={"correlation_id": get_correlation_id()},
@@ -2065,6 +2109,146 @@ def bootstrap_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None:
                 )
             )
             # Don't break server startup if indexing fails - cidx-meta can be indexed later
+
+
+def register_langfuse_golden_repos(golden_repo_manager: "GoldenRepoManager", golden_repos_dir: str) -> None:
+    """
+    Register any unregistered Langfuse trace folders as golden repos.
+
+    Scans golden-repos/ for langfuse_* directories and registers them
+    using local:// URL scheme (same as cidx-meta). Idempotent.
+
+    Args:
+        golden_repo_manager: GoldenRepoManager instance
+        golden_repos_dir: Path to golden-repos directory
+    """
+    from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+    from code_indexer.global_repos.global_activation import GlobalActivator
+    from datetime import datetime, timezone
+
+    golden_repos_path = Path(golden_repos_dir)
+    if not golden_repos_path.exists():
+        return
+
+    global_activator = GlobalActivator(golden_repos_dir)
+
+    for folder in sorted(golden_repos_path.iterdir()):
+        if not folder.is_dir() or not folder.name.startswith("langfuse_"):
+            continue
+
+        alias = folder.name
+        if golden_repo_manager.golden_repo_exists(alias):
+            continue  # Already registered
+
+        logger.info(
+            f"Auto-registering Langfuse folder as golden repo: {alias}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+        # Register in golden_repos_metadata (same pattern as cidx-meta)
+        created_at = datetime.now(timezone.utc).isoformat()
+        repo = GoldenRepo(
+            alias=alias,
+            repo_url=f"local://{alias}",
+            default_branch="main",
+            clone_path=str(folder),
+            created_at=created_at,
+            enable_temporal=False,
+        )
+        with golden_repo_manager._operation_lock:
+            golden_repo_manager.golden_repos[alias] = repo
+            # Persist to storage backend (SQLite or JSON)
+            if golden_repo_manager._use_sqlite and golden_repo_manager._sqlite_backend is not None:
+                try:
+                    golden_repo_manager._sqlite_backend.add_repo(
+                        alias=alias,
+                        repo_url=f"local://{alias}",
+                        default_branch="main",
+                        clone_path=str(folder),
+                        created_at=created_at,
+                        enable_temporal=False,
+                        temporal_options=None,
+                    )
+                except Exception as e:
+                    import sqlite3
+                    if isinstance(e, sqlite3.IntegrityError):
+                        logger.warning(
+                            f"Langfuse repo '{alias}' already exists in SQLite (concurrent registration)",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    else:
+                        raise
+            else:
+                golden_repo_manager._save_metadata()
+
+        # Activate globally (same pattern as cidx-meta)
+        try:
+            global_activator.activate_golden_repo(
+                repo_name=alias,
+                repo_url=f"local://{alias}",
+                clone_path=str(folder),
+                enable_temporal=False,
+            )
+            logger.info(
+                f"Langfuse repo '{alias}' activated globally as '{alias}-global'",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to activate Langfuse repo '{alias}' globally: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        # Initialize CIDX index for newly registered Langfuse folder
+        if not (folder / ".code-indexer").exists():
+            try:
+                import subprocess
+                subprocess.run(
+                    ["cidx", "init"],
+                    cwd=str(folder),
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                logger.info(
+                    f"Initialized CIDX index for Langfuse folder: {alias}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except subprocess.CalledProcessError as e:
+                logger.warning(
+                    f"Failed to initialize CIDX index for {alias}: {e.stderr if e.stderr else str(e)}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to initialize CIDX index for {alias}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
+        # Run initial indexing
+        try:
+            import subprocess
+            subprocess.run(
+                ["cidx", "index"],
+                cwd=str(folder),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            logger.info(
+                f"Initial indexing complete for Langfuse folder: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except subprocess.CalledProcessError as e:
+            logger.warning(
+                f"Failed to index Langfuse folder {alias}: {e.stderr if e.stderr else str(e)}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to index Langfuse folder {alias}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
 
 
 def create_app() -> FastAPI:
@@ -2302,6 +2486,9 @@ def create_app() -> FastAPI:
 
             # Phase 2: Bootstrap cidx-meta (if it doesn't exist)
             bootstrap_cidx_meta(golden_repo_manager, str(golden_repos_dir))
+
+            # Phase 3: Register any existing Langfuse folders as golden repos
+            register_langfuse_golden_repos(golden_repo_manager, str(golden_repos_dir))
 
             logger.info(
                 "cidx-meta migration and bootstrap completed",
@@ -3021,6 +3208,87 @@ def create_app() -> FastAPI:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+        # Startup: Initialize Langfuse Trace Sync Service (Story #168)
+        global langfuse_sync_service
+        langfuse_sync_service = None
+        logger.info(
+            "Server startup: Initializing Langfuse Trace Sync Service",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.langfuse_trace_sync_service import (
+                LangfuseTraceSyncService,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+
+            # Get config service for dynamic config access
+            config_service = get_config_service()
+
+            # Define callback for auto-registering new Langfuse folders after sync
+            def _on_langfuse_sync_complete():
+                """Auto-register new Langfuse folders after sync and keep watch active."""
+                if golden_repo_manager is not None:
+                    register_langfuse_golden_repos(
+                        golden_repo_manager, str(golden_repos_dir)
+                    )
+
+                # Start/reset watch on all Langfuse folders to pick up new traces
+                try:
+                    from code_indexer.server.services.auto_watch_manager import auto_watch_manager
+                    golden_repos_path = Path(golden_repos_dir)
+                    if golden_repos_path.exists():
+                        for folder in golden_repos_path.iterdir():
+                            if folder.is_dir() and folder.name.startswith("langfuse_"):
+                                if auto_watch_manager.is_watching(str(folder)):
+                                    auto_watch_manager.reset_timeout(str(folder))
+                                else:
+                                    auto_watch_manager.start_watch(
+                                        repo_path=str(folder),
+                                        timeout=300,  # 5 min idle timeout, reset each sync cycle
+                                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to start/reset watch for Langfuse folders: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+
+            # Create service with config_getter callable
+            langfuse_sync_service = LangfuseTraceSyncService(
+                config_getter=config_service.get_config,
+                data_dir=str(Path(server_data_dir) / "data"),
+                on_sync_complete=_on_langfuse_sync_complete,
+            )
+
+            # Start background sync if pull is enabled
+            config = config_service.get_config()
+            if config.langfuse_config and config.langfuse_config.pull_enabled:
+                langfuse_sync_service.start()
+                logger.info(
+                    f"Langfuse Trace Sync Service started (interval={config.langfuse_config.pull_sync_interval_seconds}s, "
+                    f"projects={len(config.langfuse_config.pull_projects)})",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.info(
+                    "Langfuse pull sync disabled, service initialized but not started",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
+            # Store in app state for dashboard access
+            app.state.langfuse_sync_service = langfuse_sync_service
+
+        except Exception as e:
+            # Log error but don't block server startup
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-029",
+                    f"Failed to initialize Langfuse Trace Sync Service: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            app.state.langfuse_sync_service = None
+
         yield  # Server is now running
 
         # Shutdown: Stop global repos background services BEFORE other cleanup
@@ -3094,6 +3362,24 @@ def create_app() -> FastAPI:
                     format_error_log(
                         "APP-GENERAL-028",
                         f"Error stopping self-monitoring service: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+        # Shutdown: Stop Langfuse Trace Sync Service (Story #168)
+        if langfuse_sync_service is not None:
+            try:
+                langfuse_sync_service.stop()
+                logger.info(
+                    "Langfuse Trace Sync Service stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-030",
+                        f"Error stopping Langfuse Trace Sync Service: {e}",
                         exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
                     )

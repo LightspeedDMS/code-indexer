@@ -24,6 +24,8 @@ from ...search.query import SearchResult
 from ...proxy.config_manager import ProxyConfigManager
 from ...proxy.cli_integration import _execute_query
 
+logger = logging.getLogger(__name__)
+
 
 class SemanticQueryError(Exception):
     """Base exception for semantic query operations."""

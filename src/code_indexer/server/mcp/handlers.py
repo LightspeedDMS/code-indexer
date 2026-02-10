@@ -65,6 +65,7 @@ def _get_hnsw_health_service() -> "HNSWHealthService":
     global _hnsw_health_service
     if _hnsw_health_service is None:
         from code_indexer.services.hnsw_health_service import HNSWHealthService
+
         _hnsw_health_service = HNSWHealthService(cache_ttl_seconds=300)
     return _hnsw_health_service
 
@@ -2140,7 +2141,10 @@ def check_hnsw_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         if not repository_alias:
             return _mcp_response(
-                {"success": False, "error": "Missing required parameter: repository_alias"}
+                {
+                    "success": False,
+                    "error": "Missing required parameter: repository_alias",
+                }
             )
 
         # Resolve repository alias to clone path
@@ -5222,6 +5226,70 @@ def scip_context(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e), "files": []})
 
 
+def _build_langfuse_section(
+    config: Any, golden_repo_manager: Any
+) -> Optional[Dict[str, Any]]:
+    """
+    Build Langfuse trace search section for quick reference (Story #169).
+
+    Args:
+        config: ServerConfig object with langfuse_config
+        golden_repo_manager: GoldenRepoManager instance for listing repos
+
+    Returns:
+        Dictionary with Langfuse search documentation when pull_enabled is True,
+        None otherwise
+    """
+    # Check if Langfuse config exists and pull is enabled
+    langfuse = getattr(config, "langfuse_config", None)
+    if not langfuse or not getattr(langfuse, "pull_enabled", False):
+        return None
+
+    # Get Langfuse repos from golden repo manager
+    langfuse_repos = []
+    if golden_repo_manager:
+        try:
+            all_repos = golden_repo_manager.list_golden_repos()
+            langfuse_repos = [
+                r.get("alias", "")
+                for r in all_repos
+                if r.get("alias", "").startswith("langfuse_")
+            ]
+        except Exception as e:
+            logger.warning(f"Failed to list golden repos for Langfuse section: {e}")
+            langfuse_repos = []
+
+    # Get project count
+    pull_projects = getattr(langfuse, "pull_projects", [])
+    project_count = len(pull_projects) if pull_projects else 0
+
+    # Build section
+    return {
+        "description": "Langfuse AI conversation traces are indexed for semantic search.",
+        "folder_naming": {
+            "pattern": "langfuse_<project>_<userId>",
+            "full_path": "langfuse_<project>_<userId>/<sessionId>/<traceId>.json",
+        },
+        "search_instructions": [
+            "Search across all Langfuse traces: search_code('query', repository_alias='langfuse_*')",
+            "Search specific project: search_code('query', repository_alias='langfuse_<project>_*')",
+            "Search specific user: search_code('query', repository_alias='langfuse_<project>_<user>')",
+        ],
+        "available_repositories": langfuse_repos,
+        "configured_projects_count": project_count,
+        "example_queries": [
+            "search_code('authentication error handling', repository_alias='langfuse_*')",
+            "search_code('SQL query generation', repository_alias='langfuse_*')",
+            "search_code('API rate limiting', repository_alias='langfuse_*')",
+        ],
+        "tips": [
+            "Use wildcards to search across all users: langfuse_myproject_*",
+            "Search specific user: langfuse_myproject_user123",
+            "Traces are synced periodically - check dashboard for sync status",
+        ],
+    }
+
+
 def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Generate quick reference documentation for available MCP tools.
@@ -5381,15 +5449,23 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         display_name = config.service_display_name or "Neo"
         server_identity = f"This server is CIDX (a.k.a. {display_name})."
 
-        return _mcp_response(
-            {
-                "success": True,
-                "server_identity": server_identity,
-                "total_tools": len(tools_summary),
-                "category_filter": category_filter,
-                "tools": tools_summary,
-            }
+        # Story #169: Add Langfuse trace search section when pull is enabled
+        response = {
+            "success": True,
+            "server_identity": server_identity,
+            "total_tools": len(tools_summary),
+            "category_filter": category_filter,
+            "tools": tools_summary,
+        }
+
+        # Conditionally add Langfuse section
+        langfuse_section = _build_langfuse_section(
+            config, app_module.golden_repo_manager
         )
+        if langfuse_section:
+            response["langfuse_trace_search"] = langfuse_section
+
+        return _mcp_response(response)
 
     except Exception as e:
         logger.exception(
@@ -6971,7 +7047,9 @@ HANDLER_REGISTRY["scip_context"] = scip_context
 
 
 # Story #633: GitHub Actions Monitoring Handlers
-async def handle_gh_actions_list_runs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gh_actions_list_runs(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
     """
     Handler for gh_actions_list_runs tool.
 
@@ -7021,7 +7099,9 @@ async def handle_gh_actions_list_runs(args: Dict[str, Any], user: User) -> Dict[
 
         # Create client and list runs
         client = GitHubActionsClient(token)
-        runs = await client.list_runs(repository=repository, branch=branch, status=status)
+        runs = await client.list_runs(
+            repository=repository, branch=branch, status=status
+        )
 
         return _mcp_response(
             {
@@ -7174,7 +7254,9 @@ async def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[st
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_gh_actions_search_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gh_actions_search_logs(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
     """
     Handler for gh_actions_search_logs tool.
 
@@ -7285,7 +7367,9 @@ async def handle_gh_actions_search_logs(args: Dict[str, Any], user: User) -> Dic
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_gh_actions_get_job_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gh_actions_get_job_logs(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
     """
     Handler for gh_actions_get_job_logs tool.
 
@@ -7384,7 +7468,9 @@ async def handle_gh_actions_get_job_logs(args: Dict[str, Any], user: User) -> Di
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_gh_actions_retry_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gh_actions_retry_run(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
     """
     Handler for gh_actions_retry_run tool.
 
@@ -7483,7 +7569,9 @@ async def handle_gh_actions_retry_run(args: Dict[str, Any], user: User) -> Dict[
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_gh_actions_cancel_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gh_actions_cancel_run(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
     """
     Handler for gh_actions_cancel_run tool.
 
@@ -7596,7 +7684,9 @@ HANDLER_REGISTRY["gh_actions_cancel_run"] = handle_gh_actions_cancel_run
 # ============================================================================
 
 
-async def handle_gitlab_ci_list_pipelines(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gitlab_ci_list_pipelines(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
     """
     Handler for gitlab_ci_list_pipelines tool.
 
@@ -7646,7 +7736,9 @@ async def handle_gitlab_ci_list_pipelines(args: Dict[str, Any], user: User) -> D
 
         # Create client and list pipelines (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        pipelines = await client.list_pipelines(project_id=project_id, ref=ref, status=status)
+        pipelines = await client.list_pipelines(
+            project_id=project_id, ref=ref, status=status
+        )
 
         return _mcp_response(
             {
@@ -7701,7 +7793,9 @@ async def handle_gitlab_ci_list_pipelines(args: Dict[str, Any], user: User) -> D
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_gitlab_ci_get_pipeline(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gitlab_ci_get_pipeline(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
     """
     Handler for gitlab_ci_get_pipeline tool.
 
@@ -7801,7 +7895,9 @@ async def handle_gitlab_ci_get_pipeline(args: Dict[str, Any], user: User) -> Dic
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_gitlab_ci_search_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gitlab_ci_search_logs(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
     """
     Handler for gitlab_ci_search_logs tool.
 
@@ -7922,7 +8018,9 @@ HANDLER_REGISTRY["gitlab_ci_get_pipeline"] = handle_gitlab_ci_get_pipeline
 HANDLER_REGISTRY["gitlab_ci_search_logs"] = handle_gitlab_ci_search_logs
 
 
-async def handle_gitlab_ci_get_job_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gitlab_ci_get_job_logs(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
     """
     Handler for gitlab_ci_get_job_logs tool.
 
@@ -8020,7 +8118,9 @@ async def handle_gitlab_ci_get_job_logs(args: Dict[str, Any], user: User) -> Dic
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_gitlab_ci_retry_pipeline(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_gitlab_ci_retry_pipeline(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
     """
     Handler for gitlab_ci_retry_pipeline tool.
 
@@ -8068,7 +8168,9 @@ async def handle_gitlab_ci_retry_pipeline(args: Dict[str, Any], user: User) -> D
 
         # Create client and retry pipeline (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        result = await client.retry_pipeline(project_id=project_id, pipeline_id=pipeline_id)
+        result = await client.retry_pipeline(
+            project_id=project_id, pipeline_id=pipeline_id
+        )
 
         return _mcp_response(
             {
@@ -8169,7 +8271,9 @@ async def handle_gitlab_ci_cancel_pipeline(
 
         # Create client and cancel pipeline (CRITICAL: keyword)
         client = GitLabCIClient(token)
-        result = await client.cancel_pipeline(project_id=project_id, pipeline_id=pipeline_id)
+        result = await client.cancel_pipeline(
+            project_id=project_id, pipeline_id=pipeline_id
+        )
 
         return _mcp_response(
             {
@@ -8231,7 +8335,9 @@ HANDLER_REGISTRY["gitlab_ci_cancel_pipeline"] = handle_gitlab_ci_cancel_pipeline
 # =============================================================================
 
 
-async def handle_github_actions_list_runs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_github_actions_list_runs(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
     """
     Handler for github_actions_list_runs tool.
 
@@ -8292,7 +8398,9 @@ async def handle_github_actions_list_runs(args: Dict[str, Any], user: User) -> D
 
         # Create client and list runs (CRITICAL: keyword)
         client = GitHubActionsClient(token)
-        runs = await client.list_runs(repository=repository, branch=branch, status=status)
+        runs = await client.list_runs(
+            repository=repository, branch=branch, status=status
+        )
 
         # Apply limit to results
         if limit:
@@ -8353,7 +8461,9 @@ async def handle_github_actions_list_runs(args: Dict[str, Any], user: User) -> D
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_github_actions_get_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_github_actions_get_run(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
     """
     Handler for github_actions_get_run tool.
 
@@ -8690,7 +8800,9 @@ async def handle_github_actions_get_job_logs(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_github_actions_retry_run(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+async def handle_github_actions_retry_run(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
     """
     Handler for github_actions_retry_run tool.
 
@@ -10958,11 +11070,13 @@ def handle_start_trace(
             )
 
         # Bug #137 fix: Return session_id so HTTP clients know which session to use
-        return _mcp_response({
-            "status": "active",
-            "trace_id": trace_ctx.trace_id,
-            "session_id": session_id,
-        })
+        return _mcp_response(
+            {
+                "status": "active",
+                "trace_id": trace_ctx.trace_id,
+                "session_id": session_id,
+            }
+        )
 
     except Exception as e:
         logger.error(
@@ -11008,7 +11122,9 @@ def handle_end_trace(
 
         # Get trace_id before ending
         # Bug #137 fix: Pass username for fallback lookup (HTTP client support)
-        trace_ctx = service.trace_manager.get_active_trace(session_id, username=username)
+        trace_ctx = service.trace_manager.get_active_trace(
+            session_id, username=username
+        )
         if not trace_ctx:
             return _mcp_response(
                 {"status": "no_active_trace", "message": "No active trace to end"}
@@ -11022,8 +11138,11 @@ def handle_end_trace(
 
         # Bug #137 fix: Pass username for fallback lookup (HTTP client support)
         success = service.trace_manager.end_trace(
-            session_id=session_id, score=score, feedback=feedback, outcome=outcome,
-            username=username
+            session_id=session_id,
+            score=score,
+            feedback=feedback,
+            outcome=outcome,
+            username=username,
         )
 
         if success:

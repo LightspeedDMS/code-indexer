@@ -1372,6 +1372,33 @@ class GoldenRepoMetadataSqliteBackend:
             )
         return updated
 
+    def update_repo_url(self, alias: str, repo_url: str) -> bool:
+        """
+        Update the repo_url for a golden repository.
+
+        Bug #131: This method is used during legacy cidx-meta migration (Scenario 2)
+        to update repo_url from None to "local://cidx-meta".
+
+        Args:
+            alias: Alias of the repository to update.
+            repo_url: New repo_url value.
+
+        Returns:
+            True if a record was updated, False if alias not found.
+        """
+
+        def operation(conn):
+            cursor = conn.execute(
+                "UPDATE golden_repos_metadata SET repo_url = ? WHERE alias = ?",
+                (repo_url, alias),
+            )
+            return cursor.rowcount > 0
+
+        updated: bool = self._conn_manager.execute_atomic(operation)
+        if updated:
+            logger.info(f"Updated repo_url={repo_url} for golden repo: {alias}")
+        return updated
+
     def close(self) -> None:
         """Close database connections."""
         self._conn_manager.close_all()

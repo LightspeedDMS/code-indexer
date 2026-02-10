@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.10.0] - 2026-02-10
+
+### Added
+
+- **Langfuse Trace Sync** (Epic #162) - Background service that pulls AI conversation traces from Langfuse projects and makes them semantically searchable. Includes overlap window + content hash deduplication strategy, automatic golden repo registration, watch integration for incremental indexing, per-project sync metrics, and dashboard monitoring with health status and manual sync trigger.
+
+### Changed
+
+- **Trace JSON format**: Trace files now store the trace object first (with user prompt and AI response) followed by observations sorted chronologically by startTime. Previously observations were sorted by ID and alphabetical key sorting placed them before the trace content.
+- **Dashboard: Langfuse section repositioned** above Recent Activity for better visibility.
+- **Dashboard: "Efficiency" column renamed to "Change Rate"** in Langfuse project metrics table, accurately reflecting what the metric measures (percentage of traces that changed per sync cycle).
+
+### Fixed
+
+- **Dashboard: Langfuse trace count always showed zero** - Folder stats used non-recursive glob (`*.json`) which missed trace files inside session subdirectories. Fixed to use recursive glob (`**/*.json`).
+- **Dashboard: Storage Size value wrapping** in the Langfuse storage card on narrow layouts.
+
+---
+
 ## [8.9.18] - 2026-02-09
 
 ### Added

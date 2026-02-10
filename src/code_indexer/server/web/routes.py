@@ -81,8 +81,9 @@ templates.env.globals["enumerate"] = enumerate
 def _get_server_time_for_template() -> str:
     """Get current server time for Jinja2 templates (Story #89)."""
     from datetime import datetime, timezone as tz
+
     current_time = datetime.now(tz.utc)
-    return current_time.isoformat().replace('+00:00', 'Z')
+    return current_time.isoformat().replace("+00:00", "Z")
 
 
 # Add server time function to Jinja2 globals for server clock (Story #89)
@@ -259,7 +260,7 @@ def _get_server_time() -> str:
     from datetime import datetime, timezone as tz
 
     current_time = datetime.now(tz.utc)
-    return current_time.isoformat().replace('+00:00', 'Z')
+    return current_time.isoformat().replace("+00:00", "Z")
 
 
 @web_router.get("/", response_class=HTMLResponse)
@@ -519,6 +520,94 @@ def dashboard_api_metrics_partial(
             "api_filter": api_filter,
         },
     )
+
+
+@web_router.get("/partials/dashboard-langfuse", response_class=HTMLResponse)
+def dashboard_langfuse_partial(request: Request):
+    """
+    Story #168: Langfuse status card partial endpoint.
+
+    Returns HTML fragment containing Langfuse sync status, metrics, and manual sync trigger.
+    Card is only visible when langfuse.pull_enabled is true.
+
+    Auto-refreshes every 30 seconds via HTMX.
+
+    Returns HTML fragment for htmx partial updates.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+
+    dashboard_service = _get_dashboard_service()
+    langfuse_data = dashboard_service.get_langfuse_metrics()
+
+    return templates.TemplateResponse(
+        "partials/dashboard_langfuse.html",
+        {
+            "request": request,
+            "langfuse": langfuse_data,
+        },
+    )
+
+
+@web_router.post("/langfuse-sync/trigger", response_class=JSONResponse)
+def langfuse_sync_trigger(request: Request):
+    """
+    Story #168 AC4: Trigger immediate Langfuse sync.
+
+    C1 fix: Non-blocking trigger using background thread, returns 202 Accepted.
+    H4 fix: Returns 409 Conflict if sync already in progress.
+
+    Returns:
+        202 Accepted - Sync triggered successfully
+        409 Conflict - Sync already in progress
+        503 Service Unavailable - Sync service not initialized
+        401 Unauthorized - Authentication required
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return JSONResponse(
+            {"status": "error", "message": "Authentication required"},
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    try:
+        from ..app import langfuse_sync_service
+
+        if langfuse_sync_service is None:
+            return JSONResponse(
+                {"status": "error", "message": "Langfuse sync service not initialized"},
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        # C1/H4: Non-blocking trigger with concurrent sync guard
+        triggered = langfuse_sync_service.trigger_sync()
+
+        if not triggered:
+            return JSONResponse(
+                {"status": "error", "message": "Sync already in progress"},
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+        return JSONResponse(
+            {"status": "success", "message": "Sync triggered successfully"},
+            status_code=status.HTTP_202_ACCEPTED,
+        )
+
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "LANGFUSE-SYNC-001",
+                f"Failed to trigger Langfuse sync: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        # M5: Generic error message (keep detailed logging above)
+        return JSONResponse(
+            {"status": "error", "message": "Internal error triggering sync"},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 # Placeholder routes for other admin pages
@@ -5948,6 +6037,76 @@ def reset_config(
         )
 
 
+# NOTE: This specific route MUST come BEFORE /config/{section} to avoid being
+# caught by the parameterized route. FastAPI matches routes in order of definition.
+@web_router.post("/config/langfuse_pull", response_class=HTMLResponse)
+async def update_langfuse_pull_config(
+    request: Request,
+    csrf_token: Optional[str] = Form(None),
+):
+    """Update Langfuse Trace Pull configuration (Story #164)."""
+    from ..services.config_service import get_config_service
+
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+
+    if not validate_login_csrf_token(request, csrf_token):
+        return _create_config_page_response(
+            request, session, error_message="Invalid CSRF token"
+        )
+
+    form_data = await request.form()
+    config_service = get_config_service()
+
+    try:
+        # Update scalar settings
+        config_service.update_setting(
+            "langfuse", "pull_enabled", form_data.get("pull_enabled", "false")
+        )
+        config_service.update_setting(
+            "langfuse",
+            "pull_host",
+            form_data.get("pull_host", "https://cloud.langfuse.com"),
+        )
+        config_service.update_setting(
+            "langfuse",
+            "pull_sync_interval_seconds",
+            form_data.get("pull_sync_interval_seconds", "300"),
+        )
+        config_service.update_setting(
+            "langfuse",
+            "pull_trace_age_days",
+            form_data.get("pull_trace_age_days", "30"),
+        )
+
+        # Update projects from JSON
+        projects_json = form_data.get("pull_projects", "[]")
+        if projects_json:
+            config_service.update_setting("langfuse", "pull_projects", projects_json)
+
+        return _create_config_page_response(
+            request,
+            session,
+            success_message="Langfuse Trace Pull configuration saved",
+        )
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-046",
+                "Failed to update Langfuse pull config: %s",
+                e,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return _create_config_page_response(
+            request,
+            session,
+            error_message=f"Failed to save configuration: {str(e)}",
+            validation_errors={"langfuse_pull": str(e)},
+        )
+
+
 @web_router.post("/config/{section}", response_class=HTMLResponse)
 async def update_config_section(
     request: Request,
@@ -8211,9 +8370,6 @@ def get_server_time() -> Dict[str, str]:
 
     # Format as ISO 8601 with Z suffix for UTC (preserves microseconds)
     # Replace '+00:00' with 'Z' for standard UTC notation
-    timestamp = current_time.isoformat().replace('+00:00', 'Z')
+    timestamp = current_time.isoformat().replace("+00:00", "Z")
 
-    return {
-        "timestamp": timestamp,
-        "timezone": "UTC"
-    }
+    return {"timestamp": timestamp, "timezone": "UTC"}

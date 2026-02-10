@@ -62,6 +62,12 @@ class DashboardData:
 class DashboardService:
     """Service for aggregating dashboard data from various internal sources."""
 
+    def __init__(self):
+        """Initialize dashboard service with caches."""
+        # M9: Folder stats cache (60s TTL)
+        self._folder_stats_cache: Optional[dict] = None
+        self._folder_stats_cache_time: Optional[datetime] = None
+
     def get_dashboard_data(
         self, username: str, user_role: str = "user"
     ) -> DashboardData:
@@ -397,6 +403,174 @@ class DashboardService:
                 continue
 
         return None
+
+    def get_langfuse_metrics(self) -> Dict[str, Any]:
+        """
+        Get Langfuse sync metrics for dashboard display.
+
+        Returns:
+            Dict with:
+                - metrics: Per-project sync metrics from sync service
+                - health: Overall health status (healthy/degraded/unhealthy/unknown)
+                - folder_stats: User folder statistics (folders, traces, size)
+                - config: Sync configuration (pull_enabled, interval)
+        """
+        try:
+            from ..app import langfuse_sync_service
+            from ..services.config_service import get_config_service
+
+            # Get config
+            config_service = get_config_service()
+            config = config_service.get_config()
+            langfuse = config.langfuse_config
+
+            # If pull is disabled, return minimal data
+            if not langfuse or not langfuse.pull_enabled:
+                return {
+                    "metrics": {},
+                    "health": "disabled",
+                    "folder_stats": {
+                        "user_folders": 0,
+                        "total_traces": 0,
+                        "total_size_mb": 0.0,
+                    },
+                    "config": {"pull_enabled": False, "interval": 0},
+                }
+
+            # Get metrics from sync service
+            metrics = (
+                langfuse_sync_service.get_metrics() if langfuse_sync_service else {}
+            )
+
+            # Compute health status
+            health = self._compute_langfuse_health(
+                metrics, langfuse.pull_sync_interval_seconds
+            )
+
+            # Get folder statistics
+            server_dir = config_service.config_manager.server_dir
+            folder_stats = self._get_langfuse_folder_stats(server_dir)
+
+            return {
+                "metrics": metrics,
+                "health": health,
+                "folder_stats": folder_stats,
+                "config": {
+                    "pull_enabled": langfuse.pull_enabled,
+                    "interval": langfuse.pull_sync_interval_seconds,
+                },
+            }
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "DASHBOARD-LANGFUSE-001",
+                    f"Failed to get Langfuse metrics: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return {
+                "metrics": {},
+                "health": "error",
+                "folder_stats": {
+                    "user_folders": 0,
+                    "total_traces": 0,
+                    "total_size_mb": 0.0,
+                },
+                "config": {"pull_enabled": False, "interval": 0},
+            }
+
+    def _compute_langfuse_health(self, metrics: dict, interval_seconds: int) -> str:
+        """
+        Compute health status from sync metrics.
+
+        Returns:
+            "healthy" - All projects synced successfully in last interval
+            "degraded" - Some projects have errors but sync is running
+            "unhealthy" - Sync has not run for 2x the configured interval
+            "unknown" - No data yet
+        """
+        if not metrics:
+            return "unknown"
+
+        now = datetime.now(timezone.utc)
+
+        has_errors = any(m.get("errors_count", 0) > 0 for m in metrics.values())
+
+        # Check if sync is stale (2x interval)
+        all_stale = True
+        for m in metrics.values():
+            if m.get("last_sync_time"):
+                last = datetime.fromisoformat(m["last_sync_time"])
+                if (now - last).total_seconds() < interval_seconds * 2:
+                    all_stale = False
+                    break
+
+        if all_stale and metrics:
+            return "unhealthy"  # RED
+        elif has_errors:
+            return "degraded"  # YELLOW
+        else:
+            return "healthy"  # GREEN
+
+    def _get_langfuse_folder_stats(self, server_dir: Path) -> dict:
+        """
+        Calculate Langfuse folder statistics.
+
+        M9: Cached with 60s TTL to avoid expensive filesystem scan on every 30s refresh.
+
+        Args:
+            server_dir: Server data directory
+
+        Returns:
+            dict with:
+                - user_folders: count of langfuse_* directories
+                - total_traces: count of *.json files
+                - total_size_mb: total size in MB
+        """
+        # M9: Check cache (60s TTL)
+        now = datetime.now(timezone.utc)
+        if self._folder_stats_cache and self._folder_stats_cache_time:
+            age = (now - self._folder_stats_cache_time).total_seconds()
+            if age < 60:
+                return self._folder_stats_cache
+
+        # Cache miss or expired - recalculate
+        golden_repos_dir = server_dir / "data" / "golden-repos"
+
+        if not golden_repos_dir.exists():
+            result = {"user_folders": 0, "total_traces": 0, "total_size_mb": 0.0}
+            self._folder_stats_cache = result
+            self._folder_stats_cache_time = now
+            return result
+
+        user_folders = 0
+        total_traces = 0
+        total_size_bytes = 0
+
+        for folder in golden_repos_dir.iterdir():
+            if folder.is_dir() and folder.name.startswith("langfuse_"):
+                user_folders += 1
+
+                # Count JSON files and sizes
+                for trace_file in folder.glob("**/*.json"):
+                    if trace_file.is_file():
+                        total_traces += 1
+                        total_size_bytes += trace_file.stat().st_size
+
+        total_size_mb = total_size_bytes / (1024 * 1024)
+
+        result = {
+            "user_folders": user_folders,
+            "total_traces": total_traces,
+            "total_size_mb": round(total_size_mb, 2),
+        }
+
+        # M9: Update cache
+        self._folder_stats_cache = result
+        self._folder_stats_cache_time = now
+
+        return result
 
     def get_temporal_index_status(
         self, username: str, repo_alias: str

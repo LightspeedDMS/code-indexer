@@ -49,16 +49,16 @@ class BranchService:
         self.git_topology_service = git_topology_service
         self.index_status_manager = index_status_manager
         self._closed = False
+        self._is_git_repo = self.git_topology_service.is_git_available()
 
-        # Validate that this is a git repository
-        if not self.git_topology_service.is_git_available():
-            raise ValueError("Not a git repository")
-
-        # Initialize git repo for branch operations
-        try:
-            self.repo = Repo(self.git_topology_service.codebase_dir)
-        except InvalidGitRepositoryError as e:
-            raise ValueError(f"Invalid git repository: {e}")
+        # Initialize git repo for branch operations (only if git is available)
+        if self._is_git_repo:
+            try:
+                self.repo = Repo(self.git_topology_service.codebase_dir)
+            except InvalidGitRepositoryError as e:
+                raise ValueError(f"Invalid git repository: {e}")
+        else:
+            self.repo = None
 
     def list_branches(self, include_remote: bool = False) -> List[BranchInfo]:
         """List all branches in the repository.
@@ -67,11 +67,15 @@ class BranchService:
             include_remote: Whether to include remote tracking information
 
         Returns:
-            List of BranchInfo objects containing branch details
+            List of BranchInfo objects containing branch details (empty list for non-git repos)
 
         Raises:
-            ValueError: If not a git repository or git operations fail
+            ValueError: If git operations fail
         """
+        # Return empty list for non-git repositories
+        if not self._is_git_repo:
+            return []
+
         try:
             branches = []
             current_branch_name = self.git_topology_service.get_current_branch()
@@ -118,8 +122,12 @@ class BranchService:
             branch_name: Name of the branch to retrieve
 
         Returns:
-            BranchInfo object if branch exists, None otherwise
+            BranchInfo object if branch exists, None otherwise (always None for non-git repos)
         """
+        # Return None for non-git repositories
+        if not self._is_git_repo:
+            return None
+
         try:
             # Check if branch exists
             for branch in self.repo.heads:
@@ -279,7 +287,7 @@ class BranchService:
         Closes the GitPython repository object to release file handles
         and other system resources.
         """
-        if not self._closed and hasattr(self, "repo"):
+        if not self._closed and hasattr(self, "repo") and self.repo is not None:
             try:
                 self.repo.close()
             except Exception as e:

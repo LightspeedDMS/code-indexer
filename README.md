@@ -2,7 +2,7 @@
 
 AI-powered semantic code search for your codebase. Find code by meaning, not just keywords.
 
-**Version 8.9.18** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
+**Version 8.10.0** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
 
 ## Quick Navigation
 
@@ -14,6 +14,7 @@ AI-powered semantic code search for your codebase. Find code by meaning, not jus
   - [Full-Text Search](#full-text-search-fts)
   - [SCIP Code Intelligence](#scip-code-intelligence)
   - [Git History Search](#git-history-search-temporal)
+  - [Langfuse Trace Sync](#langfuse-trace-sync-v810) (NEW in v8.10)
 - [Operating Modes](#operating-modes)
 - [Common Commands](#common-commands)
 - [Documentation](#documentation)
@@ -181,6 +182,36 @@ cidx teach-ai --claude --project    # Creates CLAUDE.md
 ```
 
 See: [AI Integration Guide](docs/ai-integration.md) | [MCP Bridge Guide](docs/mcpb/README.md)
+
+### Langfuse Trace Sync (v8.10+)
+
+Automatically pull AI conversation traces from Langfuse and make them semantically searchable. CIDX syncs traces in the background, indexes them with the same semantic search engine used for code, and makes them available via MCP tools and CLI queries.
+
+**How it works:**
+1. **Background sync**: Pulls traces from configured Langfuse projects at a configurable interval (default: 5 minutes)
+2. **Smart deduplication**: Overlap window + content hash strategy detects trace mutations without re-downloading unchanged data
+3. **Auto-registration**: New trace folders are automatically registered as golden repos and indexed
+4. **Watch integration**: File system watchers trigger incremental re-indexing as new traces arrive
+
+**Trace storage layout:**
+```
+golden-repos/
+  langfuse_<project>_<userId>/
+    <sessionId>/
+      <traceId>.json    # Full trace + observations, chronologically ordered
+```
+
+Each trace file contains the user prompt (`trace.input`), AI response (`trace.output`), metadata, and all observations (tool calls) in chronological order.
+
+**Search traces via MCP:**
+```
+search_code("authentication error handling", repository_alias="langfuse_*")
+search_code("SQL query generation", repository_alias="langfuse_MyProject_*")
+```
+
+**Dashboard monitoring**: Real-time sync health, per-project metrics (traces checked/new/updated), storage statistics, and manual sync trigger from the admin dashboard.
+
+**Configuration**: Enable via the Web UI Config Screen under Langfuse settings. Requires Langfuse project public/secret key pair.
 
 ## Operating Modes
 

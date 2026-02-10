@@ -414,6 +414,27 @@ class AutoWatchManager:
                 "timeout_seconds": state.get("timeout_seconds"),
             }
 
+    def get_all_states(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get watch state for all watched repositories.
+
+        Returns:
+            Dictionary mapping repository paths to watch state dictionaries.
+            Each state dictionary contains:
+            - watch_running: bool - Whether watch is currently active
+            - last_activity: datetime - Last activity timestamp
+            - timeout_seconds: int - Timeout duration in seconds
+        """
+        with self._lock:
+            return {
+                path: {
+                    "watch_running": state.get("watch_running", False),
+                    "last_activity": state.get("last_activity"),
+                    "timeout_seconds": state.get("timeout_seconds"),
+                }
+                for path, state in self._watch_state.items()
+            }
+
 
 # Singleton instance
 auto_watch_manager = AutoWatchManager()

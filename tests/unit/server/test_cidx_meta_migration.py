@@ -49,10 +49,16 @@ class TestMigrateLegacyCidxMeta:
         metadata_file.write_text("{}")
 
         # Create mock golden_repo_manager
+        from threading import Lock
+
         mock_manager = Mock()
         mock_manager.golden_repo_exists = Mock(return_value=False)
         mock_manager.golden_repos = {}  # Add golden_repos dictionary
         mock_manager._save_metadata = Mock()
+        mock_manager._operation_lock = Lock()
+        # Configure for JSON mode (fallback path)
+        mock_manager._use_sqlite = False
+        mock_manager._sqlite_backend = None
 
         # Mock GlobalActivator to avoid actual global activation
         with patch(
@@ -76,7 +82,7 @@ class TestMigrateLegacyCidxMeta:
     def test_migrates_repo_url_none_to_local_scheme(
         self, golden_repos_dir, metadata_file
     ):
-        """Test migration when cidx-meta has repo_url=None in metadata.json."""
+        """Test migration when cidx-meta has repo_url=None in metadata.json (JSON mode)."""
         # Setup: Create cidx-meta directory and metadata with None repo_url
         cidx_meta_path = golden_repos_dir / "cidx-meta"
         cidx_meta_path.mkdir()
@@ -104,6 +110,9 @@ class TestMigrateLegacyCidxMeta:
 
         mock_manager.get_golden_repo = Mock(return_value=mock_repo)
         mock_manager._save_metadata = Mock()
+        # Configure for JSON mode
+        mock_manager._use_sqlite = False
+        mock_manager._sqlite_backend = None
 
         # Execute migration
         from code_indexer.server.app import migrate_legacy_cidx_meta
@@ -112,6 +121,7 @@ class TestMigrateLegacyCidxMeta:
 
         # Verify: repo_url was updated to local://cidx-meta
         assert mock_repo.repo_url == "local://cidx-meta"
+        # In JSON mode, _save_metadata() is called
         mock_manager._save_metadata.assert_called_once()
 
     def test_no_op_when_already_migrated(self, golden_repos_dir, metadata_file):
@@ -159,6 +169,107 @@ class TestMigrateLegacyCidxMeta:
         # Verify: No migration attempted
         mock_manager.add_golden_repo.assert_not_called()
 
+    def test_migration_scenario1_persists_with_sqlite_backend(
+        self, golden_repos_dir
+    ):
+        """
+        Test that Scenario 1 (cidx-meta directory exists but not in registry)
+        persists to SQLite when _use_sqlite=True.
+
+        Bug #131 Finding 1.5: Verifies that Scenario 1 migration calls
+        _sqlite_backend.add_repo() to persist cidx-meta to golden_repos_metadata table.
+        """
+        # Setup: Create cidx-meta directory
+        cidx_meta_path = golden_repos_dir / "cidx-meta"
+        cidx_meta_path.mkdir()
+
+        # Create mock SQLite backend
+        mock_sqlite_backend = Mock()
+
+        # Create mock golden_repo_manager
+        mock_manager = Mock()
+        mock_manager.golden_repo_exists = Mock(return_value=False)
+        mock_manager.golden_repos = {}
+        mock_manager._save_metadata = Mock()
+        # Configure for SQLite mode
+        mock_manager._use_sqlite = True
+        mock_manager._sqlite_backend = mock_sqlite_backend
+        # Add _operation_lock mock
+        from threading import Lock
+
+        mock_manager._operation_lock = Lock()
+
+        # Mock GlobalActivator to avoid actual global activation
+        with patch(
+            "code_indexer.global_repos.global_activation.GlobalActivator"
+        ) as mock_activator_class:
+            mock_activator = Mock()
+            mock_activator_class.return_value = mock_activator
+
+            # Execute migration
+            from code_indexer.server.app import migrate_legacy_cidx_meta
+
+            migrate_legacy_cidx_meta(mock_manager, str(golden_repos_dir))
+
+            # Verify: _sqlite_backend.add_repo() was called
+            mock_sqlite_backend.add_repo.assert_called_once()
+            call_args = mock_sqlite_backend.add_repo.call_args
+            assert call_args[1]["alias"] == "cidx-meta"
+            assert call_args[1]["repo_url"] == "local://cidx-meta"
+            assert call_args[1]["default_branch"] == "main"
+            assert call_args[1]["enable_temporal"] is False
+            assert call_args[1]["temporal_options"] is None
+
+            # Verify: _save_metadata() was NOT called (SQLite uses add_repo)
+            mock_manager._save_metadata.assert_not_called()
+
+    def test_migration_scenario2_persists_repo_url_with_sqlite(
+        self, golden_repos_dir
+    ):
+        """
+        Test that Scenario 2 (repo_url=None in metadata) persists to SQLite when _use_sqlite=True.
+
+        Bug #131 Finding 1.4: Verifies that Scenario 2 migration calls
+        _sqlite_backend.update_repo_url() to persist the repo_url update from None to "local://cidx-meta".
+        """
+        # Setup: Create cidx-meta directory
+        cidx_meta_path = golden_repos_dir / "cidx-meta"
+        cidx_meta_path.mkdir()
+
+        # Create mock SQLite backend
+        mock_sqlite_backend = Mock()
+
+        # Create mock manager with a mock repo that has modifiable repo_url
+        mock_manager = Mock()
+        mock_manager.golden_repo_exists = Mock(return_value=True)
+
+        # Use a simple Mock object with settable repo_url attribute
+        mock_repo = Mock()
+        mock_repo.repo_url = None
+        mock_repo.alias = "cidx-meta"
+
+        mock_manager.get_golden_repo = Mock(return_value=mock_repo)
+        mock_manager._save_metadata = Mock()
+        # Configure for SQLite mode
+        mock_manager._use_sqlite = True
+        mock_manager._sqlite_backend = mock_sqlite_backend
+
+        # Execute migration
+        from code_indexer.server.app import migrate_legacy_cidx_meta
+
+        migrate_legacy_cidx_meta(mock_manager, str(golden_repos_dir))
+
+        # Verify: repo_url was updated to local://cidx-meta
+        assert mock_repo.repo_url == "local://cidx-meta"
+
+        # Verify: _sqlite_backend.update_repo_url() was called
+        mock_sqlite_backend.update_repo_url.assert_called_once_with(
+            "cidx-meta", "local://cidx-meta"
+        )
+
+        # Verify: _save_metadata() was NOT called (SQLite uses update_repo_url)
+        mock_manager._save_metadata.assert_not_called()
+
 
 class TestBootstrapCidxMeta:
     """Test cidx-meta bootstrap on fresh installation."""
@@ -168,10 +279,15 @@ class TestBootstrapCidxMeta:
         # Setup: No cidx-meta exists
 
         # Create mock manager
+        from threading import Lock
+
         mock_manager = Mock()
         mock_manager.golden_repo_exists = Mock(return_value=False)
         mock_manager.golden_repos = {}
         mock_manager._save_metadata = Mock()
+        mock_manager._operation_lock = Lock()
+        mock_manager._use_sqlite = False
+        mock_manager._sqlite_backend = None
 
         # Mock GlobalActivator to avoid actual global activation
         with patch(
@@ -241,10 +357,15 @@ class TestBootstrapCidxMeta:
         # Setup: No cidx-meta directory
 
         # Create mock manager
+        from threading import Lock
+
         mock_manager = Mock()
         mock_manager.golden_repo_exists = Mock(return_value=False)
         mock_manager.golden_repos = {}
         mock_manager._save_metadata = Mock()
+        mock_manager._operation_lock = Lock()
+        mock_manager._use_sqlite = False
+        mock_manager._sqlite_backend = None
 
         # Mock GlobalActivator to avoid actual global activation
         with patch(
@@ -273,10 +394,15 @@ class TestBootstrapCidxMeta:
         (cidx_meta_path / ".code-indexer").mkdir()
 
         # Create mock manager
+        from threading import Lock
+
         mock_manager = Mock()
         mock_manager.golden_repo_exists = Mock(return_value=False)
         mock_manager.golden_repos = {}
         mock_manager._save_metadata = Mock()
+        mock_manager._operation_lock = Lock()
+        mock_manager._use_sqlite = False
+        mock_manager._sqlite_backend = None
 
         # Mock GlobalActivator
         with patch(
@@ -311,10 +437,15 @@ class TestBootstrapCidxMeta:
     def test_subprocess_error_handling(self, golden_repos_dir):
         """Test that bootstrap handles subprocess errors gracefully."""
         # Setup: No cidx-meta exists
+        from threading import Lock
+
         mock_manager = Mock()
         mock_manager.golden_repo_exists = Mock(return_value=False)
         mock_manager.golden_repos = {}
         mock_manager._save_metadata = Mock()
+        mock_manager._operation_lock = Lock()
+        mock_manager._use_sqlite = False
+        mock_manager._sqlite_backend = None
 
         # Mock GlobalActivator
         with patch(
@@ -342,12 +473,101 @@ class TestBootstrapCidxMeta:
                 assert cidx_meta_path.exists()
                 assert "cidx-meta" in mock_manager.golden_repos
 
+    def test_bootstrap_persists_with_sqlite_backend(self, golden_repos_dir):
+        """
+        Test that when _use_sqlite=True, bootstrap_cidx_meta() uses _sqlite_backend.add_repo().
+
+        This verifies the fix for the SQLite persistence bug where cidx-meta was added
+        to in-memory dict but never persisted to golden_repos_metadata SQLite table.
+        """
+        # Setup: No cidx-meta exists
+        from threading import Lock
+
+        mock_sqlite_backend = Mock()
+        mock_manager = Mock()
+        mock_manager.golden_repo_exists = Mock(return_value=False)
+        mock_manager.golden_repos = {}
+        mock_manager._save_metadata = Mock()
+        mock_manager._operation_lock = Lock()
+        # Configure for SQLite mode
+        mock_manager._use_sqlite = True
+        mock_manager._sqlite_backend = mock_sqlite_backend
+
+        # Mock GlobalActivator
+        with patch(
+            "code_indexer.global_repos.global_activation.GlobalActivator"
+        ) as mock_activator_class:
+            mock_activator = Mock()
+            mock_activator_class.return_value = mock_activator
+
+            # Mock subprocess to avoid actual cidx calls
+            with patch("subprocess.run"):
+                # Execute bootstrap
+                from code_indexer.server.app import bootstrap_cidx_meta
+
+                bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
+
+                # Verify: _sqlite_backend.add_repo() was called
+                mock_sqlite_backend.add_repo.assert_called_once()
+                call_args = mock_sqlite_backend.add_repo.call_args
+                assert call_args[1]["alias"] == "cidx-meta"
+                assert call_args[1]["repo_url"] == "local://cidx-meta"
+                assert call_args[1]["default_branch"] == "main"
+                assert call_args[1]["enable_temporal"] is False
+                assert call_args[1]["temporal_options"] is None
+                assert "created_at" in call_args[1]
+                assert "clone_path" in call_args[1]
+
+                # Verify: _save_metadata() was NOT called (SQLite uses add_repo)
+                mock_manager._save_metadata.assert_not_called()
+
+    def test_bootstrap_persists_with_json_fallback(self, golden_repos_dir):
+        """
+        Test that when _use_sqlite=False, bootstrap_cidx_meta() uses _save_metadata().
+        """
+        # Setup: No cidx-meta exists
+        from threading import Lock
+
+        mock_manager = Mock()
+        mock_manager.golden_repo_exists = Mock(return_value=False)
+        mock_manager.golden_repos = {}
+        mock_manager._save_metadata = Mock()
+        mock_manager._operation_lock = Lock()
+        # Configure for JSON mode
+        mock_manager._use_sqlite = False
+        mock_manager._sqlite_backend = None
+
+        # Mock GlobalActivator
+        with patch(
+            "code_indexer.global_repos.global_activation.GlobalActivator"
+        ) as mock_activator_class:
+            mock_activator = Mock()
+            mock_activator_class.return_value = mock_activator
+
+            # Mock subprocess to avoid actual cidx calls
+            with patch("subprocess.run"):
+                # Execute bootstrap
+                from code_indexer.server.app import bootstrap_cidx_meta
+
+                bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
+
+                # Verify: _save_metadata() was called (JSON mode)
+                mock_manager._save_metadata.assert_called()
+
+                # Verify: cidx-meta was added to in-memory dict
+                assert "cidx-meta" in mock_manager.golden_repos
+
     def test_idempotent_multiple_calls(self, golden_repos_dir):
         """Test that multiple bootstrap calls are safe (idempotent)."""
         # Setup
+        from threading import Lock
+
         mock_manager = Mock()
         mock_manager.golden_repos = {}
         mock_manager._save_metadata = Mock()
+        mock_manager._operation_lock = Lock()
+        mock_manager._use_sqlite = False
+        mock_manager._sqlite_backend = None
 
         # First call: golden_repo_exists returns False
         mock_manager.golden_repo_exists = Mock(return_value=False)

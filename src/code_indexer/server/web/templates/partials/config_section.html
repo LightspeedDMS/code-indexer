@@ -1306,6 +1306,123 @@
     </article>
 </details>
 
+<!-- Langfuse Trace Pull Settings Section (Story #164) -->
+<details class="config-section" id="section-langfuse_pull">
+    <summary>
+        <h2>Langfuse Trace Pull</h2>
+    </summary>
+    <p class="section-description">
+        Configures pulling traces from Langfuse projects for semantic search indexing. Traces are synced periodically and indexed for search.
+    </p>
+    <article>
+        <div id="display-langfuse_pull">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Pull Enabled</td>
+                        <td class="config-value">{{ 'Yes' if config.langfuse.pull_enabled else 'No' }}</td>
+                        <td class="config-note"><small>Enable trace pulling from Langfuse</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Host URL</td>
+                        <td class="config-value">{{ config.langfuse.pull_host }}</td>
+                        <td class="config-note"><small>Langfuse server URL for pulling traces</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Sync Interval</td>
+                        <td class="config-value">{{ config.langfuse.pull_sync_interval_seconds }} seconds</td>
+                        <td class="config-note"><small>How often to sync (60-3600s)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Trace Age</td>
+                        <td class="config-value">{{ config.langfuse.pull_trace_age_days }} days</td>
+                        <td class="config-note"><small>Max age of traces to pull (1-365)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Pull Projects</td>
+                        <td class="config-value">
+                            {% if config.langfuse.pull_projects %}
+                                {{ config.langfuse.pull_projects|length }} project(s)
+                            {% else %}
+                                None configured
+                            {% endif %}
+                        </td>
+                        <td class="config-note"><small>Langfuse projects to pull from</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            {% if config.langfuse.pull_projects %}
+            <table class="config-table" style="margin-top: 0.5rem;">
+                <thead><tr><th>#</th><th>Public Key</th></tr></thead>
+                <tbody>
+                    {% for proj in config.langfuse.pull_projects %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>{{ proj.public_key[:15] }}...</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% endif %}
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('langfuse_pull')">Edit</button>
+            </div>
+        </div>
+        <form id="edit-form-langfuse_pull" method="post" action="/admin/config/langfuse_pull" style="display: none;" onsubmit="lpSync();">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.langfuse_pull %}
+            <div class="validation-error">{{ validation_errors.langfuse_pull }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="lp-enabled">
+                    Pull Enabled
+                    <select id="lp-enabled" name="pull_enabled">
+                        <option value="true" {% if config.langfuse.pull_enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.langfuse.pull_enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Enable pulling traces from Langfuse</small>
+                </label>
+                <label for="lp-host">
+                    Host URL
+                    <input type="url" id="lp-host" name="pull_host"
+                           value="{{ config.langfuse.pull_host }}" placeholder="https://cloud.langfuse.com">
+                    <small>Langfuse server URL for pulling traces</small>
+                </label>
+                <label for="lp-interval">
+                    Sync Interval (seconds)
+                    <input type="number" id="lp-interval" name="pull_sync_interval_seconds"
+                           value="{{ config.langfuse.pull_sync_interval_seconds }}" min="60" max="3600">
+                    <small>60-3600 seconds</small>
+                </label>
+                <label for="lp-age">
+                    Trace Age (days)
+                    <input type="number" id="lp-age" name="pull_trace_age_days"
+                           value="{{ config.langfuse.pull_trace_age_days }}" min="1" max="365">
+                    <small>1-365 days</small>
+                </label>
+            </div>
+            <h3 style="margin-top: 1rem;">Pull Projects</h3>
+            <div id="lp-projects-list">
+                {% for proj in config.langfuse.pull_projects %}
+                <div class="lp-project" style="border: 1px solid var(--pico-muted-border-color); padding: 0.75rem; margin-bottom: 0.5rem; border-radius: 4px;">
+                    <div class="form-grid">
+                        <label>Public Key <input type="text" class="lp-pk" value="{{ proj.public_key or '' }}" placeholder="pk-lf-..."></label>
+                        <label>Secret Key <input type="password" class="lp-sk" value="{{ proj.secret_key or '' }}" placeholder="sk-lf-..."></label>
+                    </div>
+                    <button type="button" class="outline small" onclick="this.closest('.lp-project').remove();lpSync();" style="margin-top:0.25rem;">Remove</button>
+                </div>
+                {% endfor %}
+            </div>
+            <button type="button" class="outline small" onclick="lpAdd();" style="margin-top: 0.5rem;">Add Project</button>
+            <input type="hidden" id="lp-projects-json" name="pull_projects" value="">
+            <div class="form-actions" style="margin-top: 1rem;">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('langfuse_pull')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 <!-- Claude Delegation Settings Section (Story #721) -->
 <details class="config-section" id="section-claude_delegation">
     <summary>
@@ -2338,6 +2455,10 @@ async function clearVoyageAIKey() {
         statusSpan.className = 'key-status error';
     }
 }
+
+// Langfuse Pull Project Management (Story #164)
+function lpAdd(){var l=document.getElementById('lp-projects-list'),d=document.createElement('div');d.className='lp-project';d.style='border:1px solid var(--pico-muted-border-color);padding:0.75rem;margin-bottom:0.5rem;border-radius:4px;';d.innerHTML='<div class="form-grid"><label>Public Key <input type="text" class="lp-pk" placeholder="pk-lf-..."></label><label>Secret Key <input type="password" class="lp-sk" placeholder="sk-lf-..."></label></div><button type="button" class="outline small" onclick="this.closest(\'.lp-project\').remove();lpSync();" style="margin-top:0.25rem;">Remove</button>';l.appendChild(d);}
+function lpSync(){var ps=[];document.querySelectorAll('#lp-projects-list .lp-project').forEach(function(e){var pk=e.querySelector('.lp-pk').value.trim();if(pk){ps.push({public_key:pk,secret_key:e.querySelector('.lp-sk').value.trim()});}});document.getElementById('lp-projects-json').value=JSON.stringify(ps);}
 </script>
 
 <style>

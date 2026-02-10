@@ -8,7 +8,7 @@ and directory structure setup for the CIDX server installation.
 import json
 import logging
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Optional, Dict, List, Union
 
@@ -560,13 +560,24 @@ class SelfMonitoringConfig:
 
 
 @dataclass
+class LangfusePullProject:
+    """Credentials for a Langfuse project to pull traces from."""
+
+    public_key: str = ""
+    secret_key: str = ""
+
+
+@dataclass
 class LangfuseConfig:
     """
-    Langfuse integration configuration (Story #136).
+    Langfuse integration configuration (Story #136, Story #164).
 
     Controls Langfuse tracing integration for research session observability.
     When enabled, captures user prompts, tool usage patterns, and performance
     metrics for analysis.
+
+    Story #164 extends this with pull configuration for importing traces
+    from Langfuse projects for analysis.
     """
 
     # Enable/disable Langfuse tracing
@@ -579,6 +590,35 @@ class LangfuseConfig:
     host: str = "https://cloud.langfuse.com"
     # Auto-trace: automatically create trace on first tool call if no trace exists
     auto_trace_enabled: bool = False
+
+    # Story #164 - Langfuse Pull Configuration
+    # Enable/disable trace pulling from Langfuse projects
+    pull_enabled: bool = False
+    # Langfuse host URL for pulling traces (defaults to cloud, can be self-hosted)
+    pull_host: str = "https://cloud.langfuse.com"
+    # List of projects from which to pull traces
+    pull_projects: List[LangfusePullProject] = field(default_factory=list)
+    # Sync interval in seconds (min: 60, max: 3600)
+    pull_sync_interval_seconds: int = 300
+    # Maximum age of traces to pull in days (min: 1, max: 365)
+    pull_trace_age_days: int = 30
+
+    def __post_init__(self):
+        """Convert dict entries to LangfusePullProject instances if needed."""
+        # Handle deserialization from JSON where pull_projects are dicts
+        if self.pull_projects:
+            converted_projects = []
+            for p in self.pull_projects:
+                if isinstance(p, dict):
+                    # Migration: Remove obsolete project_name and project_id fields
+                    migrated = {
+                        "public_key": p.get("public_key", ""),
+                        "secret_key": p.get("secret_key", ""),
+                    }
+                    converted_projects.append(LangfusePullProject(**migrated))
+                else:
+                    converted_projects.append(p)
+            self.pull_projects = converted_projects
 
 
 @dataclass

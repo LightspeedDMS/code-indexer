@@ -10,6 +10,10 @@ import time
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+from code_indexer.server.services.langfuse_watch_integration import (
+    DEFAULT_LANGFUSE_WATCH_IDLE_TIMEOUT_SECONDS,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -270,8 +274,83 @@ class DaemonWatchManager:
                 self.project_path = None
                 self.start_time = None
 
+    def _is_git_folder(self, folder_path: str) -> bool:
+        """Check if folder is a git repository.
+
+        Args:
+            folder_path: Path to folder to check
+
+        Returns:
+            True if folder contains .git directory, False otherwise
+        """
+        git_dir = Path(folder_path) / ".git"
+        return git_dir.exists()
+
+    def _create_simple_watch_handler(
+        self, project_path: str, config: Any, smart_indexer: Any, debounce_seconds: float
+    ) -> Any:
+        """Create SimpleWatchHandler for non-git folders.
+
+        Args:
+            project_path: Path to the project to watch
+            config: Configuration for the watch handler
+            smart_indexer: SmartIndexer instance for incremental indexing
+            debounce_seconds: Debounce interval for file events
+
+        Returns:
+            Configured SimpleWatchHandler instance
+
+        Raises:
+            Exception: If handler creation fails
+        """
+        from code_indexer.services.simple_watch_handler import SimpleWatchHandler
+
+        # Create indexing callback for SimpleWatchHandler
+        def indexing_callback(changed_files: list, event_type: str) -> None:
+            """Bridge SimpleWatchHandler events to SmartIndexer."""
+            # Convert absolute paths to relative paths
+            relative_paths = []
+            for file_path in changed_files:
+                abs_path = Path(file_path)
+                try:
+                    rel_path = abs_path.relative_to(config.codebase_dir)
+                    relative_paths.append(str(rel_path))
+                except ValueError:
+                    # File outside codebase directory
+                    logger.warning(
+                        f"File {file_path} is outside codebase {config.codebase_dir}"
+                    )
+                    continue
+
+            if relative_paths:
+                # Trigger SmartIndexer incremental processing
+                logger.info(
+                    f"Processing {len(relative_paths)} file changes (event: {event_type})"
+                )
+                smart_indexer.process_files_incrementally(
+                    relative_paths,
+                    force_reprocess=False,
+                    quiet=False,
+                    watch_mode=True,
+                )
+
+        # Create simple watch handler
+        watch_handler = SimpleWatchHandler(
+            folder_path=project_path,
+            indexing_callback=indexing_callback,
+            debounce_seconds=debounce_seconds,
+            idle_timeout_seconds=DEFAULT_LANGFUSE_WATCH_IDLE_TIMEOUT_SECONDS,
+        )
+
+        logger.info(f"Simple watch handler created for non-git folder {project_path}")
+        return watch_handler
+
     def _create_watch_handler(self, project_path: str, config: Any, **kwargs) -> Any:
-        """Create and configure a GitAwareWatchHandler instance.
+        """Create and configure appropriate watch handler (Git-aware or Simple).
+
+        Automatically selects handler based on folder type:
+        - Git repository (.git exists) -> GitAwareWatchHandler
+        - Non-git folder -> SimpleWatchHandler
 
         Args:
             project_path: Path to the project to watch
@@ -279,19 +358,16 @@ class DaemonWatchManager:
             **kwargs: Additional arguments for watch handler
 
         Returns:
-            Configured GitAwareWatchHandler instance
+            Configured watch handler instance (GitAwareWatchHandler or SimpleWatchHandler)
 
         Raises:
             Exception: If handler creation fails
         """
         # Import here to avoid circular dependencies and lazy loading
-        from code_indexer.services.git_aware_watch_handler import GitAwareWatchHandler
         from code_indexer.config import ConfigManager
         from code_indexer.backends.backend_factory import BackendFactory
         from code_indexer.services.embedding_factory import EmbeddingProviderFactory
         from code_indexer.services.smart_indexer import SmartIndexer
-        from code_indexer.services.git_topology_service import GitTopologyService
-        from code_indexer.services.watch_metadata import WatchMetadata
 
         try:
             # Initialize configuration if not provided
@@ -312,26 +388,46 @@ class DaemonWatchManager:
                 config, embedding_provider, vector_store_client, metadata_path
             )
 
-            # Initialize git topology service
-            git_topology_service = GitTopologyService(config.codebase_dir)
-
-            # Initialize watch metadata
-            watch_metadata_path = (
-                config_manager.config_path.parent / "watch_metadata.json"
-            )
-            watch_metadata = WatchMetadata.load_from_disk(watch_metadata_path)
-
-            # Create watch handler
             debounce_seconds = kwargs.get("debounce_seconds", 2.0)
-            watch_handler = GitAwareWatchHandler(
-                config=config,
-                smart_indexer=smart_indexer,
-                git_topology_service=git_topology_service,
-                watch_metadata=watch_metadata,
-                debounce_seconds=debounce_seconds,
-            )
 
-            logger.info(f"Watch handler created successfully for {project_path}")
+            # Select handler based on folder type
+            if self._is_git_folder(project_path):
+                # Git repository - use GitAwareWatchHandler
+                from code_indexer.services.git_aware_watch_handler import (
+                    GitAwareWatchHandler,
+                )
+                from code_indexer.services.git_topology_service import (
+                    GitTopologyService,
+                )
+                from code_indexer.services.watch_metadata import WatchMetadata
+
+                # Initialize git topology service
+                git_topology_service = GitTopologyService(config.codebase_dir)
+
+                # Initialize watch metadata
+                watch_metadata_path = (
+                    config_manager.config_path.parent / "watch_metadata.json"
+                )
+                watch_metadata = WatchMetadata.load_from_disk(watch_metadata_path)
+
+                # Create git-aware watch handler
+                watch_handler = GitAwareWatchHandler(
+                    config=config,
+                    smart_indexer=smart_indexer,
+                    git_topology_service=git_topology_service,
+                    watch_metadata=watch_metadata,
+                    debounce_seconds=debounce_seconds,
+                )
+
+                logger.info(
+                    f"Git-aware watch handler created for git repository {project_path}"
+                )
+            else:
+                # Non-git folder - use SimpleWatchHandler
+                watch_handler = self._create_simple_watch_handler(
+                    project_path, config, smart_indexer, debounce_seconds
+                )
+
             return watch_handler
 
         except Exception as e:

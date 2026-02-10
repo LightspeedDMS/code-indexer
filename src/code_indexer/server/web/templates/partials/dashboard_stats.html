@@ -150,6 +150,20 @@
     </article>
 </div>
 
+<!-- Langfuse Sync Section (Story #168) -->
+<!-- M6/M8: Uses 30s HTMX-only refresh (not in refreshAll() JavaScript function)
+     because Langfuse data changes slowly (sync runs every 5min by default).
+     This avoids unnecessary API calls while keeping data reasonably fresh. -->
+<div id="langfuse-section" class="dashboard-section"
+    hx-get="/admin/partials/dashboard-langfuse"
+    hx-trigger="load, every 30s"
+    hx-swap="innerHTML">
+    <!-- Loading indicator shown until HTMX fetches Langfuse data -->
+    <div class="loading-indicator">
+        <p>Loading Langfuse sync status...</p>
+    </div>
+</div>
+
 <!-- Recent Activity Section -->
 <div style="display: flex; justify-content: space-between; align-items: center;">
     <h2>Recent Activity</h2>

@@ -8,6 +8,7 @@ All settings persist to ~/.cidx-server/config.json via ServerConfigManager.
 from code_indexer.server.middleware.correlation import get_correlation_id
 
 import logging
+from dataclasses import asdict
 from typing import Any, Dict, Optional
 
 from ..utils.config_manager import (
@@ -198,13 +199,19 @@ class ConfigService:
                 "trace_sample_rate": config.telemetry_config.trace_sample_rate,
                 "deployment_environment": config.telemetry_config.deployment_environment,
             },
-            # Langfuse configuration (Story #136)
+            # Langfuse configuration (Story #136, Story #164)
             "langfuse": {
                 "enabled": config.langfuse_config.enabled if config.langfuse_config else False,
                 "public_key": config.langfuse_config.public_key if config.langfuse_config else "",
                 "secret_key": config.langfuse_config.secret_key if config.langfuse_config else "",
                 "host": config.langfuse_config.host if config.langfuse_config else "https://cloud.langfuse.com",
                 "auto_trace_enabled": config.langfuse_config.auto_trace_enabled if config.langfuse_config else False,
+                # Story #164: Langfuse Trace Pull Configuration
+                "pull_enabled": config.langfuse_config.pull_enabled if config.langfuse_config else False,
+                "pull_host": config.langfuse_config.pull_host if config.langfuse_config else "https://cloud.langfuse.com",
+                "pull_projects": [asdict(p) for p in config.langfuse_config.pull_projects] if config.langfuse_config else [],
+                "pull_sync_interval_seconds": config.langfuse_config.pull_sync_interval_seconds if config.langfuse_config else 300,
+                "pull_trace_age_days": config.langfuse_config.pull_trace_age_days if config.langfuse_config else 30,
             },
             # Claude Delegation configuration (Story #721)
             "claude_delegation": self._get_delegation_settings(),
@@ -614,8 +621,8 @@ class ConfigService:
     def _update_langfuse_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
-        """Update a langfuse setting (Story #136)."""
-        from ..utils.config_manager import LangfuseConfig
+        """Update a langfuse setting (Story #136, Story #164)."""
+        from ..utils.config_manager import LangfuseConfig, LangfusePullProject
 
         # Initialize langfuse_config if None
         if config.langfuse_config is None:
@@ -631,6 +638,24 @@ class ConfigService:
             langfuse.host = str(value)
         elif key == "auto_trace_enabled":
             langfuse.auto_trace_enabled = value in ["true", True, "True", "1"]
+        # Story #164: Langfuse Trace Pull settings
+        elif key == "pull_enabled":
+            langfuse.pull_enabled = value in ["true", True, "True", "1"]
+        elif key == "pull_host":
+            langfuse.pull_host = value.strip() if value else "https://cloud.langfuse.com"
+        elif key == "pull_sync_interval_seconds":
+            val = max(60, min(3600, int(value)))
+            langfuse.pull_sync_interval_seconds = val
+        elif key == "pull_trace_age_days":
+            val = max(1, min(365, int(value)))
+            langfuse.pull_trace_age_days = val
+        elif key == "pull_projects":
+            import json as _json
+            projects_data = _json.loads(value) if isinstance(value, str) else value
+            langfuse.pull_projects = [
+                LangfusePullProject(**p) if isinstance(p, dict) else p
+                for p in projects_data
+            ]
         else:
             raise ValueError(f"Unknown langfuse setting: {key}")
 
