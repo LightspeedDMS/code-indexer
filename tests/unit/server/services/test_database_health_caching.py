@@ -164,6 +164,7 @@ class TestDatabaseHealthCaching:
                 "groups.db": Path(temp_dir) / "groups.db",
                 "scip_audit.db": Path(temp_dir) / "scip_audit.db",
                 "payload_cache.db": golden_cache / "payload_cache.db",
+                "api_metrics.db": data_dir / "api_metrics.db",
             }
 
             for db_path in db_paths.values():
@@ -536,7 +537,7 @@ class TestDatabaseHealthErrorCases:
         assert status == DatabaseHealthStatus.WARNING
 
     def test_get_all_database_health_uncached(self):
-        """get_all_database_health() should return health for all 7 databases."""
+        """get_all_database_health() should return health for all 8 databases."""
         from code_indexer.server.services.database_health_service import (
             DatabaseHealthService,
             DATABASE_DISPLAY_NAMES,
@@ -559,6 +560,7 @@ class TestDatabaseHealthErrorCases:
                 "groups.db": Path(temp_dir) / "groups.db",
                 "scip_audit.db": Path(temp_dir) / "scip_audit.db",
                 "payload_cache.db": golden_cache / "payload_cache.db",
+                "api_metrics.db": data_dir / "api_metrics.db",
             }
 
             for db_path in db_paths.values():

@@ -1,5 +1,5 @@
 """
-Database Health Service for monitoring all 7 central databases.
+Database Health Service for monitoring all 8 central databases.
 
 Story #712: Dashboard Refinements - Database Health Honeycomb
 Story #3: Removed search_config.db and file_content_limits.db (migrated to config.json)
@@ -160,12 +160,13 @@ DATABASE_DISPLAY_NAMES: Dict[str, str] = {
     "groups.db": "Groups",
     "scip_audit.db": "SCIP Audit",
     "payload_cache.db": "Payload Cache",
+    "api_metrics.db": "API Metrics",
 }
 
 
 class DatabaseHealthService:
     """
-    Service for checking health of all 7 central CIDX databases.
+    Service for checking health of all 8 central CIDX databases.
 
     Performs 5-point health checks on each database and determines
     overall status (healthy/warning/error).
@@ -228,7 +229,7 @@ class DatabaseHealthService:
 
     def get_all_database_health(self) -> List[DatabaseHealthResult]:
         """
-        Check health of all 7 central databases (uncached).
+        Check health of all 8 central databases (uncached).
 
         Returns:
             List of DatabaseHealthResult for each database
@@ -237,8 +238,8 @@ class DatabaseHealthService:
 
         for file_name, display_name in DATABASE_DISPLAY_NAMES.items():
             # Determine correct path based on database location
-            if file_name == "cidx_server.db":
-                # Main server DB is in data/ subdirectory
+            if file_name in ("cidx_server.db", "api_metrics.db"):
+                # Main server DB and API metrics DB are in data/ subdirectory
                 db_path = self.server_dir / "data" / file_name
             elif file_name == "payload_cache.db":
                 # Payload cache is in golden-repos cache directory
@@ -256,7 +257,7 @@ class DatabaseHealthService:
 
     def get_all_database_health_cached(self) -> List[DatabaseHealthResult]:
         """
-        Check health of all 7 central databases with caching (Story #30 AC6).
+        Check health of all 8 central databases with caching (Story #30 AC6).
 
         Uses check_database_health_cached for each database, returning
         cached results when within 60-second TTL.
@@ -268,8 +269,8 @@ class DatabaseHealthService:
 
         for file_name, display_name in DATABASE_DISPLAY_NAMES.items():
             # Determine correct path based on database location
-            if file_name == "cidx_server.db":
-                # Main server DB is in data/ subdirectory
+            if file_name in ("cidx_server.db", "api_metrics.db"):
+                # Main server DB and API metrics DB are in data/ subdirectory
                 db_path = self.server_dir / "data" / file_name
             elif file_name == "payload_cache.db":
                 # Payload cache is in golden-repos cache directory
