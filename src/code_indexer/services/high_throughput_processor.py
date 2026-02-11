@@ -872,6 +872,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         slot_tracker: Optional[CleanSlotTracker] = None,
         watch_mode: bool = False,
         fts_manager: Optional[Any] = None,
+        skip_branch_isolation: bool = False,
     ):
         """
         Process branch changes using high-throughput parallel processing.
@@ -888,6 +889,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             progress_callback: Optional callback for progress reporting
             vector_thread_count: Number of threads for parallel processing
             watch_mode: If True, skip HNSW rebuild (for watch mode performance)
+            skip_branch_isolation: If True, skip branch isolation (used when caller handles it separately or for non-git repos)
 
         Returns:
             BranchIndexingResult with processing statistics
@@ -970,24 +972,27 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                         continue
 
             # Hide files that don't exist in the new branch (branch isolation)
-            if progress_callback:
-                progress_callback(
-                    0,
-                    0,
-                    Path(""),
-                    info="Applying branch isolation",
-                    slot_tracker=slot_tracker,
-                )
+            # Apply branch isolation unless explicitly skipped
+            # (skip when caller handles it separately or for non-git repos)
+            if not skip_branch_isolation:
+                if progress_callback:
+                    progress_callback(
+                        0,
+                        0,
+                        Path(""),
+                        info="Applying branch isolation",
+                        slot_tracker=slot_tracker,
+                    )
 
-            # Get all files that should be visible in the new branch
-            all_branch_files = changed_files + unchanged_files
-            self.hide_files_not_in_branch_thread_safe(
-                new_branch,
-                all_branch_files,
-                collection_name,
-                progress_callback,
-                slot_tracker,
-            )
+                # Get all files that should be visible in the new branch
+                all_branch_files = changed_files + unchanged_files
+                self.hide_files_not_in_branch_thread_safe(
+                    new_branch,
+                    all_branch_files,
+                    collection_name,
+                    progress_callback,
+                    slot_tracker,
+                )
 
             result.processing_time = time.time() - start_time
 

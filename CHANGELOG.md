@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.11.2] - 2026-02-11
+
+### Fixed
+
+- **Langfuse search regression** - Fixed three bugs causing MCP search_code to return empty file_path and content for Langfuse trace repositories:
+  - `_batch_update_points` was replacing payload instead of merging, losing existing fields (path, language, content) during branch isolation updates
+  - `process_files_incrementally` passed only changed files to branch isolation, causing `hide_files_not_in_branch` to hide all files since the subset didn't match the full branch file list
+  - Branch isolation (`hide_files_not_in_branch`) was running on non-git folders (Langfuse trace folders have no branches), incorrectly hiding all indexed content
+- **Missed branch isolation guard in `_do_incremental_index`** - Added `is_git_available()` check before `hide_files_not_in_branch_thread_safe` call, preventing the same regression through the incremental indexing code path
+
+### Changed
+
+- **search_code tool documentation** - Improved hybrid search mode description with RRF scoring details and added `match_text` field to output schema
+
+---
+
 ## [8.11.1] - 2026-02-10
 
 ### Fixed

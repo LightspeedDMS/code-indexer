@@ -53,9 +53,12 @@ inputSchema:
     search_mode:
       type: string
       description: 'Search mode: ''semantic'' for natural language/conceptual queries (''how authentication works''), ''fts''
-        for exact text/identifiers (''def authenticate_user''), ''hybrid'' for both. Default: semantic. NOTE: FTS multi-term
-        queries use AND semantics - all terms must match. Example: ''password reset'' requires both words. For OR behavior,
-        use regex mode.'
+        for exact text/identifiers (''def authenticate_user''), ''hybrid'' runs both FTS and semantic searches in parallel
+        then merges results using Reciprocal Rank Fusion (RRF) - results found by both engines are boosted to the top.
+        Default: semantic. HYBRID RESULTS: Each result has code_snippet (content) and similarity_score (RRF-based). FTS-originated
+        results additionally carry match_text (exact matched text). Large fields may be truncated to snippet_preview +
+        snippet_cache_handle (use get_cached_content to retrieve full content). NOTE: FTS multi-term queries use AND semantics
+        - all terms must match. Example: ''password reset'' requires both words. For OR behavior, use regex mode.'
       enum:
       - semantic
       - fts
@@ -229,6 +232,12 @@ outputSchema:
                 - 'null'
                 description: Component repository name for composite repositories. Null for single repositories. Indicates
                   which repo in a composite this result came from.
+              match_text:
+                type:
+                - string
+                - 'null'
+                description: Exact matched text from FTS engine. Only present in FTS and hybrid search modes for
+                  FTS-originated results. Null or absent for pure semantic results.
               file_last_modified:
                 type:
                 - number
@@ -356,7 +365,7 @@ Use cases:
 
 TL;DR: Search code using pre-built indexes. Use semantic mode for conceptual queries, FTS for exact text.
 
-SEARCH MODE: 'authentication logic' (concept) -> semantic | 'def authenticate_user' (exact) -> fts | unsure -> hybrid
+SEARCH MODE: 'authentication logic' (concept) -> semantic | 'def authenticate_user' (exact) -> fts | unsure -> hybrid (runs both in parallel, merges via RRF - common hits ranked highest)
 
 CRITICAL: Semantic search finds code by MEANING, not exact text. Results are APPROXIMATE. For exhaustive exact-text results, use FTS mode or regex_search tool.
 

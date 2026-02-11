@@ -240,8 +240,9 @@ class SemanticSearchService:
 
                 # Extract source code if requested
                 source_content = None
-                if include_source and "content" in payload:
-                    source_content = payload["content"]
+                if include_source:
+                    if "content" in payload:
+                        source_content = payload["content"]
 
                 search_item = SearchResultItem(
                     file_path=payload.get("path", ""),

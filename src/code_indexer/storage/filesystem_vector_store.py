@@ -2591,12 +2591,19 @@ class FilesystemVectorStore:
                 if not existing:
                     continue
 
-                # Update payload, keep vector
+                # MERGE payload (not replace) - preserve existing metadata
+                existing_payload = existing.get("payload", {})
+                merged_payload = {**existing_payload, **new_payload}
+
                 updated_point = {
                     "id": point_id,
                     "vector": existing["vector"],
-                    "payload": new_payload,
+                    "payload": merged_payload,
                 }
+
+                # Preserve chunk_text if it exists in the original
+                if "chunk_text" in existing:
+                    updated_point["chunk_text"] = existing["chunk_text"]
 
                 # Upsert updated point
                 self.upsert_points(collection_name, [updated_point])

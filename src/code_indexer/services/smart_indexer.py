@@ -779,13 +779,15 @@ class SmartIndexer(HighThroughputProcessor):
                     all_relative_files.append(str(file_path))
 
             # Use thread-safe branch isolation directly from high-throughput processor
-            if progress_callback:
-                progress_callback(
-                    0, 0, Path(""), info="Applying branch isolation cleanup..."
+            # Only apply branch isolation for git repositories
+            if self.git_topology_service.is_git_available():
+                if progress_callback:
+                    progress_callback(
+                        0, 0, Path(""), info="Applying branch isolation cleanup..."
+                    )
+                self.hide_files_not_in_branch_thread_safe(
+                    current_branch, all_relative_files, collection_name, progress_callback
                 )
-            self.hide_files_not_in_branch_thread_safe(
-                current_branch, all_relative_files, collection_name, progress_callback
-            )
 
             # Use ProcessingStats directly from high-throughput processor
             stats = high_throughput_stats
@@ -1113,9 +1115,11 @@ class SmartIndexer(HighThroughputProcessor):
                     all_relative_files.append(str(file_path))
 
             # Use thread-safe branch isolation directly from high-throughput processor
-            self.hide_files_not_in_branch_thread_safe(
-                current_branch, all_relative_files, collection_name, progress_callback
-            )
+            # Only apply branch isolation for git repositories
+            if self.git_topology_service.is_git_available():
+                self.hide_files_not_in_branch_thread_safe(
+                    current_branch, all_relative_files, collection_name, progress_callback
+                )
 
             # Use ProcessingStats directly from high-throughput processor
             stats = high_throughput_stats
@@ -2077,6 +2081,7 @@ class SmartIndexer(HighThroughputProcessor):
                         vector_thread_count=vector_thread_count,
                         watch_mode=watch_mode,  # Pass through watch_mode
                         fts_manager=fts_manager,  # type: ignore[name-defined]  # noqa: F821 (lazy-loaded FTS manager)
+                        skip_branch_isolation=True,  # Branch isolation handled separately below
                     )
 
                     # For incremental file processing, also ensure branch isolation
@@ -2094,9 +2099,11 @@ class SmartIndexer(HighThroughputProcessor):
                         except ValueError:
                             all_relative_files.append(str(f))
 
-                    self.hide_files_not_in_branch_thread_safe(
-                        current_branch, all_relative_files, collection_name
-                    )
+                    # Only apply branch isolation for git repositories
+                    if self.git_topology_service.is_git_available():
+                        self.hide_files_not_in_branch_thread_safe(
+                            current_branch, all_relative_files, collection_name
+                        )
 
                     # Convert BranchIndexingResult to ProcessingStats
                     stats.files_processed = branch_result.files_processed
