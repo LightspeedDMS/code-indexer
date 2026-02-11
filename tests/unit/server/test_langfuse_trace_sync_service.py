@@ -833,6 +833,12 @@ class TestTwoPhaseHashCheck:
             }
             metrics = SyncMetrics()
 
+            # Create the trace file on disk so the file existence check passes
+            folder = service._get_trace_folder("test-project", trace)
+            folder.mkdir(parents=True, exist_ok=True)
+            trace_file = folder / "t1.json"
+            trace_file.write_text('{"trace": {}, "observations": []}')
+
             # Process trace - should skip fetch
             service._process_trace(mock_api_client, trace, "test-project", trace_hashes, metrics)
 
@@ -910,12 +916,64 @@ class TestTwoPhaseHashCheck:
             }
             metrics = SyncMetrics()
 
+            # Create the trace file on disk so the file existence check passes in Phase 2
+            folder = service._get_trace_folder("test-project", trace)
+            folder.mkdir(parents=True, exist_ok=True)
+            trace_file = folder / "t1.json"
+            trace_file.write_text('{"trace": {}, "observations": []}')
+
             service._process_trace(mock_api_client, trace, "test-project", trace_hashes, metrics)
 
             # updatedAt should be updated
             assert trace_hashes["t1"]["updated_at"] == "2024-01-02T00:00:00+00:00"
             assert trace_hashes["t1"]["content_hash"] == expected_hash
             assert metrics.traces_unchanged == 1
+
+    def test_process_trace_rewrites_when_file_missing(self):
+        """Test that _process_trace re-writes trace when file is missing from disk despite hash match."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
+
+            from unittest.mock import Mock
+
+            mock_api_client = Mock()
+            mock_api_client.fetch_observations.return_value = []
+
+            trace = {
+                "id": "test-trace-123",
+                "updatedAt": "2026-01-01T00:00:00Z",
+                "userId": "test_user",
+                "sessionId": "test_session",
+            }
+
+            # Build expected hash
+            canonical = service._build_canonical_json(trace, [])
+            content_hash = service._compute_hash(canonical)
+
+            # Pre-populate hash as if trace was previously synced
+            trace_hashes = {
+                "test-trace-123": {
+                    "updated_at": "2026-01-01T00:00:00Z",
+                    "content_hash": content_hash,
+                }
+            }
+
+            metrics = SyncMetrics()
+
+            # Phase 1 match (updatedAt and content_hash both match) but file missing
+            # should fall through and re-write
+            service._process_trace(mock_api_client, trace, "TestProject", trace_hashes, metrics)
+
+            # File should have been written since it was missing from disk
+            # Verify the file exists now
+            folder = service._get_trace_folder("TestProject", trace)
+            file_path = folder / "test-trace-123.json"
+            assert file_path.exists(), "Trace file should have been re-written"
+
+            # Should be counted as updated (not new, not unchanged)
+            assert metrics.traces_written_new == 0  # Not "new" - trace was in hashes
+            assert metrics.traces_written_updated == 1  # Re-written because file was missing
+            assert metrics.traces_unchanged == 0  # Should NOT be unchanged
 
 
 # ==============================================================================

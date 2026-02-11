@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.12.1] - 2026-02-11
+
+### Fixed
+
+- **Langfuse sync skips writing traces when files deleted but state persists** - The sync service uses a content hash state file to track which traces have been synced. When trace folders were deleted from disk (e.g., during cleanup) but the state file persisted, the sync permanently skipped re-writing those traces because the hashes matched. Now verifies trace files exist on disk before returning "unchanged", forcing re-write when files are missing.
+
+### Added
+
+- **Operational logging for Langfuse sync service** - Added INFO-level logging for sync iteration start, project sync count, and per-project metrics (traces checked/new/updated/unchanged/errors/duration). Previously the sync thread ran completely silently, making debugging impossible.
+
+---
+
 ## [8.12.0] - 2026-02-11
 
 ### Changed

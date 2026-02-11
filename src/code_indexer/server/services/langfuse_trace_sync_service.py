@@ -126,6 +126,8 @@ class LangfuseTraceSyncService:
         if not langfuse or not langfuse.pull_enabled:
             return
 
+        logger.info(f"Syncing {len(langfuse.pull_projects)} Langfuse project(s)")
+
         host = langfuse.pull_host
         for project_creds in langfuse.pull_projects:
             try:
@@ -231,6 +233,12 @@ class LangfuseTraceSyncService:
         with self._lock:
             self._metrics[project_name] = metrics
 
+        logger.info(
+            f"Synced project '{project_name}': {metrics.traces_checked} checked, "
+            f"{metrics.traces_written_new} new, {metrics.traces_written_updated} updated, "
+            f"{metrics.traces_unchanged} unchanged, {metrics.errors_count} errors ({elapsed_ms}ms)"
+        )
+
 
     def _process_trace(
         self,
@@ -252,10 +260,16 @@ class LangfuseTraceSyncService:
         updated_at = trace.get("updatedAt", "")
         stored = trace_hashes.get(trace_id)
 
+        # Compute file path for existence checks (detect deleted files)
+        folder = self._get_trace_folder(project_name, trace)
+        file_path = folder / f"{trace_id}.json"
+
         # If stored hash exists and updatedAt matches, skip (no change)
         if stored and stored.get("updated_at") == updated_at:
-            metrics.traces_unchanged += 1
-            return
+            if file_path.exists():
+                metrics.traces_unchanged += 1
+                return
+            # File missing from disk - fall through to fetch and re-write
 
         # Phase 2: Trace changed or new - fetch observations and compute full hash
         observations = api_client.fetch_observations(trace_id)
@@ -264,18 +278,19 @@ class LangfuseTraceSyncService:
 
         # Check full content hash (updatedAt might change without content change)
         if stored and stored.get("content_hash") == content_hash:
-            # Update the updatedAt but don't rewrite file
-            trace_hashes[trace_id] = {
-                "updated_at": updated_at,
-                "content_hash": content_hash,
-            }
-            metrics.traces_unchanged += 1
-            return
+            if file_path.exists():
+                # Update the updatedAt but don't rewrite file
+                trace_hashes[trace_id] = {
+                    "updated_at": updated_at,
+                    "content_hash": content_hash,
+                }
+                metrics.traces_unchanged += 1
+                return
+            # File missing from disk - fall through to re-write
 
         is_new = trace_id not in trace_hashes
 
-        # Write to filesystem
-        folder = self._get_trace_folder(project_name, trace)
+        # Write to filesystem (folder already computed above)
         self._write_trace(folder, trace_id, trace, observations)
 
         # Update hash with both updatedAt and content hash
@@ -378,6 +393,7 @@ class LangfuseTraceSyncService:
                 config = self._config_getter()
                 if config.langfuse_config and config.langfuse_config.pull_enabled:
                     interval = config.langfuse_config.pull_sync_interval_seconds
+                    logger.info(f"Langfuse sync iteration starting (pull_enabled=True, interval={interval}s)")
                     # H4: Acquire lock before sync (skip if manual sync in progress)
                     if self._sync_lock.acquire(blocking=False):
                         try:
