@@ -197,24 +197,21 @@ class TestGoldenRepoManager:
 
     def test_list_golden_repos_with_data(self, golden_repo_manager):
         """Test listing golden repositories with existing data."""
-        # Add test repositories
-        test_repos = {
-            "repo-1": GoldenRepo(
-                alias="repo-1",
-                repo_url="https://github.com/test/repo-1.git",
-                default_branch="main",
-                clone_path="/path/to/repo-1",
-                created_at="2023-01-01T00:00:00Z",
-            ),
-            "repo-2": GoldenRepo(
-                alias="repo-2",
-                repo_url="https://github.com/test/repo-2.git",
-                default_branch="develop",
-                clone_path="/path/to/repo-2",
-                created_at="2023-01-02T00:00:00Z",
-            ),
-        }
-        golden_repo_manager.golden_repos = test_repos
+        # Add test repositories to SQLite backend
+        golden_repo_manager._sqlite_backend.add_repo(
+            alias="repo-1",
+            repo_url="https://github.com/test/repo-1.git",
+            default_branch="main",
+            clone_path="/path/to/repo-1",
+            created_at="2023-01-01T00:00:00Z",
+        )
+        golden_repo_manager._sqlite_backend.add_repo(
+            alias="repo-2",
+            repo_url="https://github.com/test/repo-2.git",
+            default_branch="develop",
+            clone_path="/path/to/repo-2",
+            created_at="2023-01-02T00:00:00Z",
+        )
 
         result = golden_repo_manager.list_golden_repos()
 

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.12.2] - 2026-02-11
+
+### Fixed
+
+- **Langfuse repos invisible in Web UI despite being in SQLite (Bug #176)** - `list_golden_repos()` and `get_golden_repo()` read from a stale in-memory dict instead of SQLite, making repos registered after server startup invisible to MCP endpoints and the Web UI. Changed both methods to read directly from `GoldenRepoMetadataSqliteBackend`. Also fixed 11 external `golden_repos` dict accesses in `activated_repo_manager.py`, `git_operations_service.py`, and `app.py`. Eliminated double `GoldenRepoManager` instantiation in `app.py` where migration/bootstrap used a temporary instance whose registrations were lost.
+
+---
+
 ## [8.12.1] - 2026-02-11
 
 ### Fixed

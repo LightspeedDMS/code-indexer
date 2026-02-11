@@ -184,10 +184,10 @@ class GitOperationsService:
                 return
 
             # Get golden repo path from golden repo manager
-            if (
+            golden_repo = self.activated_repo_manager.golden_repo_manager.get_golden_repo(
                 golden_repo_alias
-                not in self.activated_repo_manager.golden_repo_manager.golden_repos
-            ):
+            )
+            if golden_repo is None:
                 logger.warning(
                     format_error_log(
                         "CACHE-GENERAL-018",
@@ -196,10 +196,6 @@ class GitOperationsService:
                     )
                 )
                 return
-
-            self.activated_repo_manager.golden_repo_manager.golden_repos[
-                golden_repo_alias
-            ]
 
             # Use canonical path resolution to handle versioned repos (Bug #3, #4 fix)
             golden_repo_path = (

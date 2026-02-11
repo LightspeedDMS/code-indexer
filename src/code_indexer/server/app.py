@@ -2321,47 +2321,8 @@ def create_app() -> FastAPI:
                 )
             )
 
-        # Startup: Migrate legacy cidx-meta and bootstrap if needed
-        logger.info(
-            "Server startup: Checking cidx-meta migration and bootstrap",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        try:
-            from code_indexer.server.repositories.golden_repo_manager import (
-                GoldenRepoManager,
-            )
-
-            # Create GoldenRepoManager instance for migration/bootstrap
-            # NOTE: GoldenRepoManager expects data_dir (e.g., ~/.cidx-server/data), NOT golden-repos path
-            data_dir = Path(server_data_dir) / "data"
-            golden_repo_manager = GoldenRepoManager(
-                str(data_dir), db_path=str(db_path)
-            )
-
-            # Phase 1: Migrate legacy cidx-meta (if it exists in old format)
-            migrate_legacy_cidx_meta(golden_repo_manager, str(golden_repos_dir))
-
-            # Phase 2: Bootstrap cidx-meta (if it doesn't exist)
-            bootstrap_cidx_meta(golden_repo_manager, str(golden_repos_dir))
-
-            # Phase 3: Register any existing Langfuse folders as golden repos
-            register_langfuse_golden_repos(golden_repo_manager, str(golden_repos_dir))
-
-            logger.info(
-                "cidx-meta migration and bootstrap completed",
-                extra={"correlation_id": get_correlation_id()},
-            )
-
-        except Exception as e:
-            # Log error but don't block server startup
-            logger.error(
-                format_error_log(
-                    "APP-GENERAL-011",
-                    f"Failed to migrate/bootstrap cidx-meta on startup: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
-            )
+        # Startup: cidx-meta migration and bootstrap moved to after main GoldenRepoManager initialization
+        # (See lines after GoldenRepoManager creation below)
 
         # Startup: Run SSH key migration (first-time auto-discovery)
         logger.info(
@@ -3406,6 +3367,26 @@ def create_app() -> FastAPI:
     )
     # Inject BackgroundJobManager into GoldenRepoManager for async operations
     golden_repo_manager.background_job_manager = background_job_manager
+
+    # Migration and bootstrap using the main golden_repo_manager instance
+    try:
+        migrate_legacy_cidx_meta(golden_repo_manager, str(golden_repos_dir))
+        bootstrap_cidx_meta(golden_repo_manager, str(golden_repos_dir))
+        register_langfuse_golden_repos(golden_repo_manager, str(golden_repos_dir))
+        logger.info(
+            "cidx-meta migration and bootstrap completed",
+            extra={"correlation_id": get_correlation_id()},
+        )
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "APP-GENERAL-011",
+                f"Failed to migrate/bootstrap cidx-meta on startup: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+
     activated_repo_manager = ActivatedRepoManager(
         data_dir=data_dir,
         golden_repo_manager=golden_repo_manager,
@@ -5099,12 +5080,11 @@ def create_app() -> FastAPI:
             HTTPException 404: If golden repository not found
         """
         # Check if golden repo exists
-        if alias not in golden_repo_manager.golden_repos:
+        golden_repo = golden_repo_manager.get_golden_repo(alias)
+        if golden_repo is None:
             raise HTTPException(
                 status_code=404, detail=f"Golden repository '{alias}' not found"
             )
-
-        golden_repo = golden_repo_manager.golden_repos[alias]
 
         # Query index presence for all four individual types
         indexes = {}

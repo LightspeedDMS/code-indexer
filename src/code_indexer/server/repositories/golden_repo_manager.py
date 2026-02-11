@@ -414,12 +414,12 @@ class GoldenRepoManager:
 
     def list_golden_repos(self) -> List[Dict[str, str]]:
         """
-        List all golden repositories.
+        List all golden repositories from SQLite (source of truth).
 
         Returns:
             List of golden repository dictionaries
         """
-        return [repo.to_dict() for repo in self.golden_repos.values()]
+        return self._sqlite_backend.list_repos()
 
     def register_local_repo(
         self,
@@ -1682,7 +1682,7 @@ class GoldenRepoManager:
 
     def get_golden_repo(self, alias: str) -> Optional[GoldenRepo]:
         """
-        Get a golden repository by alias.
+        Get golden repository by alias from SQLite (source of truth).
 
         Args:
             alias: Repository alias
@@ -1690,7 +1690,10 @@ class GoldenRepoManager:
         Returns:
             GoldenRepo object if found, None otherwise
         """
-        return self.golden_repos.get(alias)
+        repo_data = self._sqlite_backend.get_repo(alias)
+        if repo_data is None:
+            return None
+        return GoldenRepo(**repo_data)
 
     def golden_repo_exists(self, alias: str) -> bool:
         """

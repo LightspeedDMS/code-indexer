@@ -191,7 +191,8 @@ class ActivatedRepoManager:
             ActivatedRepoError: If golden repo not found or already activated
         """
         # Validate golden repository exists
-        if golden_repo_alias not in self.golden_repo_manager.golden_repos:
+        golden_repo = self.golden_repo_manager.get_golden_repo(golden_repo_alias)
+        if golden_repo is None:
             raise ActivatedRepoError(
                 f"Golden repository '{golden_repo_alias}' not found"
             )
@@ -201,7 +202,6 @@ class ActivatedRepoManager:
             user_alias = golden_repo_alias
 
         if branch_name is None:
-            golden_repo = self.golden_repo_manager.golden_repos[golden_repo_alias]
             branch_name = golden_repo.default_branch
 
         # Check if repository already activated for this user
@@ -308,7 +308,7 @@ class ActivatedRepoManager:
                 5, f"Validating {len(golden_repo_aliases)} golden repositories"
             )
             for alias in golden_repo_aliases:
-                if alias not in self.golden_repo_manager.golden_repos:
+                if self.golden_repo_manager.get_golden_repo(alias) is None:
                     raise ActivatedRepoError(f"Golden repository '{alias}' not found")
 
             # Step 1: Determine user_alias (default to joined names if not provided)
@@ -369,7 +369,6 @@ class ActivatedRepoManager:
                     f"Cloning repository {idx + 1}/{total_repos}: {alias}",
                 )
 
-                self.golden_repo_manager.golden_repos[alias]
                 subrepo_path = composite_path / alias
 
                 try:
@@ -968,7 +967,7 @@ class ActivatedRepoManager:
             # Story #636: Check and migrate legacy remotes before fetch
             if (
                 golden_repo_alias
-                and golden_repo_alias in self.golden_repo_manager.golden_repos
+                and self.golden_repo_manager.get_golden_repo(golden_repo_alias) is not None
             ):
                 # Use canonical path resolution to handle versioned repos (Bug #3, #4 fix)
                 golden_repo_path = self.golden_repo_manager.get_actual_repo_path(
@@ -1382,7 +1381,11 @@ class ActivatedRepoManager:
                 f"Starting activation of '{golden_repo_alias}' as '{user_alias}' for user '{username}'",
             )
 
-            golden_repo = self.golden_repo_manager.golden_repos[golden_repo_alias]
+            golden_repo = self.golden_repo_manager.get_golden_repo(golden_repo_alias)
+            if golden_repo is None:
+                raise ActivatedRepoError(
+                    f"Golden repository '{golden_repo_alias}' not found"
+                )
 
             update_progress(20, "Validating golden repository")
 
@@ -2862,10 +2865,10 @@ class ActivatedRepoManager:
                         continue
 
                     # Get the golden repository URL from the golden repo manager
-                    golden_repo = self.golden_repo_manager.golden_repos.get(
+                    golden_repo = self.golden_repo_manager.get_golden_repo(
                         golden_repo_alias
                     )
-                    if not golden_repo:
+                    if golden_repo is None:
                         continue
 
                     # Normalize the golden repository's URL
