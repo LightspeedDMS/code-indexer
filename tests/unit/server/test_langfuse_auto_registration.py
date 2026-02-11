@@ -782,6 +782,144 @@ class TestCidxIndexInitialization:
                 fire_lifecycle_hooks=False,
             )
 
+    def test_re_indexes_when_registration_exists_but_index_missing(
+        self, golden_repos_dir, mock_golden_repo_manager
+    ):
+        """
+        BUG FIX TEST: Test that cidx init + index run when folder is already
+        registered but .code-indexer/index/ directory is missing.
+
+        This is the core bug - when register_local_repo returns False (already
+        registered), the function should still check if index exists and re-index
+        if needed.
+        """
+        # Setup: Create langfuse folder with no .code-indexer directory
+        langfuse = golden_repos_dir / "langfuse_already_registered"
+        langfuse.mkdir()
+
+        # Mock that folder is ALREADY registered (returns False)
+        mock_golden_repo_manager.register_local_repo.return_value = False
+
+        # Mock subprocess.run
+        with patch("subprocess.run") as mock_subprocess_run:
+            mock_subprocess_run.return_value = Mock(returncode=0, stderr="", stdout="")
+
+            # Execute
+            from code_indexer.server.app import register_langfuse_golden_repos
+
+            register_langfuse_golden_repos(
+                mock_golden_repo_manager, str(golden_repos_dir)
+            )
+
+            # Verify: cidx init was called (because .code-indexer doesn't exist)
+            cidx_init_calls = [
+                call
+                for call in mock_subprocess_run.call_args_list
+                if call[0][0] == ["cidx", "init"]
+            ]
+            assert len(cidx_init_calls) == 1, "cidx init should be called when .code-indexer missing"
+            assert cidx_init_calls[0][1]["cwd"] == str(langfuse)
+
+            # Verify: cidx index was called
+            cidx_index_calls = [
+                call
+                for call in mock_subprocess_run.call_args_list
+                if call[0][0] == ["cidx", "index"]
+            ]
+            assert len(cidx_index_calls) == 1, "cidx index should be called when index missing"
+            assert cidx_index_calls[0][1]["cwd"] == str(langfuse)
+
+    def test_re_indexes_when_registration_exists_but_index_dir_empty(
+        self, golden_repos_dir, mock_golden_repo_manager
+    ):
+        """
+        BUG FIX TEST: Test that cidx index runs when folder is already registered
+        and .code-indexer exists but index/ directory is empty or missing.
+        """
+        # Setup: Create langfuse folder with .code-indexer but no index directory
+        langfuse = golden_repos_dir / "langfuse_empty_index"
+        langfuse.mkdir()
+        (langfuse / ".code-indexer").mkdir()
+        # Create empty index directory
+        (langfuse / ".code-indexer" / "index").mkdir()
+
+        # Mock that folder is ALREADY registered
+        mock_golden_repo_manager.register_local_repo.return_value = False
+
+        # Mock subprocess.run
+        with patch("subprocess.run") as mock_subprocess_run:
+            mock_subprocess_run.return_value = Mock(returncode=0, stderr="", stdout="")
+
+            # Execute
+            from code_indexer.server.app import register_langfuse_golden_repos
+
+            register_langfuse_golden_repos(
+                mock_golden_repo_manager, str(golden_repos_dir)
+            )
+
+            # Verify: cidx init was NOT called (.code-indexer exists)
+            cidx_init_calls = [
+                call
+                for call in mock_subprocess_run.call_args_list
+                if call[0][0] == ["cidx", "init"]
+            ]
+            assert len(cidx_init_calls) == 0, "cidx init should not be called when .code-indexer exists"
+
+            # Verify: cidx index WAS called (empty index directory)
+            cidx_index_calls = [
+                call
+                for call in mock_subprocess_run.call_args_list
+                if call[0][0] == ["cidx", "index"]
+            ]
+            assert len(cidx_index_calls) == 1, "cidx index should be called when index directory is empty"
+            assert cidx_index_calls[0][1]["cwd"] == str(langfuse)
+
+    def test_skips_indexing_when_registration_exists_and_index_populated(
+        self, golden_repos_dir, mock_golden_repo_manager
+    ):
+        """
+        Test that cidx init + index are SKIPPED when folder is already registered
+        and .code-indexer/index/ has content (fast path).
+        """
+        # Setup: Create langfuse folder with populated index
+        langfuse = golden_repos_dir / "langfuse_has_index"
+        langfuse.mkdir()
+        (langfuse / ".code-indexer").mkdir()
+        index_dir = langfuse / ".code-indexer" / "index"
+        index_dir.mkdir()
+        # Add a file to make it non-empty
+        (index_dir / "some_collection").mkdir()
+        (index_dir / "some_collection" / "data.json").write_text("{}")
+
+        # Mock that folder is ALREADY registered
+        mock_golden_repo_manager.register_local_repo.return_value = False
+
+        # Mock subprocess.run
+        with patch("subprocess.run") as mock_subprocess_run:
+            mock_subprocess_run.return_value = Mock(returncode=0, stderr="", stdout="")
+
+            # Execute
+            from code_indexer.server.app import register_langfuse_golden_repos
+
+            register_langfuse_golden_repos(
+                mock_golden_repo_manager, str(golden_repos_dir)
+            )
+
+            # Verify: NO cidx commands were called (fast path)
+            cidx_init_calls = [
+                call
+                for call in mock_subprocess_run.call_args_list
+                if call[0][0] == ["cidx", "init"]
+            ]
+            assert len(cidx_init_calls) == 0, "cidx init should not be called when index exists"
+
+            cidx_index_calls = [
+                call
+                for call in mock_subprocess_run.call_args_list
+                if call[0][0] == ["cidx", "index"]
+            ]
+            assert len(cidx_index_calls) == 0, "cidx index should not be called when index is populated"
+
 
 class TestWatchModeIntegration:
     """Test watch mode activation for Langfuse folders after sync."""

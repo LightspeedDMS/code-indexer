@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.11.3] - 2026-02-11
+
+### Fixed
+
+- **Langfuse folders not re-indexed after cleanup or failed indexing** - `register_langfuse_golden_repos()` only ran `cidx init` + `cidx index` for newly registered folders. If a folder was already registered in SQLite but its CIDX index was missing or empty (e.g., after cleanup or failed initial indexing), the function silently skipped re-indexing. Now always checks index existence independently of registration status and rebuilds when needed.
+
+---
+
 ## [8.11.2] - 2026-02-11
 
 ### Fixed

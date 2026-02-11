@@ -2069,23 +2069,31 @@ def register_langfuse_golden_repos(golden_repo_manager: "GoldenRepoManager", gol
                 extra={"correlation_id": get_correlation_id()},
             )
 
-            # Initialize CIDX index for newly registered folder
-            if not (folder / ".code-indexer").exists():
-                try:
-                    subprocess.run(
-                        ["cidx", "init"],
-                        cwd=str(folder),
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                    )
-                except (subprocess.CalledProcessError, Exception) as e:
-                    logger.warning(
-                        f"Failed to initialize CIDX index for {alias}: {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+        # Always ensure CIDX index exists (handles restart after failed/deleted index)
+        index_dir = folder / ".code-indexer" / "index"
+        needs_init = not (folder / ".code-indexer").exists()
+        try:
+            index_has_content = index_dir.exists() and any(index_dir.iterdir())
+        except (FileNotFoundError, OSError):
+            index_has_content = False
+        needs_indexing = newly_registered or not index_has_content
 
-            # Run initial indexing
+        if needs_init:
+            try:
+                subprocess.run(
+                    ["cidx", "init"],
+                    cwd=str(folder),
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except (subprocess.CalledProcessError, Exception) as e:
+                logger.warning(
+                    f"Failed to initialize CIDX index for {alias}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
+        if needs_indexing:
             try:
                 subprocess.run(
                     ["cidx", "index"],
@@ -2094,8 +2102,9 @@ def register_langfuse_golden_repos(golden_repo_manager: "GoldenRepoManager", gol
                     capture_output=True,
                     text=True,
                 )
+                action = "Initial indexing" if newly_registered else "Re-indexing"
                 logger.info(
-                    f"Initial indexing complete for Langfuse folder: {alias}",
+                    f"{action} complete for Langfuse folder: {alias}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             except (subprocess.CalledProcessError, Exception) as e:
