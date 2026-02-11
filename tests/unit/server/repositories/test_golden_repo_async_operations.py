@@ -66,7 +66,15 @@ class TestGoldenRepoAsyncOperations:
             temporal_options=None,
         )
         golden_repo_manager.golden_repos["test-repo"] = golden_repo
-        golden_repo_manager._save_metadata()
+        golden_repo_manager._sqlite_backend.add_repo(
+            alias=golden_repo.alias,
+            repo_url=golden_repo.repo_url,
+            default_branch=golden_repo.default_branch,
+            clone_path=golden_repo.clone_path,
+            created_at=golden_repo.created_at,
+            enable_temporal=golden_repo.enable_temporal,
+            temporal_options=golden_repo.temporal_options,
+        )
 
         return golden_repo_manager
 

@@ -1193,6 +1193,23 @@ class GoldenRepoMetadataSqliteBackend:
         """
         self._conn_manager = DatabaseConnectionManager(db_path)
 
+    def ensure_table_exists(self) -> None:
+        """Ensure the golden_repos_metadata table exists (idempotent)."""
+        def operation(conn):
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS golden_repos_metadata (
+                    alias TEXT PRIMARY KEY NOT NULL,
+                    repo_url TEXT NOT NULL,
+                    default_branch TEXT NOT NULL,
+                    clone_path TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    enable_temporal INTEGER NOT NULL DEFAULT 0,
+                    temporal_options TEXT
+                )
+            """)
+            conn.commit()
+        self._conn_manager.execute_atomic(operation)
+
     def add_repo(
         self,
         alias: str,

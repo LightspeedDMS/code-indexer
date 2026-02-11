@@ -63,7 +63,15 @@ class TestCanonicalPathResolution:
             created_at="2025-01-01T00:00:00Z",
         )
         self.manager.golden_repos["test-repo"] = golden_repo
-        self.manager._save_metadata()
+        self.manager._sqlite_backend.add_repo(
+            alias=golden_repo.alias,
+            repo_url=golden_repo.repo_url,
+            default_branch=golden_repo.default_branch,
+            clone_path=golden_repo.clone_path,
+            created_at=golden_repo.created_at,
+            enable_temporal=golden_repo.enable_temporal,
+            temporal_options=golden_repo.temporal_options,
+        )
 
         # Test resolution
         actual_path = self.manager.get_actual_repo_path("test-repo")
@@ -94,7 +102,15 @@ class TestCanonicalPathResolution:
             created_at="2025-01-01T00:00:00Z",
         )
         self.manager.golden_repos["txt-db"] = golden_repo
-        self.manager._save_metadata()
+        self.manager._sqlite_backend.add_repo(
+            alias=golden_repo.alias,
+            repo_url=golden_repo.repo_url,
+            default_branch=golden_repo.default_branch,
+            clone_path=golden_repo.clone_path,
+            created_at=golden_repo.created_at,
+            enable_temporal=golden_repo.enable_temporal,
+            temporal_options=golden_repo.temporal_options,
+        )
 
         # Test resolution - should find versioned path
         actual_path = self.manager.get_actual_repo_path("txt-db")
@@ -127,7 +143,15 @@ class TestCanonicalPathResolution:
             created_at="2025-01-01T00:00:00Z",
         )
         self.manager.golden_repos["multi-ver"] = golden_repo
-        self.manager._save_metadata()
+        self.manager._sqlite_backend.add_repo(
+            alias=golden_repo.alias,
+            repo_url=golden_repo.repo_url,
+            default_branch=golden_repo.default_branch,
+            clone_path=golden_repo.clone_path,
+            created_at=golden_repo.created_at,
+            enable_temporal=golden_repo.enable_temporal,
+            temporal_options=golden_repo.temporal_options,
+        )
 
         # Test resolution - should return newest version
         actual_path = self.manager.get_actual_repo_path("multi-ver")
@@ -153,7 +177,15 @@ class TestCanonicalPathResolution:
             created_at="2025-01-01T00:00:00Z",
         )
         self.manager.golden_repos["missing-repo"] = golden_repo
-        self.manager._save_metadata()
+        self.manager._sqlite_backend.add_repo(
+            alias=golden_repo.alias,
+            repo_url=golden_repo.repo_url,
+            default_branch=golden_repo.default_branch,
+            clone_path=golden_repo.clone_path,
+            created_at=golden_repo.created_at,
+            enable_temporal=golden_repo.enable_temporal,
+            temporal_options=golden_repo.temporal_options,
+        )
 
         # Test resolution - should raise error
         with pytest.raises(GoldenRepoNotFoundError) as exc_info:
@@ -203,7 +235,15 @@ class TestCanonicalPathResolution:
             created_at="2025-01-01T00:00:00Z",
         )
         self.manager.golden_repos["dual-exists"] = golden_repo
-        self.manager._save_metadata()
+        self.manager._sqlite_backend.add_repo(
+            alias=golden_repo.alias,
+            repo_url=golden_repo.repo_url,
+            default_branch=golden_repo.default_branch,
+            clone_path=golden_repo.clone_path,
+            created_at=golden_repo.created_at,
+            enable_temporal=golden_repo.enable_temporal,
+            temporal_options=golden_repo.temporal_options,
+        )
 
         # Test resolution - should prefer flat path
         actual_path = self.manager.get_actual_repo_path("dual-exists")
@@ -234,7 +274,15 @@ class TestCanonicalPathResolution:
             created_at="2025-01-01T00:00:00Z",
         )
         self.manager.golden_repos["empty-versioned"] = golden_repo
-        self.manager._save_metadata()
+        self.manager._sqlite_backend.add_repo(
+            alias=golden_repo.alias,
+            repo_url=golden_repo.repo_url,
+            default_branch=golden_repo.default_branch,
+            clone_path=golden_repo.clone_path,
+            created_at=golden_repo.created_at,
+            enable_temporal=golden_repo.enable_temporal,
+            temporal_options=golden_repo.temporal_options,
+        )
 
         # Test resolution - should raise error (no v_* directories found)
         with pytest.raises(GoldenRepoNotFoundError) as exc_info:
@@ -335,7 +383,15 @@ class TestCanonicalPathResolution:
             created_at="2025-01-01T00:00:00Z",
         )
         self.manager.golden_repos["malformed-ver"] = golden_repo
-        self.manager._save_metadata()
+        self.manager._sqlite_backend.add_repo(
+            alias=golden_repo.alias,
+            repo_url=golden_repo.repo_url,
+            default_branch=golden_repo.default_branch,
+            clone_path=golden_repo.clone_path,
+            created_at=golden_repo.created_at,
+            enable_temporal=golden_repo.enable_temporal,
+            temporal_options=golden_repo.temporal_options,
+        )
 
         # Should skip malformed version and return valid version
         actual_path = self.manager.get_actual_repo_path("malformed-ver")
@@ -366,7 +422,15 @@ class TestCanonicalPathResolution:
             created_at="2025-01-01T00:00:00Z",
         )
         self.manager.golden_repos["symlink-attack"] = golden_repo
-        self.manager._save_metadata()
+        self.manager._sqlite_backend.add_repo(
+            alias=golden_repo.alias,
+            repo_url=golden_repo.repo_url,
+            default_branch=golden_repo.default_branch,
+            clone_path=golden_repo.clone_path,
+            created_at=golden_repo.created_at,
+            enable_temporal=golden_repo.enable_temporal,
+            temporal_options=golden_repo.temporal_options,
+        )
 
         # Should reject symlink pointing outside golden_repos_dir
         with pytest.raises(ValueError) as exc_info:
@@ -439,7 +503,15 @@ class TestCanonicalPathIntegrationWithMigration:
             created_at="2025-01-01T00:00:00Z",
         )
         self.manager.golden_repos["txt-db"] = golden_repo
-        self.manager._save_metadata()
+        self.manager._sqlite_backend.add_repo(
+            alias=golden_repo.alias,
+            repo_url=golden_repo.repo_url,
+            default_branch=golden_repo.default_branch,
+            clone_path=golden_repo.clone_path,
+            created_at=golden_repo.created_at,
+            enable_temporal=golden_repo.enable_temporal,
+            temporal_options=golden_repo.temporal_options,
+        )
 
         # Test canonical resolution
         actual_path = self.manager.get_actual_repo_path("txt-db")
@@ -486,7 +558,15 @@ class TestCanonicalPathIntegrationWithMigration:
             created_at="2025-01-01T00:00:00Z",
         )
         self.manager.golden_repos["txt-db"] = golden_repo
-        self.manager._save_metadata()
+        self.manager._sqlite_backend.add_repo(
+            alias=golden_repo.alias,
+            repo_url=golden_repo.repo_url,
+            default_branch=golden_repo.default_branch,
+            clone_path=golden_repo.clone_path,
+            created_at=golden_repo.created_at,
+            enable_temporal=golden_repo.enable_temporal,
+            temporal_options=golden_repo.temporal_options,
+        )
 
         # Demonstrate the bug: using metadata path directly FAILS
         # subprocess.run raises FileNotFoundError when cwd doesn't exist

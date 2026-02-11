@@ -34,11 +34,9 @@ def mock_golden_repo_manager():
     """Create mock golden repo manager."""
     mock_manager = Mock()
     mock_manager.golden_repos = {}
-    mock_manager._save_metadata = Mock()
     mock_manager._operation_lock = threading.RLock()
     mock_manager.golden_repo_exists = Mock(return_value=False)
     # SQLite backend support (for persistence tests)
-    mock_manager._use_sqlite = False  # Default to JSON mode
     mock_manager._sqlite_backend = None
     return mock_manager
 
@@ -648,7 +646,7 @@ class TestCidxIndexInitialization:
             cidx_index_calls = [
                 call
                 for call in mock_subprocess_run.call_args_list
-                if call[0][0] == ["cidx", "index"]
+                if call[0][0] == ["cidx", "index", "--fts"]
             ]
             assert len(cidx_index_calls) == 1
             assert cidx_index_calls[0][1]["cwd"] == str(langfuse)
@@ -692,7 +690,7 @@ class TestCidxIndexInitialization:
             cidx_index_calls = [
                 call
                 for call in mock_subprocess_run.call_args_list
-                if call[0][0] == ["cidx", "index"]
+                if call[0][0] == ["cidx", "index", "--fts"]
             ]
             assert len(cidx_index_calls) == 1
 
@@ -824,7 +822,7 @@ class TestCidxIndexInitialization:
             cidx_index_calls = [
                 call
                 for call in mock_subprocess_run.call_args_list
-                if call[0][0] == ["cidx", "index"]
+                if call[0][0] == ["cidx", "index", "--fts"]
             ]
             assert len(cidx_index_calls) == 1, "cidx index should be called when index missing"
             assert cidx_index_calls[0][1]["cwd"] == str(langfuse)
@@ -869,7 +867,7 @@ class TestCidxIndexInitialization:
             cidx_index_calls = [
                 call
                 for call in mock_subprocess_run.call_args_list
-                if call[0][0] == ["cidx", "index"]
+                if call[0][0] == ["cidx", "index", "--fts"]
             ]
             assert len(cidx_index_calls) == 1, "cidx index should be called when index directory is empty"
             assert cidx_index_calls[0][1]["cwd"] == str(langfuse)
@@ -916,7 +914,7 @@ class TestCidxIndexInitialization:
             cidx_index_calls = [
                 call
                 for call in mock_subprocess_run.call_args_list
-                if call[0][0] == ["cidx", "index"]
+                if call[0][0] == ["cidx", "index", "--fts"]
             ]
             assert len(cidx_index_calls) == 0, "cidx index should not be called when index is populated"
 
@@ -941,9 +939,7 @@ class TestWatchModeIntegration:
         mock_manager.golden_repo_exists = Mock(return_value=False)
         mock_manager.golden_repos = {}
         mock_manager._operation_lock = threading.RLock()
-        mock_manager._use_sqlite = False
         mock_manager._sqlite_backend = None
-        mock_manager._save_metadata = Mock()
 
         # Mock auto_watch_manager
         mock_watch_manager = Mock()
@@ -1005,8 +1001,6 @@ class TestWatchModeIntegration:
         mock_manager.golden_repo_exists = Mock(return_value=True)  # Already registered
         mock_manager.golden_repos = {}
         mock_manager._operation_lock = threading.RLock()
-        mock_manager._save_metadata = Mock()
-
         # Mock auto_watch_manager with existing watch
         mock_watch_manager = Mock()
         mock_watch_manager.is_watching.return_value = True  # Already watching

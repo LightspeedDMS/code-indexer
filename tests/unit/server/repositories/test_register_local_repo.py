@@ -141,9 +141,8 @@ class TestRegisterLocalRepo:
 
         AC1: Persist to storage backend (SQLite or JSON)
         """
-        # Mock SQLite backend
+        # Mock SQLite backend (always active)
         mock_sqlite = MagicMock()
-        golden_repo_manager._use_sqlite = True
         golden_repo_manager._sqlite_backend = mock_sqlite
 
         golden_repo_manager.register_local_repo(
@@ -166,22 +165,20 @@ class TestRegisterLocalRepo:
         """
         Test that register_local_repo persists to JSON when SQLite not available.
 
-        AC1: Persist to storage backend (SQLite or JSON)
+        AC1: Persist to storage backend (SQLite)
         """
-        # Disable SQLite backend
-        golden_repo_manager._use_sqlite = False
-        golden_repo_manager._sqlite_backend = None
+        # Mock SQLite backend (always active)
+        mock_sqlite = MagicMock()
+        golden_repo_manager._sqlite_backend = mock_sqlite
 
-        # Mock _save_metadata method
-        with patch.object(golden_repo_manager, "_save_metadata") as mock_save:
-            golden_repo_manager.register_local_repo(
-                alias="test-repo",
-                folder_path=test_folder,
-                fire_lifecycle_hooks=False,
-            )
+        golden_repo_manager.register_local_repo(
+            alias="test-repo",
+            folder_path=test_folder,
+            fire_lifecycle_hooks=False,
+        )
 
-            # Verify _save_metadata was called
-            mock_save.assert_called_once()
+        # Verify SQLite backend add_repo was called
+        mock_sqlite.add_repo.assert_called_once()
 
     def test_register_local_repo_calls_global_activator(
         self, golden_repo_manager, test_folder

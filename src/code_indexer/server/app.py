@@ -1897,16 +1897,10 @@ def migrate_legacy_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None
 
             # Update repo_url from None to local://cidx-meta
             repo.repo_url = "local://cidx-meta"
-            # Persist to storage backend (SQLite or JSON)
-            if (
-                golden_repo_manager._use_sqlite
-                and golden_repo_manager._sqlite_backend is not None
-            ):
-                golden_repo_manager._sqlite_backend.update_repo_url(
-                    "cidx-meta", "local://cidx-meta"
-                )
-            else:
-                golden_repo_manager._save_metadata()
+            # Persist to storage backend (SQLite)
+            golden_repo_manager._sqlite_backend.update_repo_url(
+                "cidx-meta", "local://cidx-meta"
+            )
             logger.info(
                 "Legacy cidx-meta migrated: repo_url updated to local://cidx-meta",
                 extra={"correlation_id": get_correlation_id()},
@@ -2096,7 +2090,7 @@ def register_langfuse_golden_repos(golden_repo_manager: "GoldenRepoManager", gol
         if needs_indexing:
             try:
                 subprocess.run(
-                    ["cidx", "index"],
+                    ["cidx", "index", "--fts"],
                     cwd=str(folder),
                     check=True,
                     capture_output=True,
@@ -2341,7 +2335,7 @@ def create_app() -> FastAPI:
             # NOTE: GoldenRepoManager expects data_dir (e.g., ~/.cidx-server/data), NOT golden-repos path
             data_dir = Path(server_data_dir) / "data"
             golden_repo_manager = GoldenRepoManager(
-                str(data_dir), use_sqlite=True, db_path=str(db_path)
+                str(data_dir), db_path=str(db_path)
             )
 
             # Phase 1: Migrate legacy cidx-meta (if it exists in old format)
@@ -3401,7 +3395,6 @@ def create_app() -> FastAPI:
     golden_repo_manager = GoldenRepoManager(
         data_dir=data_dir,
         resource_config=server_config.resource_config,
-        use_sqlite=True,
         db_path=db_path_str,
     )
     # Initialize BackgroundJobManager with SQLite persistence (Bug fix: Jobs not showing in Dashboard)

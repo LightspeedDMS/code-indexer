@@ -217,14 +217,23 @@ class TestCleanupManagerIntegrationInRemoval:
         from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
         from datetime import datetime, timezone
 
-        manager.golden_repos[test_alias] = GoldenRepo(
+        golden_repo = GoldenRepo(
             alias=test_alias,
             repo_url="file://" + str(test_path),
             default_branch="main",
             clone_path=str(test_path),
             created_at=datetime.now(timezone.utc).isoformat(),
         )
-        manager._save_metadata()
+        manager.golden_repos[test_alias] = golden_repo
+        manager._sqlite_backend.add_repo(
+            alias=golden_repo.alias,
+            repo_url=golden_repo.repo_url,
+            default_branch=golden_repo.default_branch,
+            clone_path=golden_repo.clone_path,
+            created_at=golden_repo.created_at,
+            enable_temporal=golden_repo.enable_temporal,
+            temporal_options=golden_repo.temporal_options,
+        )
 
         # Simulate active query by incrementing ref count
         query_tracker.increment_ref(str(test_path))

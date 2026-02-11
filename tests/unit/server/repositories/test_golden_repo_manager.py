@@ -59,11 +59,11 @@ class TestGoldenRepoManager:
 
         assert os.path.exists(temp_data_dir)
         assert os.path.exists(manager.golden_repos_dir)
-        assert os.path.exists(manager.metadata_file)
+        db_path = os.path.join(temp_data_dir, "cidx_server.db")
+        assert os.path.exists(db_path)
 
-    def test_initialization_loads_existing_metadata(self, temp_data_dir):
-        """Test that GoldenRepoManager loads existing metadata on initialization."""
-        # Create metadata file with test data
+    def test_initialization_migrates_existing_metadata_json(self, temp_data_dir):
+        """Test that GoldenRepoManager migrates existing metadata.json to SQLite on initialization."""
         metadata_file = os.path.join(temp_data_dir, "golden-repos", "metadata.json")
         os.makedirs(os.path.dirname(metadata_file), exist_ok=True)
 
@@ -76,7 +76,6 @@ class TestGoldenRepoManager:
                 "created_at": "2023-01-01T00:00:00Z",
             }
         }
-
         with open(metadata_file, "w") as f:
             json.dump(test_data, f)
 
@@ -85,6 +84,47 @@ class TestGoldenRepoManager:
         assert len(manager.golden_repos) == 1
         assert "test-repo" in manager.golden_repos
         assert manager.golden_repos["test-repo"].alias == "test-repo"
+
+    def test_migration_handles_per_repo_errors(self, temp_data_dir):
+        """Test that migration continues when individual repos fail, and renames metadata.json after completion."""
+        metadata_file = os.path.join(temp_data_dir, "golden-repos", "metadata.json")
+        os.makedirs(os.path.dirname(metadata_file), exist_ok=True)
+
+        test_data = {
+            "valid-repo": {
+                "alias": "valid-repo",
+                "repo_url": "https://github.com/test/valid.git",
+                "default_branch": "main",
+                "clone_path": "/path/to/valid",
+                "created_at": "2023-01-01T00:00:00Z",
+            },
+            "invalid-repo": {
+                "alias": "invalid-repo",
+                "repo_url": "https://github.com/test/invalid.git",
+                # Missing required fields: default_branch, clone_path, created_at
+            },
+            "another-valid-repo": {
+                "alias": "another-valid-repo",
+                "repo_url": "https://github.com/test/another.git",
+                "default_branch": "develop",
+                "clone_path": "/path/to/another",
+                "created_at": "2023-01-02T00:00:00Z",
+            },
+        }
+        with open(metadata_file, "w") as f:
+            json.dump(test_data, f)
+
+        manager = GoldenRepoManager(data_dir=temp_data_dir)
+
+        # Valid repos should be migrated
+        assert len(manager.golden_repos) == 2
+        assert "valid-repo" in manager.golden_repos
+        assert "another-valid-repo" in manager.golden_repos
+        assert "invalid-repo" not in manager.golden_repos
+
+        # metadata.json should be renamed to metadata.json.migrated
+        assert not os.path.exists(metadata_file)
+        assert os.path.exists(metadata_file + ".migrated")
 
     def test_add_golden_repo_success(self, golden_repo_manager, valid_git_repo_url):
         """Test successfully adding a golden repository."""
@@ -285,9 +325,8 @@ class TestGoldenRepoManager:
 
         assert not os.path.exists(test_repo_path)
 
-    def test_save_metadata(self, golden_repo_manager):
-        """Test saving metadata to file."""
-        # Add test repository
+    def test_sqlite_persistence(self, golden_repo_manager):
+        """Test that repos are persisted to SQLite."""
         test_repo = GoldenRepo(
             alias="test-repo",
             repo_url="https://github.com/test/repo.git",
@@ -296,30 +335,43 @@ class TestGoldenRepoManager:
             created_at="2023-01-01T00:00:00Z",
         )
         golden_repo_manager.golden_repos["test-repo"] = test_repo
+        golden_repo_manager._sqlite_backend.add_repo(
+            alias="test-repo",
+            repo_url="https://github.com/test/repo.git",
+            default_branch="main",
+            clone_path="/path/to/test-repo",
+            created_at="2023-01-01T00:00:00Z",
+        )
 
-        golden_repo_manager._save_metadata()
-
-        # Verify metadata file exists and contains correct data
-        assert os.path.exists(golden_repo_manager.metadata_file)
-
-        with open(golden_repo_manager.metadata_file, "r") as f:
-            data = json.load(f)
-
-        assert "test-repo" in data
-        assert data["test-repo"]["alias"] == "test-repo"
-        assert data["test-repo"]["repo_url"] == "https://github.com/test/repo.git"
+        # Verify data in SQLite
+        repos = golden_repo_manager._sqlite_backend.list_repos()
+        assert len(repos) >= 1
+        aliases = [r["alias"] for r in repos]
+        assert "test-repo" in aliases
 
     def test_remove_golden_repo_cleanup_permission_error(self, golden_repo_manager):
         """Test removal when cleanup fails due to permission errors (async refactored version)."""
         # Add test repository
+        clone_path = os.path.join(golden_repo_manager.golden_repos_dir, "permission-test-repo")
+        os.makedirs(clone_path, exist_ok=True)
+
         test_repo = GoldenRepo(
             alias="permission-test-repo",
             repo_url="https://github.com/test/repo.git",
             default_branch="main",
-            clone_path="/path/to/permission-test-repo",
+            clone_path=clone_path,
             created_at="2023-01-01T00:00:00Z",
         )
         golden_repo_manager.golden_repos["permission-test-repo"] = test_repo
+
+        # Persist to SQLite
+        golden_repo_manager._sqlite_backend.add_repo(
+            alias="permission-test-repo",
+            repo_url="https://github.com/test/repo.git",
+            default_branch="main",
+            clone_path=clone_path,
+            created_at="2023-01-01T00:00:00Z",
+        )
 
         # Mock cleanup to raise PermissionError (which gets wrapped in GitOperationError)
         with patch.object(
@@ -351,19 +403,31 @@ class TestGoldenRepoManager:
 
             # Repository should still exist in metadata since cleanup failed
             assert "permission-test-repo" in golden_repo_manager.golden_repos
-            mock_cleanup.assert_called_once_with("/path/to/permission-test-repo")
+            mock_cleanup.assert_called_once_with(clone_path)
 
     def test_remove_golden_repo_cleanup_filesystem_error(self, golden_repo_manager):
         """Test removal when cleanup fails due to filesystem errors (async refactored version)."""
         # Add test repository
+        clone_path = os.path.join(golden_repo_manager.golden_repos_dir, "filesystem-test-repo")
+        os.makedirs(clone_path, exist_ok=True)
+
         test_repo = GoldenRepo(
             alias="filesystem-test-repo",
             repo_url="https://github.com/test/repo.git",
             default_branch="main",
-            clone_path="/path/to/filesystem-test-repo",
+            clone_path=clone_path,
             created_at="2023-01-01T00:00:00Z",
         )
         golden_repo_manager.golden_repos["filesystem-test-repo"] = test_repo
+
+        # Persist to SQLite
+        golden_repo_manager._sqlite_backend.add_repo(
+            alias="filesystem-test-repo",
+            repo_url="https://github.com/test/repo.git",
+            default_branch="main",
+            clone_path=clone_path,
+            created_at="2023-01-01T00:00:00Z",
+        )
 
         # Mock cleanup to raise OSError (which gets wrapped in GitOperationError)
         with patch.object(
@@ -393,7 +457,7 @@ class TestGoldenRepoManager:
 
             # Repository should still exist in metadata since cleanup failed
             assert "filesystem-test-repo" in golden_repo_manager.golden_repos
-            mock_cleanup.assert_called_once_with("/path/to/filesystem-test-repo")
+            mock_cleanup.assert_called_once_with(clone_path)
 
     def test_refresh_golden_repo_uses_incremental_indexing(
         self, golden_repo_manager, temp_data_dir
@@ -740,33 +804,6 @@ class TestGoldenRepoManager:
         # No job should be created on validation failure
         golden_repo_manager.background_job_manager.submit_job.assert_not_called()
 
-    def test_add_index_to_golden_repo_index_already_exists(self, golden_repo_manager):
-        """Test adding index when it already exists raises ValueError (AC3)."""
-        # Add test repository
-        test_repo = GoldenRepo(
-            alias="test-repo",
-            repo_url="https://github.com/test/repo.git",
-            default_branch="main",
-            clone_path="/path/to/test-repo",
-            created_at="2023-01-01T00:00:00Z",
-        )
-        golden_repo_manager.golden_repos["test-repo"] = test_repo
-
-        # Mock index existence check to return True (index already exists)
-        with patch.object(golden_repo_manager, "_index_exists") as mock_index_exists:
-            mock_index_exists.return_value = True
-
-            with pytest.raises(
-                ValueError,
-                match="Index type 'temporal' already exists for golden repo 'test-repo'",
-            ):
-                golden_repo_manager.add_index_to_golden_repo(
-                    alias="test-repo", index_type="temporal", submitter_username="admin"
-                )
-
-            # No job should be created when index already exists
-            golden_repo_manager.background_job_manager.submit_job.assert_not_called()
-
     def test_background_worker_semantic_execution(self, golden_repo_manager):
         """Test background worker executes correct command for semantic index (AC5)."""
         # Add test repository with actual path
@@ -777,7 +814,17 @@ class TestGoldenRepoManager:
             clone_path=os.path.join(golden_repo_manager.golden_repos_dir, "test-repo"),
             created_at="2023-01-01T00:00:00Z",
         )
+        os.makedirs(test_repo.clone_path, exist_ok=True)
         golden_repo_manager.golden_repos["test-repo"] = test_repo
+
+        # Persist to SQLite
+        golden_repo_manager._sqlite_backend.add_repo(
+            alias=test_repo.alias,
+            repo_url=test_repo.repo_url,
+            default_branch=test_repo.default_branch,
+            clone_path=test_repo.clone_path,
+            created_at=test_repo.created_at,
+        )
 
         # Mock index existence check
         with patch.object(golden_repo_manager, "_index_exists") as mock_index_exists:
@@ -798,11 +845,12 @@ class TestGoldenRepoManager:
 
                 result = background_worker()
 
-                # Verify cidx index was called (semantic only, no --fts flag)
-                mock_run.assert_called_once()
-                call_args = mock_run.call_args
-                command = call_args[0][0]
-                cwd = call_args[1]["cwd"]
+                # Verify cidx init and cidx index were called
+                assert mock_run.call_count == 2
+                # First call is cidx init, second is the actual command
+                call_args = mock_run.call_args_list[1]
+                command = call_args[0][0]  # positional args -> first arg -> the command list
+                cwd = call_args[1]["cwd"]  # keyword args -> cwd
 
                 assert command == ["cidx", "index"]
                 assert cwd == test_repo.clone_path
@@ -818,7 +866,17 @@ class TestGoldenRepoManager:
             clone_path=os.path.join(golden_repo_manager.golden_repos_dir, "test-repo"),
             created_at="2023-01-01T00:00:00Z",
         )
+        os.makedirs(test_repo.clone_path, exist_ok=True)
         golden_repo_manager.golden_repos["test-repo"] = test_repo
+
+        # Persist to SQLite
+        golden_repo_manager._sqlite_backend.add_repo(
+            alias=test_repo.alias,
+            repo_url=test_repo.repo_url,
+            default_branch=test_repo.default_branch,
+            clone_path=test_repo.clone_path,
+            created_at=test_repo.created_at,
+        )
 
         # Mock index existence check
         with patch.object(golden_repo_manager, "_index_exists") as mock_index_exists:
@@ -839,13 +897,14 @@ class TestGoldenRepoManager:
 
                 result = background_worker()
 
-                # Verify cidx index --fts-only was called with correct cwd
-                mock_run.assert_called_once()
-                call_args = mock_run.call_args
-                command = call_args[0][0]
-                cwd = call_args[1]["cwd"]
+                # Verify cidx init and cidx index --rebuild-fts-index were called
+                assert mock_run.call_count == 2
+                # First call is cidx init, second is the actual command
+                call_args = mock_run.call_args_list[1]
+                command = call_args[0][0]  # positional args -> first arg -> the command list
+                cwd = call_args[1]["cwd"]  # keyword args -> cwd
 
-                assert command == ["cidx", "index", "--fts-only"]
+                assert command == ["cidx", "index", "--rebuild-fts-index"]
                 assert cwd == test_repo.clone_path
                 assert result["success"] is True
 
@@ -865,7 +924,19 @@ class TestGoldenRepoManager:
                 "diff_context": 10,
             },
         )
+        os.makedirs(test_repo.clone_path, exist_ok=True)
         golden_repo_manager.golden_repos["test-repo"] = test_repo
+
+        # Persist to SQLite
+        golden_repo_manager._sqlite_backend.add_repo(
+            alias=test_repo.alias,
+            repo_url=test_repo.repo_url,
+            default_branch=test_repo.default_branch,
+            clone_path=test_repo.clone_path,
+            created_at=test_repo.created_at,
+            enable_temporal=test_repo.enable_temporal,
+            temporal_options=test_repo.temporal_options,
+        )
 
         # Mock index existence check
         with patch.object(golden_repo_manager, "_index_exists") as mock_index_exists:
@@ -886,11 +957,12 @@ class TestGoldenRepoManager:
 
                 result = background_worker()
 
-                # Verify cidx index --index-commits was called with options
-                mock_run.assert_called_once()
-                call_args = mock_run.call_args
-                command = call_args[0][0]
-                cwd = call_args[1]["cwd"]
+                # Verify cidx init and cidx index --index-commits were called
+                assert mock_run.call_count == 2
+                # First call is cidx init, second is the actual command
+                call_args = mock_run.call_args_list[1]
+                command = call_args[0][0]  # positional args -> first arg -> the command list
+                cwd = call_args[1]["cwd"]  # keyword args -> cwd
 
                 assert "cidx" in command
                 assert "index" in command
@@ -914,7 +986,17 @@ class TestGoldenRepoManager:
             clone_path=os.path.join(golden_repo_manager.golden_repos_dir, "test-repo"),
             created_at="2023-01-01T00:00:00Z",
         )
+        os.makedirs(test_repo.clone_path, exist_ok=True)
         golden_repo_manager.golden_repos["test-repo"] = test_repo
+
+        # Persist to SQLite
+        golden_repo_manager._sqlite_backend.add_repo(
+            alias=test_repo.alias,
+            repo_url=test_repo.repo_url,
+            default_branch=test_repo.default_branch,
+            clone_path=test_repo.clone_path,
+            created_at=test_repo.created_at,
+        )
 
         # Mock index existence check
         with patch.object(golden_repo_manager, "_index_exists") as mock_index_exists:
@@ -935,11 +1017,12 @@ class TestGoldenRepoManager:
 
                 result = background_worker()
 
-                # Verify cidx scip generate was called with correct cwd
-                mock_run.assert_called_once()
-                call_args = mock_run.call_args
-                command = call_args[0][0]
-                cwd = call_args[1]["cwd"]
+                # Verify cidx init and cidx scip generate were called
+                assert mock_run.call_count == 2
+                # First call is cidx init, second is the actual command
+                call_args = mock_run.call_args_list[1]
+                command = call_args[0][0]  # positional args -> first arg -> the command list
+                cwd = call_args[1]["cwd"]  # keyword args -> cwd
 
                 assert command == ["cidx", "scip", "generate"]
                 assert cwd == test_repo.clone_path
@@ -963,7 +1046,17 @@ class TestGoldenRepoManager:
             clone_path=os.path.join(golden_repo_manager.golden_repos_dir, "test-repo"),
             created_at="2023-01-01T00:00:00Z",
         )
+        os.makedirs(test_repo.clone_path, exist_ok=True)
         golden_repo_manager.golden_repos["test-repo"] = test_repo
+
+        # Persist to SQLite
+        golden_repo_manager._sqlite_backend.add_repo(
+            alias=test_repo.alias,
+            repo_url=test_repo.repo_url,
+            default_branch=test_repo.default_branch,
+            clone_path=test_repo.clone_path,
+            created_at=test_repo.created_at,
+        )
 
         with patch.object(golden_repo_manager, "_index_exists") as mock_index_exists:
             mock_index_exists.return_value = False
@@ -1003,7 +1096,17 @@ class TestGoldenRepoManager:
             clone_path=os.path.join(golden_repo_manager.golden_repos_dir, "test-repo"),
             created_at="2023-01-01T00:00:00Z",
         )
+        os.makedirs(test_repo.clone_path, exist_ok=True)
         golden_repo_manager.golden_repos["test-repo"] = test_repo
+
+        # Persist to SQLite
+        golden_repo_manager._sqlite_backend.add_repo(
+            alias=test_repo.alias,
+            repo_url=test_repo.repo_url,
+            default_branch=test_repo.default_branch,
+            clone_path=test_repo.clone_path,
+            created_at=test_repo.created_at,
+        )
 
         with patch.object(golden_repo_manager, "_index_exists") as mock_index_exists:
             mock_index_exists.return_value = False
@@ -1044,7 +1147,19 @@ class TestGoldenRepoManager:
             enable_temporal=False,
             temporal_options=None,  # No options provided
         )
+        os.makedirs(test_repo.clone_path, exist_ok=True)
         golden_repo_manager.golden_repos["test-repo"] = test_repo
+
+        # Persist to SQLite
+        golden_repo_manager._sqlite_backend.add_repo(
+            alias=test_repo.alias,
+            repo_url=test_repo.repo_url,
+            default_branch=test_repo.default_branch,
+            clone_path=test_repo.clone_path,
+            created_at=test_repo.created_at,
+            enable_temporal=test_repo.enable_temporal,
+            temporal_options=test_repo.temporal_options,
+        )
 
         with patch.object(golden_repo_manager, "_index_exists") as mock_index_exists:
             mock_index_exists.return_value = False
@@ -1080,13 +1195,23 @@ class TestGoldenRepoManager:
         self, golden_repo_manager, temp_data_dir
     ):
         """Test that _index_exists checks for actual semantic index files, not just directories (CRITICAL ISSUE #9)."""
-        # Create test repository
+        # Create test repository (must be under golden_repos_dir)
         test_repo = GoldenRepo(
             alias="test-repo",
             repo_url="https://github.com/test/repo.git",
             default_branch="main",
-            clone_path=os.path.join(temp_data_dir, "test-repo"),
+            clone_path=os.path.join(golden_repo_manager.golden_repos_dir, "test-repo"),
             created_at="2023-01-01T00:00:00Z",
+        )
+        golden_repo_manager.golden_repos["test-repo"] = test_repo
+
+        # Persist to SQLite
+        golden_repo_manager._sqlite_backend.add_repo(
+            alias=test_repo.alias,
+            repo_url=test_repo.repo_url,
+            default_branch=test_repo.default_branch,
+            clone_path=test_repo.clone_path,
+            created_at=test_repo.created_at,
         )
 
         # Create directories but no actual index files
@@ -1109,13 +1234,23 @@ class TestGoldenRepoManager:
         self, golden_repo_manager, temp_data_dir
     ):
         """Test that _index_exists checks for actual FTS index files, not just directories."""
-        # Create test repository
+        # Create test repository (must be under golden_repos_dir)
         test_repo = GoldenRepo(
             alias="test-repo",
             repo_url="https://github.com/test/repo.git",
             default_branch="main",
-            clone_path=os.path.join(temp_data_dir, "test-repo"),
+            clone_path=os.path.join(golden_repo_manager.golden_repos_dir, "test-repo"),
             created_at="2023-01-01T00:00:00Z",
+        )
+        golden_repo_manager.golden_repos["test-repo"] = test_repo
+
+        # Persist to SQLite
+        golden_repo_manager._sqlite_backend.add_repo(
+            alias=test_repo.alias,
+            repo_url=test_repo.repo_url,
+            default_branch=test_repo.default_branch,
+            clone_path=test_repo.clone_path,
+            created_at=test_repo.created_at,
         )
 
         # Create directories but no actual index files

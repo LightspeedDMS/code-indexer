@@ -99,7 +99,6 @@ class GoldenRepoManager:
         self,
         data_dir: str,
         resource_config: Optional["ServerResourceConfig"] = None,
-        use_sqlite: bool = False,
         db_path: Optional[str] = None,
     ):
         """
@@ -108,18 +107,16 @@ class GoldenRepoManager:
         Args:
             data_dir: Data directory path (REQUIRED - no default)
             resource_config: Resource configuration (timeouts, limits)
-            use_sqlite: Whether to use SQLite backend for metadata storage (Story #711)
-            db_path: Path to SQLite database file (required when use_sqlite=True)
+            db_path: Path to SQLite database file (optional, auto-computed from data_dir if not provided)
 
         Raises:
-            ValueError: If data_dir is None or empty, or db_path missing when use_sqlite=True
+            ValueError: If data_dir is None or empty
         """
         if not data_dir or not data_dir.strip():
             raise ValueError("data_dir is required and cannot be None or empty")
 
         self.data_dir = data_dir
         self.golden_repos_dir = os.path.join(self.data_dir, "golden-repos")
-        self.metadata_file = os.path.join(self.golden_repos_dir, "metadata.json")
 
         # Resource configuration (import here to avoid circular dependency)
         if resource_config is None:
@@ -137,80 +134,82 @@ class GoldenRepoManager:
         # Storage for golden repositories
         self.golden_repos: Dict[str, GoldenRepo] = {}
 
-        # SQLite backend configuration (Story #711)
-        self._use_sqlite = use_sqlite
-        self._sqlite_backend: Optional[Any] = None
+        # SQLite backend - always enabled (Bug #176: single source of truth)
+        # Auto-compute db_path if not provided
+        if db_path is None:
+            db_path = os.path.join(self.data_dir, "cidx_server.db")
 
-        if use_sqlite:
-            if db_path is None:
-                raise ValueError("db_path is required when use_sqlite=True")
-            from code_indexer.server.storage.sqlite_backends import (
-                GoldenRepoMetadataSqliteBackend,
-            )
+        from code_indexer.server.storage.sqlite_backends import (
+            GoldenRepoMetadataSqliteBackend,
+        )
 
-            self._sqlite_backend = GoldenRepoMetadataSqliteBackend(db_path)
-            self._load_metadata_from_sqlite()
-        else:
-            # Original JSON behavior
-            self._load_metadata()
+        self._sqlite_backend: Any = GoldenRepoMetadataSqliteBackend(db_path)
+        self._sqlite_backend.ensure_table_exists()
+        self._load_metadata_from_sqlite()
 
-    def _load_metadata(self) -> None:
-        """Load golden repository metadata from file.
-
-        Thread-safe: Uses _operation_lock to prevent concurrent access (Story #620 Priority 2A).
-        """
-        with self._operation_lock:
-            if os.path.exists(self.metadata_file):
-                try:
-                    with open(self.metadata_file, "r") as f:
-                        data = json.load(f)
-                        for alias, repo_data in data.items():
+        # One-time migration from metadata.json to SQLite (Bug #176)
+        metadata_file = os.path.join(self.golden_repos_dir, "metadata.json")
+        if os.path.exists(metadata_file):
+            try:
+                with open(metadata_file, "r") as f:
+                    json_data = json.load(f)
+                migrated = 0
+                failed = 0
+                for alias, repo_data in json_data.items():
+                    try:
+                        if alias not in self.golden_repos:
+                            self._sqlite_backend.add_repo(
+                                alias=repo_data["alias"],
+                                repo_url=repo_data["repo_url"],
+                                default_branch=repo_data["default_branch"],
+                                clone_path=repo_data["clone_path"],
+                                created_at=repo_data["created_at"],
+                                enable_temporal=repo_data.get("enable_temporal", False),
+                                temporal_options=repo_data.get("temporal_options"),
+                            )
                             self.golden_repos[alias] = GoldenRepo(**repo_data)
-                except (json.JSONDecodeError, TypeError, KeyError):
-                    # If metadata file is corrupted, start fresh
-                    self.golden_repos = {}
-            else:
-                # Create empty metadata file
-                # NOTE: Cannot call _save_metadata() here as it also acquires _operation_lock,
-                # which would cause deadlock (threading.Lock is NOT reentrant). Inline the save logic.
-                self.golden_repos = {}
-                data = {}
-                with open(self.metadata_file, "w") as f:
-                    json.dump(data, f, indent=2)
+                            migrated += 1
+                    except (TypeError, KeyError, ValueError) as repo_error:
+                        failed += 1
+                        logging.warning(
+                            f"Failed to migrate repo '{alias}' from metadata.json: {repo_error}. "
+                            f"Continuing with remaining repos."
+                        )
+
+                if migrated > 0:
+                    logging.warning(
+                        f"Migrated {migrated} repos from metadata.json to SQLite. "
+                        f"metadata.json is now deprecated and can be removed."
+                    )
+                if failed > 0:
+                    logging.warning(
+                        f"Failed to migrate {failed} repos from metadata.json. "
+                        f"Check logs for details."
+                    )
+
+                # Rename metadata.json to metadata.json.migrated to prevent re-processing
+                migrated_file = metadata_file + ".migrated"
+                try:
+                    os.rename(metadata_file, migrated_file)
+                    logging.info(f"Renamed metadata.json to {os.path.basename(migrated_file)}")
+                except OSError as rename_error:
+                    logging.warning(
+                        f"Failed to rename metadata.json: {rename_error}. "
+                        f"Migration succeeded but file will be re-processed on next startup."
+                    )
+            except (json.JSONDecodeError, TypeError, KeyError) as e:
+                logging.warning(f"Could not migrate metadata.json: {e}")
 
     def _load_metadata_from_sqlite(self) -> None:
-        """Load golden repository metadata from SQLite backend (Story #711).
+        """Load golden repository metadata from SQLite backend.
 
         Thread-safe: Uses _operation_lock to prevent concurrent access.
         """
         with self._operation_lock:
-            if self._sqlite_backend is None:
-                logging.warning("SQLite backend not initialized, cannot load metadata")
-                return
             repos = self._sqlite_backend.list_repos()
             for repo_data in repos:
                 self.golden_repos[repo_data["alias"]] = GoldenRepo(**repo_data)
             logging.info(f"Loaded {len(self.golden_repos)} golden repos from SQLite")
-
-    def _save_metadata(self) -> None:
-        """Save golden repository metadata to file.
-
-        Thread-safe: Uses _operation_lock to prevent concurrent access (Story #620 Priority 2A).
-
-        Note: When using SQLite backend (Story #711), saves are done per-operation
-        so this method returns early.
-        """
-        if self._use_sqlite:
-            # SQLite saves are done per-operation, not bulk
-            return
-
-        with self._operation_lock:
-            data = {}
-            for alias, repo in self.golden_repos.items():
-                data[alias] = repo.to_dict()
-
-            with open(self.metadata_file, "w") as f:
-                json.dump(data, f, indent=2)
 
     def add_golden_repo(
         self,
@@ -310,18 +309,15 @@ class GoldenRepoManager:
 
                 # Store and persist
                 self.golden_repos[alias] = golden_repo
-                if self._use_sqlite and self._sqlite_backend is not None:
-                    self._sqlite_backend.add_repo(
-                        alias=alias,
-                        repo_url=repo_url,
-                        default_branch=default_branch,
-                        clone_path=clone_path,
-                        created_at=created_at,
-                        enable_temporal=enable_temporal,
+                self._sqlite_backend.add_repo(
+                    alias=alias,
+                    repo_url=repo_url,
+                    default_branch=default_branch,
+                    clone_path=clone_path,
+                    created_at=created_at,
+                    enable_temporal=enable_temporal,
                         temporal_options=temporal_options,
                     )
-                else:
-                    self._save_metadata()
 
                 # Automatic global activation (AC1 from Story #521)
                 # This is a non-blocking post-registration step (AC4)
@@ -484,20 +480,15 @@ class GoldenRepoManager:
             self.golden_repos[alias] = golden_repo
 
             # Persist to storage backend (SQLite - doesn't acquire lock)
-            if self._use_sqlite and self._sqlite_backend is not None:
-                self._sqlite_backend.add_repo(
-                    alias=alias,
-                    repo_url=f"local://{alias}",
-                    default_branch="main",
-                    clone_path=str(folder_path),
-                    created_at=created_at,
-                    enable_temporal=False,
+            self._sqlite_backend.add_repo(
+                alias=alias,
+                repo_url=f"local://{alias}",
+                default_branch="main",
+                clone_path=str(folder_path),
+                created_at=created_at,
+                enable_temporal=False,
                     temporal_options=None,
                 )
-
-        # JSON persist (acquires its own lock) - OUTSIDE the lock block
-        if not self._use_sqlite:
-            self._save_metadata()
 
         # Global activation (non-blocking - logs error but doesn't fail)
         try:
@@ -658,30 +649,17 @@ class GoldenRepoManager:
             # Only remove from storage after cleanup is complete
             del self.golden_repos[alias]
 
-            if self._use_sqlite and self._sqlite_backend is not None:
-                try:
-                    self._sqlite_backend.remove_repo(alias)
-                except Exception as save_error:
-                    # If SQLite delete fails, rollback the in-memory deletion
-                    logging.error(
-                        f"Failed to remove from SQLite after deletion, rolling back: {save_error}"
-                    )
-                    self.golden_repos[alias] = golden_repo  # Restore repository
-                    raise GitOperationError(
-                        f"Repository deletion rollback due to SQLite removal failure: {save_error}"
-                    )
-            else:
-                try:
-                    self._save_metadata()
-                except Exception as save_error:
-                    # If metadata save fails, rollback the deletion
-                    logging.error(
-                        f"Failed to save metadata after deletion, rolling back: {save_error}"
-                    )
-                    self.golden_repos[alias] = golden_repo  # Restore repository
-                    raise GitOperationError(
-                        f"Repository deletion rollback due to metadata save failure: {save_error}"
-                    )
+            try:
+                self._sqlite_backend.remove_repo(alias)
+            except Exception as save_error:
+                # If SQLite delete fails, rollback the in-memory deletion
+                logging.error(
+                    f"Failed to remove from SQLite after deletion, rolling back: {save_error}"
+                )
+                self.golden_repos[alias] = golden_repo  # Restore repository
+                raise GitOperationError(
+                    f"Repository deletion rollback due to SQLite removal failure: {save_error}"
+                )
 
             # ANTI-FALLBACK RULE: Fail operation when cleanup is incomplete
             # Per MESSI Rule 2: "Graceful failure over forced success"
@@ -2039,61 +2017,56 @@ class GoldenRepoManager:
 
                     # Bug #131: Update enable_temporal flag in BOTH tables after successful temporal index creation
                     # Update golden_repos_metadata table (existing)
-                    if self._use_sqlite and self._sqlite_backend is not None:
-                        if self._sqlite_backend.update_enable_temporal(alias, True):
-                            self.golden_repos[alias].enable_temporal = True
-                            logging.info(
-                                f"Updated enable_temporal=True for repo {alias} in golden_repos_metadata"
-                            )
-                        else:
-                            logging.warning(
-                                f"Failed to update enable_temporal for {alias} in golden_repos_metadata"
-                            )
-                    else:
-                        # JSON backend - update in-memory only
+                    if self._sqlite_backend.update_enable_temporal(alias, True):
                         self.golden_repos[alias].enable_temporal = True
+                        logging.info(
+                            f"Updated enable_temporal=True for repo {alias} in golden_repos_metadata"
+                        )
+                    else:
+                        logging.warning(
+                            f"Failed to update enable_temporal for {alias} in golden_repos_metadata"
+                        )
 
                     # Bug #131: ALSO update global_repos table via GlobalRegistry
                     # Convert alias to global format: "python-mock" -> "python-mock-global"
                     global_alias = f"{alias}-global"
-                    if self._use_sqlite:
-                        try:
-                            from code_indexer.global_repos.global_registry import (
-                                GlobalRegistry,
+                    try:
+                        from code_indexer.global_repos.global_registry import (
+                            GlobalRegistry,
+                        )
+
+                        # Compute db_path (same pattern as app.py)
+                        from pathlib import Path as PathLib
+
+                        data_dir = PathLib(self.data_dir)
+                        golden_repos_dir = data_dir / "golden-repos"
+                        sqlite_db_path = str(data_dir / "cidx_server.db")
+
+                        # Instantiate GlobalRegistry with SQLite backend
+                        registry = GlobalRegistry(
+                            str(golden_repos_dir),
+                            use_sqlite=True,
+                            db_path=sqlite_db_path,
+                        )
+
+                        # Update enable_temporal in global_repos table via backend
+                        if (
+                            registry._sqlite_backend is not None
+                            and registry._sqlite_backend.update_enable_temporal(
+                                global_alias, True
                             )
-
-                            # Compute db_path (same pattern as app.py)
-                            from pathlib import Path as PathLib
-
-                            data_dir = PathLib(self.data_dir)
-                            golden_repos_dir = data_dir / "golden-repos"
-                            sqlite_db_path = str(data_dir / "cidx_server.db")
-
-                            # Instantiate GlobalRegistry with SQLite backend
-                            registry = GlobalRegistry(
-                                str(golden_repos_dir),
-                                use_sqlite=True,
-                                db_path=sqlite_db_path,
+                        ):
+                            logging.info(
+                                f"Updated enable_temporal=True for repo {global_alias} in global_repos"
                             )
-
-                            # Update enable_temporal in global_repos table via backend
-                            if (
-                                registry._sqlite_backend is not None
-                                and registry._sqlite_backend.update_enable_temporal(
-                                    global_alias, True
-                                )
-                            ):
-                                logging.info(
-                                    f"Updated enable_temporal=True for repo {global_alias} in global_repos"
-                                )
-                            else:
-                                logging.warning(
-                                    f"Failed to update enable_temporal for {global_alias} in global_repos"
-                                )
-                        except Exception as e:
-                            logging.error(
-                                f"Error updating global_repos table for {global_alias}: {e}"
+                        else:
+                            logging.warning(
+                                f"Failed to update enable_temporal for {global_alias} in global_repos"
                             )
+                    except Exception as e:
+                        logging.error(
+                            f"Error updating global_repos table for {global_alias}: {e}"
+                        )
 
                 # AC7: scip - execute cidx scip generate
                 elif index_type == "scip":

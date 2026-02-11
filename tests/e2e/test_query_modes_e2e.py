@@ -361,12 +361,17 @@ def verify_cleanup(alias: str) -> None:
     )
     data_path = Path(server_data_dir) / "data" / "golden-repos"
 
-    # Check metadata.json doesn't contain our alias
-    metadata_path = data_path / "metadata.json"
-    if metadata_path.exists():
-        with open(metadata_path) as f:
-            metadata = json.load(f)
-        assert alias not in metadata, f"Alias {alias} still in metadata.json"
+    # Check SQLite database doesn't contain our alias
+    import sqlite3
+    db_path = Path(server_data_dir) / "data" / "cidx_server.db"
+    if db_path.exists():
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute(
+            "SELECT alias FROM golden_repos_metadata WHERE alias = ?", (alias,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        assert row is None, f"Alias {alias} still in golden_repos_metadata SQLite table"
 
     # Check folder doesn't exist
     repo_folder = data_path / alias

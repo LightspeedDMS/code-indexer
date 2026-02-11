@@ -116,7 +116,15 @@ class BaseCanonicalPathTest:
             temporal_options=None,
         )
         self.manager.golden_repos[alias] = golden_repo
-        self.manager._save_metadata()
+        self.manager._sqlite_backend.add_repo(
+            alias=golden_repo.alias,
+            repo_url=golden_repo.repo_url,
+            default_branch=golden_repo.default_branch,
+            clone_path=golden_repo.clone_path,
+            created_at=golden_repo.created_at,
+            enable_temporal=golden_repo.enable_temporal,
+            temporal_options=golden_repo.temporal_options,
+        )
         return golden_repo
 
     def _mock_immediate_job_execution(self):

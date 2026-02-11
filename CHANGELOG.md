@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.12.0] - 2026-02-11
+
+### Changed
+
+- **SQLite single source of truth for golden repo metadata** - Eliminated dual-storage pattern (metadata.json + SQLite). GoldenRepoManager now always uses SQLite backend, fixing Bug #176 where Langfuse repos registered via `register_local_repo()` were invisible to MCP endpoints like `list_repositories`. The `use_sqlite` parameter has been removed from `GoldenRepoManager.__init__()`. When `db_path` is not provided, it auto-computes from `data_dir`. Includes one-time migration from metadata.json to SQLite with per-repo error handling.
+
+---
+
 ## [8.11.3] - 2026-02-11
 
 ### Fixed

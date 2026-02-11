@@ -64,7 +64,7 @@ class TestMigrateLegacyCidxMeta:
     def test_migrates_repo_url_none_to_local_scheme(
         self, golden_repos_dir, metadata_file
     ):
-        """Test migration when cidx-meta has repo_url=None in metadata.json (JSON mode)."""
+        """Test migration when cidx-meta has repo_url=None in metadata.json (SQLite mode)."""
         # Setup: Create cidx-meta directory and metadata with None repo_url
         cidx_meta_path = golden_repos_dir / "cidx-meta"
         cidx_meta_path.mkdir()
@@ -91,10 +91,8 @@ class TestMigrateLegacyCidxMeta:
         mock_repo.alias = "cidx-meta"
 
         mock_manager.get_golden_repo = Mock(return_value=mock_repo)
-        mock_manager._save_metadata = Mock()
-        # Configure for JSON mode
-        mock_manager._use_sqlite = False
-        mock_manager._sqlite_backend = None
+        # SQLite backend (always active)
+        mock_manager._sqlite_backend = Mock()
 
         # Execute migration
         from code_indexer.server.app import migrate_legacy_cidx_meta
@@ -103,8 +101,10 @@ class TestMigrateLegacyCidxMeta:
 
         # Verify: repo_url was updated to local://cidx-meta
         assert mock_repo.repo_url == "local://cidx-meta"
-        # In JSON mode, _save_metadata() is called
-        mock_manager._save_metadata.assert_called_once()
+        # SQLite backend update_repo_url() is called to persist
+        mock_manager._sqlite_backend.update_repo_url.assert_called_once_with(
+            "cidx-meta", "local://cidx-meta"
+        )
 
     def test_no_op_when_already_migrated(self, golden_repos_dir, metadata_file):
         """Test that migration is no-op when cidx-meta already uses local:// URL."""
@@ -208,8 +208,7 @@ class TestMigrateLegacyCidxMeta:
 
         mock_manager.get_golden_repo = Mock(return_value=mock_repo)
         mock_manager._save_metadata = Mock()
-        # Configure for SQLite mode
-        mock_manager._use_sqlite = True
+        # Configure SQLite backend (always active)
         mock_manager._sqlite_backend = mock_sqlite_backend
 
         # Execute migration

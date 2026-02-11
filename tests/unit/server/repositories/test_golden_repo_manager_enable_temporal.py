@@ -78,7 +78,7 @@ def git_repo_with_commit(temp_storage_dir):
 def manager(temp_db, temp_storage_dir):
     """Create a GoldenRepoManager instance with SQLite backend."""
     manager = GoldenRepoManager(
-        data_dir=str(temp_storage_dir), db_path=temp_db, use_sqlite=True
+        data_dir=str(temp_storage_dir), db_path=temp_db
     )
 
     # Inject mock BackgroundJobManager that executes worker synchronously
@@ -224,7 +224,7 @@ def test_enable_temporal_persists_across_restart(manager, git_repo_with_commit):
         manager._sqlite_backend.close()
 
     new_manager = GoldenRepoManager(
-        data_dir=data_dir, db_path=db_path, use_sqlite=True
+        data_dir=data_dir, db_path=db_path
     )
 
     # Inject mock BackgroundJobManager that executes worker synchronously
@@ -253,14 +253,14 @@ def test_add_golden_repo_index_temporal_no_sqlite_updates_memory_only(
     temp_storage_dir, git_repo_with_commit
 ):
     """
-    Test that when SQLite is disabled, enable_temporal is updated in-memory only.
+    Test that enable_temporal is updated in the default SQLite storage.
 
-    This verifies the JSON backend path still works correctly.
+    This verifies the enable_temporal update persists correctly.
     """
     repo_alias, repo_path = git_repo_with_commit
 
-    # AC1: Create manager without SQLite backend
-    manager = GoldenRepoManager(data_dir=str(temp_storage_dir), use_sqlite=False)
+    # AC1: Create manager with default SQLite backend
+    manager = GoldenRepoManager(data_dir=str(temp_storage_dir))
 
     # Inject mock BackgroundJobManager that executes worker synchronously
     def mock_submit_job_nosql(operation_type, func, submitter_username, is_admin, repo_alias):
@@ -285,6 +285,16 @@ def test_add_golden_repo_index_temporal_no_sqlite_updates_memory_only(
         enable_temporal=False,
     )
     manager.golden_repos[repo_alias] = test_repo
+    # Also persist to SQLite (required since SQLite is always active now)
+    manager._sqlite_backend.add_repo(
+        alias=repo_alias,
+        repo_url=test_repo.repo_url,
+        default_branch=test_repo.default_branch,
+        clone_path=test_repo.clone_path,
+        created_at=test_repo.created_at,
+        enable_temporal=test_repo.enable_temporal,
+        temporal_options=test_repo.temporal_options,
+    )
 
     # AC3: Verify initial state
     repo = manager.get_golden_repo(repo_alias)
