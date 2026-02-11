@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.11.1] - 2026-02-10
+
+### Fixed
+
+- **Refresh scheduler crash on incremental indexing** - Fixed `NameError: name 'VOYAGE_MULTIMODAL_MODEL' is not defined` in `process_branch_changes_high_throughput()`. The multimodal model constant was only imported locally in a sibling method, causing the refresh scheduler to crash when finalizing indexes after incremental processing.
+
+---
+
 ## [8.11.0] - 2026-02-10
 
 ### Added

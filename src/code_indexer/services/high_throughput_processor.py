@@ -1027,7 +1027,8 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             # CRITICAL: Also finalize multimodal collection if it exists
             # Multimodal embeddings are stored in voyage-multimodal-3 collection
             # Without this, multimodal HNSW index is never built and queries fail
-            multimodal_collection = VOYAGE_MULTIMODAL_MODEL
+            from ..config import VOYAGE_MULTIMODAL_MODEL as _multimodal_model
+            multimodal_collection = _multimodal_model
             if self.vector_store_client.collection_exists(multimodal_collection):
                 multimodal_result = self.vector_store_client.end_indexing(
                     multimodal_collection,
