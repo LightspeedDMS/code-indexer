@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.11.0] - 2026-02-10
+
+### Added
+
+- **register_local_repo() method** (Story #175) - New synchronous registration method on GoldenRepoManager for local folder repos. Encapsulates idempotency, thread safety, SQLite/JSON persistence, GlobalActivator, and lifecycle hooks. Replaces three one-off registration patterns in app.py startup functions.
+- **api_metrics.db health monitoring** - Added API Metrics database to the dashboard health honeycomb, completing the 8-database monitoring grid.
+
+### Changed
+
+- **Refactored local repo registration** - `migrate_legacy_cidx_meta()`, `bootstrap_cidx_meta()`, and `register_langfuse_golden_repos()` now delegate to `register_local_repo()` instead of directly manipulating GoldenRepoManager internals. Net reduction of ~150 lines in app.py.
+
+---
+
 ## [8.10.0] - 2026-02-10
 
 ### Added

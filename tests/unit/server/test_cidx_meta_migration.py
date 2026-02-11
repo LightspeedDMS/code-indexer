@@ -45,39 +45,21 @@ class TestMigrateLegacyCidxMeta:
         cidx_meta_path = golden_repos_dir / "cidx-meta"
         cidx_meta_path.mkdir()
 
-        # Create empty metadata.json (no cidx-meta entry)
-        metadata_file.write_text("{}")
-
         # Create mock golden_repo_manager
-        from threading import Lock
-
         mock_manager = Mock()
         mock_manager.golden_repo_exists = Mock(return_value=False)
-        mock_manager.golden_repos = {}  # Add golden_repos dictionary
-        mock_manager._save_metadata = Mock()
-        mock_manager._operation_lock = Lock()
-        # Configure for JSON mode (fallback path)
-        mock_manager._use_sqlite = False
-        mock_manager._sqlite_backend = None
 
-        # Mock GlobalActivator to avoid actual global activation
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class:
-            mock_activator = Mock()
-            mock_activator_class.return_value = mock_activator
+        # Execute migration
+        from code_indexer.server.app import migrate_legacy_cidx_meta
 
-            # Execute migration
-            from code_indexer.server.app import migrate_legacy_cidx_meta
+        migrate_legacy_cidx_meta(mock_manager, str(golden_repos_dir))
 
-            migrate_legacy_cidx_meta(mock_manager, str(golden_repos_dir))
-
-            # Verify: cidx-meta was registered with local:// URL
-            assert "cidx-meta" in mock_manager.golden_repos
-            repo = mock_manager.golden_repos["cidx-meta"]
-            assert repo.repo_url == "local://cidx-meta"
-            assert repo.alias == "cidx-meta"
-            mock_manager._save_metadata.assert_called_once()
+        # Verify: register_local_repo was called with correct parameters
+        mock_manager.register_local_repo.assert_called_once_with(
+            alias="cidx-meta",
+            folder_path=cidx_meta_path,
+            fire_lifecycle_hooks=False,
+        )
 
     def test_migrates_repo_url_none_to_local_scheme(
         self, golden_repos_dir, metadata_file
@@ -174,54 +156,30 @@ class TestMigrateLegacyCidxMeta:
     ):
         """
         Test that Scenario 1 (cidx-meta directory exists but not in registry)
-        persists to SQLite when _use_sqlite=True.
+        persists via register_local_repo() which handles SQLite persistence internally.
 
-        Bug #131 Finding 1.5: Verifies that Scenario 1 migration calls
-        _sqlite_backend.add_repo() to persist cidx-meta to golden_repos_metadata table.
+        Note: SQLite persistence is now tested by test_register_local_repo.py.
+        This test verifies the migration function calls register_local_repo() correctly.
         """
         # Setup: Create cidx-meta directory
         cidx_meta_path = golden_repos_dir / "cidx-meta"
         cidx_meta_path.mkdir()
 
-        # Create mock SQLite backend
-        mock_sqlite_backend = Mock()
-
         # Create mock golden_repo_manager
         mock_manager = Mock()
         mock_manager.golden_repo_exists = Mock(return_value=False)
-        mock_manager.golden_repos = {}
-        mock_manager._save_metadata = Mock()
-        # Configure for SQLite mode
-        mock_manager._use_sqlite = True
-        mock_manager._sqlite_backend = mock_sqlite_backend
-        # Add _operation_lock mock
-        from threading import Lock
 
-        mock_manager._operation_lock = Lock()
+        # Execute migration
+        from code_indexer.server.app import migrate_legacy_cidx_meta
 
-        # Mock GlobalActivator to avoid actual global activation
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class:
-            mock_activator = Mock()
-            mock_activator_class.return_value = mock_activator
+        migrate_legacy_cidx_meta(mock_manager, str(golden_repos_dir))
 
-            # Execute migration
-            from code_indexer.server.app import migrate_legacy_cidx_meta
-
-            migrate_legacy_cidx_meta(mock_manager, str(golden_repos_dir))
-
-            # Verify: _sqlite_backend.add_repo() was called
-            mock_sqlite_backend.add_repo.assert_called_once()
-            call_args = mock_sqlite_backend.add_repo.call_args
-            assert call_args[1]["alias"] == "cidx-meta"
-            assert call_args[1]["repo_url"] == "local://cidx-meta"
-            assert call_args[1]["default_branch"] == "main"
-            assert call_args[1]["enable_temporal"] is False
-            assert call_args[1]["temporal_options"] is None
-
-            # Verify: _save_metadata() was NOT called (SQLite uses add_repo)
-            mock_manager._save_metadata.assert_not_called()
+        # Verify: register_local_repo was called with correct parameters
+        mock_manager.register_local_repo.assert_called_once_with(
+            alias="cidx-meta",
+            folder_path=cidx_meta_path,
+            fire_lifecycle_hooks=False,
+        )
 
     def test_migration_scenario2_persists_repo_url_with_sqlite(
         self, golden_repos_dir
@@ -279,56 +237,43 @@ class TestBootstrapCidxMeta:
         # Setup: No cidx-meta exists
 
         # Create mock manager
-        from threading import Lock
-
         mock_manager = Mock()
         mock_manager.golden_repo_exists = Mock(return_value=False)
-        mock_manager.golden_repos = {}
-        mock_manager._save_metadata = Mock()
-        mock_manager._operation_lock = Lock()
-        mock_manager._use_sqlite = False
-        mock_manager._sqlite_backend = None
 
-        # Mock GlobalActivator to avoid actual global activation
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class:
-            mock_activator = Mock()
-            mock_activator_class.return_value = mock_activator
+        # Mock subprocess.run to verify cidx init/index calls
+        with patch("subprocess.run") as mock_subprocess:
+            # Execute bootstrap
+            from code_indexer.server.app import bootstrap_cidx_meta
 
-            # Mock subprocess.run to verify cidx init/index calls
-            with patch("subprocess.run") as mock_subprocess:
-                # Execute bootstrap
-                from code_indexer.server.app import bootstrap_cidx_meta
+            bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
 
-                bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
+            # Verify: register_local_repo was called with correct parameters
+            cidx_meta_path = Path(str(golden_repos_dir)) / "cidx-meta"
+            mock_manager.register_local_repo.assert_called_once_with(
+                alias="cidx-meta",
+                folder_path=cidx_meta_path,
+                fire_lifecycle_hooks=False,
+            )
 
-                # Verify: cidx-meta was created with local:// URL
-                assert "cidx-meta" in mock_manager.golden_repos
-                repo = mock_manager.golden_repos["cidx-meta"]
-                assert repo.repo_url == "local://cidx-meta"
-                assert repo.alias == "cidx-meta"
+            # Verify: cidx init was called
+            init_call = [
+                call
+                for call in mock_subprocess.call_args_list
+                if call[0][0] == ["cidx", "init"]
+            ]
+            assert len(init_call) == 1
+            assert init_call[0][1]["cwd"] == str(cidx_meta_path)
+            assert init_call[0][1]["check"] is True
 
-                # Verify: cidx init was called
-                cidx_meta_path = golden_repos_dir / "cidx-meta"
-                init_call = [
-                    call
-                    for call in mock_subprocess.call_args_list
-                    if call[0][0] == ["cidx", "init"]
-                ]
-                assert len(init_call) == 1
-                assert init_call[0][1]["cwd"] == str(cidx_meta_path)
-                assert init_call[0][1]["check"] is True
-
-                # Verify: cidx index was called
-                index_call = [
-                    call
-                    for call in mock_subprocess.call_args_list
-                    if call[0][0] == ["cidx", "index"]
-                ]
-                assert len(index_call) == 1
-                assert index_call[0][1]["cwd"] == str(cidx_meta_path)
-                assert index_call[0][1]["check"] is True
+            # Verify: cidx index was called
+            index_call = [
+                call
+                for call in mock_subprocess.call_args_list
+                if call[0][0] == ["cidx", "index"]
+            ]
+            assert len(index_call) == 1
+            assert index_call[0][1]["cwd"] == str(cidx_meta_path)
+            assert index_call[0][1]["check"] is True
 
     def test_no_op_when_cidx_meta_already_exists(self, golden_repos_dir):
         """Test that bootstrap runs indexing even when cidx-meta already exists."""
@@ -437,125 +382,86 @@ class TestBootstrapCidxMeta:
     def test_subprocess_error_handling(self, golden_repos_dir):
         """Test that bootstrap handles subprocess errors gracefully."""
         # Setup: No cidx-meta exists
-        from threading import Lock
-
         mock_manager = Mock()
         mock_manager.golden_repo_exists = Mock(return_value=False)
-        mock_manager.golden_repos = {}
-        mock_manager._save_metadata = Mock()
-        mock_manager._operation_lock = Lock()
-        mock_manager._use_sqlite = False
-        mock_manager._sqlite_backend = None
 
-        # Mock GlobalActivator
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class:
-            mock_activator = Mock()
-            mock_activator_class.return_value = mock_activator
+        # Mock subprocess to raise an error
+        with patch("subprocess.run") as mock_subprocess:
+            import subprocess
 
-            # Mock subprocess to raise an error
-            with patch("subprocess.run") as mock_subprocess:
-                import subprocess
+            mock_subprocess.side_effect = subprocess.CalledProcessError(
+                1, ["cidx", "init"], stderr="Error running cidx init"
+            )
 
-                mock_subprocess.side_effect = subprocess.CalledProcessError(
-                    1, ["cidx", "init"], stderr="Error running cidx init"
-                )
+            # Execute bootstrap - should not raise exception
+            from code_indexer.server.app import bootstrap_cidx_meta
 
-                # Execute bootstrap - should not raise exception
-                from code_indexer.server.app import bootstrap_cidx_meta
+            # Should complete without raising exception
+            bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
 
-                # Should complete without raising exception
-                bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
-
-                # Verify: Directory and registration still happened
-                cidx_meta_path = golden_repos_dir / "cidx-meta"
-                assert cidx_meta_path.exists()
-                assert "cidx-meta" in mock_manager.golden_repos
+            # Verify: Directory and registration still happened
+            cidx_meta_path = golden_repos_dir / "cidx-meta"
+            assert cidx_meta_path.exists()
+            # Verify register_local_repo was called
+            mock_manager.register_local_repo.assert_called_once_with(
+                alias="cidx-meta",
+                folder_path=Path(str(golden_repos_dir)) / "cidx-meta",
+                fire_lifecycle_hooks=False,
+            )
 
     def test_bootstrap_persists_with_sqlite_backend(self, golden_repos_dir):
         """
-        Test that when _use_sqlite=True, bootstrap_cidx_meta() uses _sqlite_backend.add_repo().
+        Test that bootstrap_cidx_meta() uses register_local_repo() which handles
+        SQLite persistence internally.
 
-        This verifies the fix for the SQLite persistence bug where cidx-meta was added
-        to in-memory dict but never persisted to golden_repos_metadata SQLite table.
+        Note: SQLite persistence is now tested by test_register_local_repo.py.
+        This test verifies the bootstrap function calls register_local_repo() correctly.
         """
         # Setup: No cidx-meta exists
-        from threading import Lock
-
-        mock_sqlite_backend = Mock()
         mock_manager = Mock()
         mock_manager.golden_repo_exists = Mock(return_value=False)
-        mock_manager.golden_repos = {}
-        mock_manager._save_metadata = Mock()
-        mock_manager._operation_lock = Lock()
-        # Configure for SQLite mode
-        mock_manager._use_sqlite = True
-        mock_manager._sqlite_backend = mock_sqlite_backend
 
-        # Mock GlobalActivator
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class:
-            mock_activator = Mock()
-            mock_activator_class.return_value = mock_activator
+        # Mock subprocess to avoid actual cidx calls
+        with patch("subprocess.run"):
+            # Execute bootstrap
+            from code_indexer.server.app import bootstrap_cidx_meta
 
-            # Mock subprocess to avoid actual cidx calls
-            with patch("subprocess.run"):
-                # Execute bootstrap
-                from code_indexer.server.app import bootstrap_cidx_meta
+            bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
 
-                bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
-
-                # Verify: _sqlite_backend.add_repo() was called
-                mock_sqlite_backend.add_repo.assert_called_once()
-                call_args = mock_sqlite_backend.add_repo.call_args
-                assert call_args[1]["alias"] == "cidx-meta"
-                assert call_args[1]["repo_url"] == "local://cidx-meta"
-                assert call_args[1]["default_branch"] == "main"
-                assert call_args[1]["enable_temporal"] is False
-                assert call_args[1]["temporal_options"] is None
-                assert "created_at" in call_args[1]
-                assert "clone_path" in call_args[1]
-
-                # Verify: _save_metadata() was NOT called (SQLite uses add_repo)
-                mock_manager._save_metadata.assert_not_called()
+            # Verify: register_local_repo was called with correct parameters
+            cidx_meta_path = Path(str(golden_repos_dir)) / "cidx-meta"
+            mock_manager.register_local_repo.assert_called_once_with(
+                alias="cidx-meta",
+                folder_path=cidx_meta_path,
+                fire_lifecycle_hooks=False,
+            )
 
     def test_bootstrap_persists_with_json_fallback(self, golden_repos_dir):
         """
-        Test that when _use_sqlite=False, bootstrap_cidx_meta() uses _save_metadata().
+        Test that bootstrap_cidx_meta() uses register_local_repo() which handles
+        JSON persistence internally.
+
+        Note: JSON persistence is now tested by test_register_local_repo.py.
+        This test verifies the bootstrap function calls register_local_repo() correctly.
         """
         # Setup: No cidx-meta exists
-        from threading import Lock
-
         mock_manager = Mock()
         mock_manager.golden_repo_exists = Mock(return_value=False)
-        mock_manager.golden_repos = {}
-        mock_manager._save_metadata = Mock()
-        mock_manager._operation_lock = Lock()
-        # Configure for JSON mode
-        mock_manager._use_sqlite = False
-        mock_manager._sqlite_backend = None
 
-        # Mock GlobalActivator
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class:
-            mock_activator = Mock()
-            mock_activator_class.return_value = mock_activator
+        # Mock subprocess to avoid actual cidx calls
+        with patch("subprocess.run"):
+            # Execute bootstrap
+            from code_indexer.server.app import bootstrap_cidx_meta
 
-            # Mock subprocess to avoid actual cidx calls
-            with patch("subprocess.run"):
-                # Execute bootstrap
-                from code_indexer.server.app import bootstrap_cidx_meta
+            bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
 
-                bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
-
-                # Verify: _save_metadata() was called (JSON mode)
-                mock_manager._save_metadata.assert_called()
-
-                # Verify: cidx-meta was added to in-memory dict
-                assert "cidx-meta" in mock_manager.golden_repos
+            # Verify: register_local_repo was called with correct parameters
+            cidx_meta_path = Path(str(golden_repos_dir)) / "cidx-meta"
+            mock_manager.register_local_repo.assert_called_once_with(
+                alias="cidx-meta",
+                folder_path=cidx_meta_path,
+                fire_lifecycle_hooks=False,
+            )
 
     def test_idempotent_multiple_calls(self, golden_repos_dir):
         """Test that multiple bootstrap calls are safe (idempotent)."""

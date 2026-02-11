@@ -1875,55 +1875,14 @@ def migrate_legacy_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None
             extra={"correlation_id": get_correlation_id()},
         )
 
-        # Import GoldenRepo for direct registration
-        from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
-        from datetime import datetime, timezone
-
-        # Register directly in metadata without background job (startup hasn't initialized background_job_manager yet)
-        created_at = datetime.now(timezone.utc).isoformat()
-        repo = GoldenRepo(
+        # Use standard registration path (Story #175)
+        golden_repo_manager.register_local_repo(
             alias="cidx-meta",
-            repo_url="local://cidx-meta",
-            default_branch="main",  # Not used for local:// repos
-            clone_path=str(cidx_meta_path),
-            created_at=created_at,
-            enable_temporal=False,  # No temporal for local:// repos
-        )
-        with golden_repo_manager._operation_lock:
-            golden_repo_manager.golden_repos["cidx-meta"] = repo
-            # Persist to storage backend (SQLite or JSON)
-            if (
-                golden_repo_manager._use_sqlite
-                and golden_repo_manager._sqlite_backend is not None
-            ):
-                golden_repo_manager._sqlite_backend.add_repo(
-                    alias="cidx-meta",
-                    repo_url="local://cidx-meta",
-                    default_branch="main",
-                    clone_path=str(cidx_meta_path),
-                    created_at=created_at,
-                    enable_temporal=False,
-                    temporal_options=None,
-                )
-            else:
-                golden_repo_manager._save_metadata()
-        logger.info(
-            "Legacy cidx-meta migrated: persisted to storage",
-            extra={"correlation_id": get_correlation_id()},
-        )
-
-        # Activate cidx-meta globally (create global registry entry + alias)
-        from code_indexer.global_repos.global_activation import GlobalActivator
-
-        global_activator = GlobalActivator(str(golden_repos_dir))
-        global_activator.activate_golden_repo(
-            repo_name="cidx-meta",
-            repo_url="local://cidx-meta",
-            clone_path=str(cidx_meta_path),
-            enable_temporal=False,
+            folder_path=cidx_meta_path,
+            fire_lifecycle_hooks=False,  # ClaudeCliManager not initialized at startup
         )
         logger.info(
-            "Legacy cidx-meta activated globally",
+            "Legacy cidx-meta migrated via register_local_repo",
             extra={"correlation_id": get_correlation_id()},
         )
 
@@ -2024,51 +1983,14 @@ def bootstrap_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None:
                 )
                 # Continue with registration even if init fails - don't break server startup
 
-        # Register directly in metadata without background job (startup hasn't initialized background_job_manager yet)
-        created_at = datetime.now(timezone.utc).isoformat()
-        repo = GoldenRepo(
+        # Use standard registration path (Story #175)
+        golden_repo_manager.register_local_repo(
             alias="cidx-meta",
-            repo_url="local://cidx-meta",
-            default_branch="main",  # Not used for local:// repos
-            clone_path=str(cidx_meta_path),
-            created_at=created_at,
-            enable_temporal=False,  # No temporal for local:// repos
-        )
-        with golden_repo_manager._operation_lock:
-            golden_repo_manager.golden_repos["cidx-meta"] = repo
-            # Persist to storage backend (SQLite or JSON)
-            if (
-                golden_repo_manager._use_sqlite
-                and golden_repo_manager._sqlite_backend is not None
-            ):
-                golden_repo_manager._sqlite_backend.add_repo(
-                    alias="cidx-meta",
-                    repo_url="local://cidx-meta",
-                    default_branch="main",
-                    clone_path=str(cidx_meta_path),
-                    created_at=created_at,
-                    enable_temporal=False,
-                    temporal_options=None,
-                )
-            else:
-                golden_repo_manager._save_metadata()
-        logger.info(
-            "Bootstrapped cidx-meta at local://cidx-meta",
-            extra={"correlation_id": get_correlation_id()},
-        )
-
-        # Activate cidx-meta globally (create global registry entry + alias)
-        from code_indexer.global_repos.global_activation import GlobalActivator
-
-        global_activator = GlobalActivator(str(Path(golden_repos_dir)))
-        global_activator.activate_golden_repo(
-            repo_name="cidx-meta",
-            repo_url="local://cidx-meta",
-            clone_path=str(cidx_meta_path),
-            enable_temporal=False,
+            folder_path=cidx_meta_path,
+            fire_lifecycle_hooks=False,  # ClaudeCliManager not initialized at startup
         )
         logger.info(
-            "Bootstrapped cidx-meta activated globally",
+            "Bootstrapped cidx-meta via register_local_repo",
             extra={"correlation_id": get_correlation_id()},
         )
 
@@ -2116,139 +2038,71 @@ def register_langfuse_golden_repos(golden_repo_manager: "GoldenRepoManager", gol
     Register any unregistered Langfuse trace folders as golden repos.
 
     Scans golden-repos/ for langfuse_* directories and registers them
-    using local:// URL scheme (same as cidx-meta). Idempotent.
+    using register_local_repo() standard path. Idempotent.
 
     Args:
         golden_repo_manager: GoldenRepoManager instance
         golden_repos_dir: Path to golden-repos directory
     """
-    from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
-    from code_indexer.global_repos.global_activation import GlobalActivator
-    from datetime import datetime, timezone
+    import subprocess
 
     golden_repos_path = Path(golden_repos_dir)
     if not golden_repos_path.exists():
         return
-
-    global_activator = GlobalActivator(golden_repos_dir)
 
     for folder in sorted(golden_repos_path.iterdir()):
         if not folder.is_dir() or not folder.name.startswith("langfuse_"):
             continue
 
         alias = folder.name
-        if golden_repo_manager.golden_repo_exists(alias):
-            continue  # Already registered
 
-        logger.info(
-            f"Auto-registering Langfuse folder as golden repo: {alias}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-
-        # Register in golden_repos_metadata (same pattern as cidx-meta)
-        created_at = datetime.now(timezone.utc).isoformat()
-        repo = GoldenRepo(
+        # Use standard registration path (Story #175)
+        newly_registered = golden_repo_manager.register_local_repo(
             alias=alias,
-            repo_url=f"local://{alias}",
-            default_branch="main",
-            clone_path=str(folder),
-            created_at=created_at,
-            enable_temporal=False,
+            folder_path=folder,
+            fire_lifecycle_hooks=False,  # No cidx-meta description for trace folders
         )
-        with golden_repo_manager._operation_lock:
-            golden_repo_manager.golden_repos[alias] = repo
-            # Persist to storage backend (SQLite or JSON)
-            if golden_repo_manager._use_sqlite and golden_repo_manager._sqlite_backend is not None:
-                try:
-                    golden_repo_manager._sqlite_backend.add_repo(
-                        alias=alias,
-                        repo_url=f"local://{alias}",
-                        default_branch="main",
-                        clone_path=str(folder),
-                        created_at=created_at,
-                        enable_temporal=False,
-                        temporal_options=None,
-                    )
-                except Exception as e:
-                    import sqlite3
-                    if isinstance(e, sqlite3.IntegrityError):
-                        logger.warning(
-                            f"Langfuse repo '{alias}' already exists in SQLite (concurrent registration)",
-                            extra={"correlation_id": get_correlation_id()},
-                        )
-                    else:
-                        raise
-            else:
-                golden_repo_manager._save_metadata()
 
-        # Activate globally (same pattern as cidx-meta)
-        try:
-            global_activator.activate_golden_repo(
-                repo_name=alias,
-                repo_url=f"local://{alias}",
-                clone_path=str(folder),
-                enable_temporal=False,
-            )
+        if newly_registered:
             logger.info(
-                f"Langfuse repo '{alias}' activated globally as '{alias}-global'",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        except Exception as e:
-            logger.warning(
-                f"Failed to activate Langfuse repo '{alias}' globally: {e}",
+                f"Auto-registered Langfuse folder as golden repo: {alias}",
                 extra={"correlation_id": get_correlation_id()},
             )
 
-        # Initialize CIDX index for newly registered Langfuse folder
-        if not (folder / ".code-indexer").exists():
+            # Initialize CIDX index for newly registered folder
+            if not (folder / ".code-indexer").exists():
+                try:
+                    subprocess.run(
+                        ["cidx", "init"],
+                        cwd=str(folder),
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                except (subprocess.CalledProcessError, Exception) as e:
+                    logger.warning(
+                        f"Failed to initialize CIDX index for {alias}: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+
+            # Run initial indexing
             try:
-                import subprocess
                 subprocess.run(
-                    ["cidx", "init"],
+                    ["cidx", "index"],
                     cwd=str(folder),
                     check=True,
                     capture_output=True,
                     text=True,
                 )
                 logger.info(
-                    f"Initialized CIDX index for Langfuse folder: {alias}",
+                    f"Initial indexing complete for Langfuse folder: {alias}",
                     extra={"correlation_id": get_correlation_id()},
                 )
-            except subprocess.CalledProcessError as e:
+            except (subprocess.CalledProcessError, Exception) as e:
                 logger.warning(
-                    f"Failed to initialize CIDX index for {alias}: {e.stderr if e.stderr else str(e)}",
+                    f"Failed to index Langfuse folder {alias}: {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to initialize CIDX index for {alias}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-
-        # Run initial indexing
-        try:
-            import subprocess
-            subprocess.run(
-                ["cidx", "index"],
-                cwd=str(folder),
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            logger.info(
-                f"Initial indexing complete for Langfuse folder: {alias}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        except subprocess.CalledProcessError as e:
-            logger.warning(
-                f"Failed to index Langfuse folder {alias}: {e.stderr if e.stderr else str(e)}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        except Exception as e:
-            logger.warning(
-                f"Failed to index Langfuse folder {alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
 
 
 def create_app() -> FastAPI:

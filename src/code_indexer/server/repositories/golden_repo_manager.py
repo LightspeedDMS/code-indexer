@@ -425,6 +425,133 @@ class GoldenRepoManager:
         """
         return [repo.to_dict() for repo in self.golden_repos.values()]
 
+    def register_local_repo(
+        self,
+        alias: str,
+        folder_path: "Path",
+        fire_lifecycle_hooks: bool = True,
+    ) -> bool:
+        """
+        Register a local (non-git) directory as a golden repo. Synchronous, idempotent.
+
+        This is the standard registration path for local folders (Langfuse traces,
+        cidx-meta, etc.) that don't require git cloning. Unlike add_golden_repo(),
+        this method is synchronous and doesn't use BackgroundJobManager.
+
+        Args:
+            alias: Unique alias for the repository
+            folder_path: Path to the local directory
+            fire_lifecycle_hooks: Whether to fire on_repo_added and group_access hooks
+
+        Returns:
+            True if newly registered, False if already existed (idempotent)
+
+        Raises:
+            ValueError: If alias contains path traversal characters
+        """
+        # SECURITY: Validate alias BEFORE any operations (defense-in-depth)
+        if ".." in alias:
+            raise ValueError(
+                f"Invalid alias '{alias}': cannot contain path traversal characters (..)"
+            )
+        if "/" in alias:
+            raise ValueError(
+                f"Invalid alias '{alias}': cannot contain path traversal characters (/)"
+            )
+        if "\\" in alias:
+            raise ValueError(
+                f"Invalid alias '{alias}': cannot contain path traversal characters (\\)"
+            )
+
+        with self._operation_lock:
+            # Idempotency: return False if already registered
+            if alias in self.golden_repos:
+                return False
+
+            # Create golden repository record
+            created_at = datetime.now(timezone.utc).isoformat()
+            golden_repo = GoldenRepo(
+                alias=alias,
+                repo_url=f"local://{alias}",
+                default_branch="main",
+                clone_path=str(folder_path),
+                created_at=created_at,
+                enable_temporal=False,
+                temporal_options=None,
+            )
+
+            # Store in in-memory dict
+            self.golden_repos[alias] = golden_repo
+
+            # Persist to storage backend (SQLite - doesn't acquire lock)
+            if self._use_sqlite and self._sqlite_backend is not None:
+                self._sqlite_backend.add_repo(
+                    alias=alias,
+                    repo_url=f"local://{alias}",
+                    default_branch="main",
+                    clone_path=str(folder_path),
+                    created_at=created_at,
+                    enable_temporal=False,
+                    temporal_options=None,
+                )
+
+        # JSON persist (acquires its own lock) - OUTSIDE the lock block
+        if not self._use_sqlite:
+            self._save_metadata()
+
+        # Global activation (non-blocking - logs error but doesn't fail)
+        try:
+            from code_indexer.global_repos.global_activation import GlobalActivator
+
+            global_activator = GlobalActivator(self.golden_repos_dir)
+            global_activator.activate_golden_repo(
+                repo_name=alias,
+                repo_url=f"local://{alias}",
+                clone_path=str(folder_path),
+                enable_temporal=False,
+                temporal_options=None,
+            )
+            logging.info(
+                f"Local repo '{alias}' activated globally as '{alias}-global'"
+            )
+        except Exception as activation_error:
+            logging.error(
+                f"Global activation failed for local repo '{alias}': {activation_error}. "
+                f"Repository registered but not globally accessible."
+            )
+
+        # Lifecycle hooks (controlled by fire_lifecycle_hooks parameter)
+        if fire_lifecycle_hooks:
+            try:
+                from code_indexer.global_repos.meta_description_hook import (
+                    on_repo_added,
+                )
+
+                on_repo_added(
+                    repo_name=alias,
+                    repo_url=f"local://{alias}",
+                    clone_path=str(folder_path),
+                    golden_repos_dir=self.golden_repos_dir,
+                )
+            except Exception as hook_error:
+                logging.error(
+                    f"Meta description hook failed for '{alias}': {hook_error}"
+                )
+
+            try:
+                if self.group_access_manager is not None:
+                    from code_indexer.server.services.group_access_hooks import (
+                        on_repo_added as group_access_on_repo_added,
+                    )
+
+                    group_access_on_repo_added(alias, self.group_access_manager)
+            except Exception as hook_error:
+                logging.error(
+                    f"Group access hook failed for '{alias}': {hook_error}"
+                )
+
+        return True
+
     def remove_golden_repo(self, alias: str, submitter_username: str = "admin") -> str:
         """
         Remove a golden repository.

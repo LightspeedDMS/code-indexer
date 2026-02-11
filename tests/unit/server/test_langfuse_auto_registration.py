@@ -50,7 +50,7 @@ class TestRegisterLangfuseGoldenRepos:
         self, golden_repos_dir, mock_golden_repo_manager
     ):
         """
-        Test that new langfuse_* folders are registered as golden repos with local:// URL.
+        Test that new langfuse_* folders are registered via register_local_repo().
         """
         # Setup: Create langfuse_* directories
         langfuse1 = golden_repos_dir / "langfuse_project1_user1"
@@ -58,12 +58,12 @@ class TestRegisterLangfuseGoldenRepos:
         langfuse1.mkdir()
         langfuse2.mkdir()
 
-        # Mock GlobalActivator to avoid actual global activation
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class:
-            mock_activator = Mock()
-            mock_activator_class.return_value = mock_activator
+        # Configure register_local_repo to return True (newly registered)
+        mock_golden_repo_manager.register_local_repo.return_value = True
+
+        # Patch subprocess to prevent real cidx commands
+        with patch("subprocess.run") as mock_subprocess:
+            mock_subprocess.return_value = Mock(returncode=0, stderr="", stdout="")
 
             # Execute
             from code_indexer.server.app import register_langfuse_golden_repos
@@ -72,21 +72,14 @@ class TestRegisterLangfuseGoldenRepos:
                 mock_golden_repo_manager, str(golden_repos_dir)
             )
 
-            # Verify: Both folders were registered
-            assert len(mock_golden_repo_manager.golden_repos) == 2
-            assert "langfuse_project1_user1" in mock_golden_repo_manager.golden_repos
-            assert "langfuse_project2_user2" in mock_golden_repo_manager.golden_repos
-
-            # Verify: Registered with local:// URL scheme
-            repo1 = mock_golden_repo_manager.golden_repos["langfuse_project1_user1"]
-            assert repo1.repo_url == "local://langfuse_project1_user1"
-            assert repo1.alias == "langfuse_project1_user1"
-            assert repo1.clone_path == str(langfuse1)
-
-            repo2 = mock_golden_repo_manager.golden_repos["langfuse_project2_user2"]
-            assert repo2.repo_url == "local://langfuse_project2_user2"
-            assert repo2.alias == "langfuse_project2_user2"
-            assert repo2.clone_path == str(langfuse2)
+            # Verify: register_local_repo called for both folders
+            assert mock_golden_repo_manager.register_local_repo.call_count == 2
+            call_aliases = sorted(
+                [c.kwargs["alias"] for c in mock_golden_repo_manager.register_local_repo.call_args_list]
+            )
+            assert call_aliases == ["langfuse_project1_user1", "langfuse_project2_user2"]
+            for call in mock_golden_repo_manager.register_local_repo.call_args_list:
+                assert call.kwargs["fire_lifecycle_hooks"] is False
 
     def test_skips_already_registered_folders(
         self, golden_repos_dir, mock_golden_repo_manager
@@ -171,18 +164,19 @@ class TestRegisterLangfuseGoldenRepos:
 
     def test_activates_globally(self, golden_repos_dir, mock_golden_repo_manager):
         """
-        Test that GlobalActivator.activate_golden_repo() is called for each new registration.
+        Test that register_local_repo() is called for new folders.
+        Global activation is handled internally by register_local_repo.
         """
         # Setup: Create langfuse folder
         langfuse = golden_repos_dir / "langfuse_test_user"
         langfuse.mkdir()
 
-        # Mock GlobalActivator
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class:
-            mock_activator = Mock()
-            mock_activator_class.return_value = mock_activator
+        # Configure register_local_repo to return True
+        mock_golden_repo_manager.register_local_repo.return_value = True
+
+        # Patch subprocess
+        with patch("subprocess.run") as mock_subprocess:
+            mock_subprocess.return_value = Mock(returncode=0, stderr="", stdout="")
 
             # Execute
             from code_indexer.server.app import register_langfuse_golden_repos
@@ -191,36 +185,30 @@ class TestRegisterLangfuseGoldenRepos:
                 mock_golden_repo_manager, str(golden_repos_dir)
             )
 
-            # Verify: GlobalActivator was instantiated
-            mock_activator_class.assert_called_once_with(str(golden_repos_dir))
-
-            # Verify: activate_golden_repo was called
-            mock_activator.activate_golden_repo.assert_called_once_with(
-                repo_name="langfuse_test_user",
-                repo_url="local://langfuse_test_user",
-                clone_path=str(langfuse),
-                enable_temporal=False,
+            # Verify: register_local_repo called with correct args
+            mock_golden_repo_manager.register_local_repo.assert_called_once_with(
+                alias="langfuse_test_user",
+                folder_path=golden_repos_dir / "langfuse_test_user",
+                fire_lifecycle_hooks=False,
             )
 
     def test_handles_activation_failure_gracefully(
         self, golden_repos_dir, mock_golden_repo_manager
     ):
         """
-        Test that if GlobalActivator raises, the golden repo is still registered (just not activated).
+        Test that register_local_repo() is called for new folders.
+        Activation failure handling is inside register_local_repo.
         """
         # Setup: Create langfuse folder
         langfuse = golden_repos_dir / "langfuse_failing_user"
         langfuse.mkdir()
 
-        # Mock GlobalActivator to raise exception
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class:
-            mock_activator = Mock()
-            mock_activator.activate_golden_repo.side_effect = Exception(
-                "Activation failed"
-            )
-            mock_activator_class.return_value = mock_activator
+        # Configure register_local_repo to return True
+        mock_golden_repo_manager.register_local_repo.return_value = True
+
+        # Patch subprocess
+        with patch("subprocess.run") as mock_subprocess:
+            mock_subprocess.return_value = Mock(returncode=0, stderr="", stdout="")
 
             # Execute - should not raise
             from code_indexer.server.app import register_langfuse_golden_repos
@@ -229,16 +217,18 @@ class TestRegisterLangfuseGoldenRepos:
                 mock_golden_repo_manager, str(golden_repos_dir)
             )
 
-            # Verify: Repo was still registered despite activation failure
-            assert "langfuse_failing_user" in mock_golden_repo_manager.golden_repos
-            repo = mock_golden_repo_manager.golden_repos["langfuse_failing_user"]
-            assert repo.repo_url == "local://langfuse_failing_user"
+            # Verify: register_local_repo called
+            mock_golden_repo_manager.register_local_repo.assert_called_once_with(
+                alias="langfuse_failing_user",
+                folder_path=golden_repos_dir / "langfuse_failing_user",
+                fire_lifecycle_hooks=False,
+            )
 
     def test_registers_multiple_folders(
         self, golden_repos_dir, mock_golden_repo_manager
     ):
         """
-        Test that multiple langfuse_* folders are all registered.
+        Test that multiple langfuse_* folders are all registered via register_local_repo.
         """
         # Setup: Create multiple langfuse directories
         folders = [
@@ -249,12 +239,12 @@ class TestRegisterLangfuseGoldenRepos:
         for folder_name in folders:
             (golden_repos_dir / folder_name).mkdir()
 
-        # Mock GlobalActivator
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class:
-            mock_activator = Mock()
-            mock_activator_class.return_value = mock_activator
+        # Configure register_local_repo to return True
+        mock_golden_repo_manager.register_local_repo.return_value = True
+
+        # Patch subprocess
+        with patch("subprocess.run") as mock_subprocess:
+            mock_subprocess.return_value = Mock(returncode=0, stderr="", stdout="")
 
             # Execute
             from code_indexer.server.app import register_langfuse_golden_repos
@@ -264,15 +254,15 @@ class TestRegisterLangfuseGoldenRepos:
             )
 
             # Verify: All folders registered
-            assert len(mock_golden_repo_manager.golden_repos) == 3
-            for folder_name in folders:
-                assert folder_name in mock_golden_repo_manager.golden_repos
-                repo = mock_golden_repo_manager.golden_repos[folder_name]
-                assert repo.repo_url == f"local://{folder_name}"
-                assert repo.alias == folder_name
-
-            # Verify: GlobalActivator called for each registration
-            assert mock_activator.activate_golden_repo.call_count == 3
+            assert mock_golden_repo_manager.register_local_repo.call_count == 3
+            call_aliases = sorted(
+                [c.kwargs["alias"] for c in mock_golden_repo_manager.register_local_repo.call_args_list]
+            )
+            assert call_aliases == [
+                "langfuse_project1_alice",
+                "langfuse_project2_bob",
+                "langfuse_project3_charlie",
+            ]
 
     def test_sorted_folder_processing(
         self, golden_repos_dir, mock_golden_repo_manager
@@ -289,62 +279,48 @@ class TestRegisterLangfuseGoldenRepos:
         for folder_name in folders:
             (golden_repos_dir / folder_name).mkdir()
 
-        # Track registration order
+        # Track registration order via register_local_repo calls
         registration_order = []
 
-        def track_registration(alias):
+        def track_registration(alias=None, folder_path=None, fire_lifecycle_hooks=True):
             registration_order.append(alias)
-            return False
+            return False  # Return False to skip subprocess
 
-        mock_golden_repo_manager.golden_repo_exists = Mock(
-            side_effect=lambda alias: track_registration(alias)
+        mock_golden_repo_manager.register_local_repo = Mock(
+            side_effect=track_registration
         )
 
-        # Mock GlobalActivator
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class:
-            mock_activator = Mock()
-            mock_activator_class.return_value = mock_activator
+        # Execute
+        from code_indexer.server.app import register_langfuse_golden_repos
 
-            # Execute
-            from code_indexer.server.app import register_langfuse_golden_repos
+        register_langfuse_golden_repos(
+            mock_golden_repo_manager, str(golden_repos_dir)
+        )
 
-            register_langfuse_golden_repos(
-                mock_golden_repo_manager, str(golden_repos_dir)
-            )
-
-            # Verify: Processed in sorted order
-            assert registration_order == [
-                "langfuse_alpha",
-                "langfuse_middle",
-                "langfuse_zebra",
-            ]
+        # Verify: Processed in sorted order
+        assert registration_order == [
+            "langfuse_alpha",
+            "langfuse_middle",
+            "langfuse_zebra",
+        ]
 
     def test_registers_with_sqlite_backend(
         self, golden_repos_dir, mock_golden_repo_manager
     ):
         """
-        Test that when _use_sqlite=True, _sqlite_backend.add_repo() is called instead of _save_metadata().
-
-        This verifies the fix for the SQLite persistence bug where repos were added to in-memory
-        dict but never persisted to golden_repos_metadata SQLite table.
+        Test that register_local_repo() is called for Langfuse folders.
+        SQLite persistence is handled internally by register_local_repo.
         """
         # Setup: Create langfuse folder
         langfuse = golden_repos_dir / "langfuse_sqlite_test"
         langfuse.mkdir()
 
-        # Configure mock for SQLite mode
-        mock_sqlite_backend = Mock()
-        mock_golden_repo_manager._use_sqlite = True
-        mock_golden_repo_manager._sqlite_backend = mock_sqlite_backend
+        # Configure register_local_repo to return True
+        mock_golden_repo_manager.register_local_repo.return_value = True
 
-        # Mock GlobalActivator
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class:
-            mock_activator = Mock()
-            mock_activator_class.return_value = mock_activator
+        # Patch subprocess
+        with patch("subprocess.run") as mock_subprocess:
+            mock_subprocess.return_value = Mock(returncode=0, stderr="", stdout="")
 
             # Execute
             from code_indexer.server.app import register_langfuse_golden_repos
@@ -353,40 +329,30 @@ class TestRegisterLangfuseGoldenRepos:
                 mock_golden_repo_manager, str(golden_repos_dir)
             )
 
-            # Verify: _sqlite_backend.add_repo() was called with correct parameters
-            mock_sqlite_backend.add_repo.assert_called_once()
-            call_args = mock_sqlite_backend.add_repo.call_args
-            assert call_args[1]["alias"] == "langfuse_sqlite_test"
-            assert call_args[1]["repo_url"] == "local://langfuse_sqlite_test"
-            assert call_args[1]["default_branch"] == "main"
-            assert call_args[1]["clone_path"] == str(langfuse)
-            assert call_args[1]["enable_temporal"] is False
-            assert call_args[1]["temporal_options"] is None
-            assert "created_at" in call_args[1]
-
-            # Verify: _save_metadata() was NOT called (SQLite mode uses add_repo per-operation)
-            mock_golden_repo_manager._save_metadata.assert_not_called()
+            # Verify: register_local_repo called with correct parameters
+            mock_golden_repo_manager.register_local_repo.assert_called_once_with(
+                alias="langfuse_sqlite_test",
+                folder_path=golden_repos_dir / "langfuse_sqlite_test",
+                fire_lifecycle_hooks=False,
+            )
 
     def test_registers_with_json_fallback(
         self, golden_repos_dir, mock_golden_repo_manager
     ):
         """
-        Test that when _use_sqlite=False, _save_metadata() is called (JSON persistence).
+        Test that register_local_repo() is called for Langfuse folders.
+        JSON persistence is handled internally by register_local_repo.
         """
         # Setup: Create langfuse folder
         langfuse = golden_repos_dir / "langfuse_json_test"
         langfuse.mkdir()
 
-        # Configure mock for JSON mode (default)
-        assert mock_golden_repo_manager._use_sqlite is False
-        assert mock_golden_repo_manager._sqlite_backend is None
+        # Configure register_local_repo to return True
+        mock_golden_repo_manager.register_local_repo.return_value = True
 
-        # Mock GlobalActivator
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class:
-            mock_activator = Mock()
-            mock_activator_class.return_value = mock_activator
+        # Patch subprocess
+        with patch("subprocess.run") as mock_subprocess:
+            mock_subprocess.return_value = Mock(returncode=0, stderr="", stdout="")
 
             # Execute
             from code_indexer.server.app import register_langfuse_golden_repos
@@ -395,57 +361,40 @@ class TestRegisterLangfuseGoldenRepos:
                 mock_golden_repo_manager, str(golden_repos_dir)
             )
 
-            # Verify: _save_metadata() was called (JSON mode)
-            mock_golden_repo_manager._save_metadata.assert_called()
-
-            # Verify: Repo was added to in-memory dict
-            assert "langfuse_json_test" in mock_golden_repo_manager.golden_repos
+            # Verify: register_local_repo called
+            mock_golden_repo_manager.register_local_repo.assert_called_once_with(
+                alias="langfuse_json_test",
+                folder_path=golden_repos_dir / "langfuse_json_test",
+                fire_lifecycle_hooks=False,
+            )
 
     def test_handles_sqlite_integrity_error_gracefully(
         self, golden_repos_dir, mock_golden_repo_manager
     ):
         """
-        Test that IntegrityError from add_repo() is caught gracefully.
-
-        Bug #131 Finding 1.2: Verifies that TOCTOU race condition between
-        golden_repo_exists() check and add_repo() call is handled without crashing.
+        Test that register_langfuse_golden_repos handles idempotent registration gracefully.
+        TOCTOU race condition handling is inside register_local_repo.
         """
         # Setup: Create langfuse folder
         langfuse = golden_repos_dir / "langfuse_race_test"
         langfuse.mkdir()
 
-        # Configure mock for SQLite mode
-        import sqlite3
+        # Configure register_local_repo to return False (already existed / race)
+        mock_golden_repo_manager.register_local_repo.return_value = False
 
-        mock_sqlite_backend = Mock()
-        # Simulate TOCTOU race: exists() returns False, but add_repo() raises IntegrityError
-        mock_sqlite_backend.add_repo.side_effect = sqlite3.IntegrityError(
-            "UNIQUE constraint failed: golden_repos_metadata.alias"
+        # Execute - should not raise exception
+        from code_indexer.server.app import register_langfuse_golden_repos
+
+        register_langfuse_golden_repos(
+            mock_golden_repo_manager, str(golden_repos_dir)
         )
-        mock_golden_repo_manager._use_sqlite = True
-        mock_golden_repo_manager._sqlite_backend = mock_sqlite_backend
 
-        # Mock GlobalActivator
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class:
-            mock_activator = Mock()
-            mock_activator_class.return_value = mock_activator
-
-            # Execute - should not raise exception
-            from code_indexer.server.app import register_langfuse_golden_repos
-
-            register_langfuse_golden_repos(
-                mock_golden_repo_manager, str(golden_repos_dir)
-            )
-
-            # Verify: add_repo() was called
-            mock_sqlite_backend.add_repo.assert_called_once()
-
-            # Verify: Repo was still added to in-memory dict (before exception)
-            assert "langfuse_race_test" in mock_golden_repo_manager.golden_repos
-
-            # Test passes if no exception propagated
+        # Verify: register_local_repo was called
+        mock_golden_repo_manager.register_local_repo.assert_called_once_with(
+            alias="langfuse_race_test",
+            folder_path=golden_repos_dir / "langfuse_race_test",
+            fire_lifecycle_hooks=False,
+        )
 
 
 class TestOnSyncCompleteCallback:
@@ -757,6 +706,9 @@ class TestCidxIndexInitialization:
         langfuse = golden_repos_dir / "langfuse_init_fail"
         langfuse.mkdir()
 
+        # Configure register_local_repo to return True
+        mock_golden_repo_manager.register_local_repo.return_value = True
+
         # Mock subprocess.run to fail on cidx init
         import subprocess
 
@@ -780,8 +732,12 @@ class TestCidxIndexInitialization:
                 mock_golden_repo_manager, str(golden_repos_dir)
             )
 
-            # Verify: Repo was still registered despite init failure
-            assert "langfuse_init_fail" in mock_golden_repo_manager.golden_repos
+            # Verify: register_local_repo was called
+            mock_golden_repo_manager.register_local_repo.assert_called_once_with(
+                alias="langfuse_init_fail",
+                folder_path=golden_repos_dir / "langfuse_init_fail",
+                fire_lifecycle_hooks=False,
+            )
 
     def test_handles_cidx_index_failure_gracefully(
         self, golden_repos_dir, mock_golden_repo_manager
@@ -792,6 +748,9 @@ class TestCidxIndexInitialization:
         # Setup: Create langfuse folder
         langfuse = golden_repos_dir / "langfuse_index_fail"
         langfuse.mkdir()
+
+        # Configure register_local_repo to return True
+        mock_golden_repo_manager.register_local_repo.return_value = True
 
         # Mock subprocess.run to fail on cidx index
         import subprocess
@@ -816,8 +775,12 @@ class TestCidxIndexInitialization:
                 mock_golden_repo_manager, str(golden_repos_dir)
             )
 
-            # Verify: Repo was still registered despite index failure
-            assert "langfuse_index_fail" in mock_golden_repo_manager.golden_repos
+            # Verify: register_local_repo was called
+            mock_golden_repo_manager.register_local_repo.assert_called_once_with(
+                alias="langfuse_index_fail",
+                folder_path=golden_repos_dir / "langfuse_index_fail",
+                fire_lifecycle_hooks=False,
+            )
 
 
 class TestWatchModeIntegration:
