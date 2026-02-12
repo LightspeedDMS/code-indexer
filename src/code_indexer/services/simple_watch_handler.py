@@ -24,6 +24,7 @@ class SimpleWatchHandler(FileSystemEventHandler):
         indexing_callback: Callable[[List[str], str], None],
         debounce_seconds: float = 1.0,
         idle_timeout_seconds: float = 300.0,
+        additional_handlers: Optional[List[Any]] = None,
     ):
         """Initialize simple watch handler.
 
@@ -32,12 +33,14 @@ class SimpleWatchHandler(FileSystemEventHandler):
             indexing_callback: Callback function(changed_files, event_type)
             debounce_seconds: Time to wait before processing accumulated changes
             idle_timeout_seconds: Auto-stop after this many seconds of inactivity
+            additional_handlers: Optional list of additional FileSystemEventHandler instances to schedule
         """
         super().__init__()
         self.folder_path = Path(folder_path)
         self.indexing_callback = indexing_callback
         self.debounce_seconds = debounce_seconds
         self.idle_timeout_seconds = idle_timeout_seconds
+        self.additional_handlers = additional_handlers or []
         # Thread-safe change tracking
         self.pending_changes: Set[Path] = set()
         self.change_lock = threading.Lock()
@@ -69,6 +72,12 @@ class SimpleWatchHandler(FileSystemEventHandler):
 
         self.observer = Observer()
         self.observer.schedule(self, str(self.folder_path), recursive=True)
+
+        # Schedule additional handlers
+        for handler in self.additional_handlers:
+            self.observer.schedule(handler, str(self.folder_path), recursive=True)
+            logger.debug(f"Scheduled additional handler: {type(handler).__name__}")
+
         self.observer.start()
         logger.info(f"File system observer started for {self.folder_path}")
         self.processing_thread = threading.Thread(

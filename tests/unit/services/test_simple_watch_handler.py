@@ -623,3 +623,145 @@ class TestSimpleWatchHandlerFullLifecycle:
         # Verify lifecycle completed in reasonable time
         total_time = time.time() - start_time
         assert total_time < 5.0, "Full lifecycle should complete quickly"
+
+
+class TestSimpleWatchHandlerAdditionalHandlers:
+    """Test additional_handlers functionality for attaching extra FileSystemEventHandlers."""
+
+    @pytest.fixture
+    def temp_folder(self):
+        """Create a temporary folder for testing."""
+        temp_dir = tempfile.mkdtemp(prefix="test_simple_watch_")
+        folder_path = Path(temp_dir)
+        yield folder_path
+        shutil.rmtree(temp_dir)
+
+    def test_additional_handlers_default_empty(self, temp_folder):
+        """Test that additional_handlers defaults to empty list."""
+        from code_indexer.services.simple_watch_handler import SimpleWatchHandler
+
+        def callback(changed_files: List[str], event_type: str):
+            pass
+
+        handler = SimpleWatchHandler(
+            folder_path=str(temp_folder),
+            indexing_callback=callback,
+        )
+
+        # Verify additional_handlers exists and is empty
+        assert hasattr(handler, "additional_handlers")
+        assert handler.additional_handlers == []
+
+    def test_additional_handlers_scheduled_on_observer(self, temp_folder):
+        """Test that additional handlers are scheduled on the observer and receive events."""
+        from code_indexer.services.simple_watch_handler import SimpleWatchHandler
+        from watchdog.events import FileSystemEventHandler, FileSystemEvent
+
+        # Create event recorder handler (Anti-Mock: real FileSystemEventHandler)
+        class EventRecorder(FileSystemEventHandler):
+            def __init__(self):
+                super().__init__()
+                self.events = []
+                self.events_lock = threading.Lock()
+
+            def on_created(self, event):
+                if not event.is_directory:
+                    with self.events_lock:
+                        self.events.append(("created", event.src_path))
+
+            def on_modified(self, event):
+                if not event.is_directory:
+                    with self.events_lock:
+                        self.events.append(("modified", event.src_path))
+
+        # Create recorder
+        recorder = EventRecorder()
+
+        # Create callback for main handler
+        callback_invocations = []
+
+        def callback(changed_files: List[str], event_type: str):
+            callback_invocations.append({"files": changed_files, "type": event_type})
+
+        # Create handler with additional handler
+        handler = SimpleWatchHandler(
+            folder_path=str(temp_folder),
+            indexing_callback=callback,
+            debounce_seconds=0.2,
+            idle_timeout_seconds=5.0,
+            additional_handlers=[recorder],
+        )
+
+        # Start watching
+        handler.start_watching()
+        assert handler.is_watching()
+        time.sleep(0.1)
+
+        # Create a file
+        test_file = temp_folder / "test.py"
+        test_file.write_text("def test(): pass")
+
+        # Wait for events to be processed
+        time.sleep(0.5)
+
+        # Stop watching
+        handler.stop_watching()
+
+        # Verify main handler received callback
+        assert len(callback_invocations) > 0
+
+        # Verify additional handler received events
+        assert len(recorder.events) > 0
+        # Check that test file is in recorded events
+        assert any(str(test_file) in event_path for _, event_path in recorder.events)
+
+    def test_additional_handlers_set_after_init(self, temp_folder):
+        """Test that additional_handlers can be set after initialization."""
+        from code_indexer.services.simple_watch_handler import SimpleWatchHandler
+        from watchdog.events import FileSystemEventHandler
+
+        # Create event recorder
+        class EventRecorder(FileSystemEventHandler):
+            def __init__(self):
+                super().__init__()
+                self.events = []
+                self.events_lock = threading.Lock()
+
+            def on_created(self, event):
+                if not event.is_directory:
+                    with self.events_lock:
+                        self.events.append(("created", event.src_path))
+
+        recorder = EventRecorder()
+
+        def callback(changed_files: List[str], event_type: str):
+            pass
+
+        # Create handler WITHOUT additional handlers
+        handler = SimpleWatchHandler(
+            folder_path=str(temp_folder),
+            indexing_callback=callback,
+            debounce_seconds=0.2,
+            idle_timeout_seconds=5.0,
+        )
+
+        # Set additional_handlers AFTER init
+        handler.additional_handlers = [recorder]
+
+        # Start watching (should schedule the additional handler)
+        handler.start_watching()
+        time.sleep(0.1)
+
+        # Create a file
+        test_file = temp_folder / "test2.py"
+        test_file.write_text("def test2(): pass")
+
+        # Wait for events
+        time.sleep(0.5)
+
+        # Stop watching
+        handler.stop_watching()
+
+        # Verify additional handler received events
+        assert len(recorder.events) > 0
+        assert any(str(test_file) in event_path for _, event_path in recorder.events)

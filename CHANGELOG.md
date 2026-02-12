@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.13.0] - 2026-02-11
+
+### Added
+
+- **Sequential trace file naming** - Langfuse trace files now use chronological sequential naming (`001_turn_5544ab00.json`, `002_subagent-code-reviewer_7e3f91c2.json`) instead of raw trace IDs. Files are numbered in ascending chronological order within each session (001=oldest), enabling MCP users to read conversation history in order.
+
+- **Staging directory for trace sync** - New traces are written to a `.langfuse_staging/` directory during sync, then sorted by timestamp and moved to golden-repos with final sequential names. This prevents premature watch handler indexing of incomplete syncs and keeps memory usage low (only lightweight metadata tuples in RAM, not full trace JSON).
+
+- **FTS watch handler for non-git folders** - Langfuse and other non-git watched folders now get an FTS (Tantivy) watch handler attached alongside the semantic indexer. Previously only semantic search was updated on file changes; now FTS indexes are updated in real-time too.
+
+- **Langfuse quick reference documentation** - Enhanced `_build_langfuse_section()` with comprehensive documentation: what Langfuse repos are, file naming conventions, trace JSON structure (trace + observations), and prompt intelligence metadata fields (intel_frustration, intel_specificity, intel_task_type, intel_quality, intel_iteration).
+
+---
+
 ## [8.12.2] - 2026-02-11
 
 ### Fixed

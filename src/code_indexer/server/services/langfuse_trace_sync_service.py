@@ -9,12 +9,15 @@ trace mutations.
 import hashlib
 import json
 import logging
+import os
 import re
+import shutil
 import threading
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .langfuse_api_client import LangfuseApiClient
 from ..utils.config_manager import LangfuseConfig, LangfusePullProject
@@ -176,10 +179,11 @@ class LangfuseTraceSyncService:
         else:
             from_time = max_age  # First sync: fetch all within age limit
 
-        # 6. Fetch and process traces
+        # 6. Fetch and process traces (streaming - low memory)
         metrics = SyncMetrics()
         start_time = time.monotonic()
         seen_trace_ids = set()  # Finding 1: track seen traces for pruning
+        pending_renames = []  # Lightweight: (timestamp, trace_id, folder_path, trace_type, short_id)
 
         page = 1
         while True:
@@ -193,9 +197,11 @@ class LangfuseTraceSyncService:
                 if trace_id:
                     seen_trace_ids.add(trace_id)  # Finding 1: track seen
                 try:
-                    self._process_trace(
+                    rename_info = self._process_trace(
                         api_client, trace, project_name, trace_hashes, metrics
                     )
+                    if rename_info:
+                        pending_renames.append(rename_info)
                 except Exception as e:
                     metrics.errors_count += 1
                     logger.error(f"Error processing trace {trace.get('id')}: {e}")
@@ -203,6 +209,13 @@ class LangfuseTraceSyncService:
             page += 1
             if self._stop_event.is_set():
                 break
+
+        # Phase 2: Finalize trace files (move from staging to destination with sequential names)
+        if pending_renames:
+            self._finalize_trace_files(pending_renames, trace_hashes)
+
+        # Cleanup staging directories
+        self._cleanup_staging(project_name)
 
         # 7. Prune trace_hashes: keep seen traces + traces still within age window
         pruned_hashes = {}
@@ -221,6 +234,10 @@ class LangfuseTraceSyncService:
                     # Malformed timestamp - discard
                     pass
 
+        # INVARIANT: State must only be saved AFTER _finalize_trace_files completes.
+        # If process crashes before here, staged files are orphaned but trace_hashes
+        # (with filename=None) are not persisted. Next sync re-processes these traces
+        # from scratch (self-healing). Staged files are cleaned up on next sync.
         # 8. Save state
         elapsed_ms = int((time.monotonic() - start_time) * 1000)
         metrics.last_sync_time = now.isoformat()
@@ -247,12 +264,16 @@ class LangfuseTraceSyncService:
         project_name: str,
         trace_hashes: dict,
         metrics: SyncMetrics,
-    ) -> None:
+    ) -> Optional[Tuple[str, str, str, str, str, str]]:
         """
         Process a single trace with two-phase hash check.
 
         Finding 2: Use updatedAt for quick check before fetching observations.
         Only fetch observations if trace changed.
+
+        Returns:
+            Tuple (timestamp, trace_id, staging_folder, dest_folder, trace_type, short_id)
+            if trace is new and needs sequential naming in Phase 2, None otherwise.
         """
         trace_id = trace["id"]
 
@@ -260,15 +281,22 @@ class LangfuseTraceSyncService:
         updated_at = trace.get("updatedAt", "")
         stored = trace_hashes.get(trace_id)
 
-        # Compute file path for existence checks (detect deleted files)
-        folder = self._get_trace_folder(project_name, trace)
-        file_path = folder / f"{trace_id}.json"
+        # Compute destination folder (golden-repos)
+        dest_folder = self._get_trace_folder(project_name, trace)
+
+        # Resolve file path: use stored filename, or fall back to old naming
+        stored_filename = stored.get("filename") if stored else None
+        if stored_filename:
+            file_path = dest_folder / stored_filename
+        else:
+            # Old state without "filename" key, or new trace
+            file_path = dest_folder / f"{trace_id}.json"
 
         # If stored hash exists and updatedAt matches, skip (no change)
         if stored and stored.get("updated_at") == updated_at:
             if file_path.exists():
                 metrics.traces_unchanged += 1
-                return
+                return None
             # File missing from disk - fall through to fetch and re-write
 
         # Phase 2: Trace changed or new - fetch observations and compute full hash
@@ -280,29 +308,110 @@ class LangfuseTraceSyncService:
         if stored and stored.get("content_hash") == content_hash:
             if file_path.exists():
                 # Update the updatedAt but don't rewrite file
-                trace_hashes[trace_id] = {
+                # Preserve existing filename in state
+                updated_entry = {
                     "updated_at": updated_at,
                     "content_hash": content_hash,
                 }
+                if stored_filename:
+                    updated_entry["filename"] = stored_filename
+                trace_hashes[trace_id] = updated_entry
                 metrics.traces_unchanged += 1
-                return
+                return None
             # File missing from disk - fall through to re-write
 
         is_new = trace_id not in trace_hashes
 
-        # Write to filesystem (folder already computed above)
-        self._write_trace(folder, trace_id, trace, observations)
+        # Determine filename for writing
+        if stored_filename:
+            # Existing trace with sequential name - write directly to destination
+            filename = stored_filename
+            self._write_trace(dest_folder, filename, trace, observations)
 
-        # Update hash with both updatedAt and content hash
-        trace_hashes[trace_id] = {
-            "updated_at": updated_at,
-            "content_hash": content_hash,
-        }
+            # Update hash with updatedAt, content hash, and filename
+            trace_hashes[trace_id] = {
+                "updated_at": updated_at,
+                "content_hash": content_hash,
+                "filename": filename,
+            }
 
-        if is_new:
-            metrics.traces_written_new += 1
+            if is_new:
+                metrics.traces_written_new += 1
+            else:
+                metrics.traces_written_updated += 1
+
+            return None
         else:
-            metrics.traces_written_updated += 1
+            # New trace or migration from old naming - write to STAGING directory
+            # Return metadata for Phase 2 finalize (move to destination with sequential name)
+            staging_folder = self._get_staging_dir(project_name, trace)
+            temp_filename = f"{trace_id}.json"
+            self._write_trace(staging_folder, temp_filename, trace, observations)
+
+            # Update hash with temporary filename marker (will be updated in Phase 2)
+            trace_hashes[trace_id] = {
+                "updated_at": updated_at,
+                "content_hash": content_hash,
+                "filename": None,  # Will be set in Phase 2
+            }
+
+            if is_new:
+                metrics.traces_written_new += 1
+            else:
+                metrics.traces_written_updated += 1
+
+            # Return metadata for Phase 2 finalize (6-tuple with staging AND dest)
+            timestamp = trace.get("timestamp")
+            trace_type = self._extract_trace_type(trace)
+            short_id = self._extract_short_id(trace_id)
+            return (timestamp, trace_id, str(staging_folder), str(dest_folder), trace_type, short_id)
+
+    @staticmethod
+    def _finalize_trace_files(
+        pending: List[Tuple[str, str, str, str, str, str]],
+        trace_hashes: dict,
+    ) -> None:
+        """Move staged trace files to destination with sequential names in chronological order.
+
+        Groups pending items by destination folder, sorts by timestamp within each folder,
+        determines next sequence number, moves files from staging to destination, and updates state.
+
+        Args:
+            pending: List of (timestamp, trace_id, staging_folder, dest_folder, trace_type, short_id)
+            trace_hashes: State dict to update with new filenames
+        """
+        # Group by destination folder
+        by_dest = defaultdict(list)
+        for timestamp, trace_id, staging, dest, trace_type, short_id in pending:
+            by_dest[dest].append((timestamp, trace_id, staging, trace_type, short_id))
+
+        for dest_folder_path, entries in by_dest.items():
+            dest_folder = Path(dest_folder_path)
+            dest_folder.mkdir(parents=True, exist_ok=True)
+
+            # Sort by timestamp (oldest first), handle None
+            entries.sort(key=lambda e: e[0] or "")
+
+            # Get next seq from DESTINATION folder
+            seq = LangfuseTraceSyncService._get_next_seq_number(dest_folder)
+
+            for timestamp, trace_id, staging_folder, trace_type, short_id in entries:
+                staging_file = Path(staging_folder) / f"{trace_id}.json"
+                new_filename = LangfuseTraceSyncService._build_trace_filename(seq, trace_type, short_id)
+                dest_file = dest_folder / new_filename
+
+                if staging_file.exists():
+                    if dest_file.exists():
+                        logger.warning(f"Destination already exists, overwriting: {dest_file}")
+                        dest_file.unlink()  # Remove existing file before move
+                    shutil.move(str(staging_file), str(dest_file))
+                    if trace_id in trace_hashes:
+                        trace_hashes[trace_id]["filename"] = new_filename
+                else:
+                    logger.warning(f"Staged file missing for trace {trace_id}: {staging_file}")
+                    # Don't update trace_hashes - next sync will re-process
+
+                seq += 1
 
     @staticmethod
     def _build_canonical_json(trace: dict, observations: list) -> str:
@@ -317,6 +426,50 @@ class LangfuseTraceSyncService:
     def _compute_hash(canonical_json: str) -> str:
         """Compute SHA256 hash of canonical JSON."""
         return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _extract_trace_type(trace: dict) -> str:
+        """Extract trace type from trace data for sequential filename.
+
+        If trace name starts with 'subagent:' -> 'subagent-{sanitized_name}'
+        Otherwise -> 'turn'
+        """
+        name = trace.get("name", "") or ""
+        if name.startswith("subagent:"):
+            subagent_name = name[len("subagent:"):]
+            safe_name = LangfuseTraceSyncService._sanitize_folder_name(subagent_name)
+            return f"subagent-{safe_name}"
+        return "turn"
+
+    @staticmethod
+    def _extract_short_id(trace_id: str) -> str:
+        """Extract last 8 characters of trace ID as short identifier."""
+        return trace_id[-8:] if len(trace_id) >= 8 else trace_id
+
+    @staticmethod
+    def _get_next_seq_number(folder: Path) -> int:
+        """Determine next sequence number by scanning existing files in folder.
+
+        Parses {seq:03d}_* pattern from .json filenames to find max.
+        Returns max + 1, or 1 if no sequential files found.
+        """
+        if not folder.exists():
+            return 1
+
+        max_seq = 0
+        for f in folder.glob("*.json"):
+            parts = f.stem.split("_", 1)
+            if parts and parts[0].isdigit():
+                seq = int(parts[0])
+                if seq > max_seq:
+                    max_seq = seq
+
+        return max_seq + 1
+
+    @staticmethod
+    def _build_trace_filename(seq: int, trace_type: str, short_id: str) -> str:
+        """Build sequential trace filename: {seq:03d}_{type}_{short_id}.json"""
+        return f"{seq:03d}_{trace_type}_{short_id}.json"
 
     @staticmethod
     def _sanitize_folder_name(name: str) -> str:
@@ -335,10 +488,46 @@ class LangfuseTraceSyncService:
         folder_name = f"langfuse_{safe_project}_{safe_user}"
         return Path(self._data_dir) / "golden-repos" / folder_name / safe_session
 
+    def _get_staging_dir(self, project_name: str, trace: dict) -> Path:
+        """Get staging directory for a trace (outside golden-repos tree).
+
+        Staging directories mirror the golden-repos structure but are temporary.
+        Files are written here first, then moved to golden-repos with final names.
+        """
+        user_id = trace.get("userId") or "no_user"
+        session_id = trace.get("sessionId") or "no_session"
+
+        safe_project = self._sanitize_folder_name(project_name)
+        safe_user = self._sanitize_folder_name(user_id)
+        safe_session = self._sanitize_folder_name(session_id)
+
+        return Path(self._data_dir) / ".langfuse_staging" / safe_project / safe_user / safe_session
+
+    def _cleanup_staging(self, project_name: str) -> None:
+        """Remove empty staging directories after sync.
+
+        Walks staging directory tree bottom-up and removes empty directories.
+        This handles cleanup after normal sync and recovery from crashes.
+        """
+        safe_project = self._sanitize_folder_name(project_name)
+        staging_dir = Path(self._data_dir) / ".langfuse_staging" / safe_project
+        if staging_dir.exists():
+            # Walk bottom-up removing empty dirs
+            for dirpath, dirnames, filenames in os.walk(str(staging_dir), topdown=False):
+                if not os.listdir(dirpath):
+                    os.rmdir(dirpath)
+
     def _write_trace(
-        self, folder: Path, trace_id: str, trace: dict, observations: list
+        self, folder: Path, filename: str, trace: dict, observations: list
     ) -> None:
-        """Write trace JSON to filesystem."""
+        """Write trace JSON to filesystem.
+
+        Args:
+            folder: Directory to write the trace file into.
+            filename: The filename to use (e.g. '001_turn_0b5c9e0c.json').
+            trace: Trace data dict.
+            observations: List of observation dicts.
+        """
         folder.mkdir(parents=True, exist_ok=True)
 
         combined = {
@@ -346,7 +535,7 @@ class LangfuseTraceSyncService:
             "observations": sorted(observations, key=lambda o: o.get("startTime", "")),
         }
 
-        file_path = folder / f"{trace_id}.json"
+        file_path = folder / filename
         # Pretty-printed for readability (no sort_keys - trace first, observations chronological)
         content = json.dumps(combined, indent=2)
 

@@ -342,6 +342,28 @@ class DaemonWatchManager:
             idle_timeout_seconds=DEFAULT_LANGFUSE_WATCH_IDLE_TIMEOUT_SECONDS,
         )
 
+        # Detect FTS index and attach FTS watch handler
+        fts_index_dir = Path(project_path) / ".code-indexer" / "tantivy_index"
+        if not fts_index_dir.exists():
+            fts_index_dir = Path(project_path) / ".code-indexer" / "index" / "tantivy-fts"
+
+        if fts_index_dir.exists():
+            try:
+                from code_indexer.services.fts_watch_handler import FTSWatchHandler
+                from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+
+                tantivy_manager = TantivyIndexManager(fts_index_dir)
+                tantivy_manager.initialize_index(create_new=False)
+
+                fts_handler = FTSWatchHandler(
+                    tantivy_index_manager=tantivy_manager,
+                    config=config,
+                )
+                watch_handler.additional_handlers = [fts_handler]
+                logger.info(f"FTS watch handler attached for {project_path}")
+            except Exception as e:
+                logger.warning(f"Failed to attach FTS watch handler for {project_path}: {e}")
+
         logger.info(f"Simple watch handler created for non-git folder {project_path}")
         return watch_handler
 

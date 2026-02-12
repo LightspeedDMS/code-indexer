@@ -5265,10 +5265,70 @@ def _build_langfuse_section(
 
     # Build section
     return {
+        "what_are_langfuse_repos": (
+            "Langfuse repositories contain AI conversation traces synced from a Langfuse observability server. "
+            "Each trace captures a complete AI interaction including user prompts, model responses, tool calls, "
+            "and performance metrics. Traces are organized by project, user, and session, enabling semantic search "
+            "across historical AI conversations."
+        ),
         "description": "Langfuse AI conversation traces are indexed for semantic search.",
         "folder_naming": {
             "pattern": "langfuse_<project>_<userId>",
-            "full_path": "langfuse_<project>_<userId>/<sessionId>/<traceId>.json",
+            "full_path": "langfuse_<project>_<userId>/<sessionId>/{seq}_{type}_{short_id}.json",
+        },
+        "file_naming": {
+            "pattern": "{seq:03d}_{type}_{short_id}.json",
+            "seq": "Zero-padded sequence number (minimum 3 digits: 001, 002, ..., 999, 1000, ...) in chronological order within the session",
+            "type": "Either 'turn' (user conversation turn) or 'subagent-{name}' (subagent invocation)",
+            "short_id": "Last 8 characters of the Langfuse trace ID",
+            "example": "001_turn_5544ab00.json, 002_subagent-code-reviewer_7e3f91c2.json",
+            "ordering": "Files are numbered in chronological order (001=oldest, ascending)",
+        },
+        "trace_file_structure": {
+            "format": "JSON with two top-level keys: 'trace' and 'observations'",
+            "trace": {
+                "description": "Trace metadata from Langfuse API",
+                "key_fields": [
+                    "id - Unique trace identifier",
+                    "name - Trace name ('subagent:*' for subagents, or user turn description)",
+                    "timestamp - ISO 8601 creation timestamp",
+                    "userId - User who initiated the trace",
+                    "sessionId - Session grouping identifier",
+                    "metadata - Contains intel fields and git context",
+                    "input - User input/prompt content",
+                    "output - Model response content",
+                    "totalCost - Total API cost in USD",
+                    "latency - Response time in seconds",
+                ],
+            },
+            "observations": {
+                "description": "List of spans and generations within the trace, sorted chronologically by startTime",
+                "key_fields": [
+                    "type - SPAN (tool call) or GENERATION (model invocation)",
+                    "name - Tool or model name",
+                    "startTime/endTime - Timing information",
+                    "usage - Token counts (input, output, total)",
+                    "calculatedTotalCost - Cost for this observation",
+                ],
+            },
+        },
+        "intel_metadata": {
+            "description": "Prompt intelligence fields found in trace.metadata (subagent traces only, not user turns)",
+            "fields": {
+                "intel_frustration": "Float 0.0-1.0 indicating user frustration level",
+                "intel_specificity": "Code: surg (surgical), const (constructive), outc (outcome-focused), expl (exploratory)",
+                "intel_task_type": "Code: bug, feat, refac, research, test, docs, debug, conf, other",
+                "intel_quality": "Float 0.0-1.0 indicating prompt quality score",
+                "intel_iteration": "Integer 1-9 indicating iteration count for the task",
+            },
+            "other_metadata": [
+                "git_branch - Active git branch during the trace",
+                "git_remote - Git remote URL",
+                "model - AI model used (e.g., claude-sonnet-4-5-20250929)",
+                "project_name - Project name from workspace",
+                "project_path - Filesystem path to the project",
+                "cache_read_tokens, input_tokens, output_tokens - Token usage metrics",
+            ],
         },
         "search_instructions": [
             "Search across all Langfuse traces: search_code('query', repository_alias='langfuse_*')",

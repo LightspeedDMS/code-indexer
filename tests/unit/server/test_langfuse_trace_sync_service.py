@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -354,28 +354,27 @@ class TestWriteTrace:
         with tempfile.TemporaryDirectory() as tmpdir:
             service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
             folder = Path(tmpdir) / "test_folder"
-            trace_id = "trace123"
-            trace = {"id": trace_id, "name": "test"}
+            filename = "001_turn_trace123.json"
+            trace = {"id": "trace123", "name": "test"}
             observations = [{"id": "o1"}]
 
-            service._write_trace(folder, trace_id, trace, observations)
+            service._write_trace(folder, filename, trace, observations)
 
-            trace_file = folder / f"{trace_id}.json"
-            assert trace_file.exists()
+            assert (folder / filename).exists()
 
     def test_write_creates_directories(self):
         """Writing trace should create parent directories if needed."""
         with tempfile.TemporaryDirectory() as tmpdir:
             service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
             folder = Path(tmpdir) / "level1" / "level2" / "level3"
-            trace_id = "trace123"
-            trace = {"id": trace_id}
+            filename = "001_turn_trace123.json"
+            trace = {"id": "trace123"}
             observations = []
 
-            service._write_trace(folder, trace_id, trace, observations)
+            service._write_trace(folder, filename, trace, observations)
 
             assert folder.exists()
-            assert (folder / f"{trace_id}.json").exists()
+            assert (folder / filename).exists()
 
     def test_write_overwrites_existing(self):
         """Writing trace should overwrite existing file."""
@@ -383,16 +382,16 @@ class TestWriteTrace:
             service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
             folder = Path(tmpdir) / "test_folder"
             folder.mkdir(parents=True)
-            trace_id = "trace123"
-            trace_file = folder / f"{trace_id}.json"
+            filename = "001_turn_trace123.json"
+            trace_file = folder / filename
 
             # Write initial content
             trace_file.write_text("old content")
 
             # Overwrite
-            trace = {"id": trace_id, "new": "data"}
+            trace = {"id": "trace123", "new": "data"}
             observations = []
-            service._write_trace(folder, trace_id, trace, observations)
+            service._write_trace(folder, filename, trace, observations)
 
             content = trace_file.read_text()
             assert "old content" not in content
@@ -403,13 +402,13 @@ class TestWriteTrace:
         with tempfile.TemporaryDirectory() as tmpdir:
             service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
             folder = Path(tmpdir) / "test_folder"
-            trace_id = "trace123"
-            trace = {"id": trace_id, "name": "test"}
+            filename = "001_turn_trace123.json"
+            trace = {"id": "trace123", "name": "test"}
             observations = [{"id": "o1", "type": "generation"}]
 
-            service._write_trace(folder, trace_id, trace, observations)
+            service._write_trace(folder, filename, trace, observations)
 
-            content = (folder / f"{trace_id}.json").read_text()
+            content = (folder / filename).read_text()
             # Pretty-printed JSON should have newlines and indentation
             assert "\n" in content
             assert "  " in content  # Indentation
@@ -419,13 +418,13 @@ class TestWriteTrace:
         with tempfile.TemporaryDirectory() as tmpdir:
             service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
             folder = Path(tmpdir) / "test_folder"
-            trace_id = "trace123"
-            trace = {"id": trace_id, "name": "test"}
+            filename = "001_turn_trace123.json"
+            trace = {"id": "trace123", "name": "test"}
             observations = [{"id": "o1"}, {"id": "o2"}]
 
-            service._write_trace(folder, trace_id, trace, observations)
+            service._write_trace(folder, filename, trace, observations)
 
-            content = (folder / f"{trace_id}.json").read_text()
+            content = (folder / filename).read_text()
             data = json.loads(content)
 
             assert "trace" in data
@@ -438,17 +437,17 @@ class TestWriteTrace:
         with tempfile.TemporaryDirectory() as tmpdir:
             service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
             folder = Path(tmpdir) / "test_folder"
-            trace_id = "trace123"
-            trace = {"id": trace_id}
+            filename = "001_turn_trace123.json"
+            trace = {"id": "trace123"}
             observations = [
                 {"id": "o3", "startTime": "2026-01-01T12:03:00Z"},
                 {"id": "o1", "startTime": "2026-01-01T12:01:00Z"},
                 {"id": "o2", "startTime": "2026-01-01T12:02:00Z"},
             ]
 
-            service._write_trace(folder, trace_id, trace, observations)
+            service._write_trace(folder, filename, trace, observations)
 
-            content = (folder / f"{trace_id}.json").read_text()
+            content = (folder / filename).read_text()
             data = json.loads(content)
 
             assert data["observations"][0]["id"] == "o1"
@@ -812,6 +811,185 @@ class TestHashPruning:
         assert len(pruned_hashes) == 2
 
 
+class TestExtractTraceType:
+    """Test trace type extraction from trace data."""
+
+    def test_turn_type_for_plain_trace(self):
+        """Trace without subagent prefix should return 'turn'."""
+        trace = {"id": "abc123", "name": "some-trace-name"}
+        result = LangfuseTraceSyncService._extract_trace_type(trace)
+        assert result == "turn"
+
+    def test_turn_type_for_empty_name(self):
+        """Trace with empty name should return 'turn'."""
+        trace = {"id": "abc123", "name": ""}
+        result = LangfuseTraceSyncService._extract_trace_type(trace)
+        assert result == "turn"
+
+    def test_turn_type_for_missing_name(self):
+        """Trace without name key should return 'turn'."""
+        trace = {"id": "abc123"}
+        result = LangfuseTraceSyncService._extract_trace_type(trace)
+        assert result == "turn"
+
+    def test_subagent_type_extraction(self):
+        """Trace with 'subagent:Explore' should return 'subagent-Explore'."""
+        trace = {"id": "abc123", "name": "subagent:Explore"}
+        result = LangfuseTraceSyncService._extract_trace_type(trace)
+        assert result == "subagent-Explore"
+
+    def test_subagent_type_with_complex_name(self):
+        """Trace with 'subagent:tdd-engineer' should return 'subagent-tdd-engineer'."""
+        trace = {"id": "abc123", "name": "subagent:tdd-engineer"}
+        result = LangfuseTraceSyncService._extract_trace_type(trace)
+        assert result == "subagent-tdd-engineer"
+
+    def test_subagent_type_case_sensitive(self):
+        """Subagent prefix match should be case-sensitive."""
+        trace = {"id": "abc123", "name": "Subagent:Explore"}
+        result = LangfuseTraceSyncService._extract_trace_type(trace)
+        # "Subagent:" (capital S) does not match "subagent:" prefix
+        assert result == "turn"
+
+    def test_subagent_type_with_none_name(self):
+        """Trace with None name should return 'turn'."""
+        trace = {"id": "abc123", "name": None}
+        result = LangfuseTraceSyncService._extract_trace_type(trace)
+        assert result == "turn"
+
+    def test_subagent_with_special_characters(self):
+        """Subagent names with filesystem-unsafe chars should be sanitized."""
+        trace = {"name": "subagent:some/weird:name"}
+        result = LangfuseTraceSyncService._extract_trace_type(trace)
+        assert result == "subagent-some_weird_name"
+
+
+class TestExtractShortId:
+    """Test short ID extraction from trace ID string."""
+
+    def test_last_8_chars(self):
+        """Should return last 8 characters of trace ID."""
+        trace_id = "038114a5-8665-4aaa-a14d-f136244b598b-turn-0b5c9e0c"
+        result = LangfuseTraceSyncService._extract_short_id(trace_id)
+        assert result == "0b5c9e0c"
+
+    def test_short_trace_id(self):
+        """Trace IDs shorter than 8 chars should return the whole ID."""
+        trace_id = "abc"
+        result = LangfuseTraceSyncService._extract_short_id(trace_id)
+        assert result == "abc"
+
+    def test_exactly_8_chars(self):
+        """Trace ID of exactly 8 chars should return the whole ID."""
+        trace_id = "abcd1234"
+        result = LangfuseTraceSyncService._extract_short_id(trace_id)
+        assert result == "abcd1234"
+
+    def test_uuid_style_id(self):
+        """Standard UUID should return last 8 chars."""
+        trace_id = "550e8400-e29b-41d4-a716-446655440000"
+        result = LangfuseTraceSyncService._extract_short_id(trace_id)
+        assert result == "55440000"
+
+
+class TestGetNextSeqNumber:
+    """Test next sequence number determination from folder contents."""
+
+    def test_empty_folder(self):
+        """Empty folder should return 1."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            result = LangfuseTraceSyncService._get_next_seq_number(folder)
+            assert result == 1
+
+    def test_nonexistent_folder(self):
+        """Nonexistent folder should return 1."""
+        folder = Path("/tmp/nonexistent_folder_test_12345")
+        result = LangfuseTraceSyncService._get_next_seq_number(folder)
+        assert result == 1
+
+    def test_folder_with_sequential_files(self):
+        """Folder with sequential files should return max + 1."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            (folder / "001_turn_abcd1234.json").write_text("{}")
+            (folder / "002_turn_efgh5678.json").write_text("{}")
+            (folder / "003_subagent-Explore_ijkl9012.json").write_text("{}")
+
+            result = LangfuseTraceSyncService._get_next_seq_number(folder)
+            assert result == 4
+
+    def test_folder_with_gaps(self):
+        """Folder with gaps in sequence should return max + 1 (not fill gaps)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            (folder / "001_turn_abcd1234.json").write_text("{}")
+            (folder / "005_turn_efgh5678.json").write_text("{}")
+
+            result = LangfuseTraceSyncService._get_next_seq_number(folder)
+            assert result == 6
+
+    def test_folder_with_old_format_files(self):
+        """Folder with old-format files (no seq prefix) should return 1."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            (folder / "some-trace-id-abc123.json").write_text("{}")
+            (folder / "another-trace-id-def456.json").write_text("{}")
+
+            result = LangfuseTraceSyncService._get_next_seq_number(folder)
+            assert result == 1
+
+    def test_folder_with_mixed_files(self):
+        """Folder with both old and new format should only consider new format."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            (folder / "old-trace-id.json").write_text("{}")
+            (folder / "003_turn_abcd1234.json").write_text("{}")
+
+            result = LangfuseTraceSyncService._get_next_seq_number(folder)
+            assert result == 4
+
+    def test_folder_with_non_json_files(self):
+        """Non-JSON files should be ignored."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir)
+            (folder / "001_turn_abcd1234.json").write_text("{}")
+            (folder / "readme.txt").write_text("hello")
+            (folder / "005_turn_efgh5678.json.tmp").write_text("{}")
+
+            result = LangfuseTraceSyncService._get_next_seq_number(folder)
+            assert result == 2
+
+
+class TestBuildTraceFilename:
+    """Test trace filename building."""
+
+    def test_turn_filename(self):
+        """Turn trace should produce correct filename."""
+        result = LangfuseTraceSyncService._build_trace_filename(1, "turn", "0b5c9e0c")
+        assert result == "001_turn_0b5c9e0c.json"
+
+    def test_subagent_filename(self):
+        """Subagent trace should produce correct filename."""
+        result = LangfuseTraceSyncService._build_trace_filename(2, "subagent-Explore", "8eac4a27")
+        assert result == "002_subagent-Explore_8eac4a27.json"
+
+    def test_zero_padded_sequence(self):
+        """Sequence number should be zero-padded to 3 digits."""
+        result = LangfuseTraceSyncService._build_trace_filename(42, "turn", "abcd1234")
+        assert result == "042_turn_abcd1234.json"
+
+    def test_large_sequence_number(self):
+        """Sequence numbers above 999 should still work (no truncation)."""
+        result = LangfuseTraceSyncService._build_trace_filename(1234, "turn", "abcd1234")
+        assert result == "1234_turn_abcd1234.json"
+
+    def test_subagent_with_hyphenated_name(self):
+        """Subagent with hyphenated name should be preserved."""
+        result = LangfuseTraceSyncService._build_trace_filename(3, "subagent-tdd-engineer", "12345678")
+        assert result == "003_subagent-tdd-engineer_12345678.json"
+
+
 class TestTwoPhaseHashCheck:
     """Test two-phase hash check optimization (Finding 2)."""
 
@@ -930,12 +1108,13 @@ class TestTwoPhaseHashCheck:
             assert metrics.traces_unchanged == 1
 
     def test_process_trace_rewrites_when_file_missing(self):
-        """Test that _process_trace re-writes trace when file is missing from disk despite hash match."""
+        """Test that _process_trace re-writes trace when file is missing from disk despite hash match.
+
+        Updated: With staging approach, Phase 1 writes to staging as {trace_id}.json and returns
+        6-tuple metadata, then Phase 2 moves from staging to destination with sequential format.
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
-
-            from unittest.mock import Mock
-
             mock_api_client = Mock()
             mock_api_client.fetch_observations.return_value = []
 
@@ -950,7 +1129,7 @@ class TestTwoPhaseHashCheck:
             canonical = service._build_canonical_json(trace, [])
             content_hash = service._compute_hash(canonical)
 
-            # Pre-populate hash as if trace was previously synced
+            # Pre-populate hash as if trace was previously synced (no "filename" = old format)
             trace_hashes = {
                 "test-trace-123": {
                     "updated_at": "2026-01-01T00:00:00Z",
@@ -960,20 +1139,809 @@ class TestTwoPhaseHashCheck:
 
             metrics = SyncMetrics()
 
-            # Phase 1 match (updatedAt and content_hash both match) but file missing
-            # should fall through and re-write
-            service._process_trace(mock_api_client, trace, "TestProject", trace_hashes, metrics)
+            # Phase 1: should write to STAGING as {trace_id}.json and return 6-tuple metadata
+            rename_info = service._process_trace(mock_api_client, trace, "TestProject", trace_hashes, metrics)
 
-            # File should have been written since it was missing from disk
-            # Verify the file exists now
-            folder = service._get_trace_folder("TestProject", trace)
-            file_path = folder / "test-trace-123.json"
-            assert file_path.exists(), "Trace file should have been re-written"
+            # Verify temp file was written to STAGING (not destination)
+            staging_folder = service._get_staging_dir("TestProject", trace)
+            assert (staging_folder / "test-trace-123.json").exists(), "Staging file should have been written"
+
+            # Verify 6-tuple metadata returned
+            assert rename_info is not None
+            assert len(rename_info) == 6  # Now returns 6-tuple
+            assert trace_hashes["test-trace-123"]["filename"] is None  # Will be set in Phase 2
+
+            # Phase 2: Finalize (move from staging to destination with sequential names)
+            if rename_info:
+                service._finalize_trace_files([rename_info], trace_hashes)
+
+            # Now verify sequential filename assigned and file moved to destination
+            dest_folder = service._get_trace_folder("TestProject", trace)
+            new_filename = trace_hashes["test-trace-123"]["filename"]
+            assert new_filename == "001_turn_race-123.json"
+            assert (dest_folder / new_filename).exists(), "Trace file should exist in destination"
+            assert not (staging_folder / "test-trace-123.json").exists(), "Staging file should be moved (not copied)"
 
             # Should be counted as updated (not new, not unchanged)
             assert metrics.traces_written_new == 0  # Not "new" - trace was in hashes
             assert metrics.traces_written_updated == 1  # Re-written because file was missing
             assert metrics.traces_unchanged == 0  # Should NOT be unchanged
+
+
+class TestSequentialNaming:
+    """Integration tests for sequential trace file naming through _process_trace."""
+
+    def test_new_trace_gets_sequential_filename(self):
+        """A new trace should be written with sequential naming format.
+
+        Updated: Phase 1 writes as {trace_id}.json, Phase 2 renames to sequential.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
+            mock_api_client = Mock()
+            mock_api_client.fetch_observations.return_value = []
+
+            trace = {
+                "id": "038114a5-8665-4aaa-a14d-f136244b598b-turn-0b5c9e0c",
+                "name": "my-trace",
+                "updatedAt": "2024-01-01T00:00:00+00:00",
+                "userId": "test_user",
+                "sessionId": "test_session",
+            }
+            trace_hashes = {}
+            metrics = SyncMetrics()
+
+            # Phase 1: Process trace (writes temp file, returns rename metadata)
+            rename_info = service._process_trace(mock_api_client, trace, "test-project", trace_hashes, metrics)
+
+            # Phase 2: Assign sequential names
+            if rename_info:
+                service._finalize_trace_files([rename_info], trace_hashes)
+
+            folder = service._get_trace_folder("test-project", trace)
+            expected_filename = "001_turn_0b5c9e0c.json"
+            assert (folder / expected_filename).exists()
+            assert not (folder / f"{trace['id']}.json").exists()
+
+            trace_id = trace["id"]
+            assert "filename" in trace_hashes[trace_id]
+            assert trace_hashes[trace_id]["filename"] == expected_filename
+
+    def test_subagent_trace_gets_correct_type_in_filename(self):
+        """A subagent trace should have subagent type in filename.
+
+        Updated: Phase 1 writes temp file, Phase 2 renames to sequential with subagent type.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
+            mock_api_client = Mock()
+            mock_api_client.fetch_observations.return_value = []
+
+            trace = {
+                "id": "abc12345-6789-0000-1111-22223333aaaa-sub-8eac4a27",
+                "name": "subagent:Explore",
+                "updatedAt": "2024-01-01T00:00:00+00:00",
+                "userId": "test_user",
+                "sessionId": "test_session",
+            }
+            trace_hashes = {}
+            metrics = SyncMetrics()
+
+            # Phase 1 and 2
+            rename_info = service._process_trace(mock_api_client, trace, "test-project", trace_hashes, metrics)
+            if rename_info:
+                service._finalize_trace_files([rename_info], trace_hashes)
+
+            folder = service._get_trace_folder("test-project", trace)
+            expected_filename = "001_subagent-Explore_8eac4a27.json"
+            assert (folder / expected_filename).exists()
+            assert trace_hashes[trace["id"]]["filename"] == expected_filename
+
+    def test_multiple_traces_get_sequential_numbers(self):
+        """Multiple new traces in same folder should get incrementing sequence numbers.
+
+        Updated: Collect rename metadata in Phase 1, then rename all in Phase 2.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
+            mock_api_client = Mock()
+            mock_api_client.fetch_observations.return_value = []
+
+            trace_hashes = {}
+            metrics = SyncMetrics()
+            pending_renames = []
+
+            for i, suffix in enumerate(["aaaa1111", "bbbb2222", "cccc3333"]):
+                trace = {
+                    "id": f"trace-{i}-{suffix}",
+                    "name": "my-trace",
+                    "updatedAt": "2024-01-01T00:00:00+00:00",
+                    "userId": "test_user",
+                    "sessionId": "test_session",
+                }
+                rename_info = service._process_trace(
+                    mock_api_client, trace, "test-project", trace_hashes, metrics
+                )
+                if rename_info:
+                    pending_renames.append(rename_info)
+
+            # Phase 2: Rename all at once
+            if pending_renames:
+                service._finalize_trace_files(pending_renames, trace_hashes)
+
+            folder = service._get_trace_folder("test-project", trace)
+            json_files = sorted(folder.glob("*.json"))
+            assert len(json_files) == 3
+            assert json_files[0].name.startswith("001_")
+            assert json_files[1].name.startswith("002_")
+            assert json_files[2].name.startswith("003_")
+
+    def test_trace_update_keeps_same_filename(self):
+        """When a trace is updated, it should keep its original filename.
+
+        Updated: First trace goes through Phase 1+2, updated trace has stored_filename so returns None.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
+            mock_api_client = Mock()
+            mock_api_client.fetch_observations.return_value = [
+                {"id": "obs1", "startTime": "2024-01-01T00:00:00Z"}
+            ]
+
+            trace_id = "trace-abc-12345678"
+            trace_v1 = {
+                "id": trace_id,
+                "name": "my-trace",
+                "updatedAt": "2024-01-01T00:00:00+00:00",
+                "userId": "test_user",
+                "sessionId": "test_session",
+            }
+            trace_hashes = {}
+            metrics = SyncMetrics()
+
+            # Initial trace: Phase 1 + 2
+            rename_info = service._process_trace(mock_api_client, trace_v1, "test-project", trace_hashes, metrics)
+            if rename_info:
+                service._finalize_trace_files([rename_info], trace_hashes)
+
+            original_filename = trace_hashes[trace_id]["filename"]
+            assert original_filename == "001_turn_12345678.json"
+
+            # Update trace: has stored_filename now, so no rename needed
+            mock_api_client.fetch_observations.return_value = [
+                {"id": "obs1", "startTime": "2024-01-01T00:00:00Z"},
+                {"id": "obs2", "startTime": "2024-01-02T00:00:00Z"},
+            ]
+            trace_v2 = dict(trace_v1)
+            trace_v2["updatedAt"] = "2024-01-02T00:00:00+00:00"
+
+            rename_info2 = service._process_trace(mock_api_client, trace_v2, "test-project", trace_hashes, metrics)
+            assert rename_info2 is None  # No rename needed - already has stored_filename
+
+            assert trace_hashes[trace_id]["filename"] == original_filename
+            folder = service._get_trace_folder("test-project", trace_v1)
+            assert (folder / original_filename).exists()
+            assert len(list(folder.glob("*.json"))) == 1
+
+    def test_filename_in_state_persists_through_unchanged_check(self):
+        """When trace is unchanged (Phase 1 skip), filename should remain in state."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
+            mock_api_client = Mock()
+
+            trace = {
+                "id": "trace-xyz-99887766",
+                "name": "my-trace",
+                "updatedAt": "2024-01-01T00:00:00+00:00",
+                "userId": "test_user",
+                "sessionId": "test_session",
+            }
+
+            folder = service._get_trace_folder("test-project", trace)
+            folder.mkdir(parents=True, exist_ok=True)
+            filename = "001_turn_99887766.json"
+            (folder / filename).write_text('{"trace": {}, "observations": []}')
+
+            trace_hashes = {
+                "trace-xyz-99887766": {
+                    "updated_at": "2024-01-01T00:00:00+00:00",
+                    "content_hash": "somehash",
+                    "filename": filename,
+                }
+            }
+            metrics = SyncMetrics()
+
+            service._process_trace(mock_api_client, trace, "test-project", trace_hashes, metrics)
+
+            assert trace_hashes["trace-xyz-99887766"]["filename"] == filename
+            assert metrics.traces_unchanged == 1
+
+
+class TestChronologicalTraceOrdering:
+    """Test that traces are sorted chronologically by timestamp before processing."""
+
+    @staticmethod
+    def _mock_langfuse_api(pages_data, processed_trace_ids, project_name="test-project"):
+        """Helper to mock LangfuseApiClient with paginated trace data.
+
+        Args:
+            pages_data: List of trace lists, one per page (e.g., [[trace1, trace2], [trace3]])
+            processed_trace_ids: List to append trace IDs as they're processed
+            project_name: Project name to return from discover_project
+
+        Returns:
+            Tuple of (original_init, cleanup_function)
+        """
+        from code_indexer.server.services.langfuse_api_client import LangfuseApiClient
+
+        original_init = LangfuseApiClient.__init__
+
+        def mock_init(self, host, creds):
+            self.host = host
+            self.creds = creds
+
+        LangfuseApiClient.__init__ = mock_init
+        LangfuseApiClient.discover_project = Mock(return_value={"name": project_name})
+
+        def mock_fetch_observations(self, trace_id):
+            processed_trace_ids.append(trace_id)
+            return []
+
+        LangfuseApiClient.fetch_observations = mock_fetch_observations
+
+        call_count = [0]
+        def mock_fetch_traces_page(self, page, from_time):
+            call_count[0] += 1
+            if call_count[0] <= len(pages_data):
+                return pages_data[call_count[0] - 1]
+            else:
+                return []
+
+        LangfuseApiClient.fetch_traces_page = mock_fetch_traces_page
+
+        def cleanup():
+            LangfuseApiClient.__init__ = original_init
+
+        return original_init, cleanup
+
+    def test_sync_project_sorts_traces_by_timestamp_ascending(self):
+        """Traces returned newest-first from API should be sorted oldest-first for processing.
+
+        Updated: Verifies streaming approach where traces are written as {trace_id}.json during
+        Phase 1, then renamed to sequential filenames in Phase 2.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
+
+            # Simulate API returning traces in reverse chronological order (newest first)
+            pages_data = [
+                # Page 1: newest traces
+                [
+                    {"id": "t3", "timestamp": "2024-01-03T00:00:00Z", "updatedAt": "2024-01-03T00:00:00Z"},
+                    {"id": "t2", "timestamp": "2024-01-02T00:00:00Z", "updatedAt": "2024-01-02T00:00:00Z"},
+                ],
+                # Page 2: older traces
+                [
+                    {"id": "t1", "timestamp": "2024-01-01T00:00:00Z", "updatedAt": "2024-01-01T00:00:00Z"},
+                ],
+            ]
+
+            processed_trace_ids = []
+            original_init, cleanup = self._mock_langfuse_api(pages_data, processed_trace_ids)
+
+            try:
+                creds = LangfusePullProject(public_key="test", secret_key="test")
+                service.sync_project("https://test.com", creds, 30)
+
+                # Verify traces were processed (streaming - as pages arrive)
+                assert len(processed_trace_ids) == 3
+                # NOTE: Processing order may be API order (not sorted) during streaming,
+                # but final filenames should reflect chronological order
+
+                # Verify filenames reflect chronological order (after Phase 2 rename)
+                folder = service._get_trace_folder("test-project", pages_data[0][0])
+                files = sorted(folder.glob("*.json"))
+
+                # Find which file contains which trace ID
+                file_map = {}  # {trace_id: filename}
+                for f in files:
+                    content = json.loads(f.read_text())
+                    file_map[content["trace"]["id"]] = f.name
+
+                # Oldest trace (t1) should have lowest seq number
+                assert file_map["t1"].startswith("001_"), f"Oldest trace should be 001, got {file_map['t1']}"
+                assert file_map["t2"].startswith("002_"), f"Middle trace should be 002, got {file_map['t2']}"
+                assert file_map["t3"].startswith("003_"), f"Newest trace should be 003, got {file_map['t3']}"
+
+            finally:
+                cleanup()
+
+    def test_multi_page_buffering_before_sorting(self):
+        """Verify traces processed in streaming fashion, then sorted in Phase 2 rename.
+
+        Updated: Streaming approach processes each page immediately, collecting lightweight
+        metadata, then Phase 2 renames files to sequential order.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
+
+            # Mock API that returns 3 pages, each with traces in reverse chronological order
+            pages_data = [
+                [
+                    {"id": "t9", "timestamp": "2024-01-09T00:00:00Z", "updatedAt": "2024-01-09T00:00:00Z"},
+                    {"id": "t8", "timestamp": "2024-01-08T00:00:00Z", "updatedAt": "2024-01-08T00:00:00Z"},
+                    {"id": "t7", "timestamp": "2024-01-07T00:00:00Z", "updatedAt": "2024-01-07T00:00:00Z"},
+                ],
+                [
+                    {"id": "t6", "timestamp": "2024-01-06T00:00:00Z", "updatedAt": "2024-01-06T00:00:00Z"},
+                    {"id": "t5", "timestamp": "2024-01-05T00:00:00Z", "updatedAt": "2024-01-05T00:00:00Z"},
+                    {"id": "t4", "timestamp": "2024-01-04T00:00:00Z", "updatedAt": "2024-01-04T00:00:00Z"},
+                ],
+                [
+                    {"id": "t3", "timestamp": "2024-01-03T00:00:00Z", "updatedAt": "2024-01-03T00:00:00Z"},
+                    {"id": "t2", "timestamp": "2024-01-02T00:00:00Z", "updatedAt": "2024-01-02T00:00:00Z"},
+                    {"id": "t1", "timestamp": "2024-01-01T00:00:00Z", "updatedAt": "2024-01-01T00:00:00Z"},
+                ],
+            ]
+
+            processed_trace_ids = []
+            original_init, cleanup = self._mock_langfuse_api(pages_data, processed_trace_ids)
+
+            try:
+                creds = LangfusePullProject(public_key="test", secret_key="test")
+                service.sync_project("https://test.com", creds, 30)
+
+                # All 9 traces should be processed
+                assert len(processed_trace_ids) == 9
+
+                # Verify sequence numbers match chronological order (after Phase 2 rename)
+                folder = service._get_trace_folder("test-project", pages_data[0][0])
+                files = sorted(folder.glob("*.json"))
+                assert len(files) == 9
+
+                # Map trace IDs to their sequence numbers
+                expected_order = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"]
+                for i, expected_id in enumerate(expected_order, start=1):
+                    seq_prefix = f"{i:03d}_"
+                    matching_file = [f for f in files if f.name.startswith(seq_prefix)]
+                    assert len(matching_file) == 1, f"Expected one file with prefix {seq_prefix}"
+                    content = json.loads(matching_file[0].read_text())
+                    assert content["trace"]["id"] == expected_id
+
+            finally:
+                cleanup()
+
+    def test_existing_traces_with_stored_filenames_unaffected_by_sort(self):
+        """Traces that already have stored filenames should keep them despite sorting."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
+
+            # Use realistic trace IDs with 8+ characters for short_id extraction
+            trace_id_t2 = "trace-newer-00000002"
+            trace_id_t1 = "trace-older-00000001"
+
+            # Simulate traces returned newest-first
+            pages_data = [
+                [
+                    {"id": trace_id_t2, "timestamp": "2024-01-02T00:00:00Z", "updatedAt": "2024-01-02T00:00:00Z"},
+                    {"id": trace_id_t1, "timestamp": "2024-01-01T00:00:00Z", "updatedAt": "2024-01-01T00:00:00Z"},
+                ]
+            ]
+
+            # Pre-populate folder with existing file for t2
+            folder_path = Path(tmpdir) / "golden-repos" / "langfuse_test-project_no_user" / "no_session"
+            folder_path.mkdir(parents=True, exist_ok=True)
+            existing_file_t2 = folder_path / "001_turn_00000002.json"
+            existing_file_t2.write_text('{"trace": {"id": "' + trace_id_t2 + '"}, "observations": []}')
+
+            # Build expected hash for t2 so it's detected as unchanged
+            canonical_t2 = service._build_canonical_json(pages_data[0][0], [])
+            hash_t2 = service._compute_hash(canonical_t2)
+
+            # Pre-populate state with t2 having its stored filename
+            state = {
+                "last_sync_timestamp": "2024-01-01T12:00:00+00:00",
+                "trace_hashes": {
+                    trace_id_t2: {
+                        "updated_at": "2024-01-02T00:00:00Z",
+                        "content_hash": hash_t2,
+                        "filename": "001_turn_00000002.json",
+                    }
+                }
+            }
+            service._save_sync_state("test-project", state)
+
+            processed_trace_ids = []
+            original_init, cleanup = self._mock_langfuse_api(pages_data, processed_trace_ids)
+
+            try:
+                creds = LangfusePullProject(public_key="test", secret_key="test")
+                service.sync_project("https://test.com", creds, 30)
+
+                # Load state after sync
+                final_state = service._load_sync_state("test-project")
+
+                # t2 should still have its original filename despite being sorted after t1
+                assert final_state["trace_hashes"][trace_id_t2]["filename"] == "001_turn_00000002.json"
+                assert existing_file_t2.exists()
+
+                # t1 (new trace, older timestamp) should get sequence number 2
+                assert trace_id_t1 in final_state["trace_hashes"]
+                assert final_state["trace_hashes"][trace_id_t1]["filename"] == "002_turn_00000001.json"
+
+            finally:
+                cleanup()
+
+
+class TestFinalizeTraceFiles:
+    """Test _finalize_trace_files static method for Phase 2 move from staging to destination."""
+
+    def test_finalize_moves_from_staging_to_destination(self):
+        """Files written to staging dir should be moved to dest with sequential names."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_base = Path(tmpdir) / ".langfuse_staging" / "test-project" / "user1" / "session1"
+            dest_folder = Path(tmpdir) / "golden-repos" / "langfuse_test-project_user1" / "session1"
+            staging_base.mkdir(parents=True)
+
+            # Create staged files with trace_id.json naming
+            trace_ids = ["trace-aaa-12345678", "trace-bbb-23456789", "trace-ccc-34567890"]
+            timestamps = ["2024-01-02T00:00:00Z", "2024-01-01T00:00:00Z", "2024-01-03T00:00:00Z"]
+
+            for tid in trace_ids:
+                (staging_base / f"{tid}.json").write_text('{"test": "data"}')
+
+            # Build pending with 6-tuple: (timestamp, trace_id, staging_folder, dest_folder, trace_type, short_id)
+            pending_renames = [
+                (timestamps[2], trace_ids[2], str(staging_base), str(dest_folder), "turn", "34567890"),  # Newest
+                (timestamps[0], trace_ids[0], str(staging_base), str(dest_folder), "turn", "12345678"),  # Middle
+                (timestamps[1], trace_ids[1], str(staging_base), str(dest_folder), "turn", "23456789"),  # Oldest
+            ]
+
+            trace_hashes = {
+                trace_ids[0]: {"updated_at": timestamps[0], "content_hash": "hash1", "filename": None},
+                trace_ids[1]: {"updated_at": timestamps[1], "content_hash": "hash2", "filename": None},
+                trace_ids[2]: {"updated_at": timestamps[2], "content_hash": "hash3", "filename": None},
+            }
+
+            # Call _finalize_trace_files
+            LangfuseTraceSyncService._finalize_trace_files(pending_renames, trace_hashes)
+
+            # Verify files moved to destination in chronological order
+            assert (dest_folder / "001_turn_23456789.json").exists(), "Oldest trace should be 001"
+            assert (dest_folder / "002_turn_12345678.json").exists(), "Middle trace should be 002"
+            assert (dest_folder / "003_turn_34567890.json").exists(), "Newest trace should be 003"
+
+            # Staged files should be gone (moved, not copied)
+            assert not (staging_base / f"{trace_ids[0]}.json").exists()
+            assert not (staging_base / f"{trace_ids[1]}.json").exists()
+            assert not (staging_base / f"{trace_ids[2]}.json").exists()
+
+            # Verify trace_hashes updated with filenames
+            assert trace_hashes[trace_ids[1]]["filename"] == "001_turn_23456789.json"
+            assert trace_hashes[trace_ids[0]]["filename"] == "002_turn_12345678.json"
+            assert trace_hashes[trace_ids[2]]["filename"] == "003_turn_34567890.json"
+
+    def test_finalize_missing_staged_file_logs_warning(self):
+        """Missing staged file should log warning and NOT update trace_hashes (High #2)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_base = Path(tmpdir) / ".langfuse_staging" / "test-project" / "user1" / "session1"
+            dest_folder = Path(tmpdir) / "golden-repos" / "langfuse_test-project_user1" / "session1"
+            staging_base.mkdir(parents=True)
+
+            # Create ONE staged file, but pending has TWO entries
+            trace_id_exists = "trace-exists-12345678"
+            trace_id_missing = "trace-missing-87654321"
+            (staging_base / f"{trace_id_exists}.json").write_text('{"test": "data"}')
+            # trace_id_missing NOT created - simulates crash or missing file
+
+            pending_renames = [
+                ("2024-01-01T00:00:00Z", trace_id_exists, str(staging_base), str(dest_folder), "turn", "12345678"),
+                ("2024-01-02T00:00:00Z", trace_id_missing, str(staging_base), str(dest_folder), "turn", "87654321"),
+            ]
+
+            trace_hashes = {
+                trace_id_exists: {"updated_at": "2024-01-01T00:00:00Z", "content_hash": "hash1", "filename": None},
+                trace_id_missing: {"updated_at": "2024-01-02T00:00:00Z", "content_hash": "hash2", "filename": None},
+            }
+
+            # Should not crash, should log warning
+            LangfuseTraceSyncService._finalize_trace_files(pending_renames, trace_hashes)
+
+            # Existing file should be moved successfully
+            assert (dest_folder / "001_turn_12345678.json").exists()
+            assert trace_hashes[trace_id_exists]["filename"] == "001_turn_12345678.json"
+
+            # Missing file: filename should remain None (NOT updated)
+            assert trace_hashes[trace_id_missing]["filename"] is None
+
+    def test_finalize_destination_exists_overwrites_with_warning(self):
+        """When destination folder has existing files, new files get next sequence number."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_base = Path(tmpdir) / ".langfuse_staging" / "test-project" / "user1" / "session1"
+            dest_folder = Path(tmpdir) / "golden-repos" / "langfuse_test-project_user1" / "session1"
+            staging_base.mkdir(parents=True)
+            dest_folder.mkdir(parents=True)
+
+            trace_id = "trace-new-12345678"
+            (staging_base / f"{trace_id}.json").write_text('{"test": "new data"}')
+
+            # Pre-create destination file with sequence 001
+            existing_file = dest_folder / "001_turn_existing.json"
+            existing_file.write_text('{"test": "old data"}')
+
+            pending_renames = [
+                ("2024-01-01T00:00:00Z", trace_id, str(staging_base), str(dest_folder), "turn", "12345678"),
+            ]
+
+            trace_hashes = {
+                trace_id: {"updated_at": "2024-01-01T00:00:00Z", "content_hash": "hash1", "filename": None},
+            }
+
+            # Should assign next available sequence number (002)
+            LangfuseTraceSyncService._finalize_trace_files(pending_renames, trace_hashes)
+
+            # Old file should still exist with old data
+            assert existing_file.exists()
+            assert "old data" in existing_file.read_text()
+
+            # New file should have sequence 002 with new data
+            new_file = dest_folder / "002_turn_12345678.json"
+            assert new_file.exists()
+            assert "new data" in new_file.read_text()
+
+            # trace_hashes updated with new sequence number
+            assert trace_hashes[trace_id]["filename"] == "002_turn_12345678.json"
+
+    def test_finalize_handles_none_timestamp(self):
+        """Verify traces with None/missing timestamps are handled gracefully."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_base = Path(tmpdir) / ".langfuse_staging" / "test-project" / "user1" / "session1"
+            dest_folder = Path(tmpdir) / "golden-repos" / "langfuse_test-project_user1" / "session1"
+            staging_base.mkdir(parents=True)
+
+            trace_ids = ["trace-aaa-11111111", "trace-bbb-22222222"]
+            (staging_base / f"{trace_ids[0]}.json").write_text('{"test": "data"}')
+            (staging_base / f"{trace_ids[1]}.json").write_text('{"test": "data"}')
+
+            # One trace has None timestamp, other has valid timestamp
+            pending_renames = [
+                ("2024-01-02T00:00:00Z", trace_ids[1], str(staging_base), str(dest_folder), "turn", "22222222"),
+                (None, trace_ids[0], str(staging_base), str(dest_folder), "turn", "11111111"),  # None timestamp
+            ]
+
+            trace_hashes = {
+                trace_ids[0]: {"updated_at": None, "content_hash": "hash1", "filename": None},
+                trace_ids[1]: {"updated_at": "2024-01-02T00:00:00Z", "content_hash": "hash2", "filename": None},
+            }
+
+            # Should not crash
+            LangfuseTraceSyncService._finalize_trace_files(pending_renames, trace_hashes)
+
+            # Verify files were moved (None sorts before valid timestamps)
+            assert (dest_folder / "001_turn_11111111.json").exists()
+            assert (dest_folder / "002_turn_22222222.json").exists()
+
+    def test_finalize_multiple_folders(self):
+        """Verify finalize handles traces across multiple destination folders correctly."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging1 = Path(tmpdir) / ".langfuse_staging" / "test-project" / "user1" / "session1"
+            staging2 = Path(tmpdir) / ".langfuse_staging" / "test-project" / "user2" / "session2"
+            dest1 = Path(tmpdir) / "golden-repos" / "langfuse_test-project_user1" / "session1"
+            dest2 = Path(tmpdir) / "golden-repos" / "langfuse_test-project_user2" / "session2"
+            staging1.mkdir(parents=True)
+            staging2.mkdir(parents=True)
+
+            # Create traces in both staging folders
+            (staging1 / "trace-a-11111111.json").write_text('{"test": "data"}')
+            (staging1 / "trace-b-22222222.json").write_text('{"test": "data"}')
+            (staging2 / "trace-c-33333333.json").write_text('{"test": "data"}')
+
+            pending_renames = [
+                # Dest 1: reverse chronological
+                ("2024-01-02T00:00:00Z", "trace-b-22222222", str(staging1), str(dest1), "turn", "22222222"),
+                ("2024-01-01T00:00:00Z", "trace-a-11111111", str(staging1), str(dest1), "turn", "11111111"),
+                # Dest 2: single trace
+                ("2024-01-03T00:00:00Z", "trace-c-33333333", str(staging2), str(dest2), "turn", "33333333"),
+            ]
+
+            trace_hashes = {
+                "trace-a-11111111": {"updated_at": "2024-01-01T00:00:00Z", "content_hash": "hash1", "filename": None},
+                "trace-b-22222222": {"updated_at": "2024-01-02T00:00:00Z", "content_hash": "hash2", "filename": None},
+                "trace-c-33333333": {"updated_at": "2024-01-03T00:00:00Z", "content_hash": "hash3", "filename": None},
+            }
+
+            LangfuseTraceSyncService._finalize_trace_files(pending_renames, trace_hashes)
+
+            # Dest 1: should be sorted chronologically
+            assert (dest1 / "001_turn_11111111.json").exists()
+            assert (dest1 / "002_turn_22222222.json").exists()
+
+            # Dest 2: single trace starts at 001
+            assert (dest2 / "001_turn_33333333.json").exists()
+
+    def test_finalize_continues_existing_sequence(self):
+        """Verify new traces get sequence numbers after existing ones in destination."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_base = Path(tmpdir) / ".langfuse_staging" / "test-project" / "user1" / "session1"
+            dest_folder = Path(tmpdir) / "golden-repos" / "langfuse_test-project_user1" / "session1"
+            staging_base.mkdir(parents=True)
+            dest_folder.mkdir(parents=True)
+
+            # Create existing sequential files in DESTINATION
+            (dest_folder / "001_turn_existing1.json").write_text('{"test": "data"}')
+            (dest_folder / "002_turn_existing2.json").write_text('{"test": "data"}')
+
+            # Create new trace in STAGING
+            (staging_base / "trace-new-99999999.json").write_text('{"test": "data"}')
+
+            pending_renames = [
+                ("2024-01-03T00:00:00Z", "trace-new-99999999", str(staging_base), str(dest_folder), "turn", "99999999"),
+            ]
+
+            trace_hashes = {
+                "trace-new-99999999": {"updated_at": "2024-01-03T00:00:00Z", "content_hash": "hash1", "filename": None},
+            }
+
+            LangfuseTraceSyncService._finalize_trace_files(pending_renames, trace_hashes)
+
+            # New trace should be 003 (after existing 001, 002 in destination)
+            assert (dest_folder / "003_turn_99999999.json").exists()
+            assert not (staging_base / "trace-new-99999999.json").exists()
+
+    def test_staging_cleanup_removes_empty_dirs(self):
+        """After finalization, empty staging dirs should be cleaned up."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
+            project_name = "test-project"
+
+            # Create dummy trace for getting staging dir
+            trace = {"userId": "user1", "sessionId": "session1"}
+
+            # Create staging directory structure with empty dirs
+            staging_dir = service._get_staging_dir(project_name, trace)
+            staging_dir.mkdir(parents=True)
+
+            # Add a file then remove it to simulate post-finalization state
+            test_file = staging_dir / "test.json"
+            test_file.write_text('{"test": "data"}')
+            test_file.unlink()
+
+            # Get parent dirs for verification
+            user_dir = staging_dir.parent
+            project_staging = user_dir.parent
+
+            # Now staging_dir, user_dir, and project_staging are all empty
+            assert staging_dir.exists()
+            assert user_dir.exists()
+            assert project_staging.exists()
+
+            # Cleanup
+            service._cleanup_staging(project_name)
+
+            # All empty dirs should be removed
+            assert not staging_dir.exists()
+            assert not user_dir.exists()
+            assert not project_staging.exists()
+
+
+class TestMigrationFromOldNaming:
+    """Test migration from old {trace_id}.json naming to sequential naming."""
+
+    def test_old_state_without_filename_unchanged_trace(self):
+        """Old state entry without 'filename' key should still detect unchanged trace."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
+            mock_api_client = Mock()
+
+            trace = {
+                "id": "old-trace-id-abcd1234",
+                "name": "my-trace",
+                "updatedAt": "2024-01-01T00:00:00+00:00",
+                "userId": "test_user",
+                "sessionId": "test_session",
+            }
+
+            folder = service._get_trace_folder("test-project", trace)
+            folder.mkdir(parents=True, exist_ok=True)
+            old_file = folder / "old-trace-id-abcd1234.json"
+            old_file.write_text('{"trace": {}, "observations": []}')
+
+            trace_hashes = {
+                "old-trace-id-abcd1234": {
+                    "updated_at": "2024-01-01T00:00:00+00:00",
+                    "content_hash": "somehash",
+                }
+            }
+            metrics = SyncMetrics()
+
+            service._process_trace(mock_api_client, trace, "test-project", trace_hashes, metrics)
+            assert metrics.traces_unchanged == 1
+
+    def test_old_trace_migrates_on_content_change(self):
+        """Old trace without filename gets new sequential name when content changes.
+
+        Updated: Phase 1 writes to staging, Phase 2 moves to destination with sequential name.
+        Old file in destination stays in place (manual cleanup needed for orphaned old-format files).
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
+            mock_api_client = Mock()
+            mock_api_client.fetch_observations.return_value = [
+                {"id": "new-obs", "startTime": "2024-01-02T00:00:00Z"}
+            ]
+
+            trace = {
+                "id": "old-trace-id-abcd1234",
+                "name": "my-trace",
+                "updatedAt": "2024-01-02T00:00:00+00:00",
+                "userId": "test_user",
+                "sessionId": "test_session",
+            }
+
+            folder = service._get_trace_folder("test-project", trace)
+            folder.mkdir(parents=True, exist_ok=True)
+            old_file = folder / "old-trace-id-abcd1234.json"
+            old_file.write_text('{"trace": {}, "observations": []}')
+
+            trace_hashes = {
+                "old-trace-id-abcd1234": {
+                    "updated_at": "2024-01-01T00:00:00+00:00",
+                    "content_hash": "old_hash",
+                }
+            }
+            metrics = SyncMetrics()
+
+            # Phase 1: Process trace (writes to staging, returns 6-tuple metadata)
+            rename_info = service._process_trace(mock_api_client, trace, "test-project", trace_hashes, metrics)
+
+            # Verify staging file exists
+            staging_folder = service._get_staging_dir("test-project", trace)
+            if rename_info:
+                assert (staging_folder / f"{trace['id']}.json").exists(), "Staging file should exist"
+
+            # Phase 2: Finalize (move from staging to destination with sequential name)
+            if rename_info:
+                service._finalize_trace_files([rename_info], trace_hashes)
+
+            new_filename = trace_hashes["old-trace-id-abcd1234"]["filename"]
+            assert new_filename == "001_turn_abcd1234.json"
+            assert (folder / new_filename).exists(), "New sequential file should exist"
+            # Note: Old file stays in place - manual cleanup needed for migration
+            assert old_file.exists(), "Old file remains (not automatically deleted)"
+            assert not (staging_folder / f"{trace['id']}.json").exists(), "Staging file should be moved"
+            assert metrics.traces_written_updated == 1
+
+    def test_old_trace_unchanged_leaves_old_file_alone(self):
+        """Old trace file should be left as-is if content hasn't changed."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
+            mock_api_client = Mock()
+
+            trace = {
+                "id": "old-trace-id-wxyz9876",
+                "name": "my-trace",
+                "updatedAt": "2024-01-01T00:00:00+00:00",
+                "userId": "test_user",
+                "sessionId": "test_session",
+            }
+
+            folder = service._get_trace_folder("test-project", trace)
+            folder.mkdir(parents=True, exist_ok=True)
+            old_file = folder / "old-trace-id-wxyz9876.json"
+            old_file.write_text('{"trace": {}, "observations": []}')
+
+            trace_hashes = {
+                "old-trace-id-wxyz9876": {
+                    "updated_at": "2024-01-01T00:00:00+00:00",
+                    "content_hash": "somehash",
+                }
+            }
+            metrics = SyncMetrics()
+
+            service._process_trace(mock_api_client, trace, "test-project", trace_hashes, metrics)
+
+            assert old_file.exists()
+            assert metrics.traces_unchanged == 1
 
 
 # ==============================================================================

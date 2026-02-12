@@ -241,3 +241,180 @@ class TestSimpleHandlerCallbackWiring:
 
                                 # Verify SmartIndexer.process_files_incrementally was called
                                 mock_smart_indexer.process_files_incrementally.assert_called_once()
+
+
+class TestFTSWatchHandlerAttachment:
+    """Test FTS watch handler attachment to SimpleWatchHandler."""
+
+    def test_fts_handler_attached_when_tantivy_index_exists(self):
+        """Test FTS handler is attached when tantivy_index directory exists."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_path = Path(tmpdir)
+            # Non-git folder
+            # Create FTS index directory (primary location)
+            fts_index_dir = project_path / ".code-indexer" / "tantivy_index"
+            fts_index_dir.mkdir(parents=True)
+
+            manager = DaemonWatchManager()
+
+            # Mock everything except SimpleWatchHandler (let it be real)
+            with patch(
+                "code_indexer.config.ConfigManager"
+            ) as mock_config_mgr:
+                mock_config = MagicMock()
+                mock_config.codebase_dir = project_path
+                mock_config_mgr.create_with_backtrack.return_value.get_config.return_value = (
+                    mock_config
+                )
+
+                with patch(
+                    "code_indexer.backends.backend_factory.BackendFactory"
+                ):
+                    with patch(
+                        "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+                    ):
+                        with patch(
+                            "code_indexer.services.smart_indexer.SmartIndexer"
+                        ):
+                            # Mock TantivyIndexManager and FTSWatchHandler
+                            with patch(
+                                "code_indexer.services.tantivy_index_manager.TantivyIndexManager"
+                            ) as mock_tantivy_mgr:
+                                mock_tantivy_instance = MagicMock()
+                                mock_tantivy_mgr.return_value = mock_tantivy_instance
+
+                                with patch(
+                                    "code_indexer.services.fts_watch_handler.FTSWatchHandler"
+                                ) as mock_fts_handler:
+                                    mock_fts_instance = MagicMock()
+                                    mock_fts_handler.return_value = mock_fts_instance
+
+                                    # Create handler
+                                    handler = manager._create_watch_handler(
+                                        str(project_path), mock_config
+                                    )
+
+                                    # Verify TantivyIndexManager was initialized
+                                    mock_tantivy_mgr.assert_called_once_with(
+                                        fts_index_dir
+                                    )
+                                    mock_tantivy_instance.initialize_index.assert_called_once_with(
+                                        create_new=False
+                                    )
+
+                                    # Verify FTSWatchHandler was created
+                                    mock_fts_handler.assert_called_once()
+                                    call_kwargs = mock_fts_handler.call_args.kwargs
+                                    assert "tantivy_index_manager" in call_kwargs
+                                    assert "config" in call_kwargs
+
+                                    # Verify handler has additional_handlers set
+                                    assert hasattr(handler, "additional_handlers")
+                                    assert len(handler.additional_handlers) == 1
+                                    assert (
+                                        handler.additional_handlers[0]
+                                        == mock_fts_instance
+                                    )
+
+    def test_fts_handler_not_attached_when_no_index(self):
+        """Test FTS handler is NOT attached when no FTS index exists."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_path = Path(tmpdir)
+            # Non-git folder, NO FTS index
+
+            manager = DaemonWatchManager()
+
+            with patch(
+                "code_indexer.config.ConfigManager"
+            ) as mock_config_mgr:
+                mock_config = MagicMock()
+                mock_config.codebase_dir = project_path
+                mock_config_mgr.create_with_backtrack.return_value.get_config.return_value = (
+                    mock_config
+                )
+
+                with patch(
+                    "code_indexer.backends.backend_factory.BackendFactory"
+                ):
+                    with patch(
+                        "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+                    ):
+                        with patch(
+                            "code_indexer.services.smart_indexer.SmartIndexer"
+                        ):
+                            # Mock FTS components (should NOT be called)
+                            with patch(
+                                "code_indexer.services.tantivy_index_manager.TantivyIndexManager"
+                            ) as mock_tantivy_mgr:
+                                with patch(
+                                    "code_indexer.services.fts_watch_handler.FTSWatchHandler"
+                                ) as mock_fts_handler:
+                                    # Create handler
+                                    handler = manager._create_watch_handler(
+                                        str(project_path), mock_config
+                                    )
+
+                                    # Verify FTS components were NOT initialized
+                                    mock_tantivy_mgr.assert_not_called()
+                                    mock_fts_handler.assert_not_called()
+
+                                    # Verify handler has empty additional_handlers
+                                    assert hasattr(handler, "additional_handlers")
+                                    assert len(handler.additional_handlers) == 0
+
+    def test_fts_handler_attached_with_alternative_index_path(self):
+        """Test FTS handler is attached with alternative tantivy-fts path."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_path = Path(tmpdir)
+            # Non-git folder
+            # Create FTS index directory (alternative location)
+            fts_index_dir = (
+                project_path / ".code-indexer" / "index" / "tantivy-fts"
+            )
+            fts_index_dir.mkdir(parents=True)
+
+            manager = DaemonWatchManager()
+
+            with patch(
+                "code_indexer.config.ConfigManager"
+            ) as mock_config_mgr:
+                mock_config = MagicMock()
+                mock_config.codebase_dir = project_path
+                mock_config_mgr.create_with_backtrack.return_value.get_config.return_value = (
+                    mock_config
+                )
+
+                with patch(
+                    "code_indexer.backends.backend_factory.BackendFactory"
+                ):
+                    with patch(
+                        "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+                    ):
+                        with patch(
+                            "code_indexer.services.smart_indexer.SmartIndexer"
+                        ):
+                            with patch(
+                                "code_indexer.services.tantivy_index_manager.TantivyIndexManager"
+                            ) as mock_tantivy_mgr:
+                                mock_tantivy_instance = MagicMock()
+                                mock_tantivy_mgr.return_value = mock_tantivy_instance
+
+                                with patch(
+                                    "code_indexer.services.fts_watch_handler.FTSWatchHandler"
+                                ) as mock_fts_handler:
+                                    mock_fts_instance = MagicMock()
+                                    mock_fts_handler.return_value = mock_fts_instance
+
+                                    # Create handler
+                                    handler = manager._create_watch_handler(
+                                        str(project_path), mock_config
+                                    )
+
+                                    # Verify TantivyIndexManager was initialized with alternative path
+                                    mock_tantivy_mgr.assert_called_once_with(
+                                        fts_index_dir
+                                    )
+
+                                    # Verify FTS handler attached
+                                    assert hasattr(handler, "additional_handlers")
+                                    assert len(handler.additional_handlers) == 1

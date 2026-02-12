@@ -115,7 +115,7 @@ class TestBuildLangfuseSection:
         assert result["folder_naming"]["pattern"] == "langfuse_<project>_<userId>"
         assert (
             result["folder_naming"]["full_path"]
-            == "langfuse_<project>_<userId>/<sessionId>/<traceId>.json"
+            == "langfuse_<project>_<userId>/<sessionId>/{seq}_{type}_{short_id}.json"
         )
 
     def test_langfuse_section_has_search_instructions(self):
@@ -334,6 +334,92 @@ class TestBuildLangfuseSection:
 
         assert result is not None
         assert result["available_repositories"] == []
+
+    def test_langfuse_section_has_what_are_langfuse_repos(self):
+        """Section includes explanation of what Langfuse repos are."""
+        config = ServerConfig(
+            langfuse_config=LangfuseConfig(
+                enabled=True,
+                pull_enabled=True,
+                pull_projects=[LangfusePullProject(public_key="pk1", secret_key="sk1")],
+            )
+        )
+        manager = Mock()
+        manager.list_golden_repos.return_value = []
+        result = _build_langfuse_section(config, manager)
+        assert result is not None
+        assert "what_are_langfuse_repos" in result
+        assert isinstance(result["what_are_langfuse_repos"], str)
+        assert len(result["what_are_langfuse_repos"]) > 0
+
+    def test_langfuse_section_has_file_naming(self):
+        """Section includes file naming documentation."""
+        config = ServerConfig(
+            langfuse_config=LangfuseConfig(
+                enabled=True,
+                pull_enabled=True,
+                pull_projects=[LangfusePullProject(public_key="pk1", secret_key="sk1")],
+            )
+        )
+        manager = Mock()
+        manager.list_golden_repos.return_value = []
+        result = _build_langfuse_section(config, manager)
+        assert result is not None
+        assert "file_naming" in result
+        file_naming = result["file_naming"]
+        assert "pattern" in file_naming
+        assert "seq" in file_naming
+        assert "type" in file_naming
+        assert "short_id" in file_naming
+        assert "example" in file_naming
+        assert "ordering" in file_naming
+
+    def test_langfuse_section_has_trace_file_structure(self):
+        """Section includes trace file structure documentation."""
+        config = ServerConfig(
+            langfuse_config=LangfuseConfig(
+                enabled=True,
+                pull_enabled=True,
+                pull_projects=[LangfusePullProject(public_key="pk1", secret_key="sk1")],
+            )
+        )
+        manager = Mock()
+        manager.list_golden_repos.return_value = []
+        result = _build_langfuse_section(config, manager)
+        assert result is not None
+        assert "trace_file_structure" in result
+        structure = result["trace_file_structure"]
+        assert "format" in structure
+        assert "trace" in structure
+        assert "observations" in structure
+        assert "key_fields" in structure["trace"]
+        assert "key_fields" in structure["observations"]
+
+    def test_langfuse_section_has_intel_metadata(self):
+        """Section includes intel metadata documentation."""
+        config = ServerConfig(
+            langfuse_config=LangfuseConfig(
+                enabled=True,
+                pull_enabled=True,
+                pull_projects=[LangfusePullProject(public_key="pk1", secret_key="sk1")],
+            )
+        )
+        manager = Mock()
+        manager.list_golden_repos.return_value = []
+        result = _build_langfuse_section(config, manager)
+        assert result is not None
+        assert "intel_metadata" in result
+        intel = result["intel_metadata"]
+        assert "description" in intel
+        assert "fields" in intel
+        assert "other_metadata" in intel
+        # Verify specific intel fields are documented
+        fields = intel["fields"]
+        assert "intel_frustration" in fields
+        assert "intel_specificity" in fields
+        assert "intel_task_type" in fields
+        assert "intel_quality" in fields
+        assert "intel_iteration" in fields
 
 
 class TestQuickReferenceIntegration:
