@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock, call
 
 from code_indexer.daemon.watch_manager import DaemonWatchManager
+from code_indexer.config import VectorStoreConfig
 
 
 class TestWatchHandlerSelection:
@@ -418,3 +419,164 @@ class TestFTSWatchHandlerAttachment:
                                     # Verify FTS handler attached
                                     assert hasattr(handler, "additional_handlers")
                                     assert len(handler.additional_handlers) == 1
+
+
+class TestNonGitFolderWithoutVectorStoreConfig:
+    """Test Bug #177: Non-git folders without vector_store config should not crash."""
+
+    def test_non_git_folder_without_vector_store_config_does_not_crash(self):
+        """
+        Test that non-git folders (Langfuse) without vector_store config don't crash.
+
+        Bug #177: WatchManager._create_watch_handler() crashes with
+        "missing vector_store field" when watching Langfuse folders because:
+        1. Langfuse folders don't have .code-indexer/config.yaml
+        2. config.vector_store is None
+        3. BackendFactory.create() raises ValueError at line 37
+
+        This test reproduces the bug and verifies the fix.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_path = Path(tmpdir)
+            # Non-git folder (no .git directory)
+
+            manager = DaemonWatchManager()
+
+            # Create a config with vector_store = None (reproduces Bug #177)
+            with patch("code_indexer.config.ConfigManager") as mock_config_mgr:
+                mock_config = MagicMock()
+                mock_config.codebase_dir = project_path
+                mock_config.vector_store = None  # Bug #177 trigger
+                mock_config_mgr.create_with_backtrack.return_value.get_config.return_value = (
+                    mock_config
+                )
+                mock_config_mgr.create_with_backtrack.return_value.config_path = (
+                    project_path / ".code-indexer" / "config.yaml"
+                )
+
+                with patch(
+                    "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+                ):
+                    with patch(
+                        "code_indexer.services.simple_watch_handler.SimpleWatchHandler"
+                    ) as mock_simple_handler:
+                        mock_simple_handler.return_value = MagicMock()
+
+                        # This should NOT raise ValueError
+                        # Before fix: raises "Invalid configuration: missing vector_store field"
+                        # After fix: creates default filesystem backend for non-git folders
+                        handler = manager._create_watch_handler(
+                            str(project_path), mock_config
+                        )
+
+                        # Verify SimpleWatchHandler was created successfully
+                        assert handler is not None
+                        mock_simple_handler.assert_called_once()
+
+    def test_non_git_folder_creates_default_filesystem_backend(self):
+        """
+        Test that non-git folders without vector_store get default filesystem backend.
+
+        The fix should initialize config.vector_store with VectorStoreConfig
+        when it's None for non-git folders, ensuring BackendFactory receives
+        a valid configuration.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_path = Path(tmpdir)
+            # Non-git folder
+
+            manager = DaemonWatchManager()
+
+            with patch("code_indexer.config.ConfigManager") as mock_config_mgr:
+                mock_config = MagicMock()
+                mock_config.codebase_dir = project_path
+                mock_config.vector_store = None  # Initially None
+                mock_config_mgr.create_with_backtrack.return_value.get_config.return_value = (
+                    mock_config
+                )
+                mock_config_mgr.create_with_backtrack.return_value.config_path = (
+                    project_path / ".code-indexer" / "config.yaml"
+                )
+
+                with patch(
+                    "code_indexer.backends.backend_factory.BackendFactory"
+                ) as mock_backend_factory:
+                    mock_backend = MagicMock()
+                    mock_backend_factory.create.return_value = mock_backend
+
+                    with patch(
+                        "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+                    ):
+                        with patch("code_indexer.services.smart_indexer.SmartIndexer"):
+                            with patch(
+                                "code_indexer.services.simple_watch_handler.SimpleWatchHandler"
+                            ) as mock_simple_handler:
+                                mock_simple_handler.return_value = MagicMock()
+
+                                # Call _create_watch_handler
+                                handler = manager._create_watch_handler(
+                                    str(project_path), mock_config
+                                )
+
+                                # Verify config.vector_store was initialized
+                                assert mock_config.vector_store is not None
+                                assert mock_config.vector_store.provider == "filesystem"
+
+                                # Verify BackendFactory.create was called with valid config
+                                mock_backend_factory.create.assert_called_once()
+
+                                # Verify handler created successfully
+                                assert handler is not None
+
+    def test_git_folder_with_vector_store_still_works(self):
+        """
+        Test that git folders with existing vector_store config still work normally.
+
+        Regression test: ensure the Bug #177 fix doesn't break existing git folder behavior.
+        Git folders with proper config.vector_store should continue to create
+        GitAwareWatchHandler as before.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_path = Path(tmpdir)
+            # Create .git directory to make it a git repo
+            git_dir = project_path / ".git"
+            git_dir.mkdir()
+
+            manager = DaemonWatchManager()
+
+            # Mock config with vector_store set (normal case)
+            with patch("code_indexer.config.ConfigManager") as mock_config_mgr:
+                mock_config = MagicMock()
+                mock_config.codebase_dir = project_path
+                mock_config.vector_store = VectorStoreConfig(provider="filesystem")
+                mock_config_mgr.create_with_backtrack.return_value.get_config.return_value = (
+                    mock_config
+                )
+                mock_config_mgr.create_with_backtrack.return_value.config_path = (
+                    project_path / ".code-indexer" / "config.yaml"
+                )
+
+                with patch("code_indexer.backends.backend_factory.BackendFactory"):
+                    with patch(
+                        "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+                    ):
+                        with patch("code_indexer.services.smart_indexer.SmartIndexer"):
+                            with patch(
+                                "code_indexer.services.git_aware_watch_handler.GitAwareWatchHandler"
+                            ) as mock_git_handler:
+                                mock_git_handler.return_value = MagicMock()
+
+                                with patch(
+                                    "code_indexer.services.git_topology_service.GitTopologyService"
+                                ):
+                                    with patch(
+                                        "code_indexer.services.watch_metadata.WatchMetadata"
+                                    ):
+                                        # Should create GitAwareWatchHandler successfully
+                                        handler = manager._create_watch_handler(
+                                            str(project_path), mock_config
+                                        )
+
+                                        # Verify GitAwareWatchHandler was created
+                                        mock_git_handler.assert_called_once()
+                                        assert handler is not None

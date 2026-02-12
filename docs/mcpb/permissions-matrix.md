@@ -1,6 +1,6 @@
 # MCP Capabilities Permissions Matrix
 
-Last Updated: 2025-12-27
+Last Updated: 2026-02-12
 
 ## Overview
 
@@ -23,12 +23,14 @@ Source: `src/code_indexer/server/auth/user_manager.py:7-28`
 | Permission | Description | Tool Count |
 |------------|-------------|------------|
 | `public` | No authentication required | 1 |
-| `query_repos` | Read-only repository access (search, browse, git history) | 36 |
-| `activate_repos` | Repository activation and management | 10 |
-| `manage_golden_repos` | Golden repository administration | 5 |
-| `manage_users` | User account management | 2 |
+| `query_repos` | Read-only repository access (search, browse, git history) | ~100 |
+| `activate_repos` | Repository activation and management | ~15 |
+| `manage_golden_repos` | Golden repository administration | ~10 |
+| `manage_users` | User account management | ~5 |
 
-Total MCP Tools: 54
+Total MCP Tools: 131
+
+Note: Tool counts per permission are approximate. Tools are loaded dynamically from markdown files in `src/code_indexer/server/mcp/tool_docs/`.
 
 ## Complete Tool-Permission-Role Matrix
 
@@ -40,7 +42,7 @@ Total MCP Tools: 54
 
 ### Query Tools (All Users)
 
-All authenticated users (ADMIN, POWER_USER, NORMAL_USER) have access to these 36 tools:
+All authenticated users (ADMIN, POWER_USER, NORMAL_USER) have access to the majority of tools (approximately 100+ tools with `query_repos` permission). Key examples include:
 
 | Tool | Category | Description |
 |------|----------|-------------|
@@ -79,10 +81,11 @@ All authenticated users (ADMIN, POWER_USER, NORMAL_USER) have access to these 36
 | `scip_callchain` | SCIP | Find call chains between symbols |
 | `scip_context` | SCIP | Get smart context for symbol |
 | `cidx_quick_reference` | Documentation | Quick reference guide for CIDX capabilities |
+| ... | ... | Additional query tools (see tool_docs/ for complete list) |
 
 ### Activation Tools (POWER_USER and ADMIN)
 
-POWER_USER and ADMIN have access to these 10 repository activation tools:
+POWER_USER and ADMIN have access to repository activation and management tools (approximately 15+ tools). Key examples include:
 
 | Tool | Description |
 |------|-------------|
@@ -96,10 +99,11 @@ POWER_USER and ADMIN have access to these 10 repository activation tools:
 | `cidx_ssh_key_delete` | Delete SSH key |
 | `cidx_ssh_key_show_public` | Show public key content |
 | `cidx_ssh_key_assign_host` | Assign SSH key to host |
+| ... | ... | Additional activation tools (see tool_docs/ for complete list) |
 
 ### Golden Repo Administration (ADMIN Only)
 
-ADMIN has exclusive access to these 5 golden repository management tools:
+ADMIN has exclusive access to golden repository management tools (approximately 10+ tools). Key examples include:
 
 | Tool | Description |
 |------|-------------|
@@ -108,33 +112,37 @@ ADMIN has exclusive access to these 5 golden repository management tools:
 | `refresh_golden_repo` | Refresh golden repository |
 | `add_golden_repo_index` | Add index to golden repository |
 | `set_global_config` | Update global configuration |
+| ... | ... | Additional admin tools (see tool_docs/ for complete list) |
 
 ### User Management (ADMIN Only)
 
-ADMIN has exclusive access to these 2 user management tools:
+ADMIN has exclusive access to user management tools (approximately 5+ tools). Key examples include:
 
 | Tool | Description |
 |------|-------------|
 | `list_users` | List all users and their roles |
 | `create_user` | Create new user account |
+| ... | ... | Additional user management tools (see tool_docs/ for complete list) |
 
 ## Tool Count by Role
 
 | Role | Tool Count | Breakdown |
 |------|------------|-----------|
-| **ADMIN** | 54 | 1 public + 36 query + 10 activate + 5 golden_repos + 2 users |
-| **POWER_USER** | 47 | 1 public + 36 query + 10 activate |
-| **NORMAL_USER** | 37 | 1 public + 36 query |
+| **ADMIN** | 131 | All tools (1 public + ~100 query + ~15 activate + ~10 golden_repos + ~5 users) |
+| **POWER_USER** | ~116 | 1 public + ~100 query + ~15 activate |
+| **NORMAL_USER** | ~101 | 1 public + ~100 query |
+
+Note: Tool counts are approximate. Exact counts depend on the current set of tools loaded dynamically from `src/code_indexer/server/mcp/tool_docs/`.
 
 ## Permission Checking
 
 Permission checks occur at two levels:
 
 1. **Tool Discovery** (`tools/list`): Users only see tools they have permission to use
-   - Source: `src/code_indexer/server/mcp/handlers.py:4067-4071`
+   - Source: Permission filtering in MCP handlers based on user role
 
 2. **Tool Invocation** (`tools/call`): Permission verified before execution
-   - Source: `src/code_indexer/server/mcp/protocol.py:169-173`
+   - Source: Permission checking in MCP protocol implementation
 
 Error response when permission denied:
 ```json
@@ -180,7 +188,8 @@ Error response when permission denied:
 
 ## Version Information
 
-- Last Updated: 2025-12-27
-- CIDX Version: 8.1.0
-- Total MCP Tools: 54
+- Last Updated: 2026-02-12
+- CIDX Version: 8.13.0
+- Total MCP Tools: 131
 - Permission Model: Role-Based Access Control (RBAC)
+- Tool Source: Dynamic loading from src/code_indexer/server/mcp/tool_docs/

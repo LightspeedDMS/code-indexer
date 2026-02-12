@@ -15,7 +15,7 @@ cidx setup-global-registry --test-access --quiet  # Test registry access
 cidx init                               # Initialize with default settings
 cidx init --embedding-provider voyage-ai  # Use VoyageAI
 cidx init --max-file-size 2000000       # Set 2MB file size limit
-cidx init --setup-global-registry       # Init + setup registry (legacy)
+cidx init --voyage-model voyage-3-large # Specify VoyageAI model
 cidx init --create-override-file        # Create .code-indexer-override.yaml
 ```
 
@@ -42,7 +42,7 @@ cidx index --reconcile          # Reconcile disk vs database
 cidx index --detect-deletions   # Handle deleted files
 cidx index --batch-size 25      # Custom batch size
 cidx index --files-count-to-process 100  # Limit file count
-cidx index --threads 8          # Custom thread count (configure in config.json)
+cidx index -p 4                 # Use 4 parallel threads for vector calculations
 
 # Git history indexing
 cidx index --index-commits              # Index git history
@@ -269,13 +269,12 @@ cidx clean-data --all-projects  # Clear all projects data
 cidx uninstall                  # Remove current project completely
 cidx uninstall --confirm        # Skip confirmation prompt
 cidx uninstall --wipe-all       # DANGEROUS: Complete system wipe
-
-# Migration and maintenance
-cidx clean-legacy               # Migrate from legacy containers
-cidx optimize                   # Optimize vector database
-cidx force-flush                # Force flush to disk (deprecated)
-cidx force-flush --collection mycoll  # Flush specific collection
 ```
+
+Note: The following commands have been removed in v8.0+ (FilesystemVectorStore does not require them):
+- `clean-legacy` - No longer needed (legacy container migration)
+- `optimize` - Not needed for FilesystemVectorStore
+- `force-flush` - Not needed for FilesystemVectorStore
 
 ### Configuration Commands
 

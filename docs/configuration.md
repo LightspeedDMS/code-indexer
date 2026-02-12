@@ -82,14 +82,15 @@ echo $VOYAGE_API_KEY
 
 ### Supported Models
 
-CIDX automatically uses VoyageAI models:
+CIDX supports multiple VoyageAI models:
 
 | Model | Dimensions | Use Case |
 |-------|------------|----------|
 | **voyage-code-3** | 1024 | Default, optimized for code |
-| **voyage-large-2** | 1536 | Highest quality |
+| **voyage-3-large** | 1024 | State-of-the-art general-purpose model |
+| **voyage-large-2-instruct** | 1536 | Instruction-tuned large model |
 
-**Model Selection**: Configured in code, not user-selectable in v8.0+. Default is `voyage-code-3`.
+**Model Selection**: User-selectable via `--voyage-model` flag during `cidx init`. Default is `voyage-code-3`.
 
 ## Configuration File
 

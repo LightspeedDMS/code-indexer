@@ -62,14 +62,13 @@ This searches only the `auth-service` repository for precise results.
 
 ### Reserved Names
 
-The following names are reserved for the meta-directory:
+The following name is reserved for the meta-directory:
 
 - `cidx-meta-global` - Primary discovery endpoint
-- `cidx-meta` - Alias for convenience
 
-**These names cannot be used for user repositories.**
+**This name cannot be used for user repositories.**
 
-Attempting to register a repo with these names will fail:
+Attempting to register a repo with this name will fail:
 
 ```bash
 Error: Cannot register repo with name 'cidx-meta-global':
@@ -325,9 +324,8 @@ Search within a specific repository discovered in step 1.
 
 **Error**: `Cannot register repo with name 'cidx-meta-global': This name is reserved...`
 
-**Solution**: Choose a different alias name. Reserved names:
+**Solution**: Choose a different alias name. Reserved name:
 - `cidx-meta-global`
-- `cidx-meta`
 
 ### Stale Catalog
 

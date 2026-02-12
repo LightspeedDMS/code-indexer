@@ -99,40 +99,13 @@ outputSchema:
   - chains
 ---
 
-TL;DR: [SCIP Code Intelligence] Trace all execution paths from entry point (from_symbol) to target function (to_symbol). 
+Trace the call chain between two symbols, showing how execution flows from caller to callee through intermediate functions.
 
-SUPPORTED SYMBOL FORMATS:
-- Simple names: "chat", "invoke", "CustomChain", "BaseClient"
-- Class#method: "CustomChain#chat", "BaseClient#invoke"
-- Full SCIP identifiers: "scip-python python . hash `module`/Class#method()."
+Pass simple symbol names (e.g., 'UserService'). Fuzzy match by default ('User' matches 'UserService', 'UserManager'). Use exact=true for precise match. Requires SCIP indexes (cidx scip generate).
 
+KNOWN LIMITATION: FastAPI route decorators (@app.get, @router.post) are not tracked as call sites. Call chains through FastAPI endpoints may show gaps. Use scip_references to find route handler registrations instead.
 
-USAGE EXAMPLES:
-- Method to method: from_symbol="chat", to_symbol="invoke"
-- Class to class: from_symbol="CustomChain", to_symbol="BaseClient"
-- Within class: from_symbol="CustomChain#chat", to_symbol="CustomChain#_generate_sql"
+USE FOR: Tracing execution paths, understanding how A calls B (directly or transitively), debugging call flows.
+NOT FOR: Finding all usages (scip_references), impact analysis of changes (scip_impact).
 
-
-KNOWN LIMITATIONS:
-- May not capture FastAPI endpoint decorators (@app.post, @app.get)
-- Factory functions may not show call chains to instantiated methods
-- Cross-repository search: omit repository_alias to search all repositories
-
-
-RESPONSE INCLUDES:
-- path: List of symbol names in execution order
-- length: Number of hops in the chain
-- has_cycle: Boolean indicating if path contains cycles
-- diagnostic: Helpful message when no chains found
-- scip_files_searched: Number of SCIP indexes searched
-- repository_filter: Which repository was searched
-
-
-TIPS FOR BEST RESULTS:
-- Start with simple class or method names
-- Use repository_alias to limit search scope
-- Increase max_depth if chains seem incomplete (max: 10)
-- Check diagnostic message if 0 chains found
-
-
-REQUIRES: SCIP indexes must be generated via 'cidx scip generate' before querying. Check .code-indexer/scip/ directory for .scip files. RELATED TOOLS: scip_impact (full dependency tree), scip_dependencies (what symbol depends on), scip_dependents (what depends on symbol), scip_context (get curated file list). EXAMPLE: {"from_symbol": "handle_request", "to_symbol": "DatabaseManager", "max_depth": 10} returns {"from_symbol": "handle_request", "to_symbol": "DatabaseManager", "total_chains_found": 2, "chains": [{"length": 3, "path": [{"symbol": "handle_request", "file_path": "src/api/handler.py", "line": 10, "column": 0, "call_type": "call"}, {"symbol": "UserService.authenticate", "file_path": "src/services/user.py", "line": 25, "column": 4, "call_type": "call"}, {"symbol": "DatabaseManager.query", "file_path": "src/database/manager.py", "line": 50, "column": 8, "call_type": "call"}]}]}
+EXAMPLE: scip_callchain(from_symbol='handle_request', to_symbol='execute_query') -> [{caller, callee, file, line}, ...]

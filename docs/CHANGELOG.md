@@ -1,5 +1,275 @@
 # Code Indexer Release Notes
 
+## Version 8.13.1 (2026-02-12) - Documentation Staleness Audit
+
+### Documentation
+- Comprehensive staleness audit of 28 documentation files against source code
+- Fixed 22 stale documents with verified corrections
+- Updated version references, tool counts (75/78 to 131), model names across all docs
+- Rewrote error-codes.md from "0.37% PoC" to "93.7% production deployment"
+- Added missing v8.0-v8.13 entries to CHANGELOG with 30+ date corrections
+- Fixed operating-modes.md "three modes" to "two operational modes"
+- Updated OIDC docs with correct DB filename (oauth.db) and groups config
+- Removed references to deleted BranchAwareIndexer, Qdrant, non-existent CLI flags
+- Updated all mcpb/ docs for dynamic tool loading architecture
+
+---
+
+## Version 8.13.0 (2026-02-12) - Langfuse Sequential Trace Naming & FTS Watch Handler
+
+### Langfuse Integration Enhancements
+- Sequential trace naming for better organization in Langfuse UI
+- Staging directory support for trace processing
+- FTS watch handler for Langfuse trace folders
+- Improved trace file detection and sync logging
+
+---
+
+## Version 8.12.2 (2026-02-10) - Golden Repos SQLite Source of Truth Fix
+
+### Bug Fixes
+- Fixed golden repos to read from SQLite source of truth instead of stale in-memory dict
+- Eliminated race conditions in golden repo metadata access
+- Improved reliability of golden repo operations
+
+---
+
+## Version 8.12.1 (2026-02-09) - Langfuse Trace File Detection
+
+### Bug Fixes
+- Detect missing trace files and add comprehensive sync logging
+- Enhanced error handling for Langfuse trace synchronization
+- Improved observability of trace sync operations
+
+---
+
+## Version 8.12.0 (2026-02-08) - Metadata.json Elimination
+
+### Storage Architecture Refactor
+- Eliminated metadata.json - SQLite is now single source of truth
+- Simplified storage architecture with reduced file system complexity
+- Improved data consistency and reliability
+- Removed redundant metadata storage layer
+
+---
+
+## Version 8.11.3 (2026-02-05) - Langfuse Re-indexing Fix
+
+### Bug Fixes
+- Re-index Langfuse folders with missing or empty CIDX indexes
+- Automatic detection and repair of incomplete Langfuse indexing
+- Improved robustness of Langfuse integration
+
+---
+
+## Version 8.11.2 (2026-02-04) - Langfuse Search Regression Fix
+
+### Bug Fixes
+- Fixed search regression causing empty file_path and content in Langfuse results
+- Restored proper metadata in Langfuse trace search results
+- Improved search result quality for Langfuse traces
+
+---
+
+## Version 8.11.1 (2026-02-03) - Missing Import Fix
+
+### Bug Fixes
+- Fixed missing VOYAGE_MULTIMODAL_MODEL import in refresh scheduler
+- Resolved startup errors in golden repo refresh operations
+
+---
+
+## Version 8.11.0 (2026-02-02) - Local Repository Registration
+
+### New Features
+- Added register_local_repo() to GoldenRepoManager
+- Support for registering local filesystem repositories as golden repos
+- Enhanced flexibility for repository management workflows
+
+---
+
+## Version 8.10.0 (2026-01-30) - Langfuse Trace Sync
+
+### Major Feature: Langfuse Integration
+- Pull and index AI conversation traces from Langfuse
+- Semantic search across Claude/ChatGPT conversation history
+- Overlap window sync strategy for APIs lacking incremental sync
+- Background sync with 2-hour overlap window and SHA256 content hash deduplication
+- Non-blocking sync trigger with threading.Lock() concurrency guard
+- Watch handler for Langfuse trace folders
+- Dashboard metrics showing Langfuse trace counts and sync health
+
+### Infrastructure
+- langfuse_trace_sync_service.py - Background sync with overlap window
+- langfuse_api_client.py - REST API client (not SDK)
+- langfuse_watch_integration.py - Watch handler for Langfuse folders
+- simple_watch_handler.py - Non-git folder file watching
+
+---
+
+## Version 8.9.x (2026-01-25 to 2026-01-28) - Auto-Updater Improvements
+
+### Version 8.9.18
+- Fallback clone approach for custom hnswlib
+
+### Version 8.9.17
+- Pattern matching for lock file errors in auto-update
+
+### Version 8.9.16
+- Resilient submodule update with cleanup and retry
+
+### Version 8.9.15
+- Only initialize required submodule
+
+### Version 8.9.13
+- Fixed auto-updater status files moved from /tmp to /var/lib for PrivateTmp isolation
+
+### Version 8.9.11
+- Remove sudo from git commands - service runs as root
+
+### Version 8.9.10
+- Add sudo to git_pull in auto-updater
+
+### Version 8.9.7
+- Auto-updater self-restart mechanism
+
+### Version 8.9.0
+- Activated Repository Management UI with full feature parity
+- REST endpoints for activated repo operations (indexes, reindex, health, sync, branches)
+
+---
+
+## Version 8.8.x (2025-12-15 to 2026-01-24) - Production Hardening & Features
+
+### Version 8.8.39 (Story #160)
+- Activated Repository Management UI - Feature Parity
+- 7 REST endpoints integrated with consistent visual patterns
+- Index management, health checks, branch switching, sync operations
+
+### Version 8.8.30 (Bug #139)
+- Fixed regex_search validation before omni-search routing
+
+### Version 8.8.29 (Story #70)
+- Auto-Refresh Index Reconciliation - Sync Registry with Filesystem
+
+### Version 8.8.28 (Bug #130)
+- Input validation for regex_search include/exclude patterns
+
+### Version 8.8.22
+- Dynamic drain timeout calculation from server config
+
+### Version 8.8.20
+- Implemented three-tier branching CI/CD workflow (development → staging → master)
+
+### Version 8.8.15
+- Scan status detection and orphaned scan cleanup
+
+### Version 8.8.13
+- Self-monitoring codebase exploration to prevent false positive bug reports
+
+### Version 8.8.10
+- Auto-updater idempotently adds CIDX_REPO_ROOT to service file
+
+### Version 8.8.0 (Epic #61)
+- Multimodal Image Vectorization - Complete implementation
+
+---
+
+## Version 8.7.x (2025-12-01 to 2025-12-14) - SSO & Configuration
+
+### Version 8.7.0
+- SSO group mapping implementation
+- Enhanced authentication and authorization
+
+---
+
+## Version 8.6.x (2025-11-20 to 2025-11-30) - API Metrics & Multi-Repo Search
+
+### Version 8.6.17
+- Log level config setting now actually controls SQLite log handler
+
+### Version 8.6.16
+- Remove 27 dead config settings from Web UI
+
+### Version 8.6.13
+- Display server version in Dashboard Server Status card
+
+### Version 8.6.12
+- SQLite-backed API metrics with multi-repo search tracking
+
+### Version 8.6.11
+- Multi-repo search UX improvements and content bug fix
+
+### Version 8.6.10
+- Global repository lookup in search services - Epic #47 complete
+
+### Version 8.6.9
+- SCIP Query API Consolidation - Epic #37 complete
+
+### Version 8.6.7
+- Configurable service display name with a.k.a. reference
+
+### Version 8.6.6
+- Auto-discovery branch selection with credentials support
+
+### Version 8.6.5
+- API Key Management service and test infrastructure fixes
+
+### Version 8.6.4
+- SCIP Audit database initialization on fresh install
+
+---
+
+## Version 8.4.46 (2025-11-15) - MCP Tool Documentation
+
+### Documentation
+- Complete MCP tool documentation standardization
+- Externalized tool docs to markdown files in tool_docs/ directory
+- 128+ markdown files with structured YAML frontmatter
+
+---
+
+## Version 8.3.0 (2025-11-10) - Token Refresh CLI
+
+### New Features
+- Added cidx-token-refresh CLI command for automatic token refresh
+- Improved authentication workflow for MCP clients
+
+---
+
+## Version 8.2.7 (2025-11-08) - MCPB GLIBC Compatibility
+
+### Bug Fixes
+- Build Linux binaries on ubuntu-20.04 for GLIBC 2.31 compatibility
+- Improved portability across Linux distributions
+
+---
+
+## Version 8.1.0 (2025-11-05) - Legacy Migration
+
+### Automatic Migration
+- Automatic detection and migration of legacy indexing_progress.json files
+- Renamed 'qdrant_point_ids' to 'vector_point_ids' from v8.0 refactor
+- Zero user intervention required - transparent upgrade experience
+- Graceful fallback for corrupted files
+
+---
+
+## Version 8.0.0 (2025-11-01) - Major Architecture Changes
+
+### Breaking Changes
+- Major refactoring of vector storage architecture
+- Transition from Qdrant-specific naming to generic vector backend terminology
+- Field renames: qdrant_point_ids → vector_point_ids
+- Enhanced filesystem-based vector storage with HNSW indexing
+
+### Infrastructure
+- Container-free architecture with filesystem vector storage
+- Improved performance and simplified deployment
+- Zero external dependencies for vector storage
+
+---
+
 ## Version 7.4.0 (2024-11-19) - Multi-User Daemon & MCP Enhancements
 
 ### Multi-User Daemon Support
@@ -38,7 +308,7 @@
 
 ---
 
-## Version 7.2.1 (2024-10-XX) - Git History Search & Fixes
+## Version 7.2.1 (2024-10-30) - Git History Search & Fixes
 
 ### Git History Search (Temporal Indexing)
 
@@ -64,7 +334,7 @@
 
 ---
 
-## Version 7.2.0 (2025-10-XX) - Incremental HNSW & FTS Enhancements
+## Version 7.2.0 (2024-10-28) - Incremental HNSW & FTS Enhancements
 
 ### Performance Improvements
 
@@ -87,7 +357,7 @@
 
 ---
 
-## Version 7.1.0 (2025-09-XX) - Full-Text Search Support
+## Version 7.1.0 (2024-09-25) - Full-Text Search Support
 
 ### Full-Text Search (FTS)
 
@@ -107,7 +377,7 @@
 
 ---
 
-## Version 7.0.0 (2025-08-XX) - HNSW Graph-Based Indexing
+## Version 7.0.0 (2024-08-20) - HNSW Graph-Based Indexing
 
 ### HNSW Performance Revolution
 
@@ -127,7 +397,7 @@
 
 ---
 
-## Version 5.8.0 (2025-10-06) - CoW Cloning Portability Fix
+## Version 5.8.0 (2024-10-06) - CoW Cloning Portability Fix
 
 ### 🔧 Critical Database Portability Fix
 
@@ -160,7 +430,7 @@
 
 ---
 
-## Version 5.7.0 (2025-10-06) - Password Library Migration
+## Version 5.7.0 (2024-10-06) - Password Library Migration
 
 ### 🔐 Security & Compatibility Update
 
@@ -188,7 +458,7 @@
 
 ---
 
-## Version 5.0.0 (2025-09-17) - REMOTE REPOSITORY LINKING MODE & EPIC COMPLETION
+## Version 5.0.0 (2024-09-17) - REMOTE REPOSITORY LINKING MODE & EPIC COMPLETION
 
 ### 🚀 **MAJOR RELEASE: Complete Remote Code Indexing Architecture**
 
@@ -338,7 +608,7 @@ This release establishes the foundation for advanced team collaboration features
 - **Security Framework**: Complete authentication and authorization system
 - **API Platform**: RESTful API for custom integrations and tooling
 
-## Version 3.1.2.0 (2025-08-25) - MODEL-AWARE CHUNKING OPTIMIZATION
+## Version 3.1.2.0 (2024-08-25) - MODEL-AWARE CHUNKING OPTIMIZATION
 
 ### 🚀 **MAJOR IMPROVEMENT: Model-Aware Dynamic Chunking**
 
@@ -414,7 +684,7 @@ Pattern: next_start = current_start + step_size
 - **Memory Usage**: Significantly reduced memory consumption
 - **Consistency**: Linear performance scaling across all languages
 
-## Version 2.18.0.0 (2025-08-14)
+## Version 2.18.0.0 (2024-08-14)
 
 ### 🐛 **Bug Fixes and Test Suite Improvements**
 
@@ -445,7 +715,7 @@ Pattern: next_start = current_start + step_size
 - **Error reporting**: Better CLI feedback when file processing statistics are displayed
 - **Code quality**: Maintained zero warnings policy across all linting tools
 
-## Version 2.17.0.0 (2025-08-13)
+## Version 2.17.0.0 (2024-08-13)
 
 ### 🔧 New Feature: Configurable Qdrant Segment Size
 
@@ -485,7 +755,7 @@ code-indexer init --qdrant-segment-size 200
 - **MB to KB Conversion**: User-friendly MB input converted to KB internally for Qdrant
 - **Documentation**: Enhanced help text with performance trade-off explanations
 
-## Version 2.16.0.0 (2025-08-06)
+## Version 2.16.0.0 (2024-08-06)
 
 ### 🆕 New Standalone Command: setup-global-registry
 
@@ -525,7 +795,7 @@ sudo cidx init --setup-global-registry             # Setup + project init
 
 ---
 
-## Version 2.15.0.0 (2025-08-06)
+## Version 2.15.0.0 (2024-08-06)
 
 ### 🆕 Feature Enhancement: Advanced File Override System
 
@@ -554,7 +824,7 @@ sudo cidx init --setup-global-registry             # Setup + project init
 
 ---
 
-## Version 2.14.1.0 (2025-08-01)
+## Version 2.14.1.0 (2024-08-01)
 
 ### 🔧 Minor Enhancement: Integrated Registry Setup
 
@@ -572,7 +842,7 @@ sudo cidx init --setup-global-registry             # Setup + project init
 
 ---
 
-## Version 2.14.0.0 (2025-08-01)
+## Version 2.14.0.0 (2024-08-01)
 
 ### 🚀 Major Infrastructure Overhaul: GlobalPortRegistry System
 
@@ -629,7 +899,7 @@ sudo cidx init --setup-global-registry             # Setup + project init
 
 ---
 
-## Version 2.13.0.0 (2025-07-31)
+## Version 2.13.0.0 (2024-07-31)
 
 ### 🔧 Major Bug Fixes & Architecture Improvements
 
@@ -669,7 +939,7 @@ sudo cidx init --setup-global-registry             # Setup + project init
 
 ---
 
-## Version 2.12.0.0 (2025-07-30)
+## Version 2.12.0.0 (2024-07-30)
 
 ### 🎯 New Feature: Claude Prompt Integration
 
@@ -727,7 +997,7 @@ code-indexer set-claude-prompt
 - **Documentation Updated**: README and help commands reflect new functionality
 - **Linting Compliance**: Full ruff, black, and mypy compliance maintained
 
-## Version 2.11.2.0 (2025-07-29)
+## Version 2.11.2.0 (2024-07-29)
 
 ### 🐛 Critical Bug Fix: Infinite Loop in Reconcile Process
 
@@ -770,7 +1040,7 @@ if offset is not None and offset in seen_offsets:
 - **CI/CD Verification**: Complete GitHub CI pipeline validation
 - **Linting Compliance**: Full ruff, black, and mypy compliance maintained
 
-## Version 2.11.1.0 (2025-07-28)
+## Version 2.11.1.0 (2024-07-28)
 
 ### 🧪 Enhanced Test Infrastructure & Docker Utilities
 
@@ -792,7 +1062,7 @@ if offset is not None and offset in seen_offsets:
 - **Resource Contention**: Graceful test behavior during high-load scenarios
 - **Container Isolation**: Improved test cleanup without affecting other running tests
 
-## Version 2.11.0.0 (2025-07-28)
+## Version 2.11.0.0 (2024-07-28)
 
 ### 🧹 Complete Uninstall Cleanup Fix
 
@@ -814,7 +1084,7 @@ if offset is not None and offset in seen_offsets:
 - **Retry Logic**: Added exponential backoff for transient failures during high-concurrency test execution
 - **100% CI Pass Rate**: Maintained complete test pass rate while handling full-automation edge cases
 
-## Version 2.10.0.0 (2025-07-28)
+## Version 2.10.0.0 (2024-07-28)
 
 ### 🧪 Critical Test Infrastructure & Quality Assurance Fixes
 
@@ -887,7 +1157,7 @@ if self.is_git_aware():
 
 ---
 
-## Version 2.9.0.0 (2025-07-27)
+## Version 2.9.0.0 (2024-07-27)
 
 ### 🔧 Critical Container Runtime Detection Fixes
 
@@ -928,7 +1198,7 @@ if self.is_git_aware():
 
 ---
 
-## Version 2.8.0.0 (2025-07-27)
+## Version 2.8.0.0 (2024-07-27)
 
 ### 🔧 Enhanced Data Cleanup & Container Orchestration
 
@@ -957,7 +1227,7 @@ if self.is_git_aware():
 
 ---
 
-## Version 2.7.0.0 (2025-07-25)
+## Version 2.7.0.0 (2024-07-25)
 
 ### 🔧 Critical Architectural Fixes
 
@@ -988,7 +1258,7 @@ if self.is_git_aware():
 
 ---
 
-## Version 2.6.0.0 (2025-07-23)
+## Version 2.6.0.0 (2024-07-23)
 
 ### 🔧 CoW Container Isolation Fix
 
@@ -1016,7 +1286,7 @@ if self.is_git_aware():
 
 ---
 
-## Version 2.5.0.0 (2025-07-23)
+## Version 2.5.0.0 (2024-07-23)
 
 ### 🚀 Major Features & Enhancements
 
@@ -1069,7 +1339,7 @@ if self.is_git_aware():
 - **Language Detection**: Enhanced file extension mapping for comprehensive language support
 - **Error Recovery**: Universal error handling patterns across all language parsers
 
-## Version 2.2.0.0 (2025-07-16)
+## Version 2.2.0.0 (2024-07-16)
 
 ### 🚀 Major Features & Enhancements
 
@@ -1100,7 +1370,7 @@ if self.is_git_aware():
 - **Improved Error Recovery**: Parsers can extract meaningful constructs even from partially broken code
 - **Enhanced Metadata**: ERROR node extractions include proper metadata and context information
 
-## Version 2.1.1.0 (2025-01-16)
+## Version 2.1.1.0 (2024-01-16)
 
 ### 🐛 Bug Fixes
 - **Reconcile Branch Visibility**: Fixed critical bug where `--reconcile` only hid files not in current branch but failed to unhide files that exist in current branch after switching branches without watch mode
@@ -1110,7 +1380,7 @@ if self.is_git_aware():
 - **E2E Test Coverage**: Added comprehensive end-to-end test to reproduce and verify fix for reconcile branch visibility bug
 - **Test Infrastructure**: Improved test isolation and service management for branch-aware functionality
 
-## Version 2.1.0.0 (2025-01-14)
+## Version 2.1.0.0 (2024-01-14)
 
 ### 🐛 Bug Fixes
 - **Watch Mode**: Fixed issue where watch mode was re-indexing already indexed files
@@ -1185,7 +1455,7 @@ smart_indexer = SmartIndexer(config, embedding_provider, qdrant_client)
 stats = smart_indexer.smart_index(clear_existing=True)
 ```
 
-## Version 1.1.0.0 (2025-01-05)
+## Version 1.1.0.0 (2024-01-05)
 
 ### 🚀 Major Feature: Copy-on-Write (CoW) Clone Support
 
@@ -1222,7 +1492,7 @@ stats = smart_indexer.smart_index(clear_existing=True)
 - **Integration Testing**: Comprehensive test coverage for migration scenarios
 - **Performance Optimized**: Minimal overhead for non-CoW operations
 
-## Version 1.0.0.7 (2025-01-04)
+## Version 1.0.0.7 (2024-01-04)
 
 ### 🧪 Testing Infrastructure Improvements
 
@@ -1244,7 +1514,7 @@ stats = smart_indexer.smart_index(clear_existing=True)
 - **24 tests (48%)** use mocks and don't require collection registration
 - **0 tests (0%)** missing required collection registration
 
-## Version 1.0.0.2 (2025-06-26)
+## Version 1.0.0.2 (2024-06-26)
 
 ### 🐛 Critical Bug Fixes
 
@@ -1261,7 +1531,7 @@ stats = smart_indexer.smart_index(clear_existing=True)
 - **Recovery Guarantee**: Throttling states now guaranteed to recover within reasonable timeframes
 - **Concurrent Safety**: Improved handling of concurrent token consumption scenarios
 
-## Version 0.1.1.0 (2025-06-25)
+## Version 0.1.1.0 (2024-06-25)
 
 ### 🚀 Major Features & Enhancements
 

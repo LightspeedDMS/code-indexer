@@ -19,7 +19,7 @@ CIDX uses a three-tier repository topology to support multi-user code indexing w
 - Single remote: `origin` pointing to GitHub/GitLab URL
 - Updated via `git pull` or `cidx refresh`
 - Serves as CoW clone source for activated repos
-- Metadata stored in `{data_dir}/golden-repos/metadata.json`
+- Metadata stored in SQLite database (Story #702) and legacy `{data_dir}/golden-repos/metadata.json`
 
 **Creation**:
 ```python
@@ -42,7 +42,7 @@ git clone {repo_url} {clone_path}
 - SCIP call graphs (if supported language)
 - Multiple versions coexist (temporal queries)
 - Alias naming: `{repo-name}-global`
-- Registry stored in `{data_dir}/golden-repos/global_registry.json`
+- Registry stored in SQLite database (Story #702) via `GlobalReposSqliteBackend` and legacy `{data_dir}/golden-repos/global_registry.json`
 
 **Creation**:
 ```python

@@ -15,10 +15,7 @@ The project uses environment variables for API keys and other sensitive configur
 
 2. **Add your API keys** to `.env.local`:
    ```bash
-   # Anthropic Claude API Key
-   export CLAUDE_API_KEY="your-claude-api-key-here"
-   
-   # VoyageAI API Key (required for E2E tests)
+   # VoyageAI API Key (required for E2E tests and semantic search)
    export VOYAGE_API_KEY="your-voyage-api-key-here"
    ```
 
@@ -80,11 +77,6 @@ Environment variables are automatically loaded in the following scenarios:
 ## Required API Keys
 
 ### VoyageAI
-- Required for: E2E tests, VoyageAI embedding provider
+- Required for: E2E tests, VoyageAI embedding provider, semantic search
 - Get your key at: https://voyageai.com/
 - Test with: `echo $VOYAGE_API_KEY`
-
-### Claude (Anthropic)
-- Required for: Claude integration features
-- Get your key at: https://console.anthropic.com/
-- Test with: `echo $CLAUDE_API_KEY`

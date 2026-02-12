@@ -399,6 +399,16 @@ class DaemonWatchManager:
             else:
                 config_manager = ConfigManager.create_with_backtrack(Path(project_path))
 
+            # Bug #177 fix: For non-git folders (Langfuse) without vector_store config,
+            # initialize with default filesystem backend to prevent BackendFactory crash
+            if config.vector_store is None and not self._is_git_folder(project_path):
+                from code_indexer.config import VectorStoreConfig
+                logger.info(
+                    f"Non-git folder {project_path} missing vector_store config, "
+                    "initializing with default filesystem backend"
+                )
+                config.vector_store = VectorStoreConfig(provider="filesystem")
+
             # Create embedding provider and vector store
             embedding_provider = EmbeddingProviderFactory.create(config=config)
             backend = BackendFactory.create(config, Path(project_path))

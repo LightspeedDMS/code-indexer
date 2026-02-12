@@ -1,22 +1,29 @@
 # CIDX MCP Bridge API Reference
 
-Last Updated: 2025-11-26
+Last Updated: 2026-02-12
 
 ## Overview
 
-The CIDX MCP Bridge exposes 22 tools via the Model Context Protocol (MCP). All tools follow JSON-RPC 2.0 specification.
+The CIDX MCP Bridge exposes 131 tools via the Model Context Protocol (MCP). All tools follow JSON-RPC 2.0 specification.
 
-Tool registry: src/code_indexer/server/mcp/tools.py:7-503
+Tool registry: Tools are built dynamically from markdown files via the `_build_registry()` function in `src/code_indexer/server/mcp/tools.py`, loading from `src/code_indexer/server/mcp/tool_docs/*.md`
 
 ## Tool Organization
 
-Tools are organized into 5 categories:
+Tools are organized into 10 categories and loaded dynamically from markdown documentation:
 
-1. Search Tools (2 tools): search_code, discover_repositories
-2. Repository Management (6 tools): list_repositories, activate_repository, deactivate_repository, get_repository_status, sync_repository, switch_branch
-3. Files and Health (5 tools): list_files, get_file_content, browse_directory, get_branches, check_health
-4. Administration (5 tools): add_golden_repo, remove_golden_repo, refresh_golden_repo, list_users, create_user
-5. Analytics (4 tools): get_repository_statistics, get_job_statistics, get_all_repositories_status, manage_composite_repository
+1. **admin/** - User management, API keys, groups, maintenance mode
+2. **cicd/** - GitHub Actions and GitLab CI pipeline operations
+3. **files/** - File operations (create, edit, delete, trigger reindex)
+4. **git/** - Git operations (status, commit, push, pull, branch management, log, blame, diff)
+5. **guides/** - User guides and quick reference documentation
+6. **repos/** - Repository management (activate, deactivate, sync, golden repos, composite repos)
+7. **scip/** - Code intelligence (definitions, references, dependencies, call chains, impact analysis)
+8. **search/** - Code search (semantic, FTS, regex, browse, directory tree, file content)
+9. **ssh/** - SSH key management for git authentication
+10. **tracing/** - Langfuse trace management (start, end trace)
+
+**Note**: Individual tool documentation is available in markdown files at `src/code_indexer/server/mcp/tool_docs/`. Due to the large number of tools (131), refer to the markdown files for detailed parameter documentation rather than listing all tools here.
 
 ## Request Format
 
@@ -97,7 +104,7 @@ JSON-RPC standard error codes (from src/code_indexer/mcpb/protocol.py):
 
 Search code using semantic search, full-text search (FTS), or hybrid mode.
 
-Tool definition: src/code_indexer/server/mcp/tools.py:9-147
+Tool definition: src/code_indexer/server/mcp/tool_docs/search/search_code.md
 
 Required permission: `query_repos`
 
@@ -1158,7 +1165,7 @@ List available tools:
 }
 ```
 
-Response includes all 22 tools with full schemas:
+Response includes all 131 tools with full schemas:
 
 ```json
 {
@@ -1182,9 +1189,10 @@ Response includes all 22 tools with full schemas:
 
 ## Version Information
 
-- MCPB version: 8.1.0
+- MCPB version: 8.13.0
 - Entry point: cidx-bridge (from pyproject.toml:80)
 - CLI implementation: src/code_indexer/mcpb/bridge.py:187-222
-- Tool registry: src/code_indexer/server/mcp/tools.py
+- Tool registry: Dynamic loading via src/code_indexer/server/mcp/tools.py from tool_docs/*.md
+- Tool documentation: src/code_indexer/server/mcp/tool_docs/ (131 markdown files)
 
-Last Updated: 2025-11-26
+Last Updated: 2026-02-12

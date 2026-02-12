@@ -351,7 +351,7 @@ development → staging → master
 
 ## 3. Architecture Details
 
-**Full docs**: `/docs/v5.0.0-architecture-summary.md`, `/docs/v7.2.0-architecture-incremental-updates.md`
+**Full docs**: `/docs/architecture.md`
 
 ### Vector Storage (FilesystemVectorStore)
 
@@ -363,8 +363,7 @@ development → staging → master
 
 ### Key Topics (See Docs)
 
-- Incremental HNSW updates, change tracking (`v7.2.0-architecture-incremental-updates.md`)
-- HNSW graph-based indexing, git-aware strategies (`architecture.md`)
+- Incremental HNSW updates, change tracking, git-aware strategies (`architecture.md`)
 
 ---
 
@@ -434,7 +433,7 @@ After feature: `./lint.sh` → verify README.md → verify `--help` → fix → 
 src/code_indexer/__init__.py:9    # __version__ (source of truth)
 README.md:5                       # Version badge
 CHANGELOG.md                      # New entry at top
-docs/architecture.md:301          # Server response example
+docs/architecture.md:435          # Server response example
 docs/query-guide.md:739,883       # Version references
 ```
 
@@ -769,5 +768,5 @@ curl -s -X POST http://localhost:8000/mcp \
 
 ## 12. Where to Find More
 
-- **Architecture**: `/docs/v5.0.0-architecture-summary.md`, `/docs/v7.2.0-architecture-incremental-updates.md`
+- **Architecture**: `/docs/architecture.md`
 - **This file**: Day-to-day development essentials and mode-specific context

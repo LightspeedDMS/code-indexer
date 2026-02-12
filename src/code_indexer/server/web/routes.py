@@ -6079,6 +6079,11 @@ async def update_langfuse_pull_config(
             "pull_trace_age_days",
             form_data.get("pull_trace_age_days", "30"),
         )
+        config_service.update_setting(
+            "langfuse",
+            "pull_max_concurrent_observations",
+            form_data.get("pull_max_concurrent_observations", "5"),
+        )
 
         # Update projects from JSON
         projects_json = form_data.get("pull_projects", "[]")

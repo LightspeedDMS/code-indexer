@@ -20,8 +20,8 @@ Complete guide to connecting Claude Desktop to CIDX server using the MCP Bridge.
 
 **Key Features**:
 - **MCP Protocol 2024-11-05** - Standard Model Context Protocol implementation
-- **Credential-Based Authentication** - Secure encrypted credential storage with automatic token refresh
-- **75 MCP Tools** - Comprehensive code search, navigation, and git operations
+- **Bearer Token Authentication** - Secure JWT-based authentication with automatic token refresh
+- **131 MCP Tools** - Comprehensive code search, navigation, and git operations
 - **Remote Access** - Query centralized team code repositories
 - **Permission Controls** - Role-based access (admin, power_user, normal_user)
 
@@ -90,7 +90,7 @@ python3 -m code_indexer.mcpb --version
 
 **Via pipx** (isolated environment):
 ```bash
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.0.0
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.13.0
 python3 -m code_indexer.mcpb --version
 ```
 
@@ -254,64 +254,26 @@ python3 -m code_indexer.mcpb --setup-credentials
 
 ## Available Tools
 
-MCP Bridge exposes **75 tools** to Claude Desktop.
+MCP Bridge exposes **131 tools** to Claude Desktop.
 
 ### Tool Categories
 
-**Search & Discovery** (5 tools):
-- `search_code` - Semantic/FTS/temporal search
-- `regex_search` - Pattern matching without indexes
-- `browse_directory` - List files with metadata
-- `list_files` - Flat file listing
-- `get_file_content` - Read file contents
+Tools are organized into 10 categories and loaded dynamically from markdown files in `src/code_indexer/server/mcp/tool_docs/`:
 
-**SCIP Code Intelligence** (7 tools):
-- `scip_definition` - Find symbol definitions
-- `scip_references` - Find symbol usages
-- `scip_dependencies` - Find dependencies
-- `scip_dependents` - Find dependents
-- `scip_impact` - Impact analysis
-- `scip_callchain` - Trace call chains
-- `scip_context` - Get symbol context
+- **admin/** - User management, API keys, groups, maintenance mode
+- **cicd/** - GitHub Actions and GitLab CI pipeline operations
+- **files/** - File operations (create, edit, delete, trigger reindex)
+- **git/** - Git operations (status, commit, push, pull, branch management, log, blame, diff)
+- **guides/** - User guides and quick reference documentation
+- **repos/** - Repository management (activate, deactivate, sync, golden repos, composite repos)
+- **scip/** - Code intelligence (definitions, references, dependencies, call chains, impact analysis)
+- **search/** - Code search (semantic, FTS, regex, browse, directory tree, file content)
+- **ssh/** - SSH key management for git authentication
+- **tracing/** - Langfuse trace management (start, end trace)
 
-**Git History & Exploration** (9 tools):
-- `git_log` - Commit history
-- `git_show_commit` - Commit details
-- `git_diff` - Compare revisions
-- `git_blame` - Line attribution
-- `git_file_at_revision` - View file at commit
-- `git_file_history` - File commit history
-- `git_search_commits` - Search commit messages
-- `git_search_diffs` - Search code changes
-- `directory_tree` - Visual directory structure
+**Total**: 131 tools dynamically loaded from markdown documentation
 
-**Git Operations** (15 tools):
-- `git_status`, `git_stage`, `git_unstage`, `git_commit`, `git_push`, `git_pull`, `git_fetch`
-- `git_reset`, `git_clean`, `git_merge_abort`, `git_checkout_file`
-- `git_branch_list`, `git_branch_create`, `git_branch_switch`, `git_branch_delete`
-
-**File CRUD** (4 tools):
-- `create_file` - Create new file
-- `edit_file` - Edit existing file
-- `delete_file` - Delete file
-- `trigger_reindex` - Manual re-indexing
-
-**Repository Management** (15 tools):
-- `list_repositories`, `list_global_repos`, `activate_repository`, `deactivate_repository`
-- `get_repository_status`, `global_repo_status`, `sync_repository`, `switch_branch`
-- `get_branches`, `manage_composite_repository`
-- `add_golden_repo`, `remove_golden_repo`, `refresh_golden_repo`
-- `add_golden_repo_index`, `get_golden_repo_indexes`
-
-**System & Admin** (20 tools):
-- User management (5 tools)
-- SSH key management (6 tools)
-- Configuration (4 tools)
-- Status/health (5 tools)
-
-**Total**: 75 tools across 7 categories
-
-For complete tool reference, see [AI Integration Guide](../ai-integration.md).
+For complete tool reference, see individual tool documentation in `src/code_indexer/server/mcp/tool_docs/`.
 
 ## Usage Examples
 

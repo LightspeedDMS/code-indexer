@@ -8,40 +8,32 @@ inputSchema:
   properties:
     repository_alias:
       type: string
-      description: Repository alias to browse. Use '-global' suffix aliases (e.g., 'myproject-global') for persistent global
-        repositories, or activated repository aliases without suffix. Use list_repositories to discover available aliases.
+      description: Repository alias to browse.
     path:
       type: string
-      description: 'Subdirectory path within the repository to browse (relative to repository root). Examples: ''src'', ''src/components'',
-        ''tests/unit''. Omit or use empty string to browse from repository root.'
+      description: Subdirectory path to browse (relative to repo root).
     recursive:
       type: boolean
       description: When true (default), returns all files in directory and subdirectories. When false, returns only immediate
-        children of the specified directory (single level). Use recursive=false to explore directory structure level by level.
+        children (single level).
       default: true
     path_pattern:
       type: string
-      description: 'Glob pattern to filter files. Combines with ''path'' parameter (pattern applied within the specified directory).
-        Supports: * (any chars), ** (any path segments), ? (single char), [seq] (char class). Examples: ''*.py'' (Python files),
-        ''test_*.py'' (test files), ''**/*.ts'' (TypeScript at any depth), ''src/**/index.js'' (index files under src).'
+      description: 'Glob pattern to filter files. Supports: * (any chars), ** (any path segments), ? (single char), [seq] (char
+        class).'
     language:
       type: string
-      description: 'Filter by programming language. Supported languages: c, cpp, csharp, dart, go, java, javascript, kotlin,
-        php, python, ruby, rust, scala, swift, typescript, css, html, vue, markdown, xml, json, yaml, bash, shell, and more.
-        Can use friendly names or file extensions (py, js, ts, etc.).'
+      description: 'Filter by programming language name or extension (e.g., ''python'', ''py'', ''js'', ''typescript'').'
     limit:
       type: integer
-      description: 'Maximum files to return. IMPORTANT: Start with limit=50-100 to conserve context tokens. Each file entry
-        consumes tokens for path, size, and metadata. Only increase if you need comprehensive listing. Default 500 is high
-        for most exploration tasks.'
+      description: 'Maximum files to return. IMPORTANT: Start with 50-100 to conserve context tokens. Default 500 is high for
+        most tasks.'
       default: 500
       minimum: 1
       maximum: 500
     sort_by:
       type: string
-      description: 'Sort order for results. Options: ''path'' (alphabetical by file path - default, good for exploring structure),
-        ''size'' (by file size - useful for finding large files), ''modified_at'' (by modification time - useful for finding
-        recently changed files).'
+      description: 'Sort order: ''path'' (alphabetical), ''size'' (by file size), ''modified_at'' (by modification time).'
       enum:
       - path
       - size

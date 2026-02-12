@@ -103,6 +103,7 @@ class PayloadCache:
         self.config = config
         self._cleanup_thread: Optional[threading.Thread] = None
         self._stop_cleanup = threading.Event()
+        self._initialized = threading.Event()  # Bug #178: Gate to prevent race
 
     def initialize(self) -> None:
         """Initialize database with WAL mode and create schema.
@@ -142,6 +143,9 @@ class PayloadCache:
         finally:
             conn.close()
 
+        # Bug #178: Signal that initialization is complete
+        self._initialized.set()
+
     def close(self) -> None:
         """Close the cache and cleanup resources.
 
@@ -172,7 +176,14 @@ class PayloadCache:
         """Background cleanup loop running in separate thread.
 
         Story #50: Simplified since cleanup_expired() is now sync.
+        Bug #178: Wait for initialization to prevent race condition.
         """
+        # Wait for initialization before starting cleanup
+        # Check stop event periodically to allow clean exit if stopped before init
+        while not self._initialized.is_set():
+            if self._stop_cleanup.wait(timeout=0.1):
+                return  # Stop requested before initialization completed
+
         while not self._stop_cleanup.wait(self.config.cleanup_interval_seconds):
             try:
                 self.cleanup_expired()

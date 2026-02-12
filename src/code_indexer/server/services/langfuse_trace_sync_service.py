@@ -15,6 +15,8 @@ import shutil
 import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -25,6 +27,23 @@ from ..utils.config_manager import LangfuseConfig, LangfusePullProject
 logger = logging.getLogger(__name__)
 
 OVERLAP_WINDOW_HOURS = 2
+
+
+@dataclass
+class ProcessTraceResult:
+    """Result of processing a single trace (Story #174)."""
+
+    trace_id: str
+    # Metrics deltas (to be accumulated by main thread)
+    metric_checked: int = 1  # Always 1 per trace
+    metric_new: int = 0
+    metric_updated: int = 0
+    metric_unchanged: int = 0
+    metric_error: int = 0
+    # Hash update (to be applied by main thread)
+    hash_update: Optional[Dict[str, Any]] = None
+    # Rename info (to be queued for Phase 2 finalize)
+    rename_info: Optional[Tuple[str, str, str, str, str, str]] = None
 
 
 class SyncMetrics:
@@ -114,7 +133,7 @@ class LangfuseTraceSyncService:
 
         def _do_sync():
             try:
-                self.sync_all_projects()
+                self._do_sync_all_projects()
             finally:
                 self._sync_lock.release()
 
@@ -122,8 +141,13 @@ class LangfuseTraceSyncService:
         logger.info("Manual Langfuse sync triggered")
         return True
 
-    def sync_all_projects(self) -> None:
-        """Sync all configured projects. Called by background loop."""
+    def _do_sync_all_projects(self) -> None:
+        """
+        Internal sync logic without lock acquisition.
+
+        Called by sync_all_projects() and _sync_loop() after they acquire _sync_lock.
+        This method contains the actual sync work and does NOT acquire the lock itself.
+        """
         config = self._config_getter()
         langfuse = config.langfuse_config
         if not langfuse or not langfuse.pull_enabled:
@@ -132,9 +156,10 @@ class LangfuseTraceSyncService:
         logger.info(f"Syncing {len(langfuse.pull_projects)} Langfuse project(s)")
 
         host = langfuse.pull_host
+        max_concurrent = langfuse.pull_max_concurrent_observations
         for project_creds in langfuse.pull_projects:
             try:
-                self.sync_project(host, project_creds, langfuse.pull_trace_age_days)
+                self.sync_project(host, project_creds, langfuse.pull_trace_age_days, max_concurrent)
             except Exception as e:
                 logger.error(f"Error syncing project: {e}", exc_info=True)
 
@@ -145,10 +170,22 @@ class LangfuseTraceSyncService:
             except Exception as e:
                 logger.warning(f"Post-sync callback failed: {e}")
 
+    def sync_all_projects(self) -> None:
+        """Sync all configured projects. Called by background loop and manual trigger."""
+        # AC4: Guard against concurrent syncs (Story #174)
+        if not self._sync_lock.acquire(blocking=False):
+            logger.warning("Sync already in progress, skipping")
+            return
+
+        try:
+            self._do_sync_all_projects()
+        finally:
+            self._sync_lock.release()
+
     def sync_project(
-        self, host: str, creds: LangfusePullProject, trace_age_days: int
+        self, host: str, creds: LangfusePullProject, trace_age_days: int, max_concurrent_observations: int = 5
     ) -> None:
-        """Sync a single project."""
+        """Sync a single project (Story #174: parallel observation fetches)."""
         # 1. Create API client
         api_client = LangfuseApiClient(host, creds)
 
@@ -179,7 +216,7 @@ class LangfuseTraceSyncService:
         else:
             from_time = max_age  # First sync: fetch all within age limit
 
-        # 6. Fetch and process traces (streaming - low memory)
+        # 6. Fetch and process traces (Story #174: parallel with ThreadPoolExecutor)
         metrics = SyncMetrics()
         start_time = time.monotonic()
         seen_trace_ids = set()  # Finding 1: track seen traces for pruning
@@ -191,20 +228,48 @@ class LangfuseTraceSyncService:
             if not traces:
                 break
 
-            for trace in traces:
-                metrics.traces_checked += 1
-                trace_id = trace.get("id")
-                if trace_id:
-                    seen_trace_ids.add(trace_id)  # Finding 1: track seen
-                try:
-                    rename_info = self._process_trace(
-                        api_client, trace, project_name, trace_hashes, metrics
+            # Phase A: Submit all traces in page to thread pool (parallel execution)
+            # Thread safety: Each worker reads only its own trace_id's entry from trace_hashes.
+            # Main thread writes to trace_hashes only in the as_completed loop after the
+            # corresponding future completes. No cross-thread contention on the same key.
+            # Safe under CPython GIL for dict operations.
+            with ThreadPoolExecutor(max_workers=max_concurrent_observations) as executor:
+                futures = {}
+                for trace in traces:
+                    trace_id = trace.get("id")
+                    if trace_id:
+                        seen_trace_ids.add(trace_id)
+                    # Submit trace processing to thread pool
+                    future = executor.submit(
+                        self._process_trace,
+                        api_client,
+                        trace,
+                        project_name,
+                        trace_hashes,
                     )
-                    if rename_info:
-                        pending_renames.append(rename_info)
-                except Exception as e:
-                    metrics.errors_count += 1
-                    logger.error(f"Error processing trace {trace.get('id')}: {e}")
+                    futures[future] = trace_id
+
+                # Phase B: Collect results and merge into shared state (sequential, thread-safe)
+                for future in as_completed(futures):
+                    trace_id = futures[future]
+                    try:
+                        result = future.result()
+                        # Merge metrics deltas
+                        metrics.traces_checked += result.metric_checked
+                        metrics.traces_written_new += result.metric_new
+                        metrics.traces_written_updated += result.metric_updated
+                        metrics.traces_unchanged += result.metric_unchanged
+                        metrics.errors_count += result.metric_error
+                        # Apply hash update
+                        if result.hash_update is not None:
+                            trace_hashes[trace_id] = result.hash_update
+                        # Queue rename info
+                        if result.rename_info is not None:
+                            pending_renames.append(result.rename_info)
+                    except Exception as e:
+                        metrics.traces_checked += 1
+                        metrics.errors_count += 1
+                        logger.error(f"Error processing trace {trace_id}: {e}")
 
             page += 1
             if self._stop_event.is_set():
@@ -263,19 +328,19 @@ class LangfuseTraceSyncService:
         trace: dict,
         project_name: str,
         trace_hashes: dict,
-        metrics: SyncMetrics,
-    ) -> Optional[Tuple[str, str, str, str, str, str]]:
+    ) -> ProcessTraceResult:
         """
-        Process a single trace with two-phase hash check.
+        Process a single trace with two-phase hash check (Story #174: refactored for thread safety).
 
         Finding 2: Use updatedAt for quick check before fetching observations.
         Only fetch observations if trace changed.
 
         Returns:
-            Tuple (timestamp, trace_id, staging_folder, dest_folder, trace_type, short_id)
-            if trace is new and needs sequential naming in Phase 2, None otherwise.
+            ProcessTraceResult containing metrics deltas, hash updates, and rename info.
+            Main thread applies these updates to shared state sequentially.
         """
         trace_id = trace["id"]
+        result = ProcessTraceResult(trace_id=trace_id)
 
         # Phase 1: Quick check using trace's updatedAt (Finding 2)
         updated_at = trace.get("updatedAt", "")
@@ -295,8 +360,8 @@ class LangfuseTraceSyncService:
         # If stored hash exists and updatedAt matches, skip (no change)
         if stored and stored.get("updated_at") == updated_at:
             if file_path.exists():
-                metrics.traces_unchanged += 1
-                return None
+                result.metric_unchanged = 1
+                return result
             # File missing from disk - fall through to fetch and re-write
 
         # Phase 2: Trace changed or new - fetch observations and compute full hash
@@ -315,9 +380,9 @@ class LangfuseTraceSyncService:
                 }
                 if stored_filename:
                     updated_entry["filename"] = stored_filename
-                trace_hashes[trace_id] = updated_entry
-                metrics.traces_unchanged += 1
-                return None
+                result.hash_update = updated_entry
+                result.metric_unchanged = 1
+                return result
             # File missing from disk - fall through to re-write
 
         is_new = trace_id not in trace_hashes
@@ -328,19 +393,19 @@ class LangfuseTraceSyncService:
             filename = stored_filename
             self._write_trace(dest_folder, filename, trace, observations)
 
-            # Update hash with updatedAt, content hash, and filename
-            trace_hashes[trace_id] = {
+            # Prepare hash update
+            result.hash_update = {
                 "updated_at": updated_at,
                 "content_hash": content_hash,
                 "filename": filename,
             }
 
             if is_new:
-                metrics.traces_written_new += 1
+                result.metric_new = 1
             else:
-                metrics.traces_written_updated += 1
+                result.metric_updated = 1
 
-            return None
+            return result
         else:
             # New trace or migration from old naming - write to STAGING directory
             # Return metadata for Phase 2 finalize (move to destination with sequential name)
@@ -348,23 +413,25 @@ class LangfuseTraceSyncService:
             temp_filename = f"{trace_id}.json"
             self._write_trace(staging_folder, temp_filename, trace, observations)
 
-            # Update hash with temporary filename marker (will be updated in Phase 2)
-            trace_hashes[trace_id] = {
+            # Prepare hash update (filename will be set in Phase 2)
+            result.hash_update = {
                 "updated_at": updated_at,
                 "content_hash": content_hash,
                 "filename": None,  # Will be set in Phase 2
             }
 
             if is_new:
-                metrics.traces_written_new += 1
+                result.metric_new = 1
             else:
-                metrics.traces_written_updated += 1
+                result.metric_updated = 1
 
-            # Return metadata for Phase 2 finalize (6-tuple with staging AND dest)
+            # Return metadata for Phase 2 finalize
             timestamp = trace.get("timestamp")
             trace_type = self._extract_trace_type(trace)
             short_id = self._extract_short_id(trace_id)
-            return (timestamp, trace_id, str(staging_folder), str(dest_folder), trace_type, short_id)
+            result.rename_info = (timestamp, trace_id, str(staging_folder), str(dest_folder), trace_type, short_id)
+
+            return result
 
     @staticmethod
     def _finalize_trace_files(
@@ -574,6 +641,7 @@ class LangfuseTraceSyncService:
 
         Finding 6: Move config fetch inside try/except with fallback default.
         H4 fix: Guard sync with lock to prevent concurrent background + manual syncs.
+        Story #174 fix: Call _do_sync_all_projects() directly to avoid double-acquisition.
         """
         logger.info("Langfuse trace sync loop started")
         while not self._stop_event.is_set():
@@ -586,7 +654,7 @@ class LangfuseTraceSyncService:
                     # H4: Acquire lock before sync (skip if manual sync in progress)
                     if self._sync_lock.acquire(blocking=False):
                         try:
-                            self.sync_all_projects()
+                            self._do_sync_all_projects()
                         finally:
                             self._sync_lock.release()
                     else:

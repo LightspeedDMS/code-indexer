@@ -235,9 +235,7 @@ See [CIDX MCP Bridge](../README.md#cidx-mcp-bridge-for-claude-desktop) for compl
 
 See: [Delegation Functions Guide](delegation-functions.md) for complete documentation.
 
-Total: **78 MCP tools** available
-
-[✓ Corrected by fact-checker: Original claim was 53 tools, verified source code shows 75 tools in tool registry at src/code_indexer/server/mcp/tools.py]
+Total: **131 MCP tools** available
 
 ### Permissions
 

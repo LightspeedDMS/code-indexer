@@ -20,41 +20,37 @@ inputSchema:
       - global
       - per_repo
       default: global
-      description: 'How to aggregate regex search results across multiple repositories. ''global'' (default): Returns top
-        N matches by relevance across ALL repos - best for finding absolute best matches (e.g., limit=20 across 3 repos returns
-        20 best total). ''per_repo'': Distributes N results evenly across repos - ensures balanced representation (e.g., limit=20
-        across 3 repos returns ~7 from each repo).'
+      description: 'Multi-repo aggregation. ''global'' (default): top N by score across all repos. ''per_repo'': distributes
+        N evenly across repos. IMPORTANT: limit=10 with 3 repos returns 10 TOTAL (not 30). per_repo distributes as 4+3+3=10.'
     pattern:
       type: string
-      description: 'Regular expression pattern to search for. Uses ripgrep regex syntax. Examples: ''def\s+test_'' matches
-        Python test functions, ''TODO|FIXME'' matches either word.'
+      description: 'Regular expression pattern (ripgrep syntax).'
     path:
       type: string
-      description: 'Subdirectory to search within (relative to repo root). Default: search entire repository.'
+      description: Subdirectory to search (relative to repo root).
     include_patterns:
       type: array
       items:
         type: string
-      description: 'Glob patterns for files to include. Examples: [''*.py''] for Python files, [''*.ts'', ''*.tsx''] for TypeScript.'
+      description: Glob patterns for files to include.
     exclude_patterns:
       type: array
       items:
         type: string
-      description: 'Glob patterns for files to exclude. Examples: [''*_test.py''] to exclude tests, [''node_modules/**'']
-        to exclude deps.'
+      description: Glob patterns for files to exclude.
     case_sensitive:
       type: boolean
-      description: 'Whether search is case-sensitive. Default: true.'
+      description: Case-sensitive matching.
       default: true
     context_lines:
       type: integer
-      description: 'Lines of context before/after match. Default: 0.'
+      description: Lines of context before/after match.
       default: 0
       minimum: 0
       maximum: 10
     max_results:
       type: integer
-      description: 'Maximum matches to return. Default: 100.'
+      description: Maximum matches to return.
       default: 100
       minimum: 1
       maximum: 1000
@@ -64,24 +60,8 @@ inputSchema:
       - flat
       - grouped
       default: flat
-      description: 'Response format for omni-search (multi-repo) results. Only applies when repository_alias is an array.
-
-
-        ''flat'' (default): Returns all results in a single array, each with source_repo field.
-
-        Example response: {"results": [{"file_path": "src/auth.py", "source_repo": "backend-global", "content": "...", "score":
-        0.95}, {"file_path": "Login.tsx", "source_repo": "frontend-global", "content": "...", "score": 0.89}], "total_results":
-        2}
-
-
-        ''grouped'': Groups results by repository under results_by_repo object.
-
-        Example response: {"results_by_repo": {"backend-global": {"count": 1, "results": [{"file_path": "src/auth.py", "content":
-        "...", "score": 0.95}]}, "frontend-global": {"count": 1, "results": [{"file_path": "Login.tsx", "content": "...",
-        "score": 0.89}]}}, "total_results": 2}
-
-
-        Use ''grouped'' when you need to process results per-repository or display results organized by source.'
+      description: 'Multi-repo result format. ''flat'' (default): single array with source_repo field per result. ''grouped'':
+        results organized under results_by_repo by repository.'
   required:
   - repository_alias
   - pattern
@@ -128,4 +108,8 @@ outputSchema:
   - success
 ---
 
-TL;DR: Direct pattern search on files without index - comprehensive but slower. WHEN TO USE: (1) Find exact text/identifiers: 'def authenticate_user', (2) Complex patterns: 'class.*Controller', (3) TODO/FIXME comments, (4) Comprehensive search when you need ALL matches (not approximate). WHEN NOT TO USE: (1) Conceptual queries like 'authentication logic' -> use search_code(semantic), (2) Fast repeated searches -> use search_code(fts) which is indexed. COMPARISON: regex_search = comprehensive/slower (searches files directly) | search_code(fts) = fast/indexed (may miss unindexed files) | search_code(semantic) = conceptual/approximate (finds by meaning, not text). RELATED TOOLS: search_code (pre-indexed semantic/FTS search), git_search_diffs (find code changes in git history). QUICK START: regex_search('backend-global', 'def authenticate') finds all function definitions. EXAMPLE: regex_search('backend-global', 'TODO|FIXME', include_patterns=['*.py'], context_lines=1) Returns: {"success": true, "matches": [{"file_path": "src/auth.py", "line": 42, "content": "# TODO: add input validation", "context_before": ["def login(user):"], "context_after": ["    pass"]}], "total_matches": 3}
+Exhaustive regex pattern search on repository files without using indexes. Slower than search_code but guarantees finding ALL matches.
+
+KEY DIFFERENCE: regex_search searches files directly (comprehensive, slower) vs search_code FTS mode which uses indexes (fast, approximate). Use regex_search when you need guaranteed complete results.
+
+EXAMPLE: regex_search(repository_alias='backend-global', pattern='def authenticate')

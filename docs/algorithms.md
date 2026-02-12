@@ -1,8 +1,23 @@
 # Code Indexer Algorithms Documentation
 
-## Overview
+## DEPRECATION NOTICE
 
-The code-indexer implements a git-aware processing system that achieves O(δ) complexity for incremental updates, where δ represents the number of changed files. This document provides a technical analysis of the system's algorithms and architecture based on the actual implementation.
+**This document describes the old v7.x architecture (BranchAwareIndexer + Qdrant) which was removed in v8.0.**
+
+The architecture described in this document no longer exists in the codebase:
+- `BranchAwareIndexer` class was removed
+- Qdrant vector database was replaced with `FilesystemVectorStore`
+- Git-aware branch processing was simplified
+
+**For current v8.x architecture, see:** [INDEXING_ALGORITHM.md](INDEXING_ALGORITHM.md)
+
+This document is preserved for historical reference only.
+
+---
+
+## Overview (Historical - v7.x and earlier)
+
+The code-indexer implemented a git-aware processing system that achieved O(δ) complexity for incremental updates, where δ represented the number of changed files. This document provides a technical analysis of the historical system's algorithms and architecture.
 
 ## Core Architecture
 
@@ -19,9 +34,9 @@ The system separates content storage from visibility management through a dual-p
 **Visibility Control** (Mutable)
 - Managed via `hidden_branches` array field on content points
 - Content is visible if current branch is NOT in the hidden_branches array
-- Enables O(1) visibility lookups via Qdrant filtering
+- Enabled O(1) visibility lookups via Qdrant filtering (v7.x used Qdrant; v8.x uses FilesystemVectorStore)
 
-Reference: `branch_aware_indexer.py:43-76`
+Reference: `branch_aware_indexer.py:43-76` (historical - file removed in v8.x)
 
 ### 2. Complexity Analysis
 
@@ -54,7 +69,7 @@ Reference: `branch_aware_indexer.py:184-274`
 
 #### O(1) Search Complexity
 
-Search operations achieve O(1) branch filtering through Qdrant's vector database capabilities:
+Search operations achieved O(1) branch filtering through Qdrant's vector database capabilities (v7.x):
 
 ```python
 def search_with_branch_context(self, query_vector, branch):
@@ -62,10 +77,10 @@ def search_with_branch_context(self, query_vector, branch):
         "must": [{"key": "type", "match": {"value": "content"}}],
         "must_not": [{"key": "hidden_branches", "match": {"any": [branch]}}]
     }
-    # Qdrant handles filtering at index level - O(1) branch filtering
+    # Qdrant handled filtering at index level - O(1) branch filtering
 ```
 
-Reference: `branch_aware_indexer.py:888-920`
+Reference: `branch_aware_indexer.py:888-920` (historical - file removed in v8.x)
 
 ### 3. Branch Topology Processing
 
@@ -239,9 +254,9 @@ Reference: `branch_aware_indexer.py:964-1019`
    - Uses `git diff --quiet HEAD` to detect uncommitted changes
    - Generates temporal IDs using mtime and file size
 
-3. **Branch Visibility Filtering**
-   - Leverages Qdrant's native filtering capabilities
-   - Uses must_not filter on hidden_branches array
+3. **Branch Visibility Filtering** (v7.x)
+   - Leveraged Qdrant's native filtering capabilities
+   - Used must_not filter on hidden_branches array
 
 4. **Batch Update Strategy**
    - Groups visibility updates into 1000-point batches

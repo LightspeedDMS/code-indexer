@@ -1,6 +1,6 @@
 # Operating Modes
 
-Complete guide to CIDX's three operating modes: CLI Mode, Daemon Mode, and Server Mode.
+Complete guide to CIDX's two operational modes (CLI Mode and Daemon Mode) plus Server Mode deployment option.
 
 ## Table of Contents
 
@@ -15,18 +15,19 @@ Complete guide to CIDX's three operating modes: CLI Mode, Daemon Mode, and Serve
 
 ## Overview
 
-CIDX operates in three modes, each optimized for different use cases:
+CIDX has **two operational modes** for local development, plus an optional server deployment:
 
 1. **CLI Mode** - Direct command execution, simple setup, individual developers
 2. **Daemon Mode** - Background service with caching, faster queries, watch mode
-3. **Server Mode** - Multi-user server, team collaboration, centralized indexing
 
-All three modes use the same **container-free filesystem storage** - no Docker, no complex setup.
+Additionally, **Server Mode** is available as a separate deployment option for team collaboration and centralized indexing.
+
+All modes use the same **container-free filesystem storage** - no Docker, no complex setup.
 
 ## Mode Comparison
 
-| Feature | CLI Mode | Daemon Mode | Server Mode |
-|---------|----------|-------------|-------------|
+| Feature | CLI Mode | Daemon Mode | Server Mode (Deployment) |
+|---------|----------|-------------|--------------------------|
 | **Setup Complexity** | Instant | Simple | Moderate |
 | **Query Speed** | ~1s (disk I/O) | ~5ms (cached) | <1ms (cached) |
 | **Watch Mode** | No | Yes | N/A |
@@ -36,6 +37,8 @@ All three modes use the same **container-free filesystem storage** - no Docker, 
 | **Best For** | Quick searches | Active development | Team collaboration |
 | **Resource Usage** | Minimal | Low | Moderate |
 | **Network** | None | Unix socket | HTTP/HTTPS |
+
+**Note**: CLI and Daemon are operational modes. Server Mode is a separate deployment for multi-user access.
 
 **Recommendation**:
 - **Start with CLI Mode** - Simple, works immediately
@@ -321,7 +324,7 @@ See [Server Deployment Guide](server-deployment.md) for complete instructions.
 **Quick Overview**:
 ```bash
 # 1. Install on server
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.6.0
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.13.0
 
 # 2. Configure environment
 export VOYAGE_API_KEY="your-key"
@@ -461,6 +464,52 @@ prompt_template: |
 - `list_delegation_functions` - List available functions for current user
 - `execute_delegation_function` - Start a delegation job
 - `poll_delegation_job` - Wait for job completion and get results
+
+### Self-Monitoring & Diagnostics (v8.8.2+)
+
+Automated server health monitoring with intelligent log analysis.
+
+**Features**:
+- Background scheduled monitoring at configurable intervals
+- Claude CLI-powered log analysis for bug detection
+- Automatic GitHub issue creation for discovered problems
+- SQLite-based structured logging for efficient analysis
+- Self-diagnostics database for monitoring history
+
+**Configuration**: Available via Web UI Admin > Configuration
+
+### Langfuse Integration (v8.10.0+)
+
+Optional observability integration for tracking MCP tool usage and research sessions.
+
+**Features**:
+- Research session tracing with explicit start/end boundaries
+- Automatic span creation for all MCP tool calls
+- Performance analysis and usage pattern discovery
+- Session scoring and quality feedback
+- Web UI-based trace search and semantic querying
+
+**Key Capabilities**:
+- `start_trace` / `end_trace` MCP tools for session boundaries
+- Automatic trace creation mode (optional)
+- Background trace synchronization from Langfuse server
+- Local trace file watching and indexing
+- Semantic search over trace content
+
+**Configuration**: Web UI Admin > Configuration > Langfuse Settings
+
+### Research Assistant (v8.10+)
+
+Interactive AI-powered code investigation tool accessible via Admin Web UI.
+
+**Features**:
+- Chat-based interface for code exploration
+- Direct Claude CLI integration for deep analysis
+- Message persistence across sessions
+- Background processing with status tracking
+- Full codebase context access
+
+**Access**: Admin Web UI > Research Assistant tab
 
 ### Group-Based Security (v8.5+)
 

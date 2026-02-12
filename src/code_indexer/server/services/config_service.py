@@ -212,6 +212,7 @@ class ConfigService:
                 "pull_projects": [asdict(p) for p in config.langfuse_config.pull_projects] if config.langfuse_config else [],
                 "pull_sync_interval_seconds": config.langfuse_config.pull_sync_interval_seconds if config.langfuse_config else 300,
                 "pull_trace_age_days": config.langfuse_config.pull_trace_age_days if config.langfuse_config else 30,
+                "pull_max_concurrent_observations": config.langfuse_config.pull_max_concurrent_observations if config.langfuse_config else 5,
             },
             # Claude Delegation configuration (Story #721)
             "claude_delegation": self._get_delegation_settings(),
@@ -649,6 +650,9 @@ class ConfigService:
         elif key == "pull_trace_age_days":
             val = max(1, min(365, int(value)))
             langfuse.pull_trace_age_days = val
+        elif key == "pull_max_concurrent_observations":
+            val = max(1, min(20, int(value)))
+            langfuse.pull_max_concurrent_observations = val
         elif key == "pull_projects":
             import json as _json
             projects_data = _json.loads(value) if isinstance(value, str) else value

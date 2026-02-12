@@ -31,7 +31,7 @@ CIDX server provides:
 
 ```bash
 # Install code-indexer
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.0.0
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.13.0
 
 # Verify installation
 cidx --version
@@ -45,7 +45,7 @@ python3 -m venv cidx-venv
 source cidx-venv/bin/activate
 
 # Install code-indexer
-pip install git+https://github.com/LightspeedDMS/code-indexer.git@v8.0.0
+pip install git+https://github.com/LightspeedDMS/code-indexer.git@v8.13.0
 
 # Verify installation
 cidx --version
@@ -60,10 +60,6 @@ Create `/etc/cidx-server/config.env` (or `~/.cidx-server/config.env` for user-le
 ```bash
 # VoyageAI API Key (required for embedding generation)
 VOYAGE_API_KEY=your-voyage-api-key-here
-
-
-# HNSW Index Cache Configuration
-CIDX_HNSW_CACHE_TTL_SECONDS=600  # 10 minutes default
 
 # Server Data Directory
 CIDX_SERVER_DATA_DIR=/var/lib/cidx-server  # Default: ~/.cidx-server
@@ -129,14 +125,8 @@ The server includes automatic HNSW index caching for massive query performance i
 
 #### TTL (Time-To-Live)
 
-Configure how long HNSW indexes remain in cache:
+Configure how long HNSW indexes remain in cache via the Web UI Configuration Screen or `config.json`:
 
-```bash
-# Environment variable (seconds)
-export CIDX_HNSW_CACHE_TTL_SECONDS=600  # 10 minutes default
-```
-
-Or in `config.json`:
 ```json
 {
   "cache": {
@@ -238,9 +228,9 @@ Response:
 
 **Diagnosis**:
 ```bash
-# 1. Check if environment variable is set in systemd service
+# 1. Check cache configuration via Web UI Configuration Screen
 
-# 2. Verify variable is set in RUNNING process (not just environment)
+# 2. Verify process is running
 PID=$(pgrep -f "code_indexer.server.app")
 
 # 3. Check cache stats endpoint
@@ -250,9 +240,7 @@ curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8000/cache/stats
 
 **Solution**:
 ```bash
-sudo nano /etc/systemd/system/cidx-server.service
-
-# Add this line in [Service] section:
+# 1. Configure cache TTL via Web UI Configuration Screen
 
 # 2. Reload systemd configuration
 sudo systemctl daemon-reload
@@ -260,9 +248,8 @@ sudo systemctl daemon-reload
 # 3. Restart service
 sudo systemctl restart cidx-server
 
-# 4. Verify environment variable is now set
-sleep 2
-PID=$(pgrep -f "code_indexer.server.app")
+# 4. Verify cache is configured
+# Check Web UI Configuration Screen for cache settings
 
 # 5. Test cache activation
 # Make a query, then check /cache/stats for hit_count > 0
@@ -282,10 +269,7 @@ ps aux | grep cidx-server
 ```
 
 **Solutions**:
-1. Reduce TTL to evict entries more frequently:
-   ```bash
-   export CIDX_HNSW_CACHE_TTL_SECONDS=300  # 5 minutes
-   ```
+1. Reduce TTL to evict entries more frequently via Web UI Configuration Screen (set cache TTL to 300 seconds / 5 minutes)
 
 2. Restart server to clear cache:
    ```bash
@@ -331,10 +315,7 @@ cd deployment/
 sudo ./deploy-server.sh YOUR_VOYAGE_API_KEY
 ```
 
-This script automatically:
-2. Verifies environment variable is set in running process
-3. Checks cache activation
-4. Provides troubleshooting output if deployment fails
+This script automatically handles deployment configuration and verification.
 
 **Manual Installation** (if automated script cannot be used):
 
@@ -350,7 +331,6 @@ Type=simple
 User=cidx-server
 Group=cidx-server
 WorkingDirectory=/var/lib/cidx-server
-
 
 # Load additional environment variables from file
 EnvironmentFile=/etc/cidx-server/config.env
@@ -497,7 +477,7 @@ curl http://localhost:8000/health
 # Expected response
 {
   "status": "healthy",
-  "version": "8.0.0",
+  "version": "8.13.0",
   "cache": {
     "enabled": true,
     "active_entries": 12
@@ -573,6 +553,5 @@ ps aux | grep cidx-server
 ## Additional Resources
 
 - [Main README](../README.md) - Project overview and features
-- [Manual Test Plan](manual-testing/hnsw-cache-manual-test-plan.md) - Cache performance validation
 - [MCP Bridge Documentation](mcpb/) - Claude Desktop integration
 - [GitHub Repository](https://github.com/LightspeedDMS/code-indexer) - Source code and issues

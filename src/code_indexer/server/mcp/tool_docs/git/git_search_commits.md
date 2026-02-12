@@ -12,33 +12,26 @@ inputSchema:
       - type: array
         items:
           type: string
-      description: 'Repository identifier: either an alias (e.g., ''my-project'') or full path (e.g., ''/home/user/repos/my-project'').
-        Use list_global_repos to see available repositories and their aliases.'
+      description: Repository alias or full path.
     query:
       type: string
-      description: 'Text or pattern to search for in commit messages. Case-insensitive by default. Examples: ''fix authentication'',
-        ''JIRA-123'', ''refactor.*database''. Use is_regex=true for regex patterns.'
+      description: Text or pattern to search in commit messages. Case-insensitive by default.
     is_regex:
       type: boolean
-      description: 'Treat query as a regular expression. Default: false (literal text search). When true, uses POSIX extended
-        regex syntax. Example patterns: ''JIRA-\d+'' for ticket numbers, ''fix(ed)?\s+bug'' for variations.'
+      description: Treat query as regular expression (POSIX extended syntax).
       default: false
     author:
       type: string
-      description: 'Filter to commits by this author. Matches name or email, partial match supported. Default: all authors.
-        Examples: ''john@example.com'', ''John''.'
+      description: Filter by author name or email. Partial matches supported.
     since:
       type: string
-      description: 'Search only commits after this date. Format: YYYY-MM-DD or relative like ''6 months ago''. Default: no
-        date limit. Useful to focus on recent history.'
+      description: 'Commits after this date. Format: YYYY-MM-DD or relative (e.g., ''6 months ago'').'
     until:
       type: string
-      description: 'Search only commits before this date. Format: YYYY-MM-DD or relative. Default: no date limit. Combine
-        with since for date ranges.'
+      description: 'Commits before this date. Format: YYYY-MM-DD or relative.'
     limit:
       type: integer
-      description: 'Maximum number of matching commits to return. Default: 50. Range: 1-500. Popular search terms may match
-        many commits.'
+      description: Maximum matching commits to return.
       default: 50
       minimum: 1
       maximum: 500
@@ -47,10 +40,8 @@ inputSchema:
       enum:
       - global
       - per_repo
-      description: 'How to aggregate commit search results across multiple repositories. ''global'' (default): Returns top
-        N commits by relevance across ALL repos - best for finding most relevant matches. ''per_repo'': Distributes N results
-        evenly across repos - ensures balanced representation (e.g., limit=30 across 3 repos returns ~10 commits from each
-        repo).'
+      description: 'Multi-repo aggregation. ''global'' (default): top N by score across all repos. ''per_repo'': distributes
+        N evenly across repos. IMPORTANT: limit=10 with 3 repos returns 10 TOTAL (not 30). per_repo distributes as 4+3+3=10.'
       default: global
     response_format:
       type: string
@@ -58,24 +49,8 @@ inputSchema:
       - flat
       - grouped
       default: flat
-      description: 'Response format for omni-search (multi-repo) results. Only applies when repository_alias is an array.
-
-
-        ''flat'' (default): Returns all results in a single array, each with source_repo field.
-
-        Example response: {"results": [{"file_path": "src/auth.py", "source_repo": "backend-global", "content": "...", "score":
-        0.95}, {"file_path": "Login.tsx", "source_repo": "frontend-global", "content": "...", "score": 0.89}], "total_results":
-        2}
-
-
-        ''grouped'': Groups results by repository under results_by_repo object.
-
-        Example response: {"results_by_repo": {"backend-global": {"count": 1, "results": [{"file_path": "src/auth.py", "content":
-        "...", "score": 0.95}]}, "frontend-global": {"count": 1, "results": [{"file_path": "Login.tsx", "content": "...",
-        "score": 0.89}]}}, "total_results": 2}
-
-
-        Use ''grouped'' when you need to process results per-repository or display results organized by source.'
+      description: 'Multi-repo result format. ''flat'' (default): single array with source_repo field per result. ''grouped'':
+        results organized under results_by_repo by repository.'
   required:
   - repository_alias
   - query

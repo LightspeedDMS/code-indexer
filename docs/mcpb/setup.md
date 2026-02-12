@@ -1,6 +1,6 @@
 # CIDX MCP Bridge Setup Guide
 
-Last Updated: 2025-11-26
+Last Updated: 2026-02-12
 
 ## Overview
 
@@ -216,7 +216,7 @@ echo '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":1}' | cidx-bridge
 Expected response (JSON-RPC format):
 
 ```json
-{"jsonrpc":"2.0","result":{"tools":[...],"version":"8.1.0"},"id":1}
+{"jsonrpc":"2.0","result":{"tools":[...],"version":"8.13.0"},"id":1}
 ```
 
 Error response format (authentication failure):
@@ -381,7 +381,7 @@ Open Claude Desktop and check for CIDX tools:
 
 1. Start new conversation
 2. Type: "What CIDX tools are available?"
-3. Claude should list 22 CIDX MCP tools including search_code
+3. Claude should list 131 CIDX MCP tools including search_code
 
 Test semantic search:
 
@@ -517,9 +517,9 @@ export CIDX_LOG_LEVEL="debug"
 
 ## Version Compatibility
 
-- MCPB version: 8.1.0 (from src/code_indexer/__init__.py:9)
+- MCPB version: 8.13.0 (from src/code_indexer/__init__.py:9)
 - CIDX server requirement: v8.0.0 or later
 - Python requirement: 3.9 or later (from pyproject.toml:14)
 - MCP protocol: JSON-RPC 2.0
 
-Last Updated: 2025-11-26
+Last Updated: 2026-02-12

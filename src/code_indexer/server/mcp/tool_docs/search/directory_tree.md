@@ -8,23 +8,19 @@ inputSchema:
   properties:
     repository_alias:
       type: string
-      description: 'Repository identifier: either an alias (e.g., ''my-project'') or full path (e.g., ''/home/user/repos/my-project'').
-        Use list_global_repos to see available repositories and their aliases.'
+      description: Repository alias or full path.
     path:
       type: string
-      description: 'Subdirectory to use as tree root (relative to repo root). Default: repository root. Examples: ''src''
-        shows tree starting from src/, ''lib/utils'' shows tree starting from lib/utils/.'
+      description: Subdirectory to use as tree root (relative to repo root).
     max_depth:
       type: integer
-      description: 'Maximum depth of tree to display. Default: 3. Range: 1-10. Deeper directories show ''[...]'' indicator.
-        Use 1 for top-level overview, higher values for detailed exploration.'
+      description: 'Maximum depth to display. Deeper directories show ''[...]'' indicator.'
       default: 3
       minimum: 1
       maximum: 10
     max_files_per_dir:
       type: integer
-      description: 'Maximum files to show per directory before truncating. Default: 50. Range: 1-200. Directories with more
-        files show ''[+N more files]''. Use lower values for cleaner output on large directories.'
+      description: 'Maximum files per directory before truncating. Directories with more show ''[+N more files]''.'
       default: 50
       minimum: 1
       maximum: 200
@@ -32,24 +28,20 @@ inputSchema:
       type: array
       items:
         type: string
-      description: 'Glob patterns for files to include. Only matching files shown; directories shown if they contain matches.
-        Default: all files. Examples: [''*.py''] for Python, [''*.ts'', ''*.tsx''] for TypeScript, [''Makefile'', ''*.mk'']
-        for makefiles.'
+      description: Glob patterns for files to include. Only matching files shown; directories shown if they contain matches.
     exclude_patterns:
       type: array
       items:
         type: string
-      description: 'Glob patterns for files/directories to exclude. Default excludes: .git, node_modules, __pycache__, .venv,
-        .idea, .vscode. Additional patterns are merged with defaults. Examples: [''*.log'', ''dist/'', ''build/''].'
+      description: 'Glob patterns to exclude. Default excludes: .git, node_modules, __pycache__, .venv, .idea, .vscode. Additional
+        patterns merged with defaults.'
     show_stats:
       type: boolean
-      description: 'Show statistics: file counts per directory, total files/dirs. Default: false. When true, adds summary
-        like ''15 directories, 127 files''.'
+      description: Show file/directory count statistics.
       default: false
     include_hidden:
       type: boolean
-      description: 'Include hidden files/directories (starting with dot). Default: false. Note: .git is always excluded regardless
-        of this setting. Set to true to see .env, .gitignore, .eslintrc, etc.'
+      description: 'Include hidden files/directories (starting with dot). Note: .git always excluded.'
       default: false
   required:
   - repository_alias

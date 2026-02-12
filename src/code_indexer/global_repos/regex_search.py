@@ -276,9 +276,18 @@ class RegexSearchService:
                     )
 
                 if result.status == ExecutionStatus.ERROR:
-                    logger.warning(f"ripgrep command failed: {result.error_message}")
-                    # Return empty results on error (ripgrep returns non-zero when no matches)
-                    return [], 0
+                    # Bug #173: Differentiate exit code 1 (no matches) from actual errors
+                    if result.exit_code == 1 and not result.stderr_output:
+                        # Exit code 1 with no stderr = no matches found (normal ripgrep behavior)
+                        logger.debug("ripgrep found no matches (exit code 1)")
+                        return [], 0
+                    else:
+                        # Exit code 2+ or stderr present = actual error
+                        logger.warning(
+                            f"ripgrep error (exit code {result.exit_code}): "
+                            f"{result.stderr_output or result.error_message}"
+                        )
+                        return [], 0
 
                 # Read output from temp file
                 with open(temp_path, "r") as f:
@@ -598,9 +607,18 @@ class RegexSearchService:
                     )
 
                 if result.status == ExecutionStatus.ERROR:
-                    logger.warning(f"grep command failed: {result.error_message}")
-                    # Return empty results on error (grep returns non-zero when no matches)
-                    return [], 0
+                    # Bug #173: Differentiate exit code 1 (no matches) from actual errors
+                    if result.exit_code == 1 and not result.stderr_output:
+                        # Exit code 1 with no stderr = no matches found (normal grep behavior)
+                        logger.debug("grep found no matches (exit code 1)")
+                        return [], 0
+                    else:
+                        # Exit code 2+ or stderr present = actual error
+                        logger.warning(
+                            f"grep error (exit code {result.exit_code}): "
+                            f"{result.stderr_output or result.error_message}"
+                        )
+                        return [], 0
 
                 # Read output from temp file
                 with open(temp_path, "r") as f:

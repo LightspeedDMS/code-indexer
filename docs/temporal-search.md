@@ -42,6 +42,7 @@ cidx index --index-commits
 
 # This creates temporal indexes in:
 # .code-indexer/index/code-indexer-temporal/temporal_meta.json
+# .code-indexer/index/code-indexer-temporal/temporal_progress.json
 ```
 
 **What Gets Indexed**:
@@ -59,9 +60,9 @@ cidx index --index-commits
 
 ```bash
 # Check if temporal index exists
-ls -lh .code-indexer/index/code-indexer-temporal/temporal_meta.json
+ls -lh .code-indexer/index/code-indexer-temporal/
 
-# Should see temporal_meta.json file in the code-indexer-temporal collection
+# Should see temporal_meta.json and temporal_progress.json in the code-indexer-temporal collection
 ```
 
 ## Basic Usage
@@ -362,7 +363,7 @@ Temporal indexing increases storage:
 | Large (1000-10000) | ~50-500 MB |
 | Very Large (10000+) | ~500MB-2GB |
 
-**Storage Location**: `.code-indexer/index/code-indexer-temporal/` (includes temporal_meta.json, HNSW index, ID index, quantized vectors)
+**Storage Location**: `.code-indexer/index/code-indexer-temporal/` (includes temporal_meta.json, temporal_progress.json, HNSW index, ID index, quantized vectors)
 
 ## Troubleshooting
 
@@ -374,7 +375,7 @@ Temporal indexing increases storage:
 
 1. **Verify temporal index exists**:
    ```bash
-   ls -lh .code-indexer/index/code-indexer-temporal/temporal_meta.json
+   ls -lh .code-indexer/index/code-indexer-temporal/
    ```
 
 2. **Index commits if missing**:

@@ -1,8 +1,12 @@
 # Migration Guide: v7.x to v8.0
 
+## Historical Context
+
+This is a historical migration guide for upgrading from v7.x to v8.x. The current stable version is v8.13.0, which has evolved significantly since the initial v8.0.0 release. The core migration steps remain accurate for transitioning from v7.x to any v8.x version.
+
 ## Overview
 
-Version 8.0.0 represents a major architectural simplification of code-indexer, removing legacy infrastructure and consolidating around a streamlined container-free architecture. This guide walks you through upgrading from v7.x to v8.0.
+Version 8.0.0 represented a major architectural simplification of code-indexer, removing legacy infrastructure and consolidating around a streamlined container-free architecture. This guide walks you through upgrading from v7.x to v8.x.
 
 ## Breaking Changes Summary
 
@@ -68,7 +72,7 @@ Verify the new version:
 
 ```bash
 cidx --version
-# Should show: 8.0.0 or higher
+# Should show: 8.13.0 or higher (current stable: v8.13.0)
 ```
 
 ### Step 3: Update Configuration
@@ -433,19 +437,19 @@ When reporting migration issues, please include:
 
 ### Can I still use Qdrant if I prefer it?
 
-No, Qdrant support has been completely removed in v8.0. The filesystem backend is now the only option. If you absolutely require Qdrant, you must stay on v7.x.
+No, Qdrant support has been completely removed in v8.x. The filesystem backend is now the only option. If you absolutely require Qdrant, you must stay on v7.x.
 
 ### Can I use local embeddings instead of VoyageAI?
 
-No, Ollama local embeddings have been removed. VoyageAI is the only supported embedding provider in v8.0. VoyageAI provides production-quality embeddings with excellent performance.
+No, Ollama local embeddings have been removed. VoyageAI is the only supported embedding provider in v8.x. VoyageAI provides production-quality embeddings with excellent performance.
 
 ### Will container support be added back in the future?
 
-No, the decision to remove containers is permanent. Code-indexer v8.0+ focuses on a streamlined, container-free architecture.
+No, the decision to remove containers is permanent. Code-indexer v8.x focuses on a streamlined, container-free architecture.
 
 ### What if I need multi-user server mode?
 
-Server mode is still available in v8.0, but now runs container-free using the filesystem backend. See the updated server documentation for details.
+Server mode is still available in v8.x, but now runs container-free using the filesystem backend. See the updated server documentation for details.
 
 ### How much does VoyageAI cost?
 
@@ -453,7 +457,7 @@ VoyageAI offers a free tier for development and testing. See their pricing page 
 
 ### Do I need to re-index after migration?
 
-Yes, you must re-index your codebase after migrating to v8.0. The filesystem storage format is different from Qdrant, so a fresh index is required.
+Yes, you must re-index your codebase after migrating to v8.x. The filesystem storage format is different from Qdrant, so a fresh index is required.
 
 ### Will my old index data still work?
 
@@ -461,14 +465,14 @@ No, Qdrant-based indexes cannot be directly migrated. You must re-index using th
 
 ### Can I migrate incrementally?
 
-No, v8.0 is a major breaking release. You must fully migrate all projects and cannot run v7.x and v8.0 side-by-side on the same project.
+No, v8.x is a major breaking release. You must fully migrate all projects and cannot run v7.x and v8.x side-by-side on the same project.
 
 ## Migration Checklist
 
 Use this checklist to track your migration progress:
 
 - [ ] Backup existing index data
-- [ ] Upgrade to code-indexer v8.0.0
+- [ ] Upgrade to code-indexer v8.13.0 (or latest v8.x)
 - [ ] Remove legacy configuration fields (qdrant_config, ollama_config, containers_config)
 - [ ] Set up VoyageAI API key if migrating from Ollama
 - [ ] Stop and remove any Qdrant containers

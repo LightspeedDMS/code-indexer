@@ -76,46 +76,10 @@ outputSchema:
     - success
 ---
 
-TL;DR: Check HNSW index health and integrity for a repository. Performs comprehensive health check including file existence, readability, HNSW loadability, and integrity validation.
+Comprehensive HNSW vector index health check: file existence, readability, loadability, and graph integrity validation.
 
-QUICK START: check_hnsw_health(repository_alias='backend-global') returns health status.
+CACHING: Results cached for 5 minutes. Use force_refresh=true to bypass.
 
-USE CASES:
-(1) Verify HNSW index integrity before queries
-(2) Diagnose index corruption or issues
-(3) Monitor index health as part of system checks
-(4) Validate index after repository sync or refresh
+TROUBLESHOOTING: valid=false -> check errors array. file_exists=false -> index not built, run indexing. loadable=false -> corrupted, rebuild required.
 
-OUTPUT FIELDS:
-- valid: Overall health (True if all checks pass)
-- file_exists, readable, loadable: Progressive validation flags
-- element_count: Number of vectors indexed
-- connections_checked: Total neighbor connections validated
-- min_inbound/max_inbound: Connection distribution metrics
-- errors: List of integrity violations found
-- check_duration_ms: Performance metric
-- from_cache: Whether result came from 5-minute cache
-
-CACHING: Results cached for 5 minutes by default. Use force_refresh=true to bypass cache and perform fresh check.
-
-TROUBLESHOOTING:
-- valid=false: Check errors array for specific issues
-- file_exists=false: Index not built, run indexing first
-- readable=false: Permission issues on index file
-- loadable=false: Corrupted index, rebuild required
-- Integrity errors in errors array: Potential corruption, consider reindexing
-
-PERFORMANCE:
-- Cached: <10ms
-- Fresh check (46K vectors): ~60ms
-- Fresh check (408K vectors): ~638ms
-- Large indexes: proportional to vector count
-
-WHEN TO USE:
-Before critical operations that depend on index integrity, when diagnosing search issues, after repository sync/refresh operations, as part of system health monitoring.
-
-WHEN NOT TO USE:
-For general repository status use get_repository_status or global_repo_status instead. This tool is specifically for HNSW index health checking.
-
-RELATED TOOLS:
-get_repository_status (general repo status), global_repo_status (global repo info), get_index_status (all index types), check_health (overall system health)
+USE INSTEAD OF get_repository_status or global_repo_status for general repo info. This tool is specifically for HNSW vector index integrity.

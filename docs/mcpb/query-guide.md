@@ -1,10 +1,10 @@
 # CIDX MCP Bridge Query Guide
 
-Last Updated: 2025-11-26
+Last Updated: 2026-02-12
 
 ## Overview
 
-This guide demonstrates practical query patterns using the CIDX MCP Bridge search_code tool. All examples use verified parameters from src/code_indexer/server/mcp/tools.py:9-147.
+This guide demonstrates practical query patterns using the CIDX MCP Bridge search_code tool. All examples use verified parameters from src/code_indexer/server/mcp/tool_docs/search/search_code.md.
 
 ## Getting Started
 
@@ -2159,10 +2159,10 @@ Use limit=8 with min_score=0.7 filtering
 
 ## Version Information
 
-- MCPB version: 8.1.0
-- search_code tool: src/code_indexer/server/mcp/tools.py:9-147
+- MCPB version: 8.13.0
+- search_code tool: src/code_indexer/server/mcp/tool_docs/search/search_code.md
 - Total parameters: 25 (verified)
 - Omni-search support: 5 tools (search_code, list_files, regex_search, git_log, git_search_commits)
 - Multi-repo score filtering: Story #675 (min_score parameter with per-repo filtering)
 
-Last Updated: 2026-01-06
+Last Updated: 2026-02-12

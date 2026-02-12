@@ -12,49 +12,40 @@ inputSchema:
       - type: array
         items:
           type: string
-      description: 'Repository identifier: either an alias (e.g., ''my-project'' or ''my-project-global'') or full path. Use
-        list_global_repos to see available repositories and their aliases.'
+      description: Repository alias or full path.
     limit:
       type: integer
-      description: 'Maximum number of commits to return. Default: 50. Range: 1-500. Lower values for quick overview, higher
-        for comprehensive history.'
+      description: Maximum commits to return.
       default: 50
       minimum: 1
       maximum: 500
     offset:
       type: integer
-      description: 'Number of commits to skip (for pagination). Default: 0. Use with limit to paginate through history. Example:
-        offset=50, limit=50 returns commits 51-100.'
+      description: Commits to skip for pagination.
       default: 0
       minimum: 0
     path:
       type: string
-      description: 'Filter commits to only those affecting this path (file or directory). Path is relative to repo root. Examples:
-        ''src/main.py'' for single file, ''src/'' for all files under src directory.'
+      description: Filter commits affecting this path (file or directory, relative to repo root).
     author:
       type: string
-      description: 'Filter commits by author. Matches against author name or email. Partial matches supported. Examples: ''john@example.com'',
-        ''John Smith'', ''john''.'
+      description: Filter by author name or email. Partial matches supported.
     since:
       type: string
-      description: 'Include only commits after this date. Format: YYYY-MM-DD or relative like ''2 weeks ago'', ''2024-01-01''.
-        Inclusive of the date.'
+      description: 'Commits after this date. Format: YYYY-MM-DD or relative (e.g., ''2 weeks ago'').'
     until:
       type: string
-      description: 'Include only commits before this date. Format: YYYY-MM-DD or relative like ''yesterday'', ''2024-06-30''.
-        Inclusive of the date.'
+      description: 'Commits before this date. Format: YYYY-MM-DD or relative (e.g., ''yesterday'').'
     branch:
       type: string
-      description: 'Branch to get log from. Default: current HEAD. Examples: ''main'', ''feature/auth'', ''origin/develop''.
-        Can also be a tag like ''v1.0.0''.'
+      description: 'Branch or tag to get log from. Default: current HEAD.'
     aggregation_mode:
       type: string
       enum:
       - global
       - per_repo
-      description: 'How to aggregate git log results across multiple repositories. ''global'' (default): Merges commits by
-        date across ALL repos - shows complete chronological history. ''per_repo'': Distributes limit evenly across repos
-        - ensures balanced representation (e.g., limit=30 across 3 repos returns ~10 commits from each repo).'
+      description: 'Multi-repo aggregation. ''global'' (default): top N by score across all repos. ''per_repo'': distributes
+        N evenly across repos. IMPORTANT: limit=10 with 3 repos returns 10 TOTAL (not 30). per_repo distributes as 4+3+3=10.'
       default: global
     response_format:
       type: string
@@ -62,24 +53,8 @@ inputSchema:
       - flat
       - grouped
       default: flat
-      description: 'Response format for omni-search (multi-repo) results. Only applies when repository_alias is an array.
-
-
-        ''flat'' (default): Returns all results in a single array, each with source_repo field.
-
-        Example response: {"results": [{"file_path": "src/auth.py", "source_repo": "backend-global", "content": "...", "score":
-        0.95}, {"file_path": "Login.tsx", "source_repo": "frontend-global", "content": "...", "score": 0.89}], "total_results":
-        2}
-
-
-        ''grouped'': Groups results by repository under results_by_repo object.
-
-        Example response: {"results_by_repo": {"backend-global": {"count": 1, "results": [{"file_path": "src/auth.py", "content":
-        "...", "score": 0.95}]}, "frontend-global": {"count": 1, "results": [{"file_path": "Login.tsx", "content": "...",
-        "score": 0.89}]}}, "total_results": 2}
-
-
-        Use ''grouped'' when you need to process results per-repository or display results organized by source.'
+      description: 'Multi-repo result format. ''flat'' (default): single array with source_repo field per result. ''grouped'':
+        results organized under results_by_repo by repository.'
   required:
   - repository_alias
 outputSchema:

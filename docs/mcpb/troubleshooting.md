@@ -1256,7 +1256,7 @@ Provide diagnostic information to:
 
 ## Version Information
 
-- MCPB version: 8.1.0
+- MCPB version: 8.13.0
 - Diagnostics module: src/code_indexer/mcpb/diagnostics.py
 - Configuration module: src/code_indexer/mcpb/config.py
 - HTTP client: src/code_indexer/mcpb/http_client.py

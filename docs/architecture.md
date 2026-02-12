@@ -432,7 +432,7 @@ CIDX can index and semantically search entire git commit history:
 
 **Initialize Handshake** (CRITICAL for Claude Code connection):
 - Method: `initialize` - MUST be first client-server interaction
-- Server Response: `{ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} }, "serverInfo": { "name": "Neo", "version": "8.8.1" } }`
+- Server Response: `{ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} }, "serverInfo": { "name": "Neo", "version": "8.13.1" } }`
 - Required for OAuth flow completion - Claude Code calls `initialize` after authentication
 
 **Version Notes**:
@@ -461,17 +461,11 @@ Container-free vector storage using the local filesystem:
 
 **When to use**: Development environments, CI/CD pipelines, container-restricted systems
 
-### Qdrant Backend (Legacy)
+### Qdrant Backend (Removed in v8.0)
 
-Container-based vector storage using Docker/Podman + Qdrant vector database:
+**Historical Note**: Qdrant container-based backend was removed in v8.0 as part of the architectural simplification. CIDX now uses only FilesystemVectorStore with HNSW indexing, providing comparable performance without container dependencies.
 
-**Features:**
-- **High performance** - Optimized vector similarity search with HNSW indexing
-- **Advanced filtering** - Complex queries and metadata filtering
-- **Horizontal scaling** - Suitable for large codebases
-- **Container isolation** - Clean separation of concerns
-
-**When to use**: Production deployments, large teams, advanced vector search requirements
+For migration from v7.x Qdrant deployments, see [Migration Guide](migration-to-v8.md).
 
 ## Self-Monitoring Architecture (v8.8.2+)
 
@@ -503,7 +497,7 @@ Scheduled Scan:
 - Scan history: `~/.cidx-server/data/self_monitoring.db`
 - Server logs: `~/.cidx-server/logs.db` (SQLite structured logging)
 
-## Research Session Tracing (Langfuse) (v8.8.23+)
+## Research Session Tracing (Langfuse) (v8.10.0+)
 
 Optional observability integration for tracking MCP tool usage patterns via Langfuse.
 
@@ -542,7 +536,5 @@ Optional observability integration for tracking MCP tool usage patterns via Lang
 
 ## Related Documentation
 
-- **[v5.0.0 Architecture Summary](v5.0.0-architecture-summary.md)** - Server Mode architecture details
-- **[v7.2.0 Incremental Updates](v7.2.0-architecture-incremental-updates.md)** - Incremental HNSW implementation
 - **[Algorithms](algorithms.md)** - Detailed algorithm descriptions and complexity analysis
 - **[Technical Details](technical-details.md)** - Deep dives into implementation specifics

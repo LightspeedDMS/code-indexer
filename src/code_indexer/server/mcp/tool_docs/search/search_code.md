@@ -26,11 +26,8 @@ inputSchema:
       - global
       - per_repo
       default: global
-      description: 'Result aggregation for multi-repo searches. ''global'' (default): Top N results by score across ALL repos
-        - best for finding absolute best matches anywhere. ''per_repo'': Distributes N results evenly across repos - best
-        for comparing implementations or ensuring representation from each repo. LIMIT MATH: limit=10 with 3 repos in ''global''
-        mode might return 7+3+0=10 total. In ''per_repo'' mode returns 4+3+3=10 total (NOT 30 - per_repo does NOT multiply
-        the limit).'
+      description: 'Multi-repo aggregation. ''global'' (default): top N by score across all repos. ''per_repo'': distributes
+        N evenly across repos. IMPORTANT: limit=10 with 3 repos returns 10 TOTAL (not 30). per_repo distributes as 4+3+3=10.'
     exclude_patterns:
       type: array
       items:
@@ -52,13 +49,9 @@ inputSchema:
       maximum: 1
     search_mode:
       type: string
-      description: 'Search mode: ''semantic'' for natural language/conceptual queries (''how authentication works''), ''fts''
-        for exact text/identifiers (''def authenticate_user''), ''hybrid'' runs both FTS and semantic searches in parallel
-        then merges results using Reciprocal Rank Fusion (RRF) - results found by both engines are boosted to the top.
-        Default: semantic. HYBRID RESULTS: Each result has code_snippet (content) and similarity_score (RRF-based). FTS-originated
-        results additionally carry match_text (exact matched text). Large fields may be truncated to snippet_preview +
-        snippet_cache_handle (use get_cached_content to retrieve full content). NOTE: FTS multi-term queries use AND semantics
-        - all terms must match. Example: ''password reset'' requires both words. For OR behavior, use regex mode.'
+      description: 'Search mode: ''semantic'' for conceptual queries, ''fts'' for exact text/identifiers, ''hybrid'' runs both
+        in parallel and merges via Reciprocal Rank Fusion (common hits ranked highest). Default: semantic. FTS multi-term queries
+        use AND semantics (all terms must match).'
       enum:
       - semantic
       - fts
@@ -66,27 +59,22 @@ inputSchema:
       default: semantic
     language:
       type: string
-      description: 'Filter by programming language. Supported languages: c, cpp, csharp, dart, go, java, javascript, kotlin,
-        php, python, ruby, rust, scala, swift, typescript, css, html, vue, markdown, xml, json, yaml, bash, shell, and more.
-        Can use friendly names or file extensions (py, js, ts, etc.).'
+      description: 'Filter by programming language name or extension (e.g., ''python'', ''py'', ''js'', ''typescript'').'
     exclude_language:
       type: string
-      description: Exclude files of specified language. Use same language names as --language parameter.
+      description: Exclude files of specified language.
     path_filter:
       type: string
-      description: Filter by file path pattern using glob syntax (e.g., '*/tests/*' for test files, '*/src/**/*.py' for Python
-        files in src). Supports *, **, ?, [seq] wildcards.
+      description: 'Filter by file path using glob syntax (e.g., ''*/tests/*'', ''*/src/**/*.py''). Supports *, **, ?, [seq].'
     exclude_path:
       type: string
-      description: 'Exclude files matching path pattern. Supports glob patterns (*, **, ?, [seq]). COMMON NOISE FILTERS: ''**/package-lock.json''
-        (npm), ''**/yarn.lock'' (yarn), ''**/node_modules/**'' (deps), ''**/test/fixtures/**'' (test data), ''**/*.min.js''
-        (minified). Can combine with comma: ''pattern1,pattern2'' or use multiple calls.'
+      description: 'Exclude files matching glob pattern (e.g., ''**/node_modules/**'', ''**/package-lock.json''). Comma-separate
+        multiple patterns.'
     file_extensions:
       type: array
       items:
         type: string
-      description: Filter by file extensions (e.g., [".py", ".js"]). Alternative to language filter when you need exact extension
-        matching.
+      description: 'Filter by file extensions (e.g., [''.py'', ''.js'']).'
     accuracy:
       type: string
       enum:
@@ -94,105 +82,74 @@ inputSchema:
       - balanced
       - high
       default: balanced
-      description: 'Search accuracy profile: ''fast'' (lower accuracy, faster response), ''balanced'' (default, good tradeoff),
-        ''high'' (higher accuracy, slower response). Affects embedding search precision.'
+      description: 'Search precision: ''fast'', ''balanced'' (default), ''high''.'
     time_range:
       type: string
-      description: 'Time range filter for temporal queries (format: YYYY-MM-DD..YYYY-MM-DD, e.g., ''2024-01-01..2024-12-31'').
-        Returns only code that existed during this period. Requires temporal index built with ''cidx index --index-commits''.
-        Check repository''s temporal support via global_repo_status - look for enable_temporal: true in the response. Empty
-        temporal query results typically indicate temporal indexing is not enabled for the repository.'
+      description: 'Time range filter (format: YYYY-MM-DD..YYYY-MM-DD). Requires temporal index (cidx index --index-commits).
+        Check enable_temporal via global_repo_status.'
     time_range_all:
       type: boolean
       default: false
-      description: Query across all git history without time range limit. Requires temporal index built with 'cidx index --index-commits'.
-        Equivalent to querying from first commit to HEAD.
+      description: Search all git history. Requires temporal index.
     at_commit:
       type: string
-      description: Query code at a specific commit hash or ref (e.g., 'abc123' or 'HEAD~5'). Returns code state as it existed
-        at that commit. Requires temporal index.
+      description: 'Code state at specific commit hash or ref (e.g., ''abc123'', ''HEAD~5''). Requires temporal index.'
     include_removed:
       type: boolean
       default: false
-      description: Include files that have been removed from the current HEAD in search results. Only applicable with temporal
-        queries. Removed files will have is_removed flag in temporal_context.
+      description: Include removed files in results. Only for temporal queries.
     show_evolution:
       type: boolean
       default: false
-      description: Include code evolution timeline with commit history and diffs in response. Shows how code changed over
-        time. Requires temporal index.
+      description: Include code change timeline with commit history. Requires temporal index.
     evolution_limit:
       type: integer
       minimum: 1
-      description: Limit number of evolution entries per result (user-controlled, no maximum). Only applicable when show_evolution=true.
-        Higher values provide more complete history but increase response size.
+      description: Max evolution entries per result. Only with show_evolution=true.
     case_sensitive:
       type: boolean
       default: false
-      description: Enable case-sensitive FTS matching. Only applicable when search_mode is 'fts' or 'hybrid'. When true, query
-        matches must have exact case.
+      description: Case-sensitive FTS matching. Only for fts/hybrid modes.
     fuzzy:
       type: boolean
       default: false
-      description: Enable fuzzy matching with edit distance of 1 (typo tolerance). Only applicable when search_mode is 'fts'
-        or 'hybrid'. Incompatible with regex=true.
+      description: Fuzzy matching with edit distance 1 (typo tolerance). Only for fts/hybrid. Incompatible with regex=true.
     edit_distance:
       type: integer
       default: 0
       minimum: 0
       maximum: 3
-      description: Fuzzy match tolerance level (0=exact, 1=1 typo, 2=2 typos, 3=3 typos). Only applicable when search_mode
-        is 'fts' or 'hybrid'. Higher values allow more typos but may reduce precision.
+      description: Fuzzy tolerance 0-3 (0=exact). Only for fts/hybrid.
     snippet_lines:
       type: integer
       default: 5
       minimum: 0
       maximum: 50
-      description: Number of context lines to show around FTS matches (0=list only, 1-50=show context). Only applicable when
-        search_mode is 'fts' or 'hybrid'. Higher values provide more context but increase response size.
+      description: Context lines around FTS matches (0=list only, 1-50). Only for fts/hybrid.
     regex:
       type: boolean
       default: false
-      description: Interpret query as regex pattern for token-based matching. Only applicable when search_mode is 'fts' or
-        'hybrid'. Incompatible with fuzzy=true. Enables pattern matching like 'def.*auth' or 'test_.*'.
+      description: Interpret query as regex pattern. Only for fts/hybrid. Incompatible with fuzzy=true.
     diff_type:
       type: string
-      description: Filter temporal results by diff type (added/modified/deleted/renamed/binary). Can be comma-separated for
-        multiple types (e.g., 'added,modified'). Only applicable when time_range is specified.
+      description: Filter temporal results by diff type (added/modified/deleted/renamed/binary). Comma-separate multiple.
     author:
       type: string
-      description: Filter temporal results by commit author (name or email). Only applicable when time_range is specified.
+      description: Filter temporal results by commit author name or email.
     chunk_type:
       type: string
       enum:
       - commit_message
       - commit_diff
-      description: 'Filter temporal results by chunk type: ''commit_message'' searches commit messages, ''commit_diff'' searches
-        code diffs. Only applicable when time_range is specified.'
+      description: 'Filter temporal results: ''commit_message'' or ''commit_diff''.'
     response_format:
       type: string
       enum:
       - flat
       - grouped
       default: flat
-      description: 'Response format for omni-search (multi-repo) results. Only applies when repository_alias is an array.
-
-
-        ''flat'' (default): Returns all results in a single array, each with source_repo field.
-
-        Example response: {"results": [{"file_path": "src/auth.py", "source_repo": "backend-global", "content": "...", "score":
-        0.95}, {"file_path": "Login.tsx", "source_repo": "frontend-global", "content": "...", "score": 0.89}], "total_results":
-        2}
-
-
-        ''grouped'': Groups results by repository under results_by_repo object.
-
-        Example response: {"results_by_repo": {"backend-global": {"count": 1, "results": [{"file_path": "src/auth.py", "content":
-        "...", "score": 0.95}]}, "frontend-global": {"count": 1, "results": [{"file_path": "Login.tsx", "content": "...",
-        "score": 0.89}]}}, "total_results": 2}
-
-
-        Use ''grouped'' when you need to process results per-repository or display results organized by source.'
+      description: 'Multi-repo result format. ''flat'' (default): single array with source_repo field per result. ''grouped'':
+        results organized under results_by_repo by repository.'
   required:
   - query_text
 outputSchema:
@@ -313,67 +270,18 @@ If user does NOT explicitly specify a repository, you MUST:
 
 Skip discovery ONLY when user explicitly names a repository (e.g., "search in backend-global").
 
-REPOSITORY SELECTION DECISION TREE:
-1. User specified exact repo? -> Search that repo directly
-2. User mentioned topic WITHOUT repo? -> cidx-meta-global discovery (MANDATORY - see above)
-3. User wants comparison across repos? -> Use repository_alias as array + aggregation_mode='per_repo'
-4. User wants best matches anywhere? -> Use repository_alias as array + aggregation_mode='global'
+REPOSITORY SELECTION:
+1. User specified exact repo? -> Search directly
+2. User mentioned topic WITHOUT repo? -> cidx-meta-global discovery (MANDATORY)
+3. Cross-repo comparison? -> repository_alias as array + aggregation_mode='per_repo'
+4. Best matches anywhere? -> repository_alias as array + aggregation_mode='global'
 
-MULTI-REPOSITORY SEARCH:
-Syntax options:
-- Specific repos: repository_alias=['backend-global', 'frontend-global']
-- Wildcard ALL: repository_alias='*-global' (searches all global repos)
-- Pattern match: repository_alias='pch-*-global' (all repos matching pattern)
-- Multiple patterns: repository_alias=['backend-*', 'frontend-*']
-
-Aggregation strategies:
-- aggregation_mode='global' (default): Returns top N results by score across ALL repos - use when finding BEST matches
-- aggregation_mode='per_repo': Returns N results distributed evenly - use when COMPARING implementations
-
-LIMIT BEHAVIOR (IMPORTANT):
-- 'global' mode: limit=10 returns top 10 by score (may be 7+3+0 distribution)
-- 'per_repo' mode: limit=10 with 3 repos returns 4+3+3=10 total (NOT 30!)
-- Per-repo mode does NOT multiply the limit, it distributes it evenly
-
-CACHING WITH PARALLEL QUERIES:
-- Large results (>2000 chars) return preview + cache_handle
-- Each result has its own cache_handle (not per-repo)
-- Use get_cached_content(handle) to fetch full content page by page
-
-ERROR HANDLING:
-- Partial results supported: successful repos return results even if others fail
-- Check 'errors' field in response for per-repo failures
-
-Response formats:
-- response_format='flat' (default): Results with source_repo field for attribution
-- response_format='grouped': Results organized by repository
-
-PERFORMANCE: Searching 5+ repos increases token usage proportionally. Start with limit=3-5 for multi-repo searches.
-
-NOISE FILTERING: Use exclude_path to filter out low-value files:
-- exclude_path='**/package-lock.json' (npm lockfiles)
-- exclude_path='**/yarn.lock' (yarn lockfiles)
-- exclude_path='**/node_modules/**' (dependencies)
-- exclude_path='**/test/fixtures/**' (test data)
-- exclude_path='**/*.min.js' (minified files)
-
-Use cases:
-- Microservices: Search across service repos for shared patterns
-- Monorepo + libs: Search main repo with dependency repos together
-- Architecture analysis: Compare implementations across codebases
-- Impact analysis: Find all repos using a specific pattern/library
-
-TL;DR: Search code using pre-built indexes. Use semantic mode for conceptual queries, FTS for exact text.
-
-SEARCH MODE: 'authentication logic' (concept) -> semantic | 'def authenticate_user' (exact) -> fts | unsure -> hybrid (runs both in parallel, merges via RRF - common hits ranked highest)
+SEARCH MODE: 'authentication logic' (concept) -> semantic | 'def authenticate_user' (exact) -> fts | unsure -> hybrid (runs both, merges via RRF - common hits ranked highest)
 
 CRITICAL: Semantic search finds code by MEANING, not exact text. Results are APPROXIMATE. For exhaustive exact-text results, use FTS mode or regex_search tool.
 
-QUICK START: search_code('user authentication', repository_alias='myrepo-global', search_mode='semantic', limit=5)
+LIMIT BEHAVIOR: limit=10 with 3 repos in 'global' mode may return 7+3+0=10. In 'per_repo' mode returns 4+3+3=10 (NOT 30 - per_repo does NOT multiply the limit).
 
-TROUBLESHOOTING: (1) 0 results? Verify alias with list_global_repos, try broader terms. (2) Temporal queries empty? Check enable_temporal via global_repo_status. (3) Slow? Start with limit=5, use path_filter.
+PERFORMANCE: Start with limit=5. Each result consumes tokens proportional to code snippet size. Large fields may be truncated to snippet_preview + snippet_cache_handle (use get_cached_content to retrieve full content).
 
-WHEN NOT TO USE: (1) Need ALL matches with pattern -> use regex_search, (2) Exploring directory structure -> use browse_directory first.
-
-EXAMPLE: search_code('authentication logic', repository_alias='backend-global', search_mode='semantic', limit=3)
-Returns: {"success": true, "results": [{"file_path": "src/auth/login.py", "line_number": 15, "code_snippet": "def authenticate_user(username, password):\n    # Validates user credentials...", "similarity_score": 0.92, "source_repo": "backend-global"}], "total_results": 3, "query_metadata": {"query_text": "authentication logic", "execution_time_ms": 145, "repositories_searched": 1}}
+EXAMPLE: search_code('authentication logic', repository_alias='backend-global', search_mode='semantic', limit=5)

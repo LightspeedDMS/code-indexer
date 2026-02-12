@@ -931,10 +931,38 @@ class DiagnosticsService:
             repos_checked += 1
             repo_name = alias
             repo_has_issues = False
-            repo_dir = Path(clone_path)
+
+            # Bug #172 Fix: Resolve actual repository path (handles versioned structure)
+            # Database clone_path may be stale if repo uses .versioned/{alias}/v_*/ structure
+            actual_repo_dir = Path(clone_path)
+
+            # Check if .versioned/{alias}/ exists in golden-repos directory
+            versioned_base = golden_repos_path / ".versioned" / alias
+            if versioned_base.exists() and versioned_base.is_dir():
+                # Find all v_* subdirectories (format: v_TIMESTAMP)
+                version_dirs = []
+                try:
+                    for entry in versioned_base.iterdir():
+                        if entry.is_dir() and entry.name.startswith("v_"):
+                            try:
+                                # Validate format: v_TIMESTAMP (extract and parse timestamp)
+                                timestamp = int(entry.name.split("_")[1])
+                                version_dirs.append((entry, timestamp))
+                            except (ValueError, IndexError):
+                                # Skip malformed version directories (e.g., v_, v_abc)
+                                continue
+                except Exception:
+                    # If scanning fails, fall back to clone_path
+                    pass
+
+                # Use latest version if any valid versions found
+                if version_dirs:
+                    # Sort by timestamp (highest = latest)
+                    version_dirs.sort(key=lambda x: x[1], reverse=True)
+                    actual_repo_dir = version_dirs[0][0]
 
             # Check for .code-indexer/index/ directory
-            index_base_path = repo_dir / ".code-indexer" / "index"
+            index_base_path = actual_repo_dir / ".code-indexer" / "index"
             if not index_base_path.exists() or not index_base_path.is_dir():
                 repos_with_issues.append({
                     "repo": repo_name,

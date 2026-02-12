@@ -33,40 +33,10 @@ outputSchema:
   - status
 ---
 
-Start a Langfuse trace for a research session. When a trace is active, all subsequent MCP tool calls are automatically logged as spans with timing, inputs, and outputs. This enables deep observability into research workflows, performance analysis, and debugging.
+Start a Langfuse trace for a research session. When active, all subsequent MCP tool calls are automatically logged as spans with timing, inputs, and outputs.
 
-WHEN TO USE: (1) Beginning a focused research session on a specific topic, (2) Investigating a bug or issue that requires multiple tool calls, (3) Analyzing research workflow performance, (4) Creating audit trails for important investigations.
+TRACE LIFECYCLE: start_trace(topic) -> [all tool calls logged as spans] -> end_trace(score, outcome)
 
-TRACE LIFECYCLE:
-1. start_trace(topic="authentication") - Starts trace, returns trace_id
-2. [All tool calls automatically logged as spans under this trace]
-3. end_trace(score=0.8, outcome="success") - Ends trace with scoring
+NESTED TRACES: Starting a new trace while one is active creates a stack. end_trace() ends only the most recent.
 
-NESTED TRACES: You can start multiple traces in the same session. Traces form a stack - the most recent trace is active. When you end a trace, the previous trace becomes active again. This supports hierarchical research workflows (e.g., main investigation with focused sub-investigations).
-
-AUTOMATIC SPAN CREATION: While a trace is active, every tool call creates a span automatically:
-- Span name: Tool name (e.g., "search_code", "get_file_content")
-- Span input: Tool arguments (with sensitive fields like password/token removed)
-- Span output: Tool results (large result lists are summarized)
-- Span timing: Execution latency captured automatically
-- Span errors: Exceptions captured with error details
-
-LANGFUSE DISABLED: If Langfuse is not configured in server settings, start_trace returns status="disabled" and continues without error. Tool execution proceeds normally without tracing overhead.
-
-EXAMPLE WORKFLOW:
-```
-# Start research session
-start_trace(topic="OAuth implementation")
--> {"status": "active", "trace_id": "trace-abc123"}
-
-# Research tools (automatically traced)
-search_code(query="OAuth client", repository_alias="backend-global")
-get_file_content(repository_alias="backend-global", file_path="auth/oauth.py")
-search_code(query="token validation", repository_alias="backend-global")
-
-# End with scoring
-end_trace(score=0.9, outcome="found implementation, well-structured")
--> {"status": "ended", "trace_id": "trace-abc123"}
-```
-
-RELATED TOOLS: end_trace (complete trace with scoring), search_code (code search with automatic span logging), get_file_content (file reading with automatic span logging).
+LANGFUSE DISABLED: If Langfuse not configured, returns status="disabled" and continues without error. No tracing overhead.

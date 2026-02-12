@@ -188,11 +188,11 @@ class RefreshScheduler:
                             self._submit_refresh_job(alias_name)
                         except Exception as e:
                             logger.error(
-                                f"Refresh failed for {alias_name}: {e}", exc_info=True
+                                f"Refresh failed for {alias_name}: {type(e).__name__}: {e}", exc_info=True
                             )
 
             except Exception as e:
-                logger.error(f"Error in scheduler loop: {e}", exc_info=True)
+                logger.error(f"Error in scheduler loop: {type(e).__name__}: {e}", exc_info=True)
 
             # Wait using Event.wait() for interruptible sleep
             # Event.wait() returns True if event is set, False on timeout
@@ -368,10 +368,10 @@ class RefreshScheduler:
                 }
 
             except Exception as e:
-                logger.error(f"Refresh failed for {alias_name}: {e}", exc_info=True)
+                logger.error(f"Refresh failed for {alias_name}: {type(e).__name__}: {e}", exc_info=True)
                 # Bug #84 fix: Raise exception instead of returning error dict
                 # BackgroundJobManager marks jobs as FAILED only when exceptions are raised
-                raise RuntimeError(f"Refresh failed for {alias_name}: {e}")
+                raise RuntimeError(f"Refresh failed for {alias_name}: {type(e).__name__}: {e}")
 
     def _create_new_index(self, alias_name: str, source_path: str) -> str:
         """
@@ -443,11 +443,17 @@ class RefreshScheduler:
                 )
                 logger.info("CoW clone completed successfully")
             except subprocess.CalledProcessError as e:
-                logger.error(f"CoW clone failed: {e.stderr}")
-                raise RuntimeError(f"CoW clone failed: {e.stderr}")
-            except subprocess.TimeoutExpired:
-                logger.error(f"CoW clone timed out after {cow_timeout} seconds")
-                raise RuntimeError(f"CoW clone timed out after {cow_timeout} seconds")
+                logger.error(
+                    f"CoW clone failed for {alias_name}: {type(e).__name__}: {e.stderr}",
+                    exc_info=True
+                )
+                raise RuntimeError(f"CoW clone failed for {alias_name}: {type(e).__name__}: {e.stderr}")
+            except subprocess.TimeoutExpired as e:
+                logger.error(
+                    f"CoW clone timed out for {alias_name} after {cow_timeout} seconds: {type(e).__name__}",
+                    exc_info=True
+                )
+                raise RuntimeError(f"CoW clone timed out for {alias_name} after {cow_timeout} seconds: {type(e).__name__}")
 
             # Step 3: Fix git status (only if .git exists)
             git_dir = versioned_path / ".git"
@@ -501,14 +507,18 @@ class RefreshScheduler:
                 )
                 logger.info("cidx fix-config completed successfully")
             except subprocess.CalledProcessError as e:
-                logger.error(f"cidx fix-config failed: {e.stderr}")
-                raise RuntimeError(f"cidx fix-config failed: {e.stderr}")
-            except subprocess.TimeoutExpired:
                 logger.error(
-                    f"cidx fix-config timed out after {cidx_fix_timeout} seconds"
+                    f"cidx fix-config failed for {alias_name}: {type(e).__name__}: {e.stderr}",
+                    exc_info=True
+                )
+                raise RuntimeError(f"cidx fix-config failed for {alias_name}: {type(e).__name__}: {e.stderr}")
+            except subprocess.TimeoutExpired as e:
+                logger.error(
+                    f"cidx fix-config timed out for {alias_name} after {cidx_fix_timeout} seconds: {type(e).__name__}",
+                    exc_info=True
                 )
                 raise RuntimeError(
-                    f"cidx fix-config timed out after {cidx_fix_timeout} seconds"
+                    f"cidx fix-config timed out for {alias_name} after {cidx_fix_timeout} seconds: {type(e).__name__}"
                 )
 
             # Step 5: Run cidx index for semantic + FTS (always required)
@@ -530,14 +540,18 @@ class RefreshScheduler:
                 )
                 logger.info("cidx index (semantic+FTS) completed successfully")
             except subprocess.CalledProcessError as e:
-                logger.error(f"Indexing (semantic+FTS) failed: {e.stderr}")
-                raise RuntimeError(f"Indexing (semantic+FTS) failed: {e.stderr}")
-            except subprocess.TimeoutExpired:
                 logger.error(
-                    f"Indexing (semantic+FTS) timed out after {cidx_index_timeout} seconds"
+                    f"Indexing (semantic+FTS) failed for {alias_name}: {type(e).__name__}: {e.stderr}",
+                    exc_info=True
+                )
+                raise RuntimeError(f"Indexing (semantic+FTS) failed for {alias_name}: {type(e).__name__}: {e.stderr}")
+            except subprocess.TimeoutExpired as e:
+                logger.error(
+                    f"Indexing (semantic+FTS) timed out for {alias_name} after {cidx_index_timeout} seconds: {type(e).__name__}",
+                    exc_info=True
                 )
                 raise RuntimeError(
-                    f"Indexing (semantic+FTS) timed out after {cidx_index_timeout} seconds"
+                    f"Indexing (semantic+FTS) timed out for {alias_name} after {cidx_index_timeout} seconds: {type(e).__name__}"
                 )
 
             # Step 5b: Run cidx index --index-commits for temporal indexing (if enabled)
@@ -580,14 +594,18 @@ class RefreshScheduler:
                     )
                     logger.info("cidx index (temporal) completed successfully")
                 except subprocess.CalledProcessError as e:
-                    logger.error(f"Temporal indexing failed: {e.stderr}")
-                    raise RuntimeError(f"Temporal indexing failed: {e.stderr}")
-                except subprocess.TimeoutExpired:
                     logger.error(
-                        f"Temporal indexing timed out after {cidx_index_timeout} seconds"
+                        f"Temporal indexing failed for {alias_name}: {type(e).__name__}: {e.stderr}",
+                        exc_info=True
+                    )
+                    raise RuntimeError(f"Temporal indexing failed for {alias_name}: {type(e).__name__}: {e.stderr}")
+                except subprocess.TimeoutExpired as e:
+                    logger.error(
+                        f"Temporal indexing timed out for {alias_name} after {cidx_index_timeout} seconds: {type(e).__name__}",
+                        exc_info=True
                     )
                     raise RuntimeError(
-                        f"Temporal indexing timed out after {cidx_index_timeout} seconds"
+                        f"Temporal indexing timed out for {alias_name} after {cidx_index_timeout} seconds: {type(e).__name__}"
                     )
 
             # Step 5c: Run cidx scip generate for code intelligence indexing (if enabled)
@@ -622,15 +640,19 @@ class RefreshScheduler:
                     logger.info("cidx scip generate completed successfully")
                 except subprocess.CalledProcessError as e:
                     # AC5: SCIP failures should raise RuntimeError
-                    logger.error(f"SCIP indexing failed: {e.stderr}")
-                    raise RuntimeError(f"SCIP indexing failed: {e.stderr}")
-                except subprocess.TimeoutExpired:
+                    logger.error(
+                        f"SCIP indexing failed for {alias_name}: {type(e).__name__}: {e.stderr}",
+                        exc_info=True
+                    )
+                    raise RuntimeError(f"SCIP indexing failed for {alias_name}: {type(e).__name__}: {e.stderr}")
+                except subprocess.TimeoutExpired as e:
                     # AC5: SCIP timeout should raise RuntimeError
                     logger.error(
-                        f"SCIP indexing timed out after {scip_timeout} seconds"
+                        f"SCIP indexing timed out for {alias_name} after {scip_timeout} seconds: {type(e).__name__}",
+                        exc_info=True
                     )
                     raise RuntimeError(
-                        f"SCIP indexing timed out after {scip_timeout} seconds"
+                        f"SCIP indexing timed out for {alias_name} after {scip_timeout} seconds: {type(e).__name__}"
                     )
 
             # Step 6: Validate index exists
@@ -648,16 +670,22 @@ class RefreshScheduler:
 
         except Exception as e:
             # Step 7: Cleanup partial artifacts on failure
-            logger.error(f"Failed to create new index, cleaning up: {e}")
+            logger.error(
+                f"Failed to create new index for {alias_name}, cleaning up: {type(e).__name__}: {e}",
+                exc_info=True
+            )
             if versioned_path.exists():
                 try:
                     shutil.rmtree(versioned_path)
                     logger.info(f"Cleaned up partial index at: {versioned_path}")
                 except Exception as cleanup_error:
-                    logger.error(f"Failed to cleanup partial index: {cleanup_error}")
+                    logger.error(
+                        f"Failed to cleanup partial index for {alias_name}: {type(cleanup_error).__name__}: {cleanup_error}",
+                        exc_info=True
+                    )
 
             # Re-raise with context
-            raise RuntimeError(f"Failed to create new index: {e}")
+            raise RuntimeError(f"Failed to create new index for {alias_name}: {type(e).__name__}: {e}")
 
     def _detect_existing_indexes(self, repo_path: Path) -> Dict[str, bool]:
         """

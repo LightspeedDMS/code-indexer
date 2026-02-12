@@ -602,6 +602,8 @@ class LangfuseConfig:
     pull_sync_interval_seconds: int = 300
     # Maximum age of traces to pull in days (min: 1, max: 365)
     pull_trace_age_days: int = 30
+    # Maximum concurrent observation fetches (min: 1, max: 20) - Story #174
+    pull_max_concurrent_observations: int = 5
 
     def __post_init__(self):
         """Convert dict entries to LangfusePullProject instances if needed."""
@@ -1680,12 +1682,18 @@ class ServerConfigManager:
                     f"cache_max_entries must be between 100 and 100000, got {config.content_limits_config.cache_max_entries}"
                 )
 
-        # Validate langfuse_config (Story #136)
-        if config.langfuse_config and config.langfuse_config.enabled:
-            # Validate host URL format
-            if not config.langfuse_config.host.startswith(("http://", "https://")):
+        # Validate langfuse_config (Story #136, Story #174)
+        if config.langfuse_config:
+            # Validate host URL format (Story #136)
+            if config.langfuse_config.enabled:
+                if not config.langfuse_config.host.startswith(("http://", "https://")):
+                    raise ValueError(
+                        f"Langfuse host must start with http:// or https://, got {config.langfuse_config.host}"
+                    )
+            # Validate pull_max_concurrent_observations range (Story #174)
+            if not (1 <= config.langfuse_config.pull_max_concurrent_observations <= 20):
                 raise ValueError(
-                    f"Langfuse host must start with http:// or https://, got {config.langfuse_config.host}"
+                    f"pull_max_concurrent_observations must be between 1 and 20, got {config.langfuse_config.pull_max_concurrent_observations}"
                 )
 
     def create_server_directories(self) -> None:

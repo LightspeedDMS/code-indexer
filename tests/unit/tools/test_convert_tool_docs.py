@@ -79,14 +79,15 @@ class TestConvertToolDocs:
         assert "tl_dr: Test tool." in content
 
     def test_convert_all_tools_creates_128_files(self, temp_output_dir):
-        """convert_all_tools should create 128 .md files."""
+        """convert_all_tools should create .md files for all tools in registry."""
         from tools.convert_tool_docs import convert_all_tools
         from code_indexer.server.mcp.tools import TOOL_REGISTRY
 
+        expected_count = len(TOOL_REGISTRY)
         stats = convert_all_tools(TOOL_REGISTRY, temp_output_dir)
 
-        assert stats["total"] == 128
-        assert stats["converted"] == 128
+        assert stats["total"] == expected_count
+        assert stats["converted"] == expected_count
         assert stats["failed"] == 0
 
     def test_generated_files_have_valid_frontmatter(self, temp_output_dir):
@@ -95,9 +96,10 @@ class TestConvertToolDocs:
         from code_indexer.server.mcp.tools import TOOL_REGISTRY
         from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
 
+        expected_count = len(TOOL_REGISTRY)
         convert_all_tools(TOOL_REGISTRY, temp_output_dir)
 
         # Should load without errors
         loader = ToolDocLoader(temp_output_dir)
         docs = loader.load_all_docs()
-        assert len(docs) == 128
+        assert len(docs) == expected_count

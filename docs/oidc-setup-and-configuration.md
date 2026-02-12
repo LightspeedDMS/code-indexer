@@ -61,6 +61,8 @@ OIDC configuration is stored in `~/.cidx-server/config.json` under the `oidc_pro
     "scopes": ["openid", "profile", "email"],
     "email_claim": "email",
     "username_claim": "preferred_username",
+    "groups_claim": "groups",
+    "group_mappings": [],
     "use_pkce": true,
     "require_email_verification": true,
     "enable_jit_provisioning": true,
@@ -117,6 +119,42 @@ OIDC configuration is stored in `~/.cidx-server/config.json` under the `oidc_pro
 - Name of the claim to use for username during JIT provisioning
 - Falls back to email prefix if claim is missing or invalid
 - Common options: `preferred_username`, `username`, `login`, `email`
+
+**`groups_claim`** (string, default: `"groups"`)
+- Name of the claim containing user's group memberships from the OIDC provider
+- Used for automatic group assignment via group mappings
+- Standard OIDC uses `groups`, but some providers use different names
+- Examples: `groups`, `roles`, `memberOf`
+- The claim value should be a list/array of group identifiers or names
+
+**`group_mappings`** (array of objects, default: `[]`)
+- Maps external OIDC provider groups to CIDX internal groups
+- Enables automatic group assignment based on SSO group membership
+- Each mapping object has the structure:
+  ```json
+  {
+    "external_group_id": "guid-or-identifier",
+    "external_group_name": "Display Name (optional)",
+    "cidx_group": "target-cidx-group-name"
+  }
+  ```
+- First matched external group determines the CIDX group assignment
+- If no mappings match, user is assigned to default "users" group
+- Example configuration:
+  ```json
+  "group_mappings": [
+    {
+      "external_group_id": "admin-guid-1234",
+      "external_group_name": "Administrators",
+      "cidx_group": "admins"
+    },
+    {
+      "external_group_id": "developers-guid-5678",
+      "external_group_name": "Developers",
+      "cidx_group": "developers"
+    }
+  ]
+  ```
 
 #### Security Settings
 
@@ -310,7 +348,7 @@ When an SSO identity is linked, CIDX stores:
 }
 ```
 
-**In `~/.cidx-server/oidc_identities.db`:**
+**In `~/.cidx-server/oauth.db`:**
 ```sql
 -- Fast lookup table for SSO subject → username mapping
 INSERT INTO oidc_identity_links
@@ -630,7 +668,7 @@ Use [jwt.io](https://jwt.io) to decode ID tokens and inspect claims (do not past
 
 **Check Database State:**
 ```bash
-sqlite3 ~/.cidx-server/oidc_identities.db "SELECT * FROM oidc_identity_links;"
+sqlite3 ~/.cidx-server/oauth.db "SELECT * FROM oidc_identity_links;"
 ```
 
 **Test Email Verification:**
@@ -647,5 +685,4 @@ sqlite3 ~/.cidx-server/oidc_identities.db "SELECT * FROM oidc_identity_links;"
 
 For CIDX-specific issues:
 - Check server logs in `~/.cidx-server/logs/`
-- Review [OIDC Integration Plan](./oidc-integration-plan.md) for implementation details
 - Report issues on GitHub: https://github.com/anthropics/code-indexer/issues
