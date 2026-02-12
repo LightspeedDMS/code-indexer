@@ -50,6 +50,7 @@ class ToolDoc:
     parameters: Optional[Dict[str, str]] = None
     inputSchema: Optional[Dict[str, Any]] = None
     outputSchema: Optional[Dict[str, Any]] = None
+    requires_config: Optional[str] = None  # Story #185: Conditional tool visibility
 
 
 class ToolDocLoader:
@@ -167,6 +168,7 @@ class ToolDocLoader:
             parameters=frontmatter.get("parameters"),
             inputSchema=frontmatter.get("inputSchema"),
             outputSchema=frontmatter.get("outputSchema"),
+            requires_config=frontmatter.get("requires_config"),  # Story #185
         )
 
     def get_description(self, tool_name: str) -> str:
@@ -247,6 +249,9 @@ class ToolDocLoader:
             # Include outputSchema if present (for documentation purposes)
             if doc.outputSchema is not None:
                 tool_def["outputSchema"] = doc.outputSchema
+            # Story #185: Include requires_config for conditional visibility
+            if doc.requires_config is not None:
+                tool_def["requires_config"] = doc.requires_config
             registry[name] = tool_def
         return registry
 

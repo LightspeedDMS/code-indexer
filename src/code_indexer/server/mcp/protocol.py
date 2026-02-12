@@ -132,11 +132,13 @@ def handle_tools_list(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         user: Authenticated user
 
     Returns:
-        Dictionary with tools list filtered by user role
+        Dictionary with tools list filtered by user role and configuration
     """
     from .tools import filter_tools_by_role
 
-    tools = filter_tools_by_role(user)
+    # Story #185: Pass config to filter tools based on configuration requirements
+    config = get_config_service().get_config()
+    tools = filter_tools_by_role(user, config=config)
     return {"tools": tools}
 
 
@@ -599,7 +601,9 @@ def handle_public_tools_list(user: Optional[User]) -> Dict[str, Any]:
         }
     from .tools import filter_tools_by_role
 
-    return {"tools": filter_tools_by_role(user)}
+    # Story #185: Pass config to filter tools based on configuration requirements
+    config = get_config_service().get_config()
+    return {"tools": filter_tools_by_role(user, config=config)}
 
 
 async def process_public_jsonrpc_request(

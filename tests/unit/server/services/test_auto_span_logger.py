@@ -40,7 +40,7 @@ def active_trace(trace_manager):
     """Start a trace and return context."""
     return trace_manager.start_trace(
         session_id="session-1",
-        topic="Test trace",
+        name="Test trace",
     )
 
 

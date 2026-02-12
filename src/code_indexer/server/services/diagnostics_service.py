@@ -1024,7 +1024,40 @@ class DiagnosticsService:
         Returns:
             Dict with {repo, issue} if unhealthy, None if healthy
         """
-        # Check for required files
+        # Bug #188 fix: Detect temporal collections (FilesystemVectorStore format)
+        # Temporal collections have temporal_metadata.db, not hnsw_index.bin
+        temporal_metadata_file = collection_dir / "temporal_metadata.db"
+        if temporal_metadata_file.exists():
+            # This is a temporal collection - validate FilesystemVectorStore format
+            meta_file = collection_dir / "collection_meta.json"
+            projection_file = collection_dir / "projection_matrix.npy"
+
+            if not meta_file.exists():
+                return {
+                    "repo": repo_name,
+                    "issue": f"Missing collection_meta.json in temporal collection {collection_name}"
+                }
+
+            if not projection_file.exists():
+                return {
+                    "repo": repo_name,
+                    "issue": f"Missing projection_matrix.npy in temporal collection {collection_name}"
+                }
+
+            # Validate metadata is valid JSON
+            try:
+                with open(meta_file, 'r') as f:
+                    json.load(f)
+            except json.JSONDecodeError:
+                return {
+                    "repo": repo_name,
+                    "issue": f"Corrupted metadata JSON in temporal collection {collection_name}"
+                }
+
+            # Temporal collection is healthy
+            return None
+
+        # Non-temporal collection - validate HNSW format
         hnsw_file = collection_dir / "hnsw_index.bin"
         meta_file = collection_dir / "collection_meta.json"
 
@@ -1142,15 +1175,14 @@ class DiagnosticsService:
         Returns:
             Tuple of (schema_valid, missing_tables)
         """
+        # Bug #187 fix: Removed groups, repo_group_access, audit_logs
+        # These tables are in groups.db (separate database), not cidx_server.db
         required_tables = [
             "users",
             "user_api_keys",
             "user_mcp_credentials",
             "golden_repos_metadata",
             "global_repos",
-            "groups",
-            "repo_group_access",
-            "audit_logs",
         ]
 
         cursor = conn.cursor()
@@ -1341,7 +1373,8 @@ class DiagnosticsService:
             delegation_manager = ClaudeDelegationManager()
             config = delegation_manager.load_config()
 
-            if not config.is_configured:
+            # Bug #186 fix: Handle None return when config file doesn't exist
+            if config is None or not config.is_configured:
                 return DiagnosticResult(
                     name="Claude Server",
                     status=DiagnosticStatus.NOT_CONFIGURED,
@@ -1823,7 +1856,8 @@ class DiagnosticsService:
             delegation_manager = ClaudeDelegationManager()
             config = delegation_manager.load_config()
 
-            if not config.is_configured:
+            # Bug #186 fix: Handle None return when config file doesn't exist
+            if config is None or not config.is_configured:
                 return DiagnosticResult(
                     name="Claude Delegation Credentials",
                     status=DiagnosticStatus.NOT_CONFIGURED,

@@ -38,16 +38,14 @@ class TestSQLiteDatabaseDiagnostics:
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
 
-        # Create required tables (must match production schema)
+        # Create required tables (must match production schema - 5 tables in cidx_server.db)
+        # Note: groups, repo_group_access, audit_logs are in groups.db, NOT cidx_server.db (Bug #187)
         required_tables = [
             "users",
             "user_api_keys",
             "user_mcp_credentials",
             "golden_repos_metadata",
             "global_repos",
-            "groups",
-            "repo_group_access",
-            "audit_logs",
         ]
         for table in required_tables:
             cursor.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
@@ -178,16 +176,14 @@ class TestSQLiteDatabaseDiagnostics:
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
 
-        # Create all required tables (must match production schema)
+        # Create all required tables (must match production schema - 5 tables in cidx_server.db)
+        # Note: groups, repo_group_access, audit_logs are in groups.db, NOT cidx_server.db (Bug #187)
         required_tables = [
             "users",
             "user_api_keys",
             "user_mcp_credentials",
             "golden_repos_metadata",
             "global_repos",
-            "groups",
-            "repo_group_access",
-            "audit_logs",
         ]
         for table in required_tables:
             cursor.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
@@ -219,11 +215,11 @@ class TestSQLiteDatabaseDiagnostics:
 
         assert valid is False
         assert len(missing_tables) > 0
-        # Check for production schema table names
+        # Check for production schema table names (Bug #187: groups tables are in groups.db, not cidx_server.db)
         assert "golden_repos_metadata" in missing_tables
         assert "global_repos" in missing_tables
-        assert "groups" in missing_tables
-        assert "audit_logs" in missing_tables
+        assert "user_api_keys" in missing_tables
+        assert "user_mcp_credentials" in missing_tables
 
 
 class TestVectorStorageDiagnostics:
@@ -383,15 +379,14 @@ class TestInfrastructureDiagnostics:
         db_path.parent.mkdir(parents=True)
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
-        # Use production schema table names
+        # Use production schema table names (5 tables in cidx_server.db)
+        # Note: groups, repo_group_access, audit_logs are in groups.db, NOT cidx_server.db (Bug #187)
         required_tables = [
             "users",
             "user_api_keys",
             "user_mcp_credentials",
+            "golden_repos_metadata",
             "global_repos",
-            "groups",
-            "repo_group_access",
-            "audit_logs",
         ]
         for table in required_tables:
             cursor.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
@@ -504,16 +499,14 @@ class TestInfrastructureDiagnosticsIntegration:
         db_path.parent.mkdir(parents=True)
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
-        # Use production schema table names
+        # Use production schema table names (5 tables in cidx_server.db)
+        # Note: groups, repo_group_access, audit_logs are in groups.db, NOT cidx_server.db (Bug #187)
         required_tables = [
             "users",
             "user_api_keys",
             "user_mcp_credentials",
             "golden_repos_metadata",
             "global_repos",
-            "groups",
-            "repo_group_access",
-            "audit_logs",
         ]
         for table in required_tables:
             cursor.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")

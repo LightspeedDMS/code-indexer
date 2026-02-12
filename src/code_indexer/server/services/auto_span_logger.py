@@ -136,6 +136,7 @@ class AutoSpanLogger:
         trace_ctx = self.trace_manager.get_active_trace(session_id, username=username)
 
         # Story #136 follow-up: Auto-trace creation
+        # Story #185: Use tool name directly as trace name (not "Auto-trace: {tool_name}")
         if (
             self.config.enabled
             and self.config.auto_trace_enabled
@@ -145,7 +146,7 @@ class AutoSpanLogger:
             try:
                 trace_ctx = self.trace_manager.start_trace(
                     session_id=session_id,
-                    topic=f"Auto-trace: {tool_name}",
+                    name=tool_name,
                     strategy="auto",
                     username=username,
                 )

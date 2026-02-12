@@ -79,12 +79,17 @@ def _build_registry() -> Dict[str, Dict[str, Any]]:
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = _build_registry()
 
 
-def filter_tools_by_role(user: User) -> List[Dict[str, Any]]:
+def filter_tools_by_role(user: User, config=None) -> List[Dict[str, Any]]:
     """
-    Filter tools based on user role and permissions.
+    Filter tools based on user role, permissions, and configuration requirements.
+
+    Story #185: Tools can specify requires_config in their frontmatter to conditionally
+    appear based on server configuration. For example, tracing tools require Langfuse
+    to be enabled.
 
     Args:
         user: Authenticated user with role information
+        config: Optional Config object for checking configuration requirements
 
     Returns:
         List of MCP-compliant tool definitions (name, description, inputSchema only)
@@ -93,14 +98,29 @@ def filter_tools_by_role(user: User) -> List[Dict[str, Any]]:
 
     for tool_name, tool_def in TOOL_REGISTRY.items():
         required_permission = tool_def["required_permission"]
-        if user.has_permission(required_permission):
-            # Only include MCP-valid fields (name, description, inputSchema)
-            # Filter out internal fields (required_permission, outputSchema)
-            mcp_tool = {
-                "name": tool_def["name"],
-                "description": tool_def["description"],
-                "inputSchema": tool_def["inputSchema"],
-            }
-            filtered_tools.append(mcp_tool)
+        if not user.has_permission(required_permission):
+            continue
+
+        # Story #185: Check if tool requires specific configuration
+        requires_config = tool_def.get("requires_config")
+        if requires_config:
+            # Fail-closed: if tool requires config but no config available, hide the tool
+            if not config:
+                continue  # Skip tool when config is None (fail-closed)
+
+            # Check if required config is enabled
+            if requires_config == "langfuse_enabled":
+                if not config.langfuse_config.enabled:
+                    continue  # Skip tool if Langfuse not enabled
+            # Add more config checks here as needed
+
+        # Only include MCP-valid fields (name, description, inputSchema)
+        # Filter out internal fields (required_permission, outputSchema, requires_config)
+        mcp_tool = {
+            "name": tool_def["name"],
+            "description": tool_def["description"],
+            "inputSchema": tool_def["inputSchema"],
+        }
+        filtered_tools.append(mcp_tool)
 
     return filtered_tools

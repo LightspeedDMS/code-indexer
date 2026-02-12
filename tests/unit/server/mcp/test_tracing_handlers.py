@@ -49,10 +49,12 @@ class TestHandleStartTrace:
     ):
         """Test successful trace start."""
         mock_get_service.return_value = mock_langfuse_service
-        mock_langfuse_service.trace_manager.start_trace.return_value = "trace-456"
+        mock_trace_ctx = Mock()
+        mock_trace_ctx.trace_id = "trace-456"
+        mock_langfuse_service.trace_manager.start_trace.return_value = mock_trace_ctx
 
         args = {
-            "topic": "Authentication Research",
+            "name": "Authentication Research",
             "strategy": "Top-down",
             "metadata": {"priority": "high"},
         }
@@ -62,10 +64,13 @@ class TestHandleStartTrace:
         # Verify trace_manager.start_trace was called correctly
         mock_langfuse_service.trace_manager.start_trace.assert_called_once_with(
             session_id="session-123",
-            topic="Authentication Research",
+            name="Authentication Research",
             strategy="Top-down",
             metadata={"priority": "high"},
             username="testuser",
+            input=None,
+            tags=None,
+            intel=None,
         )
 
         # Verify response
@@ -86,7 +91,7 @@ class TestHandleStartTrace:
         service.is_enabled = Mock(return_value=False)
         mock_get_service.return_value = service
 
-        args = {"topic": "Test"}
+        args = {"name": "Test"}
 
         result = handle_start_trace(args, mock_user, session_state=mock_session_state)
 
@@ -104,7 +109,7 @@ class TestHandleStartTrace:
         """Test start_trace without session context."""
         mock_get_service.return_value = mock_langfuse_service
 
-        args = {"topic": "Test"}
+        args = {"name": "Test"}
 
         result = handle_start_trace(args, mock_user, session_state=None)
 
@@ -116,13 +121,13 @@ class TestHandleStartTrace:
         assert "No session context" in response_data["message"]
 
     @patch("code_indexer.server.services.langfuse_service.get_langfuse_service")
-    def test_start_trace_missing_topic(
+    def test_start_trace_missing_name(
         self, mock_get_service, mock_user, mock_session_state, mock_langfuse_service
     ):
-        """Test start_trace without required topic parameter."""
+        """Test start_trace without required name parameter."""
         mock_get_service.return_value = mock_langfuse_service
 
-        args = {}  # Missing topic
+        args = {}  # Missing name
 
         result = handle_start_trace(args, mock_user, session_state=mock_session_state)
 
@@ -131,7 +136,7 @@ class TestHandleStartTrace:
 
         response_data = json.loads(result["content"][0]["text"])
         assert response_data["status"] == "error"
-        assert "Missing required parameter: topic" in response_data["message"]
+        assert "Missing required parameter: name" in response_data["message"]
 
     @patch("code_indexer.server.services.langfuse_service.get_langfuse_service")
     def test_start_trace_minimal_args(
@@ -139,19 +144,24 @@ class TestHandleStartTrace:
     ):
         """Test start_trace with only required parameters."""
         mock_get_service.return_value = mock_langfuse_service
-        mock_langfuse_service.trace_manager.start_trace.return_value = "trace-789"
+        mock_trace_ctx = Mock()
+        mock_trace_ctx.trace_id = "trace-789"
+        mock_langfuse_service.trace_manager.start_trace.return_value = mock_trace_ctx
 
-        args = {"topic": "Simple Research"}
+        args = {"name": "Simple Research"}
 
         result = handle_start_trace(args, mock_user, session_state=mock_session_state)
 
         # Verify trace_manager.start_trace was called with None for optional params
         mock_langfuse_service.trace_manager.start_trace.assert_called_once_with(
             session_id="session-123",
-            topic="Simple Research",
+            name="Simple Research",
             strategy=None,
             metadata=None,
             username="testuser",
+            input=None,
+            tags=None,
+            intel=None,
         )
 
         # Verify response
@@ -171,7 +181,7 @@ class TestHandleStartTrace:
             "Test error"
         )
 
-        args = {"topic": "Test"}
+        args = {"name": "Test"}
 
         result = handle_start_trace(args, mock_user, session_state=mock_session_state)
 
@@ -201,19 +211,23 @@ class TestHandleEndTrace:
         )
         mock_langfuse_service.trace_manager.end_trace.return_value = True
 
-        args = {"score": 0.9, "feedback": "Good results", "outcome": "success"}
+        args = {"score": 0.9, "summary": "Good results", "outcome": "success"}
 
         result = handle_end_trace(args, mock_user, session_state=mock_session_state)
 
         # Verify trace_manager methods were called
         mock_langfuse_service.trace_manager.get_active_trace.assert_called_once_with(
-            "session-123"
+            "session-123", username="testuser"
         )
         mock_langfuse_service.trace_manager.end_trace.assert_called_once_with(
             session_id="session-123",
             score=0.9,
-            feedback="Good results",
+            summary="Good results",
             outcome="success",
+            username="testuser",
+            output=None,
+            tags=None,
+            intel=None,
         )
 
         # Verify response
@@ -298,7 +312,14 @@ class TestHandleEndTrace:
 
         # Verify end_trace called with None for optional params
         mock_langfuse_service.trace_manager.end_trace.assert_called_once_with(
-            session_id="session-123", score=None, feedback=None, outcome=None
+            session_id="session-123",
+            score=None,
+            summary=None,
+            outcome=None,
+            username="testuser",
+            output=None,
+            tags=None,
+            intel=None,
         )
 
         # Verify response

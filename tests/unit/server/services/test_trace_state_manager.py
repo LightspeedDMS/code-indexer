@@ -69,16 +69,18 @@ class TestTraceStateManagerBasicOperations:
 
         context = manager.start_trace(
             session_id="session-1",
-            topic="authentication",
+            name="authentication",
             metadata={"strategy": "deep-dive"},
         )
 
         # Should create trace via client
         mock_client.create_trace.assert_called_once_with(
-            name="research-session",
+            name="authentication",
             session_id="session-1",
-            metadata={"topic": "authentication", "strategy": "deep-dive"},
+            metadata={"strategy": "deep-dive"},
             user_id=None,
+            input=None,
+            tags=None,
         )
 
         # Should return context
@@ -101,13 +103,15 @@ class TestTraceStateManagerBasicOperations:
 
         manager = TraceStateManager(mock_client)
 
-        manager.start_trace(session_id="session-1", topic="auth", username="user-456")
+        manager.start_trace(session_id="session-1", name="auth", username="user-456")
 
         mock_client.create_trace.assert_called_once_with(
-            name="research-session",
+            name="auth",
             session_id="session-1",
-            metadata={"topic": "auth"},
+            metadata=None,
             user_id="user-456",
+            input=None,
+            tags=None,
         )
 
     def test_start_trace_when_client_returns_none(self):
@@ -117,7 +121,7 @@ class TestTraceStateManagerBasicOperations:
 
         manager = TraceStateManager(mock_client)
 
-        context = manager.start_trace(session_id="session-1", topic="test")
+        context = manager.start_trace(session_id="session-1", name="test")
 
         assert context is None
         # Should not create session stack
@@ -188,7 +192,7 @@ class TestTraceStateManagerBasicOperations:
         manager._session_trace_stacks["session-1"] = [context]
 
         manager.end_trace(
-            session_id="session-1", score=0.9, feedback="Excellent results"
+            session_id="session-1", score=0.9, summary="Excellent results"
         )
 
         # Should score the trace
@@ -236,10 +240,10 @@ class TestTraceStateManagerNestedTraces:
         manager = TraceStateManager(mock_client)
 
         # Start first trace
-        context1 = manager.start_trace(session_id="session-1", topic="auth")
+        context1 = manager.start_trace(session_id="session-1", name="auth")
 
         # Start second trace (nested)
-        context2 = manager.start_trace(session_id="session-1", topic="search")
+        context2 = manager.start_trace(session_id="session-1", name="search")
 
         # Stack should have both
         assert len(manager._session_trace_stacks["session-1"]) == 2
@@ -261,8 +265,8 @@ class TestTraceStateManagerNestedTraces:
 
         manager = TraceStateManager(mock_client)
 
-        context1 = manager.start_trace(session_id="session-1", topic="parent")
-        context2 = manager.start_trace(session_id="session-1", topic="child")
+        context1 = manager.start_trace(session_id="session-1", name="parent")
+        context2 = manager.start_trace(session_id="session-1", name="child")
 
         # Child should reference parent
         assert context2.parent_trace_id == "trace-parent"
@@ -358,7 +362,7 @@ class TestTraceStateManagerThreadSafety:
         manager = TraceStateManager(mock_client)
 
         # Verify lock is released after operation
-        manager.start_trace(session_id="session-1", topic="test")
+        manager.start_trace(session_id="session-1", name="test")
 
         # Lock should be released (not locked)
         assert not manager._lock.locked()
@@ -397,3 +401,224 @@ class TestTraceStateManagerThreadSafety:
 
         # Lock should be released
         assert not manager._lock.locked()
+
+
+class TestStory185ParameterChanges:
+    """Tests for Story #185: Refactor start_trace/end_trace for full prompt observability."""
+
+    def test_start_trace_accepts_name_parameter(self):
+        """start_trace should accept 'name' parameter (renamed from 'topic')."""
+        mock_client = Mock()
+        mock_trace = Mock()
+        mock_trace.id = "trace-123"
+        mock_client.create_trace.return_value = mock_trace
+
+        manager = TraceStateManager(mock_client)
+
+        context = manager.start_trace(
+            session_id="session-1",
+            name="Authentication Investigation",
+        )
+
+        # Should pass name to create_trace
+        mock_client.create_trace.assert_called_once()
+        call_args = mock_client.create_trace.call_args
+        assert call_args.kwargs["name"] == "Authentication Investigation"
+        assert context is not None
+
+    def test_start_trace_accepts_input_parameter(self):
+        """start_trace should accept optional 'input' parameter for user prompt."""
+        mock_client = Mock()
+        mock_trace = Mock()
+        mock_trace.id = "trace-123"
+        mock_client.create_trace.return_value = mock_trace
+
+        manager = TraceStateManager(mock_client)
+
+        context = manager.start_trace(
+            session_id="session-1",
+            name="Test Task",
+            input="Please find all authentication code",
+        )
+
+        # Should pass input to create_trace
+        mock_client.create_trace.assert_called_once()
+        call_args = mock_client.create_trace.call_args
+        assert call_args.kwargs["input"] == "Please find all authentication code"
+
+    def test_start_trace_accepts_tags_parameter(self):
+        """start_trace should accept optional 'tags' parameter."""
+        mock_client = Mock()
+        mock_trace = Mock()
+        mock_trace.id = "trace-123"
+        mock_client.create_trace.return_value = mock_trace
+
+        manager = TraceStateManager(mock_client)
+
+        context = manager.start_trace(
+            session_id="session-1",
+            name="Test Task",
+            tags=["bugfix", "high-priority"],
+        )
+
+        # Should pass tags to create_trace
+        mock_client.create_trace.assert_called_once()
+        call_args = mock_client.create_trace.call_args
+        assert call_args.kwargs["tags"] == ["bugfix", "high-priority"]
+
+    def test_start_trace_accepts_intel_parameter(self):
+        """start_trace should accept optional 'intel' parameter with prompt metadata."""
+        mock_client = Mock()
+        mock_trace = Mock()
+        mock_trace.id = "trace-123"
+        mock_client.create_trace.return_value = mock_trace
+
+        manager = TraceStateManager(mock_client)
+
+        intel = {
+            "frustration": 0.7,
+            "specificity": "surg",
+            "task_type": "bug",
+            "quality": 0.8,
+            "iteration": 2,
+        }
+
+        context = manager.start_trace(
+            session_id="session-1", name="Bug Investigation", intel=intel
+        )
+
+        # Should merge intel into metadata with intel_ prefix
+        mock_client.create_trace.assert_called_once()
+        call_args = mock_client.create_trace.call_args
+        metadata = call_args.kwargs["metadata"]
+        assert metadata["intel_frustration"] == 0.7
+        assert metadata["intel_specificity"] == "surg"
+        assert metadata["intel_task_type"] == "bug"
+        assert metadata["intel_quality"] == 0.8
+        assert metadata["intel_iteration"] == 2
+
+    def test_start_trace_keeps_strategy_and_metadata_unchanged(self):
+        """start_trace should still support strategy and metadata parameters."""
+        mock_client = Mock()
+        mock_trace = Mock()
+        mock_trace.id = "trace-123"
+        mock_client.create_trace.return_value = mock_trace
+
+        manager = TraceStateManager(mock_client)
+
+        context = manager.start_trace(
+            session_id="session-1",
+            name="Test Task",
+            strategy="depth-first",
+            metadata={"project": "backend", "ticket": "JIRA-123"},
+        )
+
+        # Should include strategy and metadata in trace metadata
+        mock_client.create_trace.assert_called_once()
+        call_args = mock_client.create_trace.call_args
+        metadata = call_args.kwargs["metadata"]
+        assert metadata["strategy"] == "depth-first"
+        assert metadata["project"] == "backend"
+        assert metadata["ticket"] == "JIRA-123"
+
+    def test_end_trace_accepts_summary_parameter(self):
+        """end_trace should accept 'summary' parameter (renamed from 'feedback')."""
+        mock_client = Mock()
+        manager = TraceStateManager(mock_client)
+
+        # Set up stack
+        mock_trace = Mock()
+        context = TraceContext(trace_id="trace-123", trace=mock_trace)
+        manager._session_trace_stacks["session-1"] = [context]
+
+        manager.end_trace(
+            session_id="session-1", score=0.9, summary="Found root cause in auth module"
+        )
+
+        # Should pass summary as comment to score
+        mock_client.score.assert_called_once_with(
+            trace_id="trace-123",
+            name="user-feedback",
+            value=0.9,
+            comment="Found root cause in auth module",
+        )
+
+    def test_end_trace_accepts_output_parameter(self):
+        """end_trace should accept optional 'output' parameter for Claude response."""
+        mock_client = Mock()
+        manager = TraceStateManager(mock_client)
+
+        # Set up stack
+        mock_trace = Mock()
+        context = TraceContext(trace_id="trace-123", trace=mock_trace)
+        manager._session_trace_stacks["session-1"] = [context]
+
+        manager.end_trace(
+            session_id="session-1",
+            output="I found the authentication code in src/auth.py...",
+        )
+
+        # Should call update_current_trace_in_context with output
+        mock_client.update_current_trace_in_context.assert_called_once()
+        call_args = mock_client.update_current_trace_in_context.call_args
+        assert call_args.kwargs["span"] == mock_trace
+        assert call_args.kwargs["output"] == "I found the authentication code in src/auth.py..."
+
+    def test_end_trace_accepts_intel_parameter(self):
+        """end_trace should accept optional 'intel' parameter to update prompt metadata."""
+        mock_client = Mock()
+        manager = TraceStateManager(mock_client)
+
+        # Set up stack
+        mock_trace = Mock()
+        context = TraceContext(trace_id="trace-123", trace=mock_trace)
+        manager._session_trace_stacks["session-1"] = [context]
+
+        intel = {
+            "frustration": 0.3,
+            "quality": 0.9,
+        }
+
+        manager.end_trace(session_id="session-1", intel=intel)
+
+        # Should call update_current_trace_in_context with intel metadata
+        mock_client.update_current_trace_in_context.assert_called_once()
+        call_args = mock_client.update_current_trace_in_context.call_args
+        metadata = call_args.kwargs["metadata"]
+        assert metadata["intel_frustration"] == 0.3
+        assert metadata["intel_quality"] == 0.9
+
+    def test_end_trace_accepts_tags_parameter(self):
+        """end_trace should accept optional 'tags' parameter to merge with start tags."""
+        mock_client = Mock()
+        manager = TraceStateManager(mock_client)
+
+        # Set up stack
+        mock_trace = Mock()
+        context = TraceContext(trace_id="trace-123", trace=mock_trace)
+        manager._session_trace_stacks["session-1"] = [context]
+
+        manager.end_trace(session_id="session-1", tags=["completed", "verified"])
+
+        # Should call update_current_trace_in_context with tags
+        mock_client.update_current_trace_in_context.assert_called_once()
+        call_args = mock_client.update_current_trace_in_context.call_args
+        assert call_args.kwargs["tags"] == ["completed", "verified"]
+
+    def test_end_trace_wires_outcome_to_metadata(self):
+        """end_trace should wire 'outcome' parameter to trace metadata (fix dead code)."""
+        mock_client = Mock()
+        manager = TraceStateManager(mock_client)
+
+        # Set up stack
+        mock_trace = Mock()
+        context = TraceContext(trace_id="trace-123", trace=mock_trace)
+        manager._session_trace_stacks["session-1"] = [context]
+
+        manager.end_trace(session_id="session-1", outcome="bug_found")
+
+        # Should call update_current_trace_in_context with outcome in metadata
+        mock_client.update_current_trace_in_context.assert_called_once()
+        call_args = mock_client.update_current_trace_in_context.call_args
+        metadata = call_args.kwargs["metadata"]
+        assert metadata["outcome"] == "bug_found"

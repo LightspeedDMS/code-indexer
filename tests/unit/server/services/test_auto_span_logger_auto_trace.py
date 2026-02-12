@@ -92,9 +92,8 @@ class TestAutoTraceCreation:
         # Verify trace was created
         mock_langfuse_client.create_trace.assert_called_once()
         call_kwargs = mock_langfuse_client.create_trace.call_args[1]
-        assert call_kwargs["name"] == "research-session"
+        assert call_kwargs["name"] == "search_code"
         assert call_kwargs["session_id"] == "session-1"
-        assert "Auto-trace: search_code" in call_kwargs["metadata"]["topic"]
         assert call_kwargs["metadata"]["strategy"] == "auto"
         assert call_kwargs["user_id"] == "test-user"
 
@@ -152,7 +151,7 @@ class TestAutoTraceCreation:
         mock_langfuse_client.create_trace.return_value = existing_trace
 
         trace_manager.start_trace(
-            session_id="session-1", topic="manual-research", username="test-user"
+            session_id="session-1", name="manual-research", username="test-user"
         )
 
         # Verify trace exists
@@ -224,7 +223,7 @@ class TestAutoTraceCreation:
     async def test_auto_trace_uses_tool_name_in_topic(
         self, trace_manager, mock_langfuse_client, langfuse_config_auto_enabled
     ):
-        """Auto-trace topic should include the tool name for context."""
+        """Auto-trace name should be the tool name for context."""
         auto_span_logger = AutoSpanLogger(
             trace_manager, mock_langfuse_client, langfuse_config_auto_enabled
         )
@@ -245,9 +244,9 @@ class TestAutoTraceCreation:
             username="test-user",
         )
 
-        # Verify topic includes tool name
+        # Verify name is the tool name
         call_kwargs = mock_langfuse_client.create_trace.call_args[1]
-        assert "browse_repository_tree" in call_kwargs["metadata"]["topic"]
+        assert call_kwargs["name"] == "browse_repository_tree"
 
     @pytest.mark.asyncio
     async def test_auto_trace_sets_strategy_to_auto(

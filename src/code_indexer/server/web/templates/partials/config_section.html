@@ -1,3 +1,9 @@
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- GROUP: Core Server -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="config-group">
+    <h3 class="config-group-header">Core Server</h3>
+    
 <!-- Server Settings Section -->
 <details open class="config-section" id="section-server">
     <summary>
@@ -93,6 +99,825 @@
     </article>
 </details>
 
+
+<details class="config-section" id="section-provider-api-keys">
+    <summary>
+        <h2>Provider API Keys</h2>
+    </summary>
+    <article>
+        <p class="section-description">
+            Configure API keys for external AI providers. These keys are used for code intelligence features.
+        </p>
+
+        <!-- Status Display -->
+        <div id="display-provider-api-keys">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Anthropic API Key</td>
+                        <td class="config-value">
+                            {% if config.provider_api_keys.anthropic_configured %}
+                            <span class="status-badge status-configured">Configured</span>
+                            {% else %}
+                            <span class="status-badge status-not-configured">Not Configured</span>
+                            {% endif %}
+                        </td>
+                        <td class="config-actions">
+                            {% if config.provider_api_keys.anthropic_configured %}
+                            <button type="button" class="outline small" onclick="testConfiguredAnthropicKey()">Test</button>
+                            <span id="anthropic-display-status" class="key-status"></span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">VoyageAI API Key</td>
+                        <td class="config-value">
+                            {% if config.provider_api_keys.voyageai_configured %}
+                            <span class="status-badge status-configured">Configured</span>
+                            {% else %}
+                            <span class="status-badge status-not-configured">Not Configured</span>
+                            {% endif %}
+                        </td>
+                        <td class="config-actions">
+                            {% if config.provider_api_keys.voyageai_configured %}
+                            <button type="button" class="outline small" onclick="testConfiguredVoyageAIKey()">Test</button>
+                            <span id="voyageai-display-status" class="key-status"></span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('provider-api-keys')">Edit Keys</button>
+            </div>
+        </div>
+
+        <!-- Edit Mode -->
+        <div id="edit-form-provider-api-keys" style="display: none;">
+            <div id="provider-api-keys-message"></div>
+
+            <!-- Anthropic API Key -->
+            <fieldset>
+                <legend>Anthropic API Key</legend>
+                <div class="form-grid">
+                    <label for="anthropic-api-key">
+                        API Key
+                        <input type="password" id="anthropic-api-key" name="anthropic_api_key"
+                               placeholder="sk-ant-..." autocomplete="off">
+                        <small>Format: sk-ant-... (minimum 40 characters)</small>
+                    </label>
+                </div>
+                <div class="form-actions-inline">
+                    <button type="button" class="primary small" onclick="saveAnthropicKey()">Save Key</button>
+                    <button type="button" class="outline small" onclick="testAnthropicKey()">Test Connectivity</button>
+                    {% if config.provider_api_keys.anthropic_configured %}
+                    <button type="button" class="contrast small" onclick="clearAnthropicKey()">Clear</button>
+                    {% endif %}
+                    <span id="anthropic-status" class="key-status"></span>
+                </div>
+            </fieldset>
+
+            <!-- VoyageAI API Key -->
+            <fieldset>
+                <legend>VoyageAI API Key</legend>
+                <div class="form-grid">
+                    <label for="voyageai-api-key">
+                        API Key
+                        <input type="password" id="voyageai-api-key" name="voyageai_api_key"
+                               placeholder="pa-..." autocomplete="off">
+                        <small>Format: pa-... (minimum 20 characters)</small>
+                    </label>
+                </div>
+                <div class="form-actions-inline">
+                    <button type="button" class="primary small" onclick="saveVoyageAIKey()">Save Key</button>
+                    <button type="button" class="outline small" onclick="testVoyageAIKey()">Test Connectivity</button>
+                    {% if config.provider_api_keys.voyageai_configured %}
+                    <button type="button" class="contrast small" onclick="clearVoyageAIKey()">Clear</button>
+                    {% endif %}
+                    <span id="voyageai-status" class="key-status"></span>
+                </div>
+            </fieldset>
+
+            <div class="form-actions">
+                <button type="button" class="secondary" onclick="cancelEdit('provider-api-keys')">Close</button>
+            </div>
+        </div>
+    </article>
+</details>
+
+
+<details class="config-section" id="section-mcp_session">
+    <summary>
+        <h2>MCP Session Settings</h2>
+    </summary>
+    <p class="section-description">
+        Manages Model Context Protocol (MCP) client sessions. Session TTL determines how long idle sessions remain valid before automatic expiration. Cleanup interval controls how frequently the server scans for and removes expired sessions. Shorter TTLs free resources faster but may interrupt long-running client operations.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-mcp_session">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Session TTL (seconds)</td>
+                        <td class="config-value">{{ config.mcp_session.session_ttl_seconds }}</td>
+                        <td class="config-note"><small>Time before idle sessions expire (default: 3600 = 1 hour)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Cleanup Interval (seconds)</td>
+                        <td class="config-value">{{ config.mcp_session.cleanup_interval_seconds }}</td>
+                        <td class="config-note"><small>Interval between session cleanup runs (default: 900 = 15 min)</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('mcp_session')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-mcp_session" method="post" action="/admin/config/mcp_session" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.mcp_session %}
+            <div class="validation-error">{{ validation_errors.mcp_session }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="mcp-session-ttl">
+                    Session TTL (seconds)
+                    <input type="number" id="mcp-session-ttl" name="session_ttl_seconds" value="{{ config.mcp_session.session_ttl_seconds }}" min="60">
+                    <small>Minimum 60 seconds</small>
+                </label>
+                <label for="mcp-session-cleanup">
+                    Cleanup Interval (seconds)
+                    <input type="number" id="mcp-session-cleanup" name="cleanup_interval_seconds" value="{{ config.mcp_session.cleanup_interval_seconds }}" min="60">
+                    <small>Minimum 60 seconds</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('mcp_session')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+<!-- Health Monitoring Settings Section (Story #3 Phase 2) -->
+
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- GROUP: Search & Content -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="config-group">
+    <h3 class="config-group-header">Search & Content</h3>
+    
+<!-- Search Limits Settings Section -->
+<details class="config-section" id="section-search_limits">
+    <summary>
+        <h2>Search Limits</h2>
+    </summary>
+    <p class="section-description">
+        Configures global limits for search operations. Max result size prevents overly large response payloads that could impact network performance and client memory. Search timeout ensures queries do not run indefinitely, freeing server resources for other requests when queries exceed the time limit.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-search_limits">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Max Result Size (MB)</td>
+                        <td class="config-value">{{ config.search_limits.max_result_size_mb }}</td>
+                        <td class="config-note"><small>Maximum size of search results payload</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Timeout (seconds)</td>
+                        <td class="config-value">{{ config.search_limits.timeout_seconds }}</td>
+                        <td class="config-note"><small>Maximum time for search operations</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('search_limits')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-search_limits" method="post" action="/admin/config/search_limits" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.search_limits %}
+            <div class="validation-error">{{ validation_errors.search_limits }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="search-limits-max-size">
+                    Max Result Size (MB)
+                    <input type="number" id="search-limits-max-size" name="max_result_size_mb" value="{{ config.search_limits.max_result_size_mb }}" min="1" max="100">
+                    <small>1-100 MB</small>
+                </label>
+                <label for="search-limits-timeout">
+                    Timeout (seconds)
+                    <input type="number" id="search-limits-timeout" name="timeout_seconds" value="{{ config.search_limits.timeout_seconds }}" min="5" max="300">
+                    <small>5-300 seconds</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('search_limits')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+
+<details class="config-section" id="section-multi-search">
+    <summary>
+        <h2>Multi-Search Settings</h2>
+    </summary>
+    <article>
+        <p class="section-description">
+            Controls parallel search execution across multiple repositories. Includes settings for
+            REST API multi-search (semantic/FTS), MCP omni-search (cross-repository queries), and
+            SCIP multi-repository code intelligence. Higher worker counts increase parallelism but
+            consume more server resources. Timeout settings prevent runaway queries from blocking
+            other operations.
+        </p>
+        <!-- Display Mode -->
+        <div id="display-multi-search">
+            <table class="config-table">
+                <tbody>
+                    <tr><td colspan="3"><strong>Multi-Repository Search (REST & MCP)</strong></td></tr>
+                    <tr>
+                        <td class="config-label">Multi-Search Max Workers</td>
+                        <td class="config-value">{{ config.multi_search.multi_search_max_workers }}</td>
+                        <td class="config-note"><small>Max concurrent threads for all multi-repository searches including REST API and MCP omni-search (default: 2)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Multi-Search Timeout (seconds)</td>
+                        <td class="config-value">{{ config.multi_search.multi_search_timeout_seconds }}</td>
+                        <td class="config-note"><small>Timeout per repository for all multi-repository searches including REST API and MCP omni-search (default: 30)</small></td>
+                    </tr>
+                    <tr><td colspan="3"><strong>SCIP Multi-Repository</strong></td></tr>
+                    <tr>
+                        <td class="config-label">SCIP Multi Max Workers</td>
+                        <td class="config-value">{{ config.multi_search.scip_multi_max_workers }}</td>
+                        <td class="config-note"><small>Max concurrent threads for multi-repo SCIP queries (default: 2)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">SCIP Multi Timeout (seconds)</td>
+                        <td class="config-value">{{ config.multi_search.scip_multi_timeout_seconds }}</td>
+                        <td class="config-note"><small>Timeout per repository SCIP query (default: 30)</small></td>
+                    </tr>
+                    <tr><td colspan="3"><strong>MCP Omni-Search Settings</strong><br><small style="font-weight: normal;">MCP-specific settings for caching, aggregation, and result limits. Worker/timeout settings are in the unified section above.</small></td></tr>
+                    <tr>
+                        <td class="config-label">Omni Cache Max Entries</td>
+                        <td class="config-value">{{ config.multi_search.omni_cache_max_entries }}</td>
+                        <td class="config-note"><small>Maximum cache entries (default: 100)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Omni Cache TTL (seconds)</td>
+                        <td class="config-value">{{ config.multi_search.omni_cache_ttl_seconds }}</td>
+                        <td class="config-note"><small>Cache time-to-live in seconds (default: 300)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Omni Default Limit</td>
+                        <td class="config-value">{{ config.multi_search.omni_default_limit }}</td>
+                        <td class="config-note"><small>Default result limit (default: 10)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Omni Max Limit</td>
+                        <td class="config-value">{{ config.multi_search.omni_max_limit }}</td>
+                        <td class="config-note"><small>Maximum result limit (default: 1000)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Omni Default Aggregation Mode</td>
+                        <td class="config-value">{{ config.multi_search.omni_default_aggregation_mode }}</td>
+                        <td class="config-note"><small>How to aggregate results: global or per_repo (default: global)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Omni Max Results Per Repo</td>
+                        <td class="config-value">{{ config.multi_search.omni_max_results_per_repo }}</td>
+                        <td class="config-note"><small>Maximum results from each repository (default: 100)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Omni Max Total Results Before Aggregation</td>
+                        <td class="config-value">{{ config.multi_search.omni_max_total_results_before_aggregation }}</td>
+                        <td class="config-note"><small>Maximum total results before aggregation (default: 10000)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Omni Pattern Metacharacters</td>
+                        <td class="config-value">{{ config.multi_search.omni_pattern_metacharacters }}</td>
+                        <td class="config-note"><small>Characters treated as glob pattern metacharacters (default: *?[]^$+|)</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('multi-search')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-multi-search" method="post" action="/admin/config/multi_search" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.multi_search %}
+            <div class="validation-error">{{ validation_errors.multi_search }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <h4>Multi-Repository Search (REST & MCP)</h4>
+                <label for="multi-search-max-workers">
+                    Multi-Search Max Workers
+                    <input type="number" id="multi-search-max-workers" name="multi_search_max_workers" value="{{ config.multi_search.multi_search_max_workers }}" min="1" max="50">
+                    <small>Range: 1-50 workers (default: 2). Applies to all multi-repository searches including REST API and MCP omni-search.</small>
+                </label>
+                <label for="multi-search-timeout">
+                    Multi-Search Timeout (seconds)
+                    <input type="number" id="multi-search-timeout" name="multi_search_timeout_seconds" value="{{ config.multi_search.multi_search_timeout_seconds }}" min="5" max="600">
+                    <small>Range: 5-600 seconds (default: 30). Applies to all multi-repository searches including REST API and MCP omni-search.</small>
+                </label>
+                <h4>SCIP Multi-Repository</h4>
+                <label for="scip-multi-max-workers">
+                    SCIP Multi Max Workers
+                    <input type="number" id="scip-multi-max-workers" name="scip_multi_max_workers" value="{{ config.multi_search.scip_multi_max_workers }}" min="1" max="50">
+                    <small>Range: 1-50 workers (default: 2)</small>
+                </label>
+                <label for="scip-multi-timeout">
+                    SCIP Multi Timeout (seconds)
+                    <input type="number" id="scip-multi-timeout" name="scip_multi_timeout_seconds" value="{{ config.multi_search.scip_multi_timeout_seconds }}" min="5" max="600">
+                    <small>Range: 5-600 seconds (default: 30)</small>
+                </label>
+                <h4>MCP Omni-Search Settings</h4>
+                <p><small>MCP-specific settings for caching, aggregation, and result limits. Worker/timeout settings are in the unified section above.</small></p>
+                <label for="omni-cache-max-entries">
+                    Omni Cache Max Entries
+                    <input type="number" id="omni-cache-max-entries" name="omni_cache_max_entries" value="{{ config.multi_search.omni_cache_max_entries }}" min="1" max="10000">
+                    <small>Range: 1-10000 entries (default: 100). Maximum cache entries.</small>
+                </label>
+                <label for="omni-cache-ttl-seconds">
+                    Omni Cache TTL (seconds)
+                    <input type="number" id="omni-cache-ttl-seconds" name="omni_cache_ttl_seconds" value="{{ config.multi_search.omni_cache_ttl_seconds }}" min="1" max="86400">
+                    <small>Range: 1-86400 seconds (default: 300). Cache time-to-live in seconds.</small>
+                </label>
+                <label for="omni-default-limit">
+                    Omni Default Limit
+                    <input type="number" id="omni-default-limit" name="omni_default_limit" value="{{ config.multi_search.omni_default_limit }}" min="1" max="1000">
+                    <small>Range: 1-1000 results (default: 10). Default result limit.</small>
+                </label>
+                <label for="omni-max-limit">
+                    Omni Max Limit
+                    <input type="number" id="omni-max-limit" name="omni_max_limit" value="{{ config.multi_search.omni_max_limit }}" min="1" max="10000">
+                    <small>Range: 1-10000 results (default: 1000). Maximum result limit.</small>
+                </label>
+                <label for="omni-default-aggregation-mode">
+                    Omni Default Aggregation Mode
+                    <select id="omni-default-aggregation-mode" name="omni_default_aggregation_mode">
+                        <option value="global" {% if config.multi_search.omni_default_aggregation_mode == 'global' %}selected{% endif %}>Global</option>
+                        <option value="per_repo" {% if config.multi_search.omni_default_aggregation_mode == 'per_repo' %}selected{% endif %}>Per Repo</option>
+                    </select>
+                    <small>How to aggregate results: global or per_repo (default: global).</small>
+                </label>
+                <label for="omni-max-results-per-repo">
+                    Omni Max Results Per Repo
+                    <input type="number" id="omni-max-results-per-repo" name="omni_max_results_per_repo" value="{{ config.multi_search.omni_max_results_per_repo }}" min="1" max="10000">
+                    <small>Range: 1-10000 results (default: 100). Maximum results from each repository.</small>
+                </label>
+                <label for="omni-max-total-results-before-aggregation">
+                    Omni Max Total Results Before Aggregation
+                    <input type="number" id="omni-max-total-results-before-aggregation" name="omni_max_total_results_before_aggregation" value="{{ config.multi_search.omni_max_total_results_before_aggregation }}" min="1" max="100000">
+                    <small>Range: 1-100000 results (default: 10000). Maximum total results before aggregation.</small>
+                </label>
+                <label for="omni-pattern-metacharacters">
+                    Omni Pattern Metacharacters
+                    <input type="text" id="omni-pattern-metacharacters" name="omni_pattern_metacharacters" value="{{ config.multi_search.omni_pattern_metacharacters }}">
+                    <small>Characters treated as glob pattern metacharacters (default: *?[]^$+|).</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('multi-search')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+<!-- Background Jobs Settings Section (Story #26, Story #27) -->
+
+<details class="config-section" id="section-content_limits">
+    <summary>
+        <h2>Search Result Truncation</h2>
+    </summary>
+    <p class="section-description">
+        Unified content truncation limits for AI/LLM integrations. All limits use tokens as the primary unit for consistency with LLM context windows. The chars_per_token setting determines how character counts are converted to token estimates (typical code ratio is 4 characters per token).
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-content_limits">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Characters per Token</td>
+                        <td class="config-value">{{ config.content_limits.chars_per_token }}</td>
+                        <td class="config-note"><small>Token conversion factor (default: 4 characters per token)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">File Content Max Tokens</td>
+                        <td class="config-value">{{ config.content_limits.file_content_max_tokens }}</td>
+                        <td class="config-note"><small>Maximum tokens for file content retrieval</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Git Diff Max Tokens</td>
+                        <td class="config-value">{{ config.content_limits.git_diff_max_tokens }}</td>
+                        <td class="config-note"><small>Maximum tokens for git diff output</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Git Log Max Tokens</td>
+                        <td class="config-value">{{ config.content_limits.git_log_max_tokens }}</td>
+                        <td class="config-note"><small>Maximum tokens for git log output</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Search Result Max Tokens</td>
+                        <td class="config-value">{{ config.content_limits.search_result_max_tokens }}</td>
+                        <td class="config-note"><small>Maximum tokens per search result</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Cache TTL (seconds)</td>
+                        <td class="config-value">{{ config.content_limits.cache_ttl_seconds }}</td>
+                        <td class="config-note"><small>Time-to-live for cached content</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Cache Max Entries</td>
+                        <td class="config-value">{{ config.content_limits.cache_max_entries }}</td>
+                        <td class="config-note"><small>Maximum cache entries before cleanup</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('content_limits')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-content_limits" method="post" action="/admin/config/content_limits" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.content_limits %}
+            <div class="validation-error">{{ validation_errors.content_limits }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="content-limits-chars-per-token">
+                    Characters per Token
+                    <input type="number" id="content-limits-chars-per-token" name="chars_per_token" value="{{ config.content_limits.chars_per_token }}" min="1" max="10">
+                    <small>1-10 characters (typical for code: 4)</small>
+                </label>
+                <label for="content-limits-file-content-max-tokens">
+                    File Content Max Tokens
+                    <input type="number" id="content-limits-file-content-max-tokens" name="file_content_max_tokens" value="{{ config.content_limits.file_content_max_tokens }}" min="1000" max="200000">
+                    <small>1000-200000 tokens</small>
+                </label>
+                <label for="content-limits-git-diff-max-tokens">
+                    Git Diff Max Tokens
+                    <input type="number" id="content-limits-git-diff-max-tokens" name="git_diff_max_tokens" value="{{ config.content_limits.git_diff_max_tokens }}" min="1000" max="200000">
+                    <small>1000-200000 tokens</small>
+                </label>
+                <label for="content-limits-git-log-max-tokens">
+                    Git Log Max Tokens
+                    <input type="number" id="content-limits-git-log-max-tokens" name="git_log_max_tokens" value="{{ config.content_limits.git_log_max_tokens }}" min="1000" max="200000">
+                    <small>1000-200000 tokens</small>
+                </label>
+                <label for="content-limits-search-result-max-tokens">
+                    Search Result Max Tokens
+                    <input type="number" id="content-limits-search-result-max-tokens" name="search_result_max_tokens" value="{{ config.content_limits.search_result_max_tokens }}" min="1000" max="200000">
+                    <small>1000-200000 tokens</small>
+                </label>
+                <label for="content-limits-cache-ttl-seconds">
+                    Cache TTL (seconds)
+                    <input type="number" id="content-limits-cache-ttl-seconds" name="cache_ttl_seconds" value="{{ config.content_limits.cache_ttl_seconds }}" min="60">
+                    <small>Minimum 60 seconds</small>
+                </label>
+                <label for="content-limits-cache-max-entries">
+                    Cache Max Entries
+                    <input type="number" id="content-limits-cache-max-entries" name="cache_max_entries" value="{{ config.content_limits.cache_max_entries }}" min="100" max="100000">
+                    <small>100-100000 entries</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('content_limits')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+
+<!-- File Content Limits Settings Section -->
+<details class="config-section" id="section-file_content_limits">
+    <summary>
+        <h2>File Retrieval Limits</h2>
+    </summary>
+    <p class="section-description">
+        Sets limits for file content retrieval operations, especially important for AI/LLM integrations. Max tokens per request prevents overwhelming context windows of LLM clients. Characters per token is an estimation factor for converting byte counts to token counts, typically around 4 characters per token for code.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-file_content_limits">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Max Tokens per Request</td>
+                        <td class="config-value">{{ config.file_content_limits.max_tokens_per_request }}</td>
+                        <td class="config-note"><small>Maximum tokens for file content retrieval</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Characters per Token</td>
+                        <td class="config-value">{{ config.file_content_limits.chars_per_token }}</td>
+                        <td class="config-note"><small>Estimated characters per token</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('file_content_limits')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-file_content_limits" method="post" action="/admin/config/file_content_limits" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.file_content_limits %}
+            <div class="validation-error">{{ validation_errors.file_content_limits }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="file-content-limits-max-tokens">
+                    Max Tokens per Request
+                    <input type="number" id="file-content-limits-max-tokens" name="max_tokens_per_request" value="{{ config.file_content_limits.max_tokens_per_request }}" min="1000" max="50000">
+                    <small>1000-50000 tokens</small>
+                </label>
+                <label for="file-content-limits-chars-per-token">
+                    Characters per Token
+                    <input type="number" id="file-content-limits-chars-per-token" name="chars_per_token" value="{{ config.file_content_limits.chars_per_token }}" min="1" max="10">
+                    <small>1-10 characters</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('file_content_limits')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+<!-- Content Limits Settings Section (Story #32 - Unified Content Limits Configuration) -->
+
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- GROUP: Repository Management -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="config-group">
+    <h3 class="config-group-header">Repository Management</h3>
+    
+<!-- Golden Repos Settings Section -->
+<details class="config-section" id="section-golden_repos">
+    <summary>
+        <h2>Golden Repository Settings</h2>
+    </summary>
+    <p class="section-description">
+        Configures golden (server-managed) repositories that are stored and indexed centrally. Refresh interval determines how often repositories are automatically synchronized with their remote origins. Shorter intervals keep code more current but increase network and server load.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-golden_repos">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Refresh Interval (seconds)</td>
+                        <td class="config-value">{{ config.golden_repos.refresh_interval_seconds }}</td>
+                        <td class="config-note"><small>Interval for auto-refreshing golden repositories</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Analysis Model</td>
+                        <td class="config-value">{{ config.golden_repos.analysis_model }}</td>
+                        <td class="config-note"><small>Claude model used for repository analysis jobs</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('golden_repos')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-golden_repos" method="post" action="/admin/config/golden_repos" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.golden_repos %}
+            <div class="validation-error">{{ validation_errors.golden_repos }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="golden-repos-refresh-interval">
+                    Refresh Interval (seconds)
+                    <input type="number" id="golden-repos-refresh-interval" name="refresh_interval_seconds" value="{{ config.golden_repos.refresh_interval_seconds }}" min="60">
+                    <small>Minimum 60 seconds</small>
+                </label>
+                <label for="golden-repos-analysis-model">
+                    Analysis Model
+                    <select id="golden-repos-analysis-model" name="analysis_model">
+                        <option value="opus" {% if config.golden_repos.analysis_model == "opus" %}selected{% endif %}>Opus</option>
+                        <option value="sonnet" {% if config.golden_repos.analysis_model == "sonnet" %}selected{% endif %}>Sonnet</option>
+                    </select>
+                    <small>Claude model for repository analysis (Opus: highest quality, Sonnet: faster)</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('golden_repos')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+
+<details class="config-section" id="section-scip">
+    <summary>
+        <h2>SCIP Code Intelligence</h2>
+    </summary>
+    <p class="section-description">
+        Configures SCIP (Semantic Code Intelligence Protocol) for advanced code navigation features like go-to-definition, find-references, and call chain analysis. Indexing timeouts accommodate large codebases while preventing runaway processes. Temporal stale threshold controls when git history indexes are considered outdated and need regeneration.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-scip">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Indexing Timeout (seconds)</td>
+                        <td class="config-value">{{ config.scip.indexing_timeout_seconds }}</td>
+                        <td class="config-note"><small>Max time for SCIP indexing operations (default: 3600 = 1 hour)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">SCIP Generation Timeout (seconds)</td>
+                        <td class="config-value">{{ config.scip.scip_generation_timeout_seconds }}</td>
+                        <td class="config-note"><small>Max time for SCIP file generation (default: 600 = 10 min)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Temporal Stale Threshold (days)</td>
+                        <td class="config-value">{{ config.scip.temporal_stale_threshold_days }}</td>
+                        <td class="config-note"><small>Days before temporal index considered stale (default: 7)</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('scip')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-scip" method="post" action="/admin/config/scip" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.scip %}
+            <div class="validation-error">{{ validation_errors.scip }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="scip-indexing-timeout">
+                    Indexing Timeout (seconds)
+                    <input type="number" id="scip-indexing-timeout" name="indexing_timeout_seconds" value="{{ config.scip.indexing_timeout_seconds }}" min="60">
+                    <small>Minimum 60 seconds</small>
+                </label>
+                <label for="scip-generation-timeout">
+                    SCIP Generation Timeout (seconds)
+                    <input type="number" id="scip-generation-timeout" name="scip_generation_timeout_seconds" value="{{ config.scip.scip_generation_timeout_seconds }}" min="60">
+                    <small>Minimum 60 seconds</small>
+                </label>
+                <label for="scip-temporal-stale">
+                    Temporal Stale Threshold (days)
+                    <input type="number" id="scip-temporal-stale" name="temporal_stale_threshold_days" value="{{ config.scip.temporal_stale_threshold_days }}" min="1">
+                    <small>Minimum 1 day</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('scip')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+<!-- Provider API Keys Section (Story #20) -->
+
+<!-- Job Queue Settings Section -->
+<details class="config-section" id="section-job_queue">
+    <summary>
+        <h2>Repository Sync Queue</h2>
+    </summary>
+    <p class="section-description">
+        Controls the <strong>SyncJob queue</strong> for repository synchronization operations. <strong>Affected operations:</strong> git clone, git pull, repository sync, and repository refresh jobs. System-wide limits prevent server overload, while per-user limits ensure fair resource allocation. Average job duration is used to estimate queue wait times displayed to users when jobs are queued behind others.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-job_queue">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Max Concurrent Jobs (System-wide)</td>
+                        <td class="config-value">{{ config.job_queue.max_total_concurrent_jobs }}</td>
+                        <td class="config-note"><small>Maximum jobs running simultaneously across all users</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Max Concurrent Jobs (Per User)</td>
+                        <td class="config-value">{{ config.job_queue.max_concurrent_jobs_per_user }}</td>
+                        <td class="config-note"><small>Maximum jobs a single user can run at once</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Average Job Duration (minutes)</td>
+                        <td class="config-value">{{ config.job_queue.average_job_duration_minutes }}</td>
+                        <td class="config-note"><small>Used for estimating wait times in queue</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('job_queue')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-job_queue" method="post" action="/admin/config/job_queue" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.job_queue %}
+            <div class="validation-error">{{ validation_errors.job_queue }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="job-queue-max-total">
+                    Max Concurrent Jobs (System-wide)
+                    <input type="number" id="job-queue-max-total" name="max_total_concurrent_jobs" value="{{ config.job_queue.max_total_concurrent_jobs }}" min="1" max="50">
+                    <small>1-50 jobs</small>
+                </label>
+                <label for="job-queue-max-per-user">
+                    Max Concurrent Jobs (Per User)
+                    <input type="number" id="job-queue-max-per-user" name="max_concurrent_jobs_per_user" value="{{ config.job_queue.max_concurrent_jobs_per_user }}" min="1" max="10">
+                    <small>1-10 jobs per user</small>
+                </label>
+                <label for="job-queue-avg-duration">
+                    Average Job Duration (minutes)
+                    <input type="number" id="job-queue-avg-duration" name="average_job_duration_minutes" value="{{ config.job_queue.average_job_duration_minutes }}" min="1" max="120">
+                    <small>Used for queue wait time estimates</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('job_queue')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+
+<details class="config-section" id="section-background-jobs">
+    <summary>
+        <h2>Background Task Workers</h2>
+    </summary>
+    <article>
+        <p class="section-description">Controls the <strong>BackgroundJobManager</strong> for async background tasks. <strong>Affected operations:</strong> Add Golden Repository, Remove Golden Repository, SCIP Self-Healing, and SCIP index generation. <strong>Subprocess Max Workers</strong> controls parallelism of external process execution (ripgrep/grep for regex search). These are separate from SyncJob queue operations.</p>
+        <!-- Display Mode -->
+        <div id="display-background-jobs">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Max Concurrent Background Jobs</td>
+                        <td class="config-value">{{ config.background_jobs.max_concurrent_background_jobs }}</td>
+                        <td class="config-note"><small>Maximum number of concurrent background jobs (default: 5)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Subprocess Max Workers</td>
+                        <td class="config-value">{{ config.background_jobs.subprocess_max_workers }}</td>
+                        <td class="config-note"><small>Max concurrent workers for subprocess operations like regex search (default: 2)</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('background-jobs')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-background-jobs" method="post" action="/admin/config/background_jobs" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.background_jobs %}
+            <div class="validation-error">{{ validation_errors.background_jobs }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="max-concurrent-background-jobs">
+                    Max Concurrent Background Jobs
+                    <input type="number" id="max-concurrent-background-jobs" name="max_concurrent_background_jobs" value="{{ config.background_jobs.max_concurrent_background_jobs }}" min="1" max="100">
+                    <small>Range: 1-100 jobs (default: 5). Jobs exceeding this limit stay in PENDING until a slot is available.</small>
+                </label>
+                <label for="subprocess-max-workers">
+                    Subprocess Max Workers
+                    <input type="number" id="subprocess-max-workers" name="subprocess_max_workers" value="{{ config.background_jobs.subprocess_max_workers }}" min="1" max="50">
+                    <small>Range: 1-50 workers (default: 2). Controls parallelism of subprocess-based operations like regex search.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('background-jobs')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- GROUP: Performance & Reliability -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="config-group">
+    <h3 class="config-group-header">Performance & Reliability</h3>
+    
 <!-- Cache Settings Section -->
 <details class="config-section" id="section-cache">
     <summary>
@@ -219,6 +1044,7 @@
     </article>
 </details>
 
+
 <!-- Timeout Settings Section -->
 <details class="config-section" id="section-timeouts">
     <summary>
@@ -290,78 +1116,113 @@
     </article>
 </details>
 
-<!-- Password Security Settings Section -->
-<details class="config-section" id="section-password_security">
+
+<details class="config-section" id="section-health">
     <summary>
-        <h2>Password Security</h2>
+        <h2>Health Check Thresholds</h2>
     </summary>
     <p class="section-description">
-        Defines password complexity requirements for local user accounts. Required character classes specify how many different character types (lowercase, uppercase, numbers, symbols) must be included. Entropy bits measure password unpredictability. Higher requirements improve security but may frustrate users with overly complex rules.
+        Configures health check thresholds for system resource monitoring. Warning thresholds trigger alerts while the system continues operating normally. Critical thresholds indicate severe resource constraints requiring immediate attention. Metrics cache TTL controls how frequently system metrics are refreshed for health endpoints.
     </p>
     <article>
         <!-- Display Mode -->
-        <div id="display-password_security">
+        <div id="display-health">
             <table class="config-table">
                 <tbody>
                     <tr>
-                        <td class="config-label">Minimum Length</td>
-                        <td class="config-value">{{ config.password_security.min_length }}</td>
-                        <td class="config-note"></td>
+                        <td class="config-label">Memory Warning Threshold (%)</td>
+                        <td class="config-value">{{ config.health.memory_warning_threshold_percent }}</td>
+                        <td class="config-note"><small>Memory usage warning level (default: 80%)</small></td>
                     </tr>
                     <tr>
-                        <td class="config-label">Maximum Length</td>
-                        <td class="config-value">{{ config.password_security.max_length }}</td>
-                        <td class="config-note"></td>
+                        <td class="config-label">Memory Critical Threshold (%)</td>
+                        <td class="config-value">{{ config.health.memory_critical_threshold_percent }}</td>
+                        <td class="config-note"><small>Memory usage critical level (default: 90%)</small></td>
                     </tr>
                     <tr>
-                        <td class="config-label">Required Character Classes</td>
-                        <td class="config-value">{{ config.password_security.required_char_classes }}</td>
-                        <td class="config-note"><small>1-4 (lowercase, uppercase, numbers, symbols)</small></td>
+                        <td class="config-label">Disk Warning Threshold (%)</td>
+                        <td class="config-value">{{ config.health.disk_warning_threshold_percent }}</td>
+                        <td class="config-note"><small>Disk usage warning level (default: 80%)</small></td>
                     </tr>
                     <tr>
-                        <td class="config-label">Minimum Entropy (bits)</td>
-                        <td class="config-value">{{ config.password_security.min_entropy_bits }}</td>
-                        <td class="config-note"></td>
+                        <td class="config-label">Disk Critical Threshold (%)</td>
+                        <td class="config-value">{{ config.health.disk_critical_threshold_percent }}</td>
+                        <td class="config-note"><small>Disk usage critical level (default: 90%)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">CPU Sustained Threshold (%)</td>
+                        <td class="config-value">{{ config.health.cpu_sustained_threshold_percent }}</td>
+                        <td class="config-note"><small>Sustained CPU usage alert level (default: 95%)</small></td>
+                    </tr>
+                    <!-- P3 Metrics Cache TTL (AC37) -->
+                    <tr>
+                        <td class="config-label">System Metrics Cache TTL (seconds)</td>
+                        <td class="config-value">{{ config.health.system_metrics_cache_ttl_seconds }}</td>
+                        <td class="config-note"><small>Cache duration for system metrics (default: 5s, range: 1-60s)</small></td>
                     </tr>
                 </tbody>
             </table>
             <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('password_security')">Edit</button>
+                <button class="outline small" onclick="toggleEditMode('health')">Edit</button>
             </div>
         </div>
         <!-- Edit Mode -->
-        <form id="edit-form-password_security" method="post" action="/admin/config/password_security" style="display: none;">
+        <form id="edit-form-health" method="post" action="/admin/config/health" style="display: none;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.password_security %}
-            <div class="validation-error">{{ validation_errors.password_security }}</div>
+            {% if validation_errors.health %}
+            <div class="validation-error">{{ validation_errors.health }}</div>
             {% endif %}
             <div class="form-grid">
-                <label for="pwd-min-length">
-                    Minimum Length
-                    <input type="number" id="pwd-min-length" name="min_length" value="{{ config.password_security.min_length }}" min="1">
+                <label for="health-memory-warning">
+                    Memory Warning Threshold (%)
+                    <input type="number" id="health-memory-warning" name="memory_warning_threshold_percent" value="{{ config.health.memory_warning_threshold_percent }}" min="0" max="100" step="0.1">
+                    <small>0-100%</small>
                 </label>
-                <label for="pwd-max-length">
-                    Maximum Length
-                    <input type="number" id="pwd-max-length" name="max_length" value="{{ config.password_security.max_length }}" min="1">
+                <label for="health-memory-critical">
+                    Memory Critical Threshold (%)
+                    <input type="number" id="health-memory-critical" name="memory_critical_threshold_percent" value="{{ config.health.memory_critical_threshold_percent }}" min="0" max="100" step="0.1">
+                    <small>0-100%</small>
                 </label>
-                <label for="pwd-char-classes">
-                    Required Character Classes
-                    <input type="number" id="pwd-char-classes" name="required_char_classes" value="{{ config.password_security.required_char_classes }}" min="1" max="4">
-                    <small>1=lowercase, 2=+uppercase, 3=+numbers, 4=+symbols</small>
+                <label for="health-disk-warning">
+                    Disk Warning Threshold (%)
+                    <input type="number" id="health-disk-warning" name="disk_warning_threshold_percent" value="{{ config.health.disk_warning_threshold_percent }}" min="0" max="100" step="0.1">
+                    <small>0-100%</small>
                 </label>
-                <label for="pwd-entropy">
-                    Minimum Entropy (bits)
-                    <input type="number" id="pwd-entropy" name="min_entropy_bits" value="{{ config.password_security.min_entropy_bits }}" min="1">
+                <label for="health-disk-critical">
+                    Disk Critical Threshold (%)
+                    <input type="number" id="health-disk-critical" name="disk_critical_threshold_percent" value="{{ config.health.disk_critical_threshold_percent }}" min="0" max="100" step="0.1">
+                    <small>0-100%</small>
+                </label>
+                <label for="health-cpu-sustained">
+                    CPU Sustained Threshold (%)
+                    <input type="number" id="health-cpu-sustained" name="cpu_sustained_threshold_percent" value="{{ config.health.cpu_sustained_threshold_percent }}" min="0" max="100" step="0.1">
+                    <small>0-100%</small>
+                </label>
+                <!-- P3 Metrics Cache TTL (AC37) -->
+                <label for="health-metrics-cache-ttl">
+                    System Metrics Cache TTL (seconds)
+                    <input type="number" id="health-metrics-cache-ttl" name="system_metrics_cache_ttl_seconds" value="{{ config.health.system_metrics_cache_ttl_seconds }}" min="1" max="60" step="0.1">
+                    <small>Range: 1-60 seconds</small>
                 </label>
             </div>
             <div class="form-actions">
                 <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('password_security')">Cancel</button>
+                <button type="button" class="secondary" onclick="cancelEdit('health')">Cancel</button>
             </div>
         </form>
     </article>
 </details>
 
+<!-- SCIP Settings Section (Story #3 Phase 2) -->
+
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- GROUP: Authentication & Security -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="config-group">
+    <h3 class="config-group-header">Authentication & Security</h3>
+    
 <!-- SSO Authentication Settings Section -->
 <details class="config-section" id="section-oidc">
     <summary>
@@ -554,347 +1415,298 @@
     </article>
 </details>
 
-<!-- Job Queue Settings Section -->
-<details class="config-section" id="section-job_queue">
+
+<!-- Password Security Settings Section -->
+<details class="config-section" id="section-password_security">
     <summary>
-        <h2>Job Queue Settings</h2>
+        <h2>Password Security</h2>
     </summary>
     <p class="section-description">
-        Controls the <strong>SyncJob queue</strong> for repository synchronization operations. <strong>Affected operations:</strong> git clone, git pull, repository sync, and repository refresh jobs. System-wide limits prevent server overload, while per-user limits ensure fair resource allocation. Average job duration is used to estimate queue wait times displayed to users when jobs are queued behind others.
+        Defines password complexity requirements for local user accounts. Required character classes specify how many different character types (lowercase, uppercase, numbers, symbols) must be included. Entropy bits measure password unpredictability. Higher requirements improve security but may frustrate users with overly complex rules.
     </p>
     <article>
         <!-- Display Mode -->
-        <div id="display-job_queue">
+        <div id="display-password_security">
             <table class="config-table">
                 <tbody>
                     <tr>
-                        <td class="config-label">Max Concurrent Jobs (System-wide)</td>
-                        <td class="config-value">{{ config.job_queue.max_total_concurrent_jobs }}</td>
-                        <td class="config-note"><small>Maximum jobs running simultaneously across all users</small></td>
+                        <td class="config-label">Minimum Length</td>
+                        <td class="config-value">{{ config.password_security.min_length }}</td>
+                        <td class="config-note"></td>
                     </tr>
                     <tr>
-                        <td class="config-label">Max Concurrent Jobs (Per User)</td>
-                        <td class="config-value">{{ config.job_queue.max_concurrent_jobs_per_user }}</td>
-                        <td class="config-note"><small>Maximum jobs a single user can run at once</small></td>
+                        <td class="config-label">Maximum Length</td>
+                        <td class="config-value">{{ config.password_security.max_length }}</td>
+                        <td class="config-note"></td>
                     </tr>
                     <tr>
-                        <td class="config-label">Average Job Duration (minutes)</td>
-                        <td class="config-value">{{ config.job_queue.average_job_duration_minutes }}</td>
-                        <td class="config-note"><small>Used for estimating wait times in queue</small></td>
+                        <td class="config-label">Required Character Classes</td>
+                        <td class="config-value">{{ config.password_security.required_char_classes }}</td>
+                        <td class="config-note"><small>1-4 (lowercase, uppercase, numbers, symbols)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Minimum Entropy (bits)</td>
+                        <td class="config-value">{{ config.password_security.min_entropy_bits }}</td>
+                        <td class="config-note"></td>
                     </tr>
                 </tbody>
             </table>
             <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('job_queue')">Edit</button>
+                <button class="outline small" onclick="toggleEditMode('password_security')">Edit</button>
             </div>
         </div>
         <!-- Edit Mode -->
-        <form id="edit-form-job_queue" method="post" action="/admin/config/job_queue" style="display: none;">
+        <form id="edit-form-password_security" method="post" action="/admin/config/password_security" style="display: none;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.job_queue %}
-            <div class="validation-error">{{ validation_errors.job_queue }}</div>
+            {% if validation_errors.password_security %}
+            <div class="validation-error">{{ validation_errors.password_security }}</div>
             {% endif %}
             <div class="form-grid">
-                <label for="job-queue-max-total">
-                    Max Concurrent Jobs (System-wide)
-                    <input type="number" id="job-queue-max-total" name="max_total_concurrent_jobs" value="{{ config.job_queue.max_total_concurrent_jobs }}" min="1" max="50">
-                    <small>1-50 jobs</small>
+                <label for="pwd-min-length">
+                    Minimum Length
+                    <input type="number" id="pwd-min-length" name="min_length" value="{{ config.password_security.min_length }}" min="1">
                 </label>
-                <label for="job-queue-max-per-user">
-                    Max Concurrent Jobs (Per User)
-                    <input type="number" id="job-queue-max-per-user" name="max_concurrent_jobs_per_user" value="{{ config.job_queue.max_concurrent_jobs_per_user }}" min="1" max="10">
-                    <small>1-10 jobs per user</small>
+                <label for="pwd-max-length">
+                    Maximum Length
+                    <input type="number" id="pwd-max-length" name="max_length" value="{{ config.password_security.max_length }}" min="1">
                 </label>
-                <label for="job-queue-avg-duration">
-                    Average Job Duration (minutes)
-                    <input type="number" id="job-queue-avg-duration" name="average_job_duration_minutes" value="{{ config.job_queue.average_job_duration_minutes }}" min="1" max="120">
-                    <small>Used for queue wait time estimates</small>
+                <label for="pwd-char-classes">
+                    Required Character Classes
+                    <input type="number" id="pwd-char-classes" name="required_char_classes" value="{{ config.password_security.required_char_classes }}" min="1" max="4">
+                    <small>1=lowercase, 2=+uppercase, 3=+numbers, 4=+symbols</small>
+                </label>
+                <label for="pwd-entropy">
+                    Minimum Entropy (bits)
+                    <input type="number" id="pwd-entropy" name="min_entropy_bits" value="{{ config.password_security.min_entropy_bits }}" min="1">
                 </label>
             </div>
             <div class="form-actions">
                 <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('job_queue')">Cancel</button>
+                <button type="button" class="secondary" onclick="cancelEdit('password_security')">Cancel</button>
             </div>
         </form>
     </article>
 </details>
 
-<!-- Search Limits Settings Section -->
-<details class="config-section" id="section-search_limits">
+
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- GROUP: AI & Integrations -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="config-group">
+    <h3 class="config-group-header">AI & Integrations</h3>
+    
+<!-- Claude Integration Settings Section -->
+<details class="config-section" id="section-claude-integration">
     <summary>
-        <h2>Search Limits</h2>
+        <h2>Claude CLI Integration</h2>
     </summary>
-    <p class="section-description">
-        Configures global limits for search operations. Max result size prevents overly large response payloads that could impact network performance and client memory. Search timeout ensures queries do not run indefinitely, freeing server resources for other requests when queries exceed the time limit.
-    </p>
     <article>
+        <p class="section-description">
+            Configures Claude CLI integration settings for repository analysis and research assistant features. Max concurrent processes controls parallelism for description generation jobs. Description refresh interval determines how often repository descriptions are regenerated. Research assistant timeout limits execution time for Claude research sessions.
+        </p>
         <!-- Display Mode -->
-        <div id="display-search_limits">
+        <div id="display-claude-integration">
             <table class="config-table">
                 <tbody>
                     <tr>
-                        <td class="config-label">Max Result Size (MB)</td>
-                        <td class="config-value">{{ config.search_limits.max_result_size_mb }}</td>
-                        <td class="config-note"><small>Maximum size of search results payload</small></td>
+                        <td class="config-label">Max Concurrent Claude CLI</td>
+                        <td class="config-value">{{ config.claude_cli.max_concurrent_claude_cli }}</td>
+                        <td class="config-note"><small>Maximum parallel Claude CLI processes (default: 2)</small></td>
                     </tr>
                     <tr>
-                        <td class="config-label">Timeout (seconds)</td>
-                        <td class="config-value">{{ config.search_limits.timeout_seconds }}</td>
-                        <td class="config-note"><small>Maximum time for search operations</small></td>
+                        <td class="config-label">Description Refresh Interval (hours)</td>
+                        <td class="config-value">{{ config.claude_cli.description_refresh_interval_hours }}</td>
+                        <td class="config-note"><small>How often to regenerate repository descriptions (default: 24)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Research Assistant Timeout (seconds)</td>
+                        <td class="config-value">{{ config.claude_cli.research_assistant_timeout_seconds }}</td>
+                        <td class="config-note"><small>Timeout for Research Assistant Claude CLI execution (default: 1200 = 20 minutes)</small></td>
                     </tr>
                 </tbody>
             </table>
             <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('search_limits')">Edit</button>
+                <button class="outline small" onclick="toggleEditMode('claude-integration')">Edit</button>
             </div>
         </div>
         <!-- Edit Mode -->
-        <form id="edit-form-search_limits" method="post" action="/admin/config/search_limits" style="display: none;">
+        <form id="edit-form-claude-integration" method="post" action="/admin/config/claude_cli" style="display: none;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.search_limits %}
-            <div class="validation-error">{{ validation_errors.search_limits }}</div>
+            {% if validation_errors.claude_cli %}
+            <div class="validation-error">{{ validation_errors.claude_cli }}</div>
             {% endif %}
             <div class="form-grid">
-                <label for="search-limits-max-size">
-                    Max Result Size (MB)
-                    <input type="number" id="search-limits-max-size" name="max_result_size_mb" value="{{ config.search_limits.max_result_size_mb }}" min="1" max="100">
-                    <small>1-100 MB</small>
+                <label for="claude-max-concurrent">
+                    Max Concurrent Claude CLI
+                    <input type="number" id="claude-max-concurrent" name="max_concurrent_claude_cli" value="{{ config.claude_cli.max_concurrent_claude_cli }}" min="1" max="10">
+                    <small>Maximum parallel Claude CLI processes (1-10, default: 2)</small>
                 </label>
-                <label for="search-limits-timeout">
-                    Timeout (seconds)
-                    <input type="number" id="search-limits-timeout" name="timeout_seconds" value="{{ config.search_limits.timeout_seconds }}" min="5" max="300">
-                    <small>5-300 seconds</small>
+                <label for="claude-refresh-interval">
+                    Description Refresh Interval (hours)
+                    <input type="number" id="claude-refresh-interval" name="description_refresh_interval_hours" value="{{ config.claude_cli.description_refresh_interval_hours }}" min="1">
+                    <small>How often to regenerate repository descriptions (default: 24)</small>
+                </label>
+                <label for="claude-research-timeout">
+                    Research Assistant Timeout (seconds)
+                    <input type="number" id="claude-research-timeout" name="research_assistant_timeout_seconds" value="{{ config.claude_cli.research_assistant_timeout_seconds }}" min="60" max="7200">
+                    <small>Timeout for Research Assistant Claude CLI execution (60-7200, default: 1200 = 20 minutes)</small>
                 </label>
             </div>
             <div class="form-actions">
                 <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('search_limits')">Cancel</button>
+                <button type="button" class="secondary" onclick="cancelEdit('claude-integration')">Cancel</button>
             </div>
         </form>
     </article>
 </details>
 
-<!-- File Content Limits Settings Section -->
-<details class="config-section" id="section-file_content_limits">
-    <summary>
-        <h2>File Content Limits</h2>
-    </summary>
-    <p class="section-description">
-        Sets limits for file content retrieval operations, especially important for AI/LLM integrations. Max tokens per request prevents overwhelming context windows of LLM clients. Characters per token is an estimation factor for converting byte counts to token counts, typically around 4 characters per token for code.
-    </p>
-    <article>
-        <!-- Display Mode -->
-        <div id="display-file_content_limits">
-            <table class="config-table">
-                <tbody>
-                    <tr>
-                        <td class="config-label">Max Tokens per Request</td>
-                        <td class="config-value">{{ config.file_content_limits.max_tokens_per_request }}</td>
-                        <td class="config-note"><small>Maximum tokens for file content retrieval</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Characters per Token</td>
-                        <td class="config-value">{{ config.file_content_limits.chars_per_token }}</td>
-                        <td class="config-note"><small>Estimated characters per token</small></td>
-                    </tr>
-                </tbody>
-            </table>
-            <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('file_content_limits')">Edit</button>
-            </div>
-        </div>
-        <!-- Edit Mode -->
-        <form id="edit-form-file_content_limits" method="post" action="/admin/config/file_content_limits" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.file_content_limits %}
-            <div class="validation-error">{{ validation_errors.file_content_limits }}</div>
-            {% endif %}
-            <div class="form-grid">
-                <label for="file-content-limits-max-tokens">
-                    Max Tokens per Request
-                    <input type="number" id="file-content-limits-max-tokens" name="max_tokens_per_request" value="{{ config.file_content_limits.max_tokens_per_request }}" min="1000" max="50000">
-                    <small>1000-50000 tokens</small>
-                </label>
-                <label for="file-content-limits-chars-per-token">
-                    Characters per Token
-                    <input type="number" id="file-content-limits-chars-per-token" name="chars_per_token" value="{{ config.file_content_limits.chars_per_token }}" min="1" max="10">
-                    <small>1-10 characters</small>
-                </label>
-            </div>
-            <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('file_content_limits')">Cancel</button>
-            </div>
-        </form>
-    </article>
-</details>
+<!-- Multi-Search Settings Section (Story #25, Story #29 - Consolidated) -->
 
-<!-- Content Limits Settings Section (Story #32 - Unified Content Limits Configuration) -->
-<details class="config-section" id="section-content_limits">
+<details class="config-section" id="section-claude_delegation">
     <summary>
-        <h2>Content Limits</h2>
+        <h2>Claude Delegation Functions</h2>
     </summary>
     <p class="section-description">
-        Unified content truncation limits for AI/LLM integrations. All limits use tokens as the primary unit for consistency with LLM context windows. The chars_per_token setting determines how character counts are converted to token estimates (typical code ratio is 4 characters per token).
+        Configures integration with Claude Server for AI-powered delegation functions. Delegation enables CIDX to offload complex analysis tasks to Claude. The callback URL must be reachable from Claude Server for job completion notifications. Skip SSL verification should only be enabled for testing with self-signed certificates.
     </p>
     <article>
         <!-- Display Mode -->
-        <div id="display-content_limits">
+        <div id="display-claude_delegation">
             <table class="config-table">
                 <tbody>
                     <tr>
-                        <td class="config-label">Characters per Token</td>
-                        <td class="config-value">{{ config.content_limits.chars_per_token }}</td>
-                        <td class="config-note"><small>Token conversion factor (default: 4 characters per token)</small></td>
+                        <td class="config-label">Status</td>
+                        <td class="config-value">
+                            {% if config.claude_delegation.is_configured %}
+                                <span style="color: green;">Configured</span>
+                            {% else %}
+                                <span style="color: gray;">Not Configured</span>
+                            {% endif %}
+                        </td>
+                        <td class="config-note"></td>
                     </tr>
                     <tr>
-                        <td class="config-label">File Content Max Tokens</td>
-                        <td class="config-value">{{ config.content_limits.file_content_max_tokens }}</td>
-                        <td class="config-note"><small>Maximum tokens for file content retrieval</small></td>
+                        <td class="config-label">Function Repository Alias</td>
+                        <td class="config-value">{{ config.claude_delegation.function_repo_alias }}</td>
+                        <td class="config-note"><small>Alias for delegation functions repository</small></td>
                     </tr>
                     <tr>
-                        <td class="config-label">Git Diff Max Tokens</td>
-                        <td class="config-value">{{ config.content_limits.git_diff_max_tokens }}</td>
-                        <td class="config-note"><small>Maximum tokens for git diff output</small></td>
+                        <td class="config-label">Claude Server URL</td>
+                        <td class="config-value">{{ config.claude_delegation.claude_server_url or 'Not configured' }}</td>
+                        <td class="config-note"></td>
                     </tr>
                     <tr>
-                        <td class="config-label">Git Log Max Tokens</td>
-                        <td class="config-value">{{ config.content_limits.git_log_max_tokens }}</td>
-                        <td class="config-note"><small>Maximum tokens for git log output</small></td>
+                        <td class="config-label">Username</td>
+                        <td class="config-value">{{ config.claude_delegation.claude_server_username or 'Not configured' }}</td>
+                        <td class="config-note"></td>
                     </tr>
                     <tr>
-                        <td class="config-label">Search Result Max Tokens</td>
-                        <td class="config-value">{{ config.content_limits.search_result_max_tokens }}</td>
-                        <td class="config-note"><small>Maximum tokens per search result</small></td>
+                        <td class="config-label">Credential Type</td>
+                        <td class="config-value">{{ config.claude_delegation.claude_server_credential_type }}</td>
+                        <td class="config-note"></td>
                     </tr>
                     <tr>
-                        <td class="config-label">Cache TTL (seconds)</td>
-                        <td class="config-value">{{ config.content_limits.cache_ttl_seconds }}</td>
-                        <td class="config-note"><small>Time-to-live for cached content</small></td>
+                        <td class="config-label">Credential</td>
+                        <td class="config-value">
+                            {% if config.claude_delegation.is_configured %}
+                                ********
+                            {% else %}
+                                Not configured
+                            {% endif %}
+                        </td>
+                        <td class="config-note"></td>
                     </tr>
                     <tr>
-                        <td class="config-label">Cache Max Entries</td>
-                        <td class="config-value">{{ config.content_limits.cache_max_entries }}</td>
-                        <td class="config-note"><small>Maximum cache entries before cleanup</small></td>
+                        <td class="config-label">CIDX Callback URL</td>
+                        <td class="config-value">{{ config.claude_delegation.cidx_callback_url or 'Not configured' }}</td>
+                        <td class="config-note"><small>URL for job completion callbacks</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Skip SSL Verification</td>
+                        <td class="config-value">{{ 'Yes' if config.claude_delegation.skip_ssl_verify else 'No' }}</td>
+                        <td class="config-note"><small>Allow self-signed certificates (E2E testing only)</small></td>
                     </tr>
                 </tbody>
             </table>
             <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('content_limits')">Edit</button>
+                <button class="outline small" onclick="toggleEditMode('claude_delegation')">
+                    {% if config.claude_delegation.is_configured %}Update{% else %}Configure{% endif %}
+                </button>
             </div>
         </div>
         <!-- Edit Mode -->
-        <form id="edit-form-content_limits" method="post" action="/admin/config/content_limits" style="display: none;">
+        <form id="edit-form-claude_delegation" method="post" action="/config/claude_delegation" style="display: none;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.content_limits %}
-            <div class="validation-error">{{ validation_errors.content_limits }}</div>
+            {% if validation_errors.claude_delegation %}
+            <div class="validation-error">{{ validation_errors.claude_delegation }}</div>
             {% endif %}
             <div class="form-grid">
-                <label for="content-limits-chars-per-token">
-                    Characters per Token
-                    <input type="number" id="content-limits-chars-per-token" name="chars_per_token" value="{{ config.content_limits.chars_per_token }}" min="1" max="10">
-                    <small>1-10 characters (typical for code: 4)</small>
+                <label for="delegation-function-repo-alias">
+                    Function Repository Alias
+                    <input type="text" id="delegation-function-repo-alias" name="function_repo_alias"
+                           value="{{ config.claude_delegation.function_repo_alias }}"
+                           placeholder="claude-delegation-functions-global">
+                    <small>Alias for the repository containing delegation function definitions</small>
                 </label>
-                <label for="content-limits-file-content-max-tokens">
-                    File Content Max Tokens
-                    <input type="number" id="content-limits-file-content-max-tokens" name="file_content_max_tokens" value="{{ config.content_limits.file_content_max_tokens }}" min="1000" max="200000">
-                    <small>1000-200000 tokens</small>
+                <label for="delegation-server-url">
+                    Claude Server URL
+                    <input type="text" id="delegation-server-url" name="claude_server_url"
+                           value="{{ config.claude_delegation.claude_server_url }}"
+                           placeholder="https://claude-server.example.com">
+                    <small>URL of the Claude Server for delegation</small>
                 </label>
-                <label for="content-limits-git-diff-max-tokens">
-                    Git Diff Max Tokens
-                    <input type="number" id="content-limits-git-diff-max-tokens" name="git_diff_max_tokens" value="{{ config.content_limits.git_diff_max_tokens }}" min="1000" max="200000">
-                    <small>1000-200000 tokens</small>
+                <label for="delegation-username">
+                    Username
+                    <input type="text" id="delegation-username" name="claude_server_username"
+                           value="{{ config.claude_delegation.claude_server_username }}"
+                           placeholder="username">
+                    <small>Username for Claude Server authentication</small>
                 </label>
-                <label for="content-limits-git-log-max-tokens">
-                    Git Log Max Tokens
-                    <input type="number" id="content-limits-git-log-max-tokens" name="git_log_max_tokens" value="{{ config.content_limits.git_log_max_tokens }}" min="1000" max="200000">
-                    <small>1000-200000 tokens</small>
-                </label>
-                <label for="content-limits-search-result-max-tokens">
-                    Search Result Max Tokens
-                    <input type="number" id="content-limits-search-result-max-tokens" name="search_result_max_tokens" value="{{ config.content_limits.search_result_max_tokens }}" min="1000" max="200000">
-                    <small>1000-200000 tokens</small>
-                </label>
-                <label for="content-limits-cache-ttl-seconds">
-                    Cache TTL (seconds)
-                    <input type="number" id="content-limits-cache-ttl-seconds" name="cache_ttl_seconds" value="{{ config.content_limits.cache_ttl_seconds }}" min="60">
-                    <small>Minimum 60 seconds</small>
-                </label>
-                <label for="content-limits-cache-max-entries">
-                    Cache Max Entries
-                    <input type="number" id="content-limits-cache-max-entries" name="cache_max_entries" value="{{ config.content_limits.cache_max_entries }}" min="100" max="100000">
-                    <small>100-100000 entries</small>
-                </label>
-            </div>
-            <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('content_limits')">Cancel</button>
-            </div>
-        </form>
-    </article>
-</details>
-
-<!-- Golden Repos Settings Section -->
-<details class="config-section" id="section-golden_repos">
-    <summary>
-        <h2>Golden Repos</h2>
-    </summary>
-    <p class="section-description">
-        Configures golden (server-managed) repositories that are stored and indexed centrally. Refresh interval determines how often repositories are automatically synchronized with their remote origins. Shorter intervals keep code more current but increase network and server load.
-    </p>
-    <article>
-        <!-- Display Mode -->
-        <div id="display-golden_repos">
-            <table class="config-table">
-                <tbody>
-                    <tr>
-                        <td class="config-label">Refresh Interval (seconds)</td>
-                        <td class="config-value">{{ config.golden_repos.refresh_interval_seconds }}</td>
-                        <td class="config-note"><small>Interval for auto-refreshing golden repositories</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Analysis Model</td>
-                        <td class="config-value">{{ config.golden_repos.analysis_model }}</td>
-                        <td class="config-note"><small>Claude model used for repository analysis jobs</small></td>
-                    </tr>
-                </tbody>
-            </table>
-            <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('golden_repos')">Edit</button>
-            </div>
-        </div>
-        <!-- Edit Mode -->
-        <form id="edit-form-golden_repos" method="post" action="/admin/config/golden_repos" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.golden_repos %}
-            <div class="validation-error">{{ validation_errors.golden_repos }}</div>
-            {% endif %}
-            <div class="form-grid">
-                <label for="golden-repos-refresh-interval">
-                    Refresh Interval (seconds)
-                    <input type="number" id="golden-repos-refresh-interval" name="refresh_interval_seconds" value="{{ config.golden_repos.refresh_interval_seconds }}" min="60">
-                    <small>Minimum 60 seconds</small>
-                </label>
-                <label for="golden-repos-analysis-model">
-                    Analysis Model
-                    <select id="golden-repos-analysis-model" name="analysis_model">
-                        <option value="opus" {% if config.golden_repos.analysis_model == "opus" %}selected{% endif %}>Opus</option>
-                        <option value="sonnet" {% if config.golden_repos.analysis_model == "sonnet" %}selected{% endif %}>Sonnet</option>
+                <label for="delegation-credential-type">
+                    Credential Type
+                    <select id="delegation-credential-type" name="claude_server_credential_type">
+                        <option value="password" {% if config.claude_delegation.claude_server_credential_type == 'password' %}selected{% endif %}>Password</option>
+                        <option value="api_key" {% if config.claude_delegation.claude_server_credential_type == 'api_key' %}selected{% endif %}>API Key</option>
                     </select>
-                    <small>Claude model for repository analysis (Opus: highest quality, Sonnet: faster)</small>
+                </label>
+                <label for="delegation-credential">
+                    Credential
+                    <input type="password" id="delegation-credential" name="claude_server_credential"
+                           placeholder="{% if config.claude_delegation.is_configured %}Leave empty to keep current{% else %}Enter password or API key{% endif %}">
+                    <small>{% if config.claude_delegation.is_configured %}Leave empty to keep existing credential{% else %}Password or API key for authentication{% endif %}</small>
+                </label>
+                <label for="delegation-cidx-callback-url">
+                    CIDX Callback URL
+                    <input type="text" id="delegation-cidx-callback-url" name="cidx_callback_url"
+                           value="{{ config.claude_delegation.cidx_callback_url }}"
+                           placeholder="http://192.168.60.20:8000">
+                    <small>URL that Claude Server will use to POST job completion callbacks</small>
+                </label>
+                <label for="delegation-skip-ssl-verify">
+                    Skip SSL Verification
+                    <select id="delegation-skip-ssl-verify" name="skip_ssl_verify">
+                        <option value="false" {% if not config.claude_delegation.skip_ssl_verify %}selected{% endif %}>No</option>
+                        <option value="true" {% if config.claude_delegation.skip_ssl_verify %}selected{% endif %}>Yes</option>
+                    </select>
+                    <small>WARNING: Only enable for testing with self-signed certificates</small>
                 </label>
             </div>
+            <p><small><strong>Note:</strong> Connectivity will be validated before saving. Configuration will only be saved if connection to Claude Server is successful.</small></p>
             <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('golden_repos')">Cancel</button>
+                <button type="submit" class="primary">Save and Test Connection</button>
+                <button type="button" class="secondary" onclick="cancelEdit('claude_delegation')">Cancel</button>
             </div>
         </form>
     </article>
 </details>
+
+<!-- MCP Session Settings Section (Story #3 Phase 2) -->
 
 <details class="config-section" id="section-api-keys">
     <summary>
-        <h2>CI/CD API Keys</h2>
+        <h2>CI/CD Platform Keys</h2>
     </summary>
     <p class="section-description">
         Stores API tokens for CI/CD platform integrations. GitHub tokens enable access to GitHub Actions workflows, logs, and run management. GitLab tokens enable similar functionality for GitLab CI pipelines. Tokens are stored securely and used server-side for CI/CD operations.
@@ -1033,9 +1845,18 @@
 </details>
 
 <!-- Telemetry Settings Section (Story #695) -->
+
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- GROUP: Observability -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="config-group">
+    <h3 class="config-group-header">Observability</h3>
+    
 <details class="config-section" id="section-telemetry">
     <summary>
-        <h2>Telemetry Settings</h2>
+        <h2>OpenTelemetry Export</h2>
     </summary>
     <p class="section-description">
         Configures OpenTelemetry export for distributed tracing, metrics, and logging. Connect to observability backends like Jaeger, Prometheus, or Grafana. Sample rate controls what percentage of requests are traced, balancing observability needs with performance overhead. Machine metrics collect system resource utilization data.
@@ -1201,10 +2022,11 @@
     </article>
 </details>
 
+
 <!-- Langfuse Settings Section -->
 <details class="config-section" id="section-langfuse">
     <summary>
-        <h2>Langfuse Settings</h2>
+        <h2>Langfuse Trace Export</h2>
     </summary>
     <p class="section-description">
         Configures Langfuse integration for research session tracing and observability. Captures MCP tool usage patterns for analysis. Auto-trace creates implicit traces when users don't explicitly start one.
@@ -1307,9 +2129,10 @@
 </details>
 
 <!-- Langfuse Trace Pull Settings Section (Story #164) -->
+
 <details class="config-section" id="section-langfuse_pull">
     <summary>
-        <h2>Langfuse Trace Pull</h2>
+        <h2>Langfuse Trace Import</h2>
     </summary>
     <p class="section-description">
         Configures pulling traces from Langfuse projects for semantic search indexing. Traces are synced periodically and indexed for search.
@@ -1435,753 +2258,8 @@
 </details>
 
 <!-- Claude Delegation Settings Section (Story #721) -->
-<details class="config-section" id="section-claude_delegation">
-    <summary>
-        <h2>Claude Delegation</h2>
-    </summary>
-    <p class="section-description">
-        Configures integration with Claude Server for AI-powered delegation functions. Delegation enables CIDX to offload complex analysis tasks to Claude. The callback URL must be reachable from Claude Server for job completion notifications. Skip SSL verification should only be enabled for testing with self-signed certificates.
-    </p>
-    <article>
-        <!-- Display Mode -->
-        <div id="display-claude_delegation">
-            <table class="config-table">
-                <tbody>
-                    <tr>
-                        <td class="config-label">Status</td>
-                        <td class="config-value">
-                            {% if config.claude_delegation.is_configured %}
-                                <span style="color: green;">Configured</span>
-                            {% else %}
-                                <span style="color: gray;">Not Configured</span>
-                            {% endif %}
-                        </td>
-                        <td class="config-note"></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Function Repository Alias</td>
-                        <td class="config-value">{{ config.claude_delegation.function_repo_alias }}</td>
-                        <td class="config-note"><small>Alias for delegation functions repository</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Claude Server URL</td>
-                        <td class="config-value">{{ config.claude_delegation.claude_server_url or 'Not configured' }}</td>
-                        <td class="config-note"></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Username</td>
-                        <td class="config-value">{{ config.claude_delegation.claude_server_username or 'Not configured' }}</td>
-                        <td class="config-note"></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Credential Type</td>
-                        <td class="config-value">{{ config.claude_delegation.claude_server_credential_type }}</td>
-                        <td class="config-note"></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Credential</td>
-                        <td class="config-value">
-                            {% if config.claude_delegation.is_configured %}
-                                ********
-                            {% else %}
-                                Not configured
-                            {% endif %}
-                        </td>
-                        <td class="config-note"></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">CIDX Callback URL</td>
-                        <td class="config-value">{{ config.claude_delegation.cidx_callback_url or 'Not configured' }}</td>
-                        <td class="config-note"><small>URL for job completion callbacks</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Skip SSL Verification</td>
-                        <td class="config-value">{{ 'Yes' if config.claude_delegation.skip_ssl_verify else 'No' }}</td>
-                        <td class="config-note"><small>Allow self-signed certificates (E2E testing only)</small></td>
-                    </tr>
-                </tbody>
-            </table>
-            <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('claude_delegation')">
-                    {% if config.claude_delegation.is_configured %}Update{% else %}Configure{% endif %}
-                </button>
-            </div>
-        </div>
-        <!-- Edit Mode -->
-        <form id="edit-form-claude_delegation" method="post" action="/config/claude_delegation" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.claude_delegation %}
-            <div class="validation-error">{{ validation_errors.claude_delegation }}</div>
-            {% endif %}
-            <div class="form-grid">
-                <label for="delegation-function-repo-alias">
-                    Function Repository Alias
-                    <input type="text" id="delegation-function-repo-alias" name="function_repo_alias"
-                           value="{{ config.claude_delegation.function_repo_alias }}"
-                           placeholder="claude-delegation-functions-global">
-                    <small>Alias for the repository containing delegation function definitions</small>
-                </label>
-                <label for="delegation-server-url">
-                    Claude Server URL
-                    <input type="text" id="delegation-server-url" name="claude_server_url"
-                           value="{{ config.claude_delegation.claude_server_url }}"
-                           placeholder="https://claude-server.example.com">
-                    <small>URL of the Claude Server for delegation</small>
-                </label>
-                <label for="delegation-username">
-                    Username
-                    <input type="text" id="delegation-username" name="claude_server_username"
-                           value="{{ config.claude_delegation.claude_server_username }}"
-                           placeholder="username">
-                    <small>Username for Claude Server authentication</small>
-                </label>
-                <label for="delegation-credential-type">
-                    Credential Type
-                    <select id="delegation-credential-type" name="claude_server_credential_type">
-                        <option value="password" {% if config.claude_delegation.claude_server_credential_type == 'password' %}selected{% endif %}>Password</option>
-                        <option value="api_key" {% if config.claude_delegation.claude_server_credential_type == 'api_key' %}selected{% endif %}>API Key</option>
-                    </select>
-                </label>
-                <label for="delegation-credential">
-                    Credential
-                    <input type="password" id="delegation-credential" name="claude_server_credential"
-                           placeholder="{% if config.claude_delegation.is_configured %}Leave empty to keep current{% else %}Enter password or API key{% endif %}">
-                    <small>{% if config.claude_delegation.is_configured %}Leave empty to keep existing credential{% else %}Password or API key for authentication{% endif %}</small>
-                </label>
-                <label for="delegation-cidx-callback-url">
-                    CIDX Callback URL
-                    <input type="text" id="delegation-cidx-callback-url" name="cidx_callback_url"
-                           value="{{ config.claude_delegation.cidx_callback_url }}"
-                           placeholder="http://192.168.60.20:8000">
-                    <small>URL that Claude Server will use to POST job completion callbacks</small>
-                </label>
-                <label for="delegation-skip-ssl-verify">
-                    Skip SSL Verification
-                    <select id="delegation-skip-ssl-verify" name="skip_ssl_verify">
-                        <option value="false" {% if not config.claude_delegation.skip_ssl_verify %}selected{% endif %}>No</option>
-                        <option value="true" {% if config.claude_delegation.skip_ssl_verify %}selected{% endif %}>Yes</option>
-                    </select>
-                    <small>WARNING: Only enable for testing with self-signed certificates</small>
-                </label>
-            </div>
-            <p><small><strong>Note:</strong> Connectivity will be validated before saving. Configuration will only be saved if connection to Claude Server is successful.</small></p>
-            <div class="form-actions">
-                <button type="submit" class="primary">Save and Test Connection</button>
-                <button type="button" class="secondary" onclick="cancelEdit('claude_delegation')">Cancel</button>
-            </div>
-        </form>
-    </article>
-</details>
 
-<!-- MCP Session Settings Section (Story #3 Phase 2) -->
-<details class="config-section" id="section-mcp_session">
-    <summary>
-        <h2>MCP Session Settings</h2>
-    </summary>
-    <p class="section-description">
-        Manages Model Context Protocol (MCP) client sessions. Session TTL determines how long idle sessions remain valid before automatic expiration. Cleanup interval controls how frequently the server scans for and removes expired sessions. Shorter TTLs free resources faster but may interrupt long-running client operations.
-    </p>
-    <article>
-        <!-- Display Mode -->
-        <div id="display-mcp_session">
-            <table class="config-table">
-                <tbody>
-                    <tr>
-                        <td class="config-label">Session TTL (seconds)</td>
-                        <td class="config-value">{{ config.mcp_session.session_ttl_seconds }}</td>
-                        <td class="config-note"><small>Time before idle sessions expire (default: 3600 = 1 hour)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Cleanup Interval (seconds)</td>
-                        <td class="config-value">{{ config.mcp_session.cleanup_interval_seconds }}</td>
-                        <td class="config-note"><small>Interval between session cleanup runs (default: 900 = 15 min)</small></td>
-                    </tr>
-                </tbody>
-            </table>
-            <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('mcp_session')">Edit</button>
-            </div>
-        </div>
-        <!-- Edit Mode -->
-        <form id="edit-form-mcp_session" method="post" action="/admin/config/mcp_session" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.mcp_session %}
-            <div class="validation-error">{{ validation_errors.mcp_session }}</div>
-            {% endif %}
-            <div class="form-grid">
-                <label for="mcp-session-ttl">
-                    Session TTL (seconds)
-                    <input type="number" id="mcp-session-ttl" name="session_ttl_seconds" value="{{ config.mcp_session.session_ttl_seconds }}" min="60">
-                    <small>Minimum 60 seconds</small>
-                </label>
-                <label for="mcp-session-cleanup">
-                    Cleanup Interval (seconds)
-                    <input type="number" id="mcp-session-cleanup" name="cleanup_interval_seconds" value="{{ config.mcp_session.cleanup_interval_seconds }}" min="60">
-                    <small>Minimum 60 seconds</small>
-                </label>
-            </div>
-            <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('mcp_session')">Cancel</button>
-            </div>
-        </form>
-    </article>
-</details>
-
-<!-- Health Monitoring Settings Section (Story #3 Phase 2) -->
-<details class="config-section" id="section-health">
-    <summary>
-        <h2>Health Monitoring Settings</h2>
-    </summary>
-    <p class="section-description">
-        Configures health check thresholds for system resource monitoring. Warning thresholds trigger alerts while the system continues operating normally. Critical thresholds indicate severe resource constraints requiring immediate attention. Metrics cache TTL controls how frequently system metrics are refreshed for health endpoints.
-    </p>
-    <article>
-        <!-- Display Mode -->
-        <div id="display-health">
-            <table class="config-table">
-                <tbody>
-                    <tr>
-                        <td class="config-label">Memory Warning Threshold (%)</td>
-                        <td class="config-value">{{ config.health.memory_warning_threshold_percent }}</td>
-                        <td class="config-note"><small>Memory usage warning level (default: 80%)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Memory Critical Threshold (%)</td>
-                        <td class="config-value">{{ config.health.memory_critical_threshold_percent }}</td>
-                        <td class="config-note"><small>Memory usage critical level (default: 90%)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Disk Warning Threshold (%)</td>
-                        <td class="config-value">{{ config.health.disk_warning_threshold_percent }}</td>
-                        <td class="config-note"><small>Disk usage warning level (default: 80%)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Disk Critical Threshold (%)</td>
-                        <td class="config-value">{{ config.health.disk_critical_threshold_percent }}</td>
-                        <td class="config-note"><small>Disk usage critical level (default: 90%)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">CPU Sustained Threshold (%)</td>
-                        <td class="config-value">{{ config.health.cpu_sustained_threshold_percent }}</td>
-                        <td class="config-note"><small>Sustained CPU usage alert level (default: 95%)</small></td>
-                    </tr>
-                    <!-- P3 Metrics Cache TTL (AC37) -->
-                    <tr>
-                        <td class="config-label">System Metrics Cache TTL (seconds)</td>
-                        <td class="config-value">{{ config.health.system_metrics_cache_ttl_seconds }}</td>
-                        <td class="config-note"><small>Cache duration for system metrics (default: 5s, range: 1-60s)</small></td>
-                    </tr>
-                </tbody>
-            </table>
-            <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('health')">Edit</button>
-            </div>
-        </div>
-        <!-- Edit Mode -->
-        <form id="edit-form-health" method="post" action="/admin/config/health" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.health %}
-            <div class="validation-error">{{ validation_errors.health }}</div>
-            {% endif %}
-            <div class="form-grid">
-                <label for="health-memory-warning">
-                    Memory Warning Threshold (%)
-                    <input type="number" id="health-memory-warning" name="memory_warning_threshold_percent" value="{{ config.health.memory_warning_threshold_percent }}" min="0" max="100" step="0.1">
-                    <small>0-100%</small>
-                </label>
-                <label for="health-memory-critical">
-                    Memory Critical Threshold (%)
-                    <input type="number" id="health-memory-critical" name="memory_critical_threshold_percent" value="{{ config.health.memory_critical_threshold_percent }}" min="0" max="100" step="0.1">
-                    <small>0-100%</small>
-                </label>
-                <label for="health-disk-warning">
-                    Disk Warning Threshold (%)
-                    <input type="number" id="health-disk-warning" name="disk_warning_threshold_percent" value="{{ config.health.disk_warning_threshold_percent }}" min="0" max="100" step="0.1">
-                    <small>0-100%</small>
-                </label>
-                <label for="health-disk-critical">
-                    Disk Critical Threshold (%)
-                    <input type="number" id="health-disk-critical" name="disk_critical_threshold_percent" value="{{ config.health.disk_critical_threshold_percent }}" min="0" max="100" step="0.1">
-                    <small>0-100%</small>
-                </label>
-                <label for="health-cpu-sustained">
-                    CPU Sustained Threshold (%)
-                    <input type="number" id="health-cpu-sustained" name="cpu_sustained_threshold_percent" value="{{ config.health.cpu_sustained_threshold_percent }}" min="0" max="100" step="0.1">
-                    <small>0-100%</small>
-                </label>
-                <!-- P3 Metrics Cache TTL (AC37) -->
-                <label for="health-metrics-cache-ttl">
-                    System Metrics Cache TTL (seconds)
-                    <input type="number" id="health-metrics-cache-ttl" name="system_metrics_cache_ttl_seconds" value="{{ config.health.system_metrics_cache_ttl_seconds }}" min="1" max="60" step="0.1">
-                    <small>Range: 1-60 seconds</small>
-                </label>
-            </div>
-            <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('health')">Cancel</button>
-            </div>
-        </form>
-    </article>
-</details>
-
-<!-- SCIP Settings Section (Story #3 Phase 2) -->
-<details class="config-section" id="section-scip">
-    <summary>
-        <h2>SCIP Settings</h2>
-    </summary>
-    <p class="section-description">
-        Configures SCIP (Semantic Code Intelligence Protocol) for advanced code navigation features like go-to-definition, find-references, and call chain analysis. Indexing timeouts accommodate large codebases while preventing runaway processes. Temporal stale threshold controls when git history indexes are considered outdated and need regeneration.
-    </p>
-    <article>
-        <!-- Display Mode -->
-        <div id="display-scip">
-            <table class="config-table">
-                <tbody>
-                    <tr>
-                        <td class="config-label">Indexing Timeout (seconds)</td>
-                        <td class="config-value">{{ config.scip.indexing_timeout_seconds }}</td>
-                        <td class="config-note"><small>Max time for SCIP indexing operations (default: 3600 = 1 hour)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">SCIP Generation Timeout (seconds)</td>
-                        <td class="config-value">{{ config.scip.scip_generation_timeout_seconds }}</td>
-                        <td class="config-note"><small>Max time for SCIP file generation (default: 600 = 10 min)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Temporal Stale Threshold (days)</td>
-                        <td class="config-value">{{ config.scip.temporal_stale_threshold_days }}</td>
-                        <td class="config-note"><small>Days before temporal index considered stale (default: 7)</small></td>
-                    </tr>
-                </tbody>
-            </table>
-            <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('scip')">Edit</button>
-            </div>
-        </div>
-        <!-- Edit Mode -->
-        <form id="edit-form-scip" method="post" action="/admin/config/scip" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.scip %}
-            <div class="validation-error">{{ validation_errors.scip }}</div>
-            {% endif %}
-            <div class="form-grid">
-                <label for="scip-indexing-timeout">
-                    Indexing Timeout (seconds)
-                    <input type="number" id="scip-indexing-timeout" name="indexing_timeout_seconds" value="{{ config.scip.indexing_timeout_seconds }}" min="60">
-                    <small>Minimum 60 seconds</small>
-                </label>
-                <label for="scip-generation-timeout">
-                    SCIP Generation Timeout (seconds)
-                    <input type="number" id="scip-generation-timeout" name="scip_generation_timeout_seconds" value="{{ config.scip.scip_generation_timeout_seconds }}" min="60">
-                    <small>Minimum 60 seconds</small>
-                </label>
-                <label for="scip-temporal-stale">
-                    Temporal Stale Threshold (days)
-                    <input type="number" id="scip-temporal-stale" name="temporal_stale_threshold_days" value="{{ config.scip.temporal_stale_threshold_days }}" min="1">
-                    <small>Minimum 1 day</small>
-                </label>
-            </div>
-            <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('scip')">Cancel</button>
-            </div>
-        </form>
-    </article>
-</details>
-
-<!-- Provider API Keys Section (Story #20) -->
-<details class="config-section" id="section-provider-api-keys">
-    <summary>
-        <h2>Provider API Keys</h2>
-    </summary>
-    <article>
-        <p class="section-description">
-            Configure API keys for external AI providers. These keys are used for code intelligence features.
-        </p>
-
-        <!-- Status Display -->
-        <div id="display-provider-api-keys">
-            <table class="config-table">
-                <tbody>
-                    <tr>
-                        <td class="config-label">Anthropic API Key</td>
-                        <td class="config-value">
-                            {% if config.provider_api_keys.anthropic_configured %}
-                            <span class="status-badge status-configured">Configured</span>
-                            {% else %}
-                            <span class="status-badge status-not-configured">Not Configured</span>
-                            {% endif %}
-                        </td>
-                        <td class="config-actions">
-                            {% if config.provider_api_keys.anthropic_configured %}
-                            <button type="button" class="outline small" onclick="testConfiguredAnthropicKey()">Test</button>
-                            <span id="anthropic-display-status" class="key-status"></span>
-                            {% endif %}
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">VoyageAI API Key</td>
-                        <td class="config-value">
-                            {% if config.provider_api_keys.voyageai_configured %}
-                            <span class="status-badge status-configured">Configured</span>
-                            {% else %}
-                            <span class="status-badge status-not-configured">Not Configured</span>
-                            {% endif %}
-                        </td>
-                        <td class="config-actions">
-                            {% if config.provider_api_keys.voyageai_configured %}
-                            <button type="button" class="outline small" onclick="testConfiguredVoyageAIKey()">Test</button>
-                            <span id="voyageai-display-status" class="key-status"></span>
-                            {% endif %}
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
-            <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('provider-api-keys')">Edit Keys</button>
-            </div>
-        </div>
-
-        <!-- Edit Mode -->
-        <div id="edit-form-provider-api-keys" style="display: none;">
-            <div id="provider-api-keys-message"></div>
-
-            <!-- Anthropic API Key -->
-            <fieldset>
-                <legend>Anthropic API Key</legend>
-                <div class="form-grid">
-                    <label for="anthropic-api-key">
-                        API Key
-                        <input type="password" id="anthropic-api-key" name="anthropic_api_key"
-                               placeholder="sk-ant-..." autocomplete="off">
-                        <small>Format: sk-ant-... (minimum 40 characters)</small>
-                    </label>
-                </div>
-                <div class="form-actions-inline">
-                    <button type="button" class="primary small" onclick="saveAnthropicKey()">Save Key</button>
-                    <button type="button" class="outline small" onclick="testAnthropicKey()">Test Connectivity</button>
-                    {% if config.provider_api_keys.anthropic_configured %}
-                    <button type="button" class="contrast small" onclick="clearAnthropicKey()">Clear</button>
-                    {% endif %}
-                    <span id="anthropic-status" class="key-status"></span>
-                </div>
-            </fieldset>
-
-            <!-- VoyageAI API Key -->
-            <fieldset>
-                <legend>VoyageAI API Key</legend>
-                <div class="form-grid">
-                    <label for="voyageai-api-key">
-                        API Key
-                        <input type="password" id="voyageai-api-key" name="voyageai_api_key"
-                               placeholder="pa-..." autocomplete="off">
-                        <small>Format: pa-... (minimum 20 characters)</small>
-                    </label>
-                </div>
-                <div class="form-actions-inline">
-                    <button type="button" class="primary small" onclick="saveVoyageAIKey()">Save Key</button>
-                    <button type="button" class="outline small" onclick="testVoyageAIKey()">Test Connectivity</button>
-                    {% if config.provider_api_keys.voyageai_configured %}
-                    <button type="button" class="contrast small" onclick="clearVoyageAIKey()">Clear</button>
-                    {% endif %}
-                    <span id="voyageai-status" class="key-status"></span>
-                </div>
-            </fieldset>
-
-            <div class="form-actions">
-                <button type="button" class="secondary" onclick="cancelEdit('provider-api-keys')">Close</button>
-            </div>
-        </div>
-    </article>
-</details>
-
-<!-- Claude Integration Settings Section -->
-<details class="config-section" id="section-claude-integration">
-    <summary>
-        <h2>Claude Integration</h2>
-    </summary>
-    <article>
-        <p class="section-description">
-            Configures Claude CLI integration settings for repository analysis and research assistant features. Max concurrent processes controls parallelism for description generation jobs. Description refresh interval determines how often repository descriptions are regenerated. Research assistant timeout limits execution time for Claude research sessions.
-        </p>
-        <!-- Display Mode -->
-        <div id="display-claude-integration">
-            <table class="config-table">
-                <tbody>
-                    <tr>
-                        <td class="config-label">Max Concurrent Claude CLI</td>
-                        <td class="config-value">{{ config.claude_cli.max_concurrent_claude_cli }}</td>
-                        <td class="config-note"><small>Maximum parallel Claude CLI processes (default: 2)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Description Refresh Interval (hours)</td>
-                        <td class="config-value">{{ config.claude_cli.description_refresh_interval_hours }}</td>
-                        <td class="config-note"><small>How often to regenerate repository descriptions (default: 24)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Research Assistant Timeout (seconds)</td>
-                        <td class="config-value">{{ config.claude_cli.research_assistant_timeout_seconds }}</td>
-                        <td class="config-note"><small>Timeout for Research Assistant Claude CLI execution (default: 1200 = 20 minutes)</small></td>
-                    </tr>
-                </tbody>
-            </table>
-            <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('claude-integration')">Edit</button>
-            </div>
-        </div>
-        <!-- Edit Mode -->
-        <form id="edit-form-claude-integration" method="post" action="/admin/config/claude_cli" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.claude_cli %}
-            <div class="validation-error">{{ validation_errors.claude_cli }}</div>
-            {% endif %}
-            <div class="form-grid">
-                <label for="claude-max-concurrent">
-                    Max Concurrent Claude CLI
-                    <input type="number" id="claude-max-concurrent" name="max_concurrent_claude_cli" value="{{ config.claude_cli.max_concurrent_claude_cli }}" min="1" max="10">
-                    <small>Maximum parallel Claude CLI processes (1-10, default: 2)</small>
-                </label>
-                <label for="claude-refresh-interval">
-                    Description Refresh Interval (hours)
-                    <input type="number" id="claude-refresh-interval" name="description_refresh_interval_hours" value="{{ config.claude_cli.description_refresh_interval_hours }}" min="1">
-                    <small>How often to regenerate repository descriptions (default: 24)</small>
-                </label>
-                <label for="claude-research-timeout">
-                    Research Assistant Timeout (seconds)
-                    <input type="number" id="claude-research-timeout" name="research_assistant_timeout_seconds" value="{{ config.claude_cli.research_assistant_timeout_seconds }}" min="60" max="7200">
-                    <small>Timeout for Research Assistant Claude CLI execution (60-7200, default: 1200 = 20 minutes)</small>
-                </label>
-            </div>
-            <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('claude-integration')">Cancel</button>
-            </div>
-        </form>
-    </article>
-</details>
-
-<!-- Multi-Search Settings Section (Story #25, Story #29 - Consolidated) -->
-<details class="config-section" id="section-multi-search">
-    <summary>
-        <h2>Multi-Search Settings</h2>
-    </summary>
-    <article>
-        <p class="section-description">
-            Controls parallel search execution across multiple repositories. Includes settings for
-            REST API multi-search (semantic/FTS), MCP omni-search (cross-repository queries), and
-            SCIP multi-repository code intelligence. Higher worker counts increase parallelism but
-            consume more server resources. Timeout settings prevent runaway queries from blocking
-            other operations.
-        </p>
-        <!-- Display Mode -->
-        <div id="display-multi-search">
-            <table class="config-table">
-                <tbody>
-                    <tr><td colspan="3"><strong>Multi-Repository Search (REST & MCP)</strong></td></tr>
-                    <tr>
-                        <td class="config-label">Multi-Search Max Workers</td>
-                        <td class="config-value">{{ config.multi_search.multi_search_max_workers }}</td>
-                        <td class="config-note"><small>Max concurrent threads for all multi-repository searches including REST API and MCP omni-search (default: 2)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Multi-Search Timeout (seconds)</td>
-                        <td class="config-value">{{ config.multi_search.multi_search_timeout_seconds }}</td>
-                        <td class="config-note"><small>Timeout per repository for all multi-repository searches including REST API and MCP omni-search (default: 30)</small></td>
-                    </tr>
-                    <tr><td colspan="3"><strong>SCIP Multi-Repository</strong></td></tr>
-                    <tr>
-                        <td class="config-label">SCIP Multi Max Workers</td>
-                        <td class="config-value">{{ config.multi_search.scip_multi_max_workers }}</td>
-                        <td class="config-note"><small>Max concurrent threads for multi-repo SCIP queries (default: 2)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">SCIP Multi Timeout (seconds)</td>
-                        <td class="config-value">{{ config.multi_search.scip_multi_timeout_seconds }}</td>
-                        <td class="config-note"><small>Timeout per repository SCIP query (default: 30)</small></td>
-                    </tr>
-                    <tr><td colspan="3"><strong>MCP Omni-Search Settings</strong><br><small style="font-weight: normal;">MCP-specific settings for caching, aggregation, and result limits. Worker/timeout settings are in the unified section above.</small></td></tr>
-                    <tr>
-                        <td class="config-label">Omni Cache Max Entries</td>
-                        <td class="config-value">{{ config.multi_search.omni_cache_max_entries }}</td>
-                        <td class="config-note"><small>Maximum cache entries (default: 100)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Omni Cache TTL (seconds)</td>
-                        <td class="config-value">{{ config.multi_search.omni_cache_ttl_seconds }}</td>
-                        <td class="config-note"><small>Cache time-to-live in seconds (default: 300)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Omni Default Limit</td>
-                        <td class="config-value">{{ config.multi_search.omni_default_limit }}</td>
-                        <td class="config-note"><small>Default result limit (default: 10)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Omni Max Limit</td>
-                        <td class="config-value">{{ config.multi_search.omni_max_limit }}</td>
-                        <td class="config-note"><small>Maximum result limit (default: 1000)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Omni Default Aggregation Mode</td>
-                        <td class="config-value">{{ config.multi_search.omni_default_aggregation_mode }}</td>
-                        <td class="config-note"><small>How to aggregate results: global or per_repo (default: global)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Omni Max Results Per Repo</td>
-                        <td class="config-value">{{ config.multi_search.omni_max_results_per_repo }}</td>
-                        <td class="config-note"><small>Maximum results from each repository (default: 100)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Omni Max Total Results Before Aggregation</td>
-                        <td class="config-value">{{ config.multi_search.omni_max_total_results_before_aggregation }}</td>
-                        <td class="config-note"><small>Maximum total results before aggregation (default: 10000)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Omni Pattern Metacharacters</td>
-                        <td class="config-value">{{ config.multi_search.omni_pattern_metacharacters }}</td>
-                        <td class="config-note"><small>Characters treated as glob pattern metacharacters (default: *?[]^$+|)</small></td>
-                    </tr>
-                </tbody>
-            </table>
-            <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('multi-search')">Edit</button>
-            </div>
-        </div>
-        <!-- Edit Mode -->
-        <form id="edit-form-multi-search" method="post" action="/admin/config/multi_search" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.multi_search %}
-            <div class="validation-error">{{ validation_errors.multi_search }}</div>
-            {% endif %}
-            <div class="form-grid">
-                <h4>Multi-Repository Search (REST & MCP)</h4>
-                <label for="multi-search-max-workers">
-                    Multi-Search Max Workers
-                    <input type="number" id="multi-search-max-workers" name="multi_search_max_workers" value="{{ config.multi_search.multi_search_max_workers }}" min="1" max="50">
-                    <small>Range: 1-50 workers (default: 2). Applies to all multi-repository searches including REST API and MCP omni-search.</small>
-                </label>
-                <label for="multi-search-timeout">
-                    Multi-Search Timeout (seconds)
-                    <input type="number" id="multi-search-timeout" name="multi_search_timeout_seconds" value="{{ config.multi_search.multi_search_timeout_seconds }}" min="5" max="600">
-                    <small>Range: 5-600 seconds (default: 30). Applies to all multi-repository searches including REST API and MCP omni-search.</small>
-                </label>
-                <h4>SCIP Multi-Repository</h4>
-                <label for="scip-multi-max-workers">
-                    SCIP Multi Max Workers
-                    <input type="number" id="scip-multi-max-workers" name="scip_multi_max_workers" value="{{ config.multi_search.scip_multi_max_workers }}" min="1" max="50">
-                    <small>Range: 1-50 workers (default: 2)</small>
-                </label>
-                <label for="scip-multi-timeout">
-                    SCIP Multi Timeout (seconds)
-                    <input type="number" id="scip-multi-timeout" name="scip_multi_timeout_seconds" value="{{ config.multi_search.scip_multi_timeout_seconds }}" min="5" max="600">
-                    <small>Range: 5-600 seconds (default: 30)</small>
-                </label>
-                <h4>MCP Omni-Search Settings</h4>
-                <p><small>MCP-specific settings for caching, aggregation, and result limits. Worker/timeout settings are in the unified section above.</small></p>
-                <label for="omni-cache-max-entries">
-                    Omni Cache Max Entries
-                    <input type="number" id="omni-cache-max-entries" name="omni_cache_max_entries" value="{{ config.multi_search.omni_cache_max_entries }}" min="1" max="10000">
-                    <small>Range: 1-10000 entries (default: 100). Maximum cache entries.</small>
-                </label>
-                <label for="omni-cache-ttl-seconds">
-                    Omni Cache TTL (seconds)
-                    <input type="number" id="omni-cache-ttl-seconds" name="omni_cache_ttl_seconds" value="{{ config.multi_search.omni_cache_ttl_seconds }}" min="1" max="86400">
-                    <small>Range: 1-86400 seconds (default: 300). Cache time-to-live in seconds.</small>
-                </label>
-                <label for="omni-default-limit">
-                    Omni Default Limit
-                    <input type="number" id="omni-default-limit" name="omni_default_limit" value="{{ config.multi_search.omni_default_limit }}" min="1" max="1000">
-                    <small>Range: 1-1000 results (default: 10). Default result limit.</small>
-                </label>
-                <label for="omni-max-limit">
-                    Omni Max Limit
-                    <input type="number" id="omni-max-limit" name="omni_max_limit" value="{{ config.multi_search.omni_max_limit }}" min="1" max="10000">
-                    <small>Range: 1-10000 results (default: 1000). Maximum result limit.</small>
-                </label>
-                <label for="omni-default-aggregation-mode">
-                    Omni Default Aggregation Mode
-                    <select id="omni-default-aggregation-mode" name="omni_default_aggregation_mode">
-                        <option value="global" {% if config.multi_search.omni_default_aggregation_mode == 'global' %}selected{% endif %}>Global</option>
-                        <option value="per_repo" {% if config.multi_search.omni_default_aggregation_mode == 'per_repo' %}selected{% endif %}>Per Repo</option>
-                    </select>
-                    <small>How to aggregate results: global or per_repo (default: global).</small>
-                </label>
-                <label for="omni-max-results-per-repo">
-                    Omni Max Results Per Repo
-                    <input type="number" id="omni-max-results-per-repo" name="omni_max_results_per_repo" value="{{ config.multi_search.omni_max_results_per_repo }}" min="1" max="10000">
-                    <small>Range: 1-10000 results (default: 100). Maximum results from each repository.</small>
-                </label>
-                <label for="omni-max-total-results-before-aggregation">
-                    Omni Max Total Results Before Aggregation
-                    <input type="number" id="omni-max-total-results-before-aggregation" name="omni_max_total_results_before_aggregation" value="{{ config.multi_search.omni_max_total_results_before_aggregation }}" min="1" max="100000">
-                    <small>Range: 1-100000 results (default: 10000). Maximum total results before aggregation.</small>
-                </label>
-                <label for="omni-pattern-metacharacters">
-                    Omni Pattern Metacharacters
-                    <input type="text" id="omni-pattern-metacharacters" name="omni_pattern_metacharacters" value="{{ config.multi_search.omni_pattern_metacharacters }}">
-                    <small>Characters treated as glob pattern metacharacters (default: *?[]^$+|).</small>
-                </label>
-            </div>
-            <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('multi-search')">Cancel</button>
-            </div>
-        </form>
-    </article>
-</details>
-
-<!-- Background Jobs Settings Section (Story #26, Story #27) -->
-<details class="config-section" id="section-background-jobs">
-    <summary>
-        <h2>Background Jobs Settings</h2>
-    </summary>
-    <article>
-        <p class="section-description">Controls the <strong>BackgroundJobManager</strong> for async background tasks. <strong>Affected operations:</strong> Add Golden Repository, Remove Golden Repository, SCIP Self-Healing, and SCIP index generation. <strong>Subprocess Max Workers</strong> controls parallelism of external process execution (ripgrep/grep for regex search). These are separate from SyncJob queue operations.</p>
-        <!-- Display Mode -->
-        <div id="display-background-jobs">
-            <table class="config-table">
-                <tbody>
-                    <tr>
-                        <td class="config-label">Max Concurrent Background Jobs</td>
-                        <td class="config-value">{{ config.background_jobs.max_concurrent_background_jobs }}</td>
-                        <td class="config-note"><small>Maximum number of concurrent background jobs (default: 5)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Subprocess Max Workers</td>
-                        <td class="config-value">{{ config.background_jobs.subprocess_max_workers }}</td>
-                        <td class="config-note"><small>Max concurrent workers for subprocess operations like regex search (default: 2)</small></td>
-                    </tr>
-                </tbody>
-            </table>
-            <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('background-jobs')">Edit</button>
-            </div>
-        </div>
-        <!-- Edit Mode -->
-        <form id="edit-form-background-jobs" method="post" action="/admin/config/background_jobs" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.background_jobs %}
-            <div class="validation-error">{{ validation_errors.background_jobs }}</div>
-            {% endif %}
-            <div class="form-grid">
-                <label for="max-concurrent-background-jobs">
-                    Max Concurrent Background Jobs
-                    <input type="number" id="max-concurrent-background-jobs" name="max_concurrent_background_jobs" value="{{ config.background_jobs.max_concurrent_background_jobs }}" min="1" max="100">
-                    <small>Range: 1-100 jobs (default: 5). Jobs exceeding this limit stay in PENDING until a slot is available.</small>
-                </label>
-                <label for="subprocess-max-workers">
-                    Subprocess Max Workers
-                    <input type="number" id="subprocess-max-workers" name="subprocess_max_workers" value="{{ config.background_jobs.subprocess_max_workers }}" min="1" max="50">
-                    <small>Range: 1-50 workers (default: 2). Controls parallelism of subprocess-based operations like regex search.</small>
-                </label>
-            </div>
-            <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('background-jobs')">Cancel</button>
-            </div>
-        </form>
-    </article>
-</details>
+</div>
 
 <script>
 // Provider API Keys JavaScript (Story #20)
@@ -2523,4 +2601,25 @@ fieldset legend {
     font-weight: 600;
     padding: 0 0.5rem;
 }
+/* Config group styles */
+.config-group {
+    margin-bottom: 2rem;
+}
+
+.config-group-header {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #adb5bd;
+    border-bottom: 2px solid #495057;
+    padding-bottom: 0.5rem;
+    margin-bottom: 1rem;
+    margin-top: 2rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.config-group-header:first-of-type {
+    margin-top: 1.5rem;
+}
+
 </style>

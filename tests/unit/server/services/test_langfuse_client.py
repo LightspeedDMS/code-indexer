@@ -11,6 +11,7 @@ Tests cover:
 """
 
 import pytest
+import sys
 from unittest.mock import Mock, patch, MagicMock
 
 # Import will fail initially - TDD red phase
@@ -119,6 +120,7 @@ class TestLangfuseClientLazyInit:
         assert result is not None
         assert result.trace_id == "test-trace-id"
 
+    @patch.dict("sys.modules", {"langfuse.types": MagicMock()})
     @patch("langfuse.Langfuse")
     def test_lazy_init_on_first_create_span(self, mock_langfuse_class):
         """Langfuse SDK should initialize on first create_span call."""
@@ -189,6 +191,7 @@ class TestLangfuseClientTraceOperations:
         mock_langfuse_class.return_value.start_as_current_span.assert_called_once_with(
             name="research-session",
             metadata=None,
+            input=None,
             end_on_exit=False,
         )
         mock_langfuse_class.return_value.update_current_trace.assert_called_once_with(
@@ -221,7 +224,7 @@ class TestLangfuseClientTraceOperations:
         )
 
         mock_langfuse_class.return_value.start_as_current_span.assert_called_once_with(
-            name="research", metadata=metadata, end_on_exit=False
+            name="research", metadata=metadata, input=None, end_on_exit=False
         )
         mock_langfuse_class.return_value.update_current_trace.assert_called_once_with(
             session_id="s1", user_id="user-123"
@@ -247,6 +250,7 @@ class TestLangfuseClientTraceOperations:
 class TestLangfuseClientSpanOperations:
     """Tests for span creation (SDK 3.x API)."""
 
+    @patch.dict("sys.modules", {"langfuse.types": MagicMock()})
     @patch("langfuse.Langfuse")
     def test_create_span_basic(self, mock_langfuse_class):
         """Basic span creation."""
@@ -263,6 +267,7 @@ class TestLangfuseClientSpanOperations:
         assert call_kwargs["name"] == "search_code"
         assert result == mock_span
 
+    @patch.dict("sys.modules", {"langfuse.types": MagicMock()})
     @patch("langfuse.Langfuse")
     def test_create_span_with_io(self, mock_langfuse_class):
         """Span creation with input/output."""
@@ -507,3 +512,179 @@ class TestLangfuseClientThreadSafety:
 
         # Should use same SDK instance
         assert mock_langfuse_class.call_count == 1
+
+
+class TestStory185LangfuseClientChanges:
+    """Tests for Story #185: LangfuseClient changes for prompt observability."""
+
+    @patch("langfuse.Langfuse")
+    def test_create_trace_accepts_input_parameter(self, mock_langfuse_class):
+        """create_trace should accept optional 'input' parameter for user prompt."""
+        config = LangfuseConfig(enabled=True, public_key="pk", secret_key="sk")
+        client = LangfuseClient(config)
+
+        # Set up mock
+        mock_span = Mock()
+        mock_span.trace_id = "trace-123"
+        mock_span_cm = MagicMock()
+        mock_span_cm.__enter__ = Mock(return_value=mock_span)
+        mock_span_cm.__exit__ = Mock(return_value=False)
+        mock_langfuse_class.return_value.start_as_current_span.return_value = (
+            mock_span_cm
+        )
+
+        user_prompt = "Find all authentication functions in the codebase"
+        result = client.create_trace(
+            name="Auth Investigation",
+            session_id="s1",
+            input=user_prompt,
+        )
+
+        # Should pass input to start_as_current_span
+        mock_langfuse_class.return_value.start_as_current_span.assert_called_once_with(
+            name="Auth Investigation",
+            metadata=None,
+            input=user_prompt,
+            end_on_exit=False,
+        )
+
+    @patch("langfuse.Langfuse")
+    def test_create_trace_accepts_tags_parameter(self, mock_langfuse_class):
+        """create_trace should accept optional 'tags' parameter."""
+        config = LangfuseConfig(enabled=True, public_key="pk", secret_key="sk")
+        client = LangfuseClient(config)
+
+        # Set up mock
+        mock_span = Mock()
+        mock_span.trace_id = "trace-123"
+        mock_span_cm = MagicMock()
+        mock_span_cm.__enter__ = Mock(return_value=mock_span)
+        mock_span_cm.__exit__ = Mock(return_value=False)
+        mock_langfuse_class.return_value.start_as_current_span.return_value = (
+            mock_span_cm
+        )
+
+        tags = ["bugfix", "high-priority", "authentication"]
+        result = client.create_trace(
+            name="Bug Investigation",
+            session_id="s1",
+            tags=tags,
+        )
+
+        # Should pass tags to update_current_trace
+        mock_langfuse_class.return_value.update_current_trace.assert_called_once_with(
+            session_id="s1",
+            user_id=None,
+            tags=tags,
+        )
+
+    @patch("langfuse.Langfuse")
+    def test_update_trace_method_exists(self, mock_langfuse_class):
+        """update_current_trace_in_context should update existing trace with output/metadata/tags."""
+        config = LangfuseConfig(enabled=True, public_key="pk", secret_key="sk")
+        client = LangfuseClient(config)
+
+        # Mock SDK's update_current_trace
+        mock_langfuse_class.return_value.update_current_trace = Mock()
+
+        # Create mock span with trace_id and context manager methods
+        mock_span = Mock()
+        mock_span.trace_id = "trace-123"
+        mock_span.__enter__ = Mock(return_value=mock_span)
+        mock_span.__exit__ = Mock(return_value=None)
+
+        output = "I found the authentication code in src/auth/login.py..."
+        metadata = {"outcome": "bug_found", "intel_quality": 0.9}
+        tags = ["completed", "verified"]
+
+        result = client.update_current_trace_in_context(
+            span=mock_span,
+            output=output,
+            metadata=metadata,
+            tags=tags,
+        )
+
+        # Should call SDK's update_current_trace method
+        assert result is True
+        mock_langfuse_class.return_value.update_current_trace.assert_called_once_with(
+            output=output,
+            metadata=metadata,
+            tags=tags,
+        )
+
+    @patch("langfuse.Langfuse")
+    def test_update_trace_when_disabled_returns_false(self, mock_langfuse_class):
+        """update_current_trace_in_context should return False when Langfuse disabled."""
+        config = LangfuseConfig(enabled=False)
+        client = LangfuseClient(config)
+
+        # Create mock span
+        mock_span = Mock()
+        mock_span.trace_id = "trace-123"
+
+        result = client.update_current_trace_in_context(
+            span=mock_span,
+            output="response",
+        )
+
+        assert result is False
+
+    @patch("langfuse.Langfuse")
+    def test_update_trace_with_output_only(self, mock_langfuse_class):
+        """update_current_trace_in_context should work with just output parameter."""
+        config = LangfuseConfig(enabled=True, public_key="pk", secret_key="sk")
+        client = LangfuseClient(config)
+
+        mock_langfuse_class.return_value.update_current_trace = Mock()
+
+        # Create mock span with context manager methods
+        mock_span = Mock()
+        mock_span.trace_id = "trace-123"
+        mock_span.__enter__ = Mock(return_value=mock_span)
+        mock_span.__exit__ = Mock(return_value=None)
+
+        output = "Here is the complete response..."
+        result = client.update_current_trace_in_context(span=mock_span, output=output)
+
+        assert result is True
+        mock_langfuse_class.return_value.update_current_trace.assert_called_once_with(output=output)
+
+    @patch("langfuse.Langfuse")
+    def test_update_trace_with_metadata_only(self, mock_langfuse_class):
+        """update_current_trace_in_context should work with just metadata parameter."""
+        config = LangfuseConfig(enabled=True, public_key="pk", secret_key="sk")
+        client = LangfuseClient(config)
+
+        mock_langfuse_class.return_value.update_current_trace = Mock()
+
+        # Create mock span with context manager methods
+        mock_span = Mock()
+        mock_span.trace_id = "trace-123"
+        mock_span.__enter__ = Mock(return_value=mock_span)
+        mock_span.__exit__ = Mock(return_value=None)
+
+        metadata = {"outcome": "success", "intel_frustration": 0.2}
+        result = client.update_current_trace_in_context(span=mock_span, metadata=metadata)
+
+        assert result is True
+        mock_langfuse_class.return_value.update_current_trace.assert_called_once_with(metadata=metadata)
+
+    @patch("langfuse.Langfuse")
+    def test_update_trace_handles_errors(self, mock_langfuse_class):
+        """update_current_trace_in_context should handle errors gracefully and return False."""
+        config = LangfuseConfig(enabled=True, public_key="pk", secret_key="sk")
+        client = LangfuseClient(config)
+
+        mock_langfuse_class.return_value.update_current_trace = Mock(
+            side_effect=Exception("API error")
+        )
+
+        # Create mock span with context manager methods
+        mock_span = Mock()
+        mock_span.trace_id = "trace-123"
+        mock_span.__enter__ = Mock(return_value=mock_span)
+        mock_span.__exit__ = Mock(return_value=None)
+
+        result = client.update_current_trace_in_context(span=mock_span, output="test")
+
+        assert result is False

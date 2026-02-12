@@ -100,22 +100,26 @@ class LangfuseClient:
         session_id: str,
         metadata: Optional[Dict[str, Any]] = None,
         user_id: Optional[str] = None,
+        input: Optional[str] = None,
+        tags: Optional[list] = None,
     ) -> Optional[Any]:
         """
         Create a new trace in Langfuse.
 
         Langfuse 3.7.0 API creates traces implicitly when starting root spans.
         We use start_as_current_span() to create the root span (which creates
-        the trace), then update_current_trace() to set session_id/user_id.
+        the trace), then update_current_trace() to set session_id/user_id/tags.
 
         The span is stored in the returned TraceObject and must be ended via
         end_trace() before flush() will send data to Langfuse.
 
         Args:
-            name: Name of the trace (e.g., "research-session")
+            name: Name of the trace (e.g., "Authentication Investigation")
             session_id: MCP session ID
-            metadata: Optional metadata dict (topic, strategy, etc.)
+            metadata: Optional metadata dict (strategy, intel_*, etc.)
             user_id: Optional user identifier
+            input: Optional user prompt text (Story #185)
+            tags: Optional list of tags for categorization (Story #185)
 
         Returns:
             TraceObject with .id, .trace_id, and .span properties if successful, None otherwise
@@ -129,17 +133,22 @@ class LangfuseClient:
             span_cm = self._langfuse.start_as_current_span(
                 name=name,
                 metadata=metadata,
+                input=input,
                 end_on_exit=False,
             )
 
             # Enter context to activate span
             span = span_cm.__enter__()
 
-            # Update trace with session_id and user_id
-            self._langfuse.update_current_trace(
-                session_id=session_id,
-                user_id=user_id,
-            )
+            # Update trace with session_id, user_id, and tags
+            update_kwargs = {
+                "session_id": session_id,
+                "user_id": user_id,
+            }
+            if tags is not None:
+                update_kwargs["tags"] = tags
+
+            self._langfuse.update_current_trace(**update_kwargs)
 
             # Exit context but keep span active - it will be ended in end_trace()
             span_cm.__exit__(None, None, None)
@@ -159,6 +168,59 @@ class LangfuseClient:
         except Exception as e:
             logger.error(f"Failed to create trace '{name}': {e}")
             return None
+
+    def update_current_trace_in_context(
+        self,
+        span: Any,
+        output: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        tags: Optional[list] = None,
+    ) -> bool:
+        """
+        Update a trace by re-entering its span context and calling update_current_trace.
+
+        Story #185: Langfuse SDK 3.7.0 only has update_current_trace(), which updates
+        the currently active trace in the context. To update a trace that's no longer
+        current, we must re-enter the span's context.
+
+        Args:
+            span: The span object returned from start_as_current_span (stored in TraceObject)
+            output: Optional output text (Claude's response)
+            metadata: Optional metadata to merge into trace
+            tags: Optional list of tags to add
+
+        Returns:
+            True if update succeeded, False otherwise
+        """
+        if not self._ensure_initialized():
+            return False
+
+        try:
+            # Re-enter the span's context to make it current
+            # The span was created with end_on_exit=False, so we can safely enter/exit multiple times
+            span_cm = span  # The span object IS the context manager
+            span_cm.__enter__()
+            try:
+                # Now update_current_trace will work because span is active
+                update_kwargs = {}
+                if output is not None:
+                    update_kwargs["output"] = output
+                if metadata is not None:
+                    update_kwargs["metadata"] = metadata
+                if tags is not None:
+                    update_kwargs["tags"] = tags
+
+                self._langfuse.update_current_trace(**update_kwargs)
+            finally:
+                # Always exit context (but don't end span - that happens in end_trace)
+                span_cm.__exit__(None, None, None)
+
+            logger.debug(f"Updated trace {span.trace_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to update trace: {e}")
+            return False
 
     def end_trace(self, trace_obj: Any) -> bool:
         """

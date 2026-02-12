@@ -82,10 +82,13 @@ class TraceStateManager:
     def start_trace(
         self,
         session_id: str,
-        topic: str,
+        name: str,
         strategy: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         username: Optional[str] = None,
+        input: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        intel: Optional[Dict[str, Any]] = None,
     ) -> Optional[TraceContext]:
         """
         Start a new trace for the given session.
@@ -93,29 +96,42 @@ class TraceStateManager:
         If a trace is already active for this session, the new trace becomes
         a nested trace (pushed onto the stack).
 
+        Story #185: Renamed 'topic' to 'name', added input/tags/intel parameters
+        for full prompt observability.
+
         Args:
             session_id: MCP session ID
-            topic: Research topic (e.g., "authentication", "performance")
+            name: Trace name (e.g., "Authentication Investigation")
             strategy: Optional research strategy (e.g., "semantic_then_fts")
             metadata: Optional metadata dict for additional context
             username: Optional username for the session owner
+            input: Optional user prompt text (Story #185)
+            tags: Optional list of tags for categorization (Story #185)
+            intel: Optional prompt intelligence metadata (Story #185)
 
         Returns:
             TraceContext if trace created successfully, None otherwise
         """
         # Prepare metadata
-        trace_metadata = {"topic": topic}
+        trace_metadata = {}
         if strategy:
             trace_metadata["strategy"] = strategy
         if metadata:
             trace_metadata.update(metadata)
 
+        # Story #185: Add intel fields with intel_ prefix
+        if intel:
+            for key, value in intel.items():
+                trace_metadata[f"intel_{key}"] = value
+
         # Create trace via Langfuse client
         trace = self._langfuse.create_trace(
-            name="research-session",
+            name=name,
             session_id=session_id,
-            metadata=trace_metadata,
+            metadata=trace_metadata if trace_metadata else None,
             user_id=username,  # Langfuse uses user_id, we accept username
+            input=input,
+            tags=tags,
         )
 
         if trace is None:
@@ -146,7 +162,7 @@ class TraceStateManager:
 
             logger.info(
                 f"Started trace {trace.id} for session {session_id} "
-                f"(topic: {topic}, parent: {parent_trace_id})"
+                f"(name: {name}, parent: {parent_trace_id})"
             )
 
             return context
@@ -197,9 +213,12 @@ class TraceStateManager:
         self,
         session_id: str,
         score: Optional[float] = None,
-        feedback: Optional[str] = None,
+        summary: Optional[str] = None,
         outcome: Optional[str] = None,
         username: Optional[str] = None,
+        output: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        intel: Optional[Dict[str, Any]] = None,
     ) -> Optional[TraceContext]:
         """
         End the currently active trace for a session.
@@ -210,12 +229,18 @@ class TraceStateManager:
         falls back to username-based lookup if session_id lookup fails and username
         is provided.
 
+        Story #185: Renamed 'feedback' to 'summary', added output/tags/intel parameters,
+        and wired outcome to metadata.
+
         Args:
             session_id: MCP session ID
             score: Optional score value (0.0 to 1.0)
-            feedback: Optional feedback text
-            outcome: Optional outcome description (unused currently)
+            summary: Optional summary text (renamed from feedback)
+            outcome: Optional outcome description (now wired to metadata)
             username: Optional username for fallback lookup (HTTP client support)
+            output: Optional output text (Claude's response) (Story #185)
+            tags: Optional list of tags to merge with start tags (Story #185)
+            intel: Optional prompt intelligence updates (Story #185)
 
         Returns:
             TraceContext of ended trace if successful, None otherwise
@@ -255,13 +280,32 @@ class TraceStateManager:
 
             logger.info(f"Ended trace {context.trace_id} for session {effective_session_id}")
 
+        # Story #185: Update trace with output, metadata (outcome, intel), and tags
+        # Build metadata updates
+        update_metadata = {}
+        if outcome:
+            update_metadata["outcome"] = outcome
+        if intel:
+            for key, value in intel.items():
+                update_metadata[f"intel_{key}"] = value
+
+        # Call update_current_trace_in_context if we have output, metadata, or tags
+        # Pass the span object (context.trace) instead of trace_id
+        if output or update_metadata or tags:
+            self._langfuse.update_current_trace_in_context(
+                span=context.trace,
+                output=output,
+                metadata=update_metadata if update_metadata else None,
+                tags=tags,
+            )
+
         # Add score if provided (outside lock to avoid holding during I/O)
         if score is not None:
             self._langfuse.score(
                 trace_id=context.trace_id,
                 name="user-feedback",
                 value=score,
-                comment=feedback,
+                comment=summary,
             )
 
         # End the trace span - MUST be called before flush() or data won't be sent

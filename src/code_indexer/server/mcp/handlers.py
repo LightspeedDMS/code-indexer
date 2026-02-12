@@ -11083,7 +11083,7 @@ def handle_start_trace(
     Start a new Langfuse trace for the current research session.
 
     Args:
-        args: Tool arguments containing topic, optional strategy and metadata
+        args: Tool arguments containing name, optional strategy, metadata, input, tags, and intel
         user: The authenticated user making the request
         session_state: Optional MCPSessionState for accessing session context
 
@@ -11107,21 +11107,29 @@ def handle_start_trace(
         session_id = session_state.session_id
         username = user.username
 
-        topic = args.get("topic")
-        if not topic:
+        # Story #185: Renamed topic to name
+        name = args.get("name")
+        if not name:
             return _mcp_response(
-                {"status": "error", "message": "Missing required parameter: topic"}
+                {"status": "error", "message": "Missing required parameter: name"}
             )
 
         strategy = args.get("strategy")
         metadata = args.get("metadata")
+        # Story #185: New parameters for prompt observability
+        input_text = args.get("input")
+        tags = args.get("tags")
+        intel = args.get("intel")
 
         trace_ctx = service.trace_manager.start_trace(
             session_id=session_id,
-            topic=topic,
+            name=name,
             strategy=strategy,
             metadata=metadata,
             username=username,
+            input=input_text,
+            tags=tags,
+            intel=intel,
         )
 
         if trace_ctx is None:
@@ -11156,7 +11164,7 @@ def handle_end_trace(
     End the current active trace for the research session.
 
     Args:
-        args: Tool arguments with optional score, feedback, outcome
+        args: Tool arguments with optional score, summary, outcome, output, tags, and intel
         user: The authenticated user making the request
         session_state: Optional MCPSessionState for accessing session context
 
@@ -11193,16 +11201,24 @@ def handle_end_trace(
         trace_id = trace_ctx.trace_id
 
         score = args.get("score")
-        feedback = args.get("feedback")
+        # Story #185: Renamed feedback to summary
+        summary = args.get("summary")
         outcome = args.get("outcome")
+        # Story #185: New parameters for prompt observability
+        output = args.get("output")
+        tags = args.get("tags")
+        intel = args.get("intel")
 
         # Bug #137 fix: Pass username for fallback lookup (HTTP client support)
         success = service.trace_manager.end_trace(
             session_id=session_id,
             score=score,
-            feedback=feedback,
+            summary=summary,
             outcome=outcome,
             username=username,
+            output=output,
+            tags=tags,
+            intel=intel,
         )
 
         if success:
