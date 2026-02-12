@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.14.0] - 2026-02-12
+
+### Added
+
+- **Full prompt observability for start_trace/end_trace (Story #185)** - Renamed `topic` to `name` and `feedback` to `summary` for clarity. Added `input` (user prompt), `output` (Claude response), `tags` (categorization), and `intel` (prompt intelligence metadata with frustration, specificity, task_type, quality, iteration fields) parameters. New `update_current_trace_in_context()` method in LangfuseClient updates traces via SDK 3.7.0 context API. Intel fields stored with `intel_` prefix in Langfuse metadata for dashboard filtering.
+
+- **MCP protocol compliance tests** - New test suite validates that `filter_tools_by_role()` strips internal fields and only returns MCP-spec fields (name, description, inputSchema). Tests cover permission filtering and `requires_config` conditional visibility.
+
+### Fixed
+
+- **Diagnostics bugs #186, #187, #188** - Fixed NoneType error in Claude delegation check when config file missing, corrected SQLite schema check to exclude non-existent groups tables, and fixed vector storage health check for temporal collections.
+
+---
+
 ## [8.13.0] - 2026-02-11
 
 ### Added
