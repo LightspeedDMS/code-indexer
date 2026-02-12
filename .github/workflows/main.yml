@@ -22,55 +22,15 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Get hnswlib submodule commit
-      id: hnswlib-commit
-      run: |
-        cd third_party/hnswlib
-        echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
 
-    - name: Cache hnswlib build
-      id: cache-hnswlib
-      uses: actions/cache@v3
-      with:
-        path: |
-          third_party/hnswlib/build
-          third_party/hnswlib/**/*.so
-          third_party/hnswlib/**/*.egg-info
-        key: hnswlib-${{ runner.os }}-py${{ matrix.python-version }}-${{ steps.hnswlib-commit.outputs.sha }}
-        restore-keys: |
-          hnswlib-${{ runner.os }}-py${{ matrix.python-version }}-
-
-    - name: Build hnswlib (cache miss)
-      if: steps.cache-hnswlib.outputs.cache-hit != 'true'
-      run: |
-        echo "Cache miss - building hnswlib from source"
-        cd third_party/hnswlib
-        python3 -m pip install -e .
-
-    - name: Verify hnswlib build
-      run: |
-        python3 -c "
-        import hnswlib
-        import numpy as np
-        print('Testing hnswlib check_integrity...')
-        index = hnswlib.Index(space='l2', dim=64)
-        index.init_index(max_elements=100, ef_construction=100, M=16)
-        data = np.random.random((10, 64)).astype('float32')
-        index.add_items(data, np.arange(10))
-        result = index.check_integrity()
-        assert result is not None, 'check_integrity returned None'
-        print(f'check_integrity result: {result}')
-        print('✓ hnswlib check_integrity verified')
-        "
-
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
+        python3 -m pip install -e third_party/hnswlib --break-system-packages
         python3 -m pip install -e ".[dev]" --break-system-packages
 
     - name: Run parity tests
