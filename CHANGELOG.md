@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.15.0] - 2026-02-13
+
+### Added
+
+- **Repository categories system (Story #186)** - Full CRUD for repo categories with auto-assign based on repo URL patterns, manual override, bulk evaluate. Includes SQLite backend, REST API router, MCP handler support (list_repo_categories tool), and Web UI management page with category listing and assignment.
+
+### Fixed
+
+- **HNSW health check false positive for empty collections** - Diagnostics no longer flags empty but properly initialized collections (0 vectors, no HNSW file) as broken. Reads collection_meta.json vector_count to distinguish empty (valid) from missing (broken) HNSW indexes.
+
+- **Local repos excluded from refresh scheduler** - Local:// repos (like cidx-meta-global) are now filtered in the scheduler loop before job submission, preventing phantom Running/Pending dashboard entries. The local:// check in _execute_refresh() was also moved earlier to avoid unnecessary filesystem scanning.
+
+---
+
 ## [8.14.0] - 2026-02-12
 
 ### Added
