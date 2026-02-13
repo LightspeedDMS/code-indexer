@@ -94,8 +94,13 @@ class TestToolOutputSchemas:
         assert "is_global" in repo_items, "Missing 'is_global' field"
         assert "repo_url" in repo_items, "Missing 'repo_url' field"
         assert "last_refresh" in repo_items, "Missing 'last_refresh' field"
-        assert "index_path" in repo_items, "Missing 'index_path' field"
-        assert "created_at" in repo_items, "Missing 'created_at' field"
+        # Story #196: Removed index_path (internal filesystem path)
+        assert "index_path" not in repo_items, "index_path should not be in schema (Story #196)"
+        # Story #182: Added category support
+        assert "repo_category" in repo_items, "Missing 'repo_category' field"
+        # Composite repo fields
+        assert "is_composite" in repo_items, "Missing 'is_composite' field"
+        assert "golden_repo_aliases" in repo_items, "Missing 'golden_repo_aliases' field"
 
         # Verify field descriptions are present
         assert "description" in repo_items["user_alias"]
@@ -427,6 +432,14 @@ class TestOutputSchemaCompleteness:
                 activated_repos
             )
 
+            # Story #196: Mock category service to prevent JSON serialization errors
+            mock_category_service = MagicMock()
+            mock_category_service.get_repo_category_map.return_value = {}
+
+            mock_golden_repo_manager = MagicMock()
+            mock_golden_repo_manager._repo_category_service = mock_category_service
+            mock_app.golden_repo_manager = mock_golden_repo_manager
+
             mock_registry = MagicMock()
             mock_registry.list_global_repos.return_value = global_repos
 
@@ -445,6 +458,9 @@ class TestOutputSchemaCompleteness:
                 assert "success" in response_data
                 assert "repositories" in response_data
 
+                # Story #196: Guard assertion to prevent vacuous test passing
+                assert len(response_data["repositories"]) > 0, "Test must validate actual repositories, not empty list"
+
                 # Verify repository items have normalized fields
                 for repo in response_data["repositories"]:
                     assert "user_alias" in repo
@@ -457,7 +473,8 @@ class TestOutputSchemaCompleteness:
                     if repo.get("is_global") is True:
                         assert "repo_url" in repo
                         assert "last_refresh" in repo
-                        assert "index_path" in repo
+                        # Story #196: index_path removed from global repos
+                        assert "index_path" not in repo
 
     def test_get_job_statistics_schema_matches_handler_response(self):
         """Test that get_job_statistics output schema matches actual handler response."""

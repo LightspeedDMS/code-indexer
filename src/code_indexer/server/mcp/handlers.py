@@ -1323,10 +1323,29 @@ def discover_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List activated repositories for the current user, plus global repos."""
     try:
+        # Story #196: Whitelist of MCP-relevant fields for activated repos
+        ACTIVATED_REPO_FIELDS = {
+            "user_alias",
+            "golden_repo_alias",
+            "current_branch",
+            "is_global",
+            "repo_url",
+            "last_refresh",
+            "repo_category",
+            "is_composite",
+            "golden_repo_aliases",  # For composite repos only
+        }
+
         # Get activated repos from database
-        activated_repos = app_module.activated_repo_manager.list_activated_repositories(
+        raw_activated_repos = app_module.activated_repo_manager.list_activated_repositories(
             user.username
         )
+
+        # Story #196: Filter activated repos to only include whitelisted fields
+        activated_repos = []
+        for repo in raw_activated_repos:
+            filtered_repo = {k: v for k, v in repo.items() if k in ACTIVATED_REPO_FIELDS}
+            activated_repos.append(filtered_repo)
 
         # Get global repos from GlobalRegistry
         global_repos = []
@@ -1357,10 +1376,7 @@ def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     "is_global": True,
                     "repo_url": repo.get("repo_url"),
                     "last_refresh": repo.get("last_refresh"),
-                    "index_path": repo.get(
-                        "index_path"
-                    ),  # Preserve for backward compatibility
-                    "created_at": repo.get("created_at"),  # Preserve creation timestamp
+                    # Story #196: Removed index_path and created_at (internal fields, not MCP-relevant)
                 }
                 global_repos.append(normalized)
 

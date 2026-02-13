@@ -47,19 +47,19 @@ outputSchema:
             - string
             - 'null'
             description: ISO 8601 timestamp of last index refresh
-          index_path:
-            type: string
-            description: Filesystem path to repository index
-          created_at:
-            type:
-            - string
-            - 'null'
-            description: ISO 8601 timestamp when repository was added
           repo_category:
             type:
             - string
             - 'null'
             description: Category name this repository belongs to, or null if unassigned
+          is_composite:
+            type: boolean
+            description: True if this is a composite repository containing multiple repos
+          golden_repo_aliases:
+            type: array
+            description: List of golden repo aliases included in this composite (composite repos only)
+            items:
+              type: string
     error:
       type: string
       description: Error message if failed

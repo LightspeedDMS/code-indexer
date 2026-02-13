@@ -228,6 +228,7 @@ class ConfigService:
             },
             "golden_repos": {
                 "refresh_interval_seconds": config.golden_repos_config.refresh_interval_seconds,
+                "analysis_model": config.golden_repos_config.analysis_model,
             },
             # Story #3 - Phase 2: P0/P1 settings
             "mcp_session": {
@@ -702,6 +703,10 @@ class ConfigService:
         assert golden_repos is not None  # Guaranteed by ServerConfig.__post_init__
         if key == "refresh_interval_seconds":
             golden_repos.refresh_interval_seconds = int(value)
+        elif key == "analysis_model":
+            if value not in ("opus", "sonnet"):
+                raise ValueError(f"Invalid analysis_model: {value}")
+            golden_repos.analysis_model = value
         else:
             raise ValueError(f"Unknown golden repos setting: {key}")
 

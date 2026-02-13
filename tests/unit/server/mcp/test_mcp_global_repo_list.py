@@ -87,6 +87,11 @@ class TestListRepositoriesWithGlobalRepos:
                 mock_activated_repos
             )
 
+            # Story #196: Mock category service to prevent MagicMock serialization errors
+            mock_category_service = Mock()
+            mock_category_service.get_repo_category_map = Mock(return_value={})
+            mock_app.golden_repo_manager._repo_category_service = mock_category_service
+
             # Mock GlobalRegistry to return global repos
             mock_registry = MagicMock()
             mock_registry.list_global_repos.return_value = list(
@@ -150,6 +155,11 @@ class TestListRepositoriesWithGlobalRepos:
                 mock_activated_repos
             )
 
+            # Story #196: Mock category service
+            mock_category_service = Mock()
+            mock_category_service.get_repo_category_map = Mock(return_value={})
+            mock_app.golden_repo_manager._repo_category_service = mock_category_service
+
             mock_registry = MagicMock()
             mock_registry.list_global_repos.return_value = list(
                 mock_global_registry_data.values()
@@ -187,6 +197,11 @@ class TestListRepositoriesWithGlobalRepos:
                 []
             )
 
+            # Story #196: Mock category service
+            mock_category_service = Mock()
+            mock_category_service.get_repo_category_map = Mock(return_value={})
+            mock_app.golden_repo_manager._repo_category_service = mock_category_service
+
             mock_registry = MagicMock()
             mock_registry.list_global_repos.return_value = list(
                 mock_global_registry_data.values()
@@ -213,7 +228,8 @@ class TestListRepositoriesWithGlobalRepos:
                         assert (
                             "last_refresh" in repo
                         ), "Global repo missing last_refresh"
-                        assert "index_path" in repo, "Global repo missing index_path"
+                        # Story #196: index_path removed from global repos
+                        assert "index_path" not in repo, "Global repo should not have index_path"
 
                         # Verify user_alias has -global suffix
                         assert repo["user_alias"].endswith("-global")
@@ -226,6 +242,11 @@ class TestListRepositoriesWithGlobalRepos:
             mock_app.activated_repo_manager.list_activated_repositories.return_value = (
                 mock_activated_repos
             )
+
+            # Story #196: Mock category service
+            mock_category_service = Mock()
+            mock_category_service.get_repo_category_map = Mock(return_value={})
+            mock_app.golden_repo_manager._repo_category_service = mock_category_service
 
             # Mock empty global registry
             mock_registry = MagicMock()
@@ -261,6 +282,11 @@ class TestListRepositoriesWithGlobalRepos:
                 []
             )
 
+            # Story #196: Mock category service
+            mock_category_service = Mock()
+            mock_category_service.get_repo_category_map = Mock(return_value={})
+            mock_app.golden_repo_manager._repo_category_service = mock_category_service
+
             mock_registry = MagicMock()
             mock_registry.list_global_repos.return_value = list(
                 mock_global_registry_data.values()
@@ -293,6 +319,11 @@ class TestListRepositoriesWithGlobalRepos:
                     "branch_name": "main",
                 }
             ]
+
+            # Story #196: Mock category service
+            mock_category_service = Mock()
+            mock_category_service.get_repo_category_map = Mock(return_value={})
+            mock_app.golden_repo_manager._repo_category_service = mock_category_service
 
             # Mock get_server_global_registry to raise exception
             with patch(
@@ -360,6 +391,11 @@ class TestListRepositoriesWithGlobalRepos:
             mock_app.activated_repo_manager.list_activated_repositories.return_value = (
                 duplicate_activated
             )
+
+            # Story #196: Mock category service
+            mock_category_service = Mock()
+            mock_category_service.get_repo_category_map = Mock(return_value={})
+            mock_app.golden_repo_manager._repo_category_service = mock_category_service
 
             mock_registry = MagicMock()
             mock_registry.list_global_repos.return_value = [

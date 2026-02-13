@@ -4552,6 +4552,10 @@ def _get_current_config() -> dict:
     golden_repos_config = settings.get("golden_repos")
     if not golden_repos_config:
         golden_repos_config = asdict(GoldenReposConfig())
+    else:
+        # Merge defaults for keys added after initial config creation
+        for key, value in asdict(GoldenReposConfig()).items():
+            golden_repos_config.setdefault(key, value)
 
     # Story #3 - Phase 2: P0/P1 settings (AC2-AC11)
     # Get mcp_session, health, scip config with defaults for backward compatibility
