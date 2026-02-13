@@ -394,11 +394,12 @@ class IndexingConfig:
 @dataclass
 class ClaudeIntegrationConfig:
     """
-    Claude CLI integration configuration (Story #15 - AC3, Story #20, Story #23).
+    Claude CLI integration configuration (Story #15 - AC3, Story #20, Story #23, Story #190).
 
     Contains settings for Claude CLI integration that were previously
     loose settings on ServerConfig, plus VoyageAI API key (Story #20),
-    and scheduled catch-up settings (Story #23 - AC6).
+    scheduled catch-up settings (Story #23 - AC6), and description refresh
+    scheduling (Story #190).
     """
 
     # Anthropic API key for Claude CLI (moved from ServerConfig)
@@ -409,6 +410,8 @@ class ClaudeIntegrationConfig:
     max_concurrent_claude_cli: int = 2
     # Refresh interval for description generation in hours (moved from ServerConfig)
     description_refresh_interval_hours: int = 24
+    # Story #190: Enable/disable scheduled description refresh
+    description_refresh_enabled: bool = False
     # Scheduled catch-up settings (Story #23 - AC6)
     # Enable scheduled background catch-up for repos with fallback descriptions
     scheduled_catchup_enabled: bool = False

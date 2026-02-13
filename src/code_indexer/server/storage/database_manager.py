@@ -278,6 +278,22 @@ class DatabaseSchema:
         )
     """
 
+    # Story #190: Description Refresh Tracking table
+    CREATE_DESCRIPTION_REFRESH_TRACKING_TABLE = """
+        CREATE TABLE IF NOT EXISTS description_refresh_tracking (
+            repo_alias TEXT PRIMARY KEY,
+            last_run TEXT,
+            next_run TEXT,
+            status TEXT DEFAULT 'pending',
+            error TEXT,
+            last_known_commit TEXT,
+            last_known_files_processed INTEGER,
+            last_known_indexed_at TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -347,6 +363,8 @@ class DatabaseSchema:
             conn.execute(self.CREATE_DIAGNOSTIC_RESULTS_TABLE)
             # Story #180: Repository Categories
             conn.execute(self.CREATE_REPO_CATEGORIES_TABLE)
+            # Story #190: Description Refresh Tracking
+            conn.execute(self.CREATE_DESCRIPTION_REFRESH_TRACKING_TABLE)
 
             conn.commit()
 

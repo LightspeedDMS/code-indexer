@@ -2675,6 +2675,69 @@ def create_app() -> FastAPI:
                 )
             )
 
+        # Startup: Initialize Description Refresh Scheduler (Story #190)
+        description_refresh_scheduler = None
+        logger.info(
+            "Server startup: Initializing description refresh scheduler",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.description_refresh_scheduler import (
+                DescriptionRefreshScheduler,
+            )
+            from code_indexer.server.services.claude_cli_manager import (
+                get_claude_cli_manager,
+            )
+            from code_indexer.global_repos import meta_description_hook
+
+            # Get config
+            server_config = config_service.get_config()
+            db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")
+
+            # Create scheduler instance
+            meta_dir = Path(golden_repos_dir) / "cidx-meta"
+            description_refresh_scheduler = DescriptionRefreshScheduler(
+                db_path=db_path,
+                config_manager=config_service,
+                claude_cli_manager=get_claude_cli_manager(),
+                meta_dir=meta_dir,
+            )
+
+            # Inject into meta_description_hook for tracking on repo add/remove
+            from code_indexer.server.storage.sqlite_backends import (
+                DescriptionRefreshTrackingBackend,
+            )
+
+            tracking_backend = DescriptionRefreshTrackingBackend(db_path)
+            meta_description_hook.set_tracking_backend(tracking_backend)
+            meta_description_hook.set_scheduler(description_refresh_scheduler)
+
+            # Start scheduler (internally checks if enabled)
+            description_refresh_scheduler.start()
+            app.state.description_refresh_scheduler = description_refresh_scheduler
+
+            if server_config.claude_integration_config.description_refresh_enabled:
+                logger.info(
+                    f"Description refresh scheduler started "
+                    f"(interval: {server_config.claude_integration_config.description_refresh_interval_hours}h)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.info(
+                    "Description refresh scheduler is disabled (can be enabled in Web UI)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
+        except Exception as e:
+            # Log error but don't block server startup
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-021",
+                    f"Failed to initialize description refresh scheduler: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Startup: Initialize and start SelfMonitoringService (Epic #71)
         self_monitoring_service = None
         logger.info(
@@ -3167,6 +3230,27 @@ def create_app() -> FastAPI:
                     format_error_log(
                         "APP-GENERAL-026",
                         f"Error stopping MCP Session cleanup: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+        # Shutdown: Stop description refresh scheduler (Story #190)
+        description_refresh_scheduler_state = getattr(
+            app.state, "description_refresh_scheduler", None
+        )
+        if description_refresh_scheduler_state is not None:
+            try:
+                description_refresh_scheduler_state.stop()
+                logger.info(
+                    "Description refresh scheduler stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-027",
+                        f"Error stopping description refresh scheduler: {e}",
                         exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
                     )

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.16.0] - 2026-02-13
+
+### Added
+
+- **Description Refresh Scheduler (Story #190)** - Background scheduler that periodically regenerates stale golden repository descriptions using Claude CLI. Features hash-based bucket scheduling for even distribution, commit-aware change detection, and configurable refresh intervals via Web UI. Includes output validation to detect error messages masquerading as descriptions, comprehensive ANSI terminal escape cleanup (CSI, OSC, bare ESC bytes), and chain-of-thought stripping before YAML frontmatter.
+
+---
+
 ## [8.15.0] - 2026-02-13
 
 ### Added

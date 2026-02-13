@@ -71,6 +71,164 @@ class RepoAnalyzer:
         self.repo_path = Path(repo_path)
         self.claude_cli_manager = claude_cli_manager
 
+    def get_prompt(
+        self,
+        mode: str,
+        last_analyzed: Optional[str] = None,
+        existing_description: Optional[str] = None,
+    ) -> str:
+        """
+        Get universal prompt for repository description generation (Story #190 AC1, AC6).
+
+        Single universal prompt that teaches Claude to discover repo type dynamically
+        by examining folder structure (.git directory, UUID folders, JSON trace files).
+
+        Args:
+            mode: Either "create" for initial generation or "refresh" for updating
+            last_analyzed: ISO 8601 timestamp of last analysis (required for refresh mode)
+            existing_description: Existing description text (required for refresh mode)
+
+        Returns:
+            Prompt string to send to Claude CLI
+
+        Raises:
+            ValueError: If mode is invalid or required parameters missing
+        """
+        if mode not in ("create", "refresh"):
+            raise ValueError(f"Invalid mode: {mode}. Must be 'create' or 'refresh'")
+
+        if mode == "refresh":
+            if last_analyzed is None:
+                raise ValueError("last_analyzed is required for refresh mode")
+            if existing_description is None:
+                raise ValueError("existing_description is required for refresh mode")
+
+        if mode == "create":
+            return self._get_create_prompt()
+        else:
+            return self._get_refresh_prompt(last_analyzed, existing_description)
+
+    def _get_create_prompt(self) -> str:
+        """
+        Get universal initial description generation prompt.
+
+        Teaches Claude to discover repo type by examining folder structure.
+        """
+        return """Analyze this repository and generate a comprehensive semantic description.
+
+**Repository Type Discovery:**
+Examine the folder structure to determine the repository type:
+- Git repository: Contains a .git directory
+- Langfuse trace repository: Contains UUID-named folders (e.g., 550e8400-e29b-41d4-a716-446655440000) with JSON trace files matching pattern NNN_turn_HASH.json
+
+**For Git Repositories:**
+Examine README, source files, and package files to extract:
+- summary: 2-3 sentence description of what this repository does
+- technologies: List of all technologies and tools detected
+- features: Key features
+- use_cases: Primary use cases
+- purpose: One of: api, service, library, cli-tool, web-application, data-structure, utility, framework, general-purpose
+
+**For Langfuse Trace Repositories:**
+Extract intelligence from trace files (JSON files in UUID folders):
+- user_identity: Extract from trace.userId field
+- projects_detected: Extract from metadata.project_name field
+- activity_summary: Summarize from trace.input and metadata.intel_task_type fields
+- features: Key features based on trace patterns
+- use_cases: Primary use cases inferred from traces
+
+**Output Format:**
+Generate YAML frontmatter + markdown body with these exact fields:
+---
+name: repository-name
+repo_type: git|langfuse
+technologies:
+  - Technology 1
+  - Technology 2
+purpose: inferred-purpose
+last_analyzed: (current timestamp)
+user_identity: (Langfuse only - extracted user IDs)
+projects_detected: (Langfuse only - list of project names)
+---
+
+# Repository Name
+
+(Summary description)
+
+## Key Features
+- Feature 1
+- Feature 2
+
+## Technologies
+- Tech 1
+- Tech 2
+
+## Primary Use Cases
+- Use case 1
+- Use case 2
+
+## Activity Summary (Langfuse only)
+(Summary of user activities based on traces)
+
+**IMPORTANT:**
+- Set repo_type field in YAML frontmatter to "git" or "langfuse"
+- For Langfuse repos, include user_identity, projects_detected, and activity_summary sections
+- Output ONLY the YAML + markdown (no explanations, no code blocks)
+"""
+
+    def _get_refresh_prompt(
+        self, last_analyzed: str, existing_description: str
+    ) -> str:
+        """
+        Get universal refresh prompt for updating existing descriptions.
+
+        Teaches Claude to detect changes and update accordingly.
+        """
+        return f"""Update the repository description based on changes since last analysis.
+
+**Last Analyzed:** {last_analyzed}
+
+**Existing Description:**
+{existing_description}
+
+**Repository Type Discovery:**
+Examine the folder structure to determine the repository type:
+- Git repository: Contains a .git directory
+- Langfuse trace repository: Contains UUID-named folders with JSON trace files
+
+**For Git Repositories:**
+1. Run: git log --since="{last_analyzed}" --oneline
+2. If material changes detected (not just cosmetic commits), update the description
+3. If no material changes, return the existing description unchanged
+
+**For Langfuse Trace Repositories:**
+1. Find files modified after {last_analyzed} using file modification timestamps
+2. IMPORTANT: Langfuse traces are immutable once established
+3. Focus on NEW trace files only (files with modification time > last_analyzed)
+4. Extract new findings from new traces:
+   - New user IDs from trace.userId
+   - New projects from metadata.project_name
+   - New activities from trace.input and metadata.intel_task_type
+5. MERGE new findings with existing description (preserve existing user_identity and projects_detected)
+6. DO NOT replace existing data - only ADD new discoveries
+
+**Update Strategy:**
+- Update description only if material changes detected
+- Preserve existing YAML frontmatter structure
+- For Langfuse: merge new findings, don't replace
+- Update last_analyzed timestamp to current time
+
+**Output Format:**
+Return updated YAML frontmatter + markdown body with same structure as original.
+Include repo_type field in YAML.
+If no material changes: return existing description with updated last_analyzed timestamp only.
+
+**IMPORTANT:**
+- Output ONLY the YAML + markdown (no explanations, no code blocks)
+- Preserve all existing fields in YAML frontmatter
+- For Langfuse: keep existing user_identity and projects_detected, only add new entries
+"""
+
     def extract_info(self) -> RepoInfo:
         """
         Extract information from the repository.

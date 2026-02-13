@@ -6272,6 +6272,8 @@ async def update_config_section(
         "omni_search",
         # Story #32 - Unified content limits configuration
         "content_limits",
+        # Story #190 - Claude CLI configuration
+        "claude_cli",
     ]
     if section not in valid_sections:
         return _create_config_page_response(

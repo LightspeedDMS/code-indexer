@@ -1516,6 +1516,11 @@
                         <td class="config-note"><small>Maximum parallel Claude CLI processes (default: 2)</small></td>
                     </tr>
                     <tr>
+                        <td class="config-label">Description Refresh Enabled</td>
+                        <td class="config-value">{{ 'Yes' if config.claude_cli.description_refresh_enabled else 'No' }}</td>
+                        <td class="config-note"><small>Enable periodic repository description regeneration (default: No)</small></td>
+                    </tr>
+                    <tr>
                         <td class="config-label">Description Refresh Interval (hours)</td>
                         <td class="config-value">{{ config.claude_cli.description_refresh_interval_hours }}</td>
                         <td class="config-note"><small>How often to regenerate repository descriptions (default: 24)</small></td>
@@ -1542,6 +1547,14 @@
                     Max Concurrent Claude CLI
                     <input type="number" id="claude-max-concurrent" name="max_concurrent_claude_cli" value="{{ config.claude_cli.max_concurrent_claude_cli }}" min="1" max="10">
                     <small>Maximum parallel Claude CLI processes (1-10, default: 2)</small>
+                </label>
+                <label for="claude-refresh-enabled">
+                    Description Refresh Enabled
+                    <select id="claude-refresh-enabled" name="description_refresh_enabled">
+                        <option value="true" {% if config.claude_cli.description_refresh_enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.claude_cli.description_refresh_enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Enable periodic repository description regeneration (default: No)</small>
                 </label>
                 <label for="claude-refresh-interval">
                     Description Refresh Interval (hours)

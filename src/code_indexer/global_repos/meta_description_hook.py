@@ -8,6 +8,7 @@ meta directory management code.
 
 import logging
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +28,38 @@ README_NAMES = [
     "Readme.md",
 ]
 
+# Module-level tracking backend (initialized by set_tracking_backend)
+_tracking_backend: Optional["DescriptionRefreshTrackingBackend"] = None  # type: ignore
+_scheduler: Optional["DescriptionRefreshScheduler"] = None  # type: ignore
+
+
+def set_tracking_backend(backend) -> None:
+    """
+    Set module-level tracking backend.
+
+    Args:
+        backend: DescriptionRefreshTrackingBackend instance
+
+    Note:
+        Called during server startup to inject the tracking backend.
+    """
+    global _tracking_backend
+    _tracking_backend = backend
+
+
+def set_scheduler(scheduler) -> None:
+    """
+    Set module-level scheduler.
+
+    Args:
+        scheduler: DescriptionRefreshScheduler instance
+
+    Note:
+        Called during server startup to inject the scheduler.
+    """
+    global _scheduler
+    _scheduler = scheduler
+
 
 def on_repo_added(
     repo_name: str,
@@ -38,6 +71,7 @@ def on_repo_added(
     Hook called after a golden repository is successfully added.
 
     Creates a .md description file in cidx-meta and re-indexes cidx-meta.
+    Also creates a tracking record for periodic description refresh (Story #190).
 
     Args:
         repo_name: Name/alias of the repository
@@ -50,11 +84,39 @@ def on_repo_added(
         - Handles missing clone paths gracefully (logs warning, no crash)
         - Re-indexes cidx-meta after creating .md file
         - Falls back to README copy when Claude CLI unavailable or fails
+        - Creates tracking record for scheduled refresh (if tracking backend available)
     """
     # Skip cidx-meta itself
     if repo_name == "cidx-meta":
         logger.info("Skipping meta description generation for cidx-meta itself")
         return
+
+    # Create tracking record for scheduled refresh (Story #190)
+    if _tracking_backend is not None:
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            # Calculate next run using scheduler if available, else use now
+            if _scheduler is not None:
+                next_run = _scheduler.calculate_next_run(repo_name)
+            else:
+                next_run = now_iso
+
+            _tracking_backend.upsert_tracking(
+                repo_alias=repo_name,
+                status="pending",
+                next_run=next_run,
+                created_at=now_iso,
+                updated_at=now_iso,
+            )
+            logger.info(f"Created tracking record for {repo_name} (next_run: {next_run})")
+        except Exception as e:
+            # Don't block repo add if tracking fails
+            logger.warning(
+                f"Failed to create tracking record for {repo_name}: {e}", exc_info=True
+            )
+    else:
+        logger.debug(f"Tracking backend not available, skipping tracking record for {repo_name}")
 
     cidx_meta_path = Path(golden_repos_dir) / "cidx-meta"
 
@@ -107,6 +169,7 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
     Hook called after a golden repository is successfully removed.
 
     Deletes the .md description file from cidx-meta and re-indexes cidx-meta.
+    Also deletes the tracking record for description refresh (Story #190).
 
     Args:
         repo_name: Name/alias of the repository being removed
@@ -115,6 +178,7 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
     Note:
         - Handles nonexistent .md files gracefully (no crash)
         - Re-indexes cidx-meta only if file was actually deleted
+        - Deletes tracking record (if tracking backend available)
     """
     cidx_meta_path = Path(golden_repos_dir) / "cidx-meta"
     md_file = cidx_meta_path / f"{repo_name}.md"
@@ -135,6 +199,19 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
             # Don't crash the golden repo remove operation - log and continue
     else:
         logger.debug(f"No meta description file to delete for {repo_name}")
+
+    # Delete tracking record (Story #190)
+    if _tracking_backend is not None:
+        try:
+            _tracking_backend.delete_tracking(repo_name)
+            logger.info(f"Deleted tracking record for {repo_name}")
+        except Exception as e:
+            # Don't block repo removal if tracking deletion fails
+            logger.warning(
+                f"Failed to delete tracking record for {repo_name}: {e}", exc_info=True
+            )
+    else:
+        logger.debug(f"Tracking backend not available, skipping tracking record deletion for {repo_name}")
 
 
 def _find_readme(repo_path: Path) -> Optional[Path]:
