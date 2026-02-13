@@ -911,6 +911,25 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
 
+    # Story #182: Load category map for result enrichment
+    category_map = {}
+    try:
+        if hasattr(app_module, "golden_repo_manager") and app_module.golden_repo_manager:
+            category_service = getattr(
+                app_module.golden_repo_manager, "_repo_category_service", None
+            )
+            if category_service:
+                category_map = category_service.get_repo_category_map()
+    except Exception as e:
+        # Log but don't fail if category lookup fails
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-036",
+                f"Failed to load category map in _omni_search_code: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+
     # Story #36: Convert MultiSearchResponse (grouped by repo) to flat list with source_repo
     all_results = []
     for repo_alias, repo_results in response.results.items():
@@ -919,6 +938,14 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             # Normalize score field name for consistency
             if "score" in result and "similarity_score" not in result:
                 result["similarity_score"] = result["score"]
+
+            # Story #182: Enrich with category info
+            # Strip -global suffix to get golden repo alias
+            golden_alias = repo_alias.replace("-global", "") if repo_alias else None
+            if golden_alias:
+                category_info = category_map.get(golden_alias, {})
+                result["repo_category"] = category_info.get("category_name")
+
             all_results.append(result)
 
     errors = response.errors or {}
@@ -1135,6 +1162,25 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 if query_tracker is not None:
                     query_tracker.decrement_ref(index_path)
 
+            # Story #182: Load category map for result enrichment
+            category_map = {}
+            try:
+                if hasattr(app_module, "golden_repo_manager") and app_module.golden_repo_manager:
+                    category_service = getattr(
+                        app_module.golden_repo_manager, "_repo_category_service", None
+                    )
+                    if category_service:
+                        category_map = category_service.get_repo_category_map()
+            except Exception as e:
+                # Log but don't fail if category lookup fails
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-037",
+                        f"Failed to load category map in search_code: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
             # Build response matching query_user_repositories format
             response_results = []
             for r in results:
@@ -1142,6 +1188,14 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 result_dict["source_repo"] = (
                     repository_alias  # Fix: Set source_repo for single-repo searches
                 )
+
+                # Story #182: Enrich with category info
+                # Strip -global suffix to get golden repo alias
+                golden_alias = repository_alias.replace("-global", "") if repository_alias else None
+                if golden_alias:
+                    category_info = category_map.get(golden_alias, {})
+                    result_dict["repo_category"] = category_info.get("category_name")
+
                 response_results.append(result_dict)
 
             # Apply payload truncation based on search mode
@@ -1203,6 +1257,36 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             author=params.get("author"),
             chunk_type=params.get("chunk_type"),
         )
+
+        # Story #182: Load category map for result enrichment (activated repos)
+        category_map = {}
+        try:
+            if hasattr(app_module, "golden_repo_manager") and app_module.golden_repo_manager:
+                category_service = getattr(
+                    app_module.golden_repo_manager, "_repo_category_service", None
+                )
+                if category_service:
+                    category_map = category_service.get_repo_category_map()
+        except Exception as e:
+            # Log but don't fail if category lookup fails
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-038",
+                    f"Failed to load category map in search_code (activated): {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Story #182: Enrich results with category info
+        if "results" in result and isinstance(result["results"], list):
+            for res in result["results"]:
+                # Get the repository alias from the result (may have -global suffix)
+                repo_alias = res.get("source_repo") or res.get("repository_alias")
+                if repo_alias:
+                    # Strip -global suffix to get golden repo alias
+                    golden_alias = repo_alias.replace("-global", "")
+                    category_info = category_map.get(golden_alias, {})
+                    res["repo_category"] = category_info.get("category_name")
 
         # Apply payload truncation based on search mode
         # Story #50: Truncation functions are now sync
@@ -1294,6 +1378,59 @@ def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         # Merge activated and global repos
         all_repos = activated_repos + global_repos
 
+        # Story #182: Enrich repos with category information
+        category_map = {}
+        try:
+            if hasattr(app_module, "golden_repo_manager") and app_module.golden_repo_manager:
+                category_service = getattr(
+                    app_module.golden_repo_manager, "_repo_category_service", None
+                )
+                if category_service:
+                    category_map = category_service.get_repo_category_map()
+        except Exception as e:
+            # Log but don't fail if category lookup fails
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-034",
+                    f"Failed to load category map: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Enrich each repo with category information
+        for repo in all_repos:
+            # For activated repos, use golden_repo_alias to look up category
+            # For global repos, use golden_repo_alias (same field)
+            golden_alias = repo.get("golden_repo_alias")
+            category_info = category_map.get(golden_alias, {})
+            repo["repo_category"] = category_info.get("category_name")
+
+        # Story #182: Filter by category if requested
+        category_filter = params.get("category")
+        if category_filter:
+            if category_filter == "Unassigned":
+                # Filter for repos with NULL category
+                all_repos = [r for r in all_repos if r["repo_category"] is None]
+            else:
+                # Filter for repos matching the specified category name
+                all_repos = [r for r in all_repos if r["repo_category"] == category_filter]
+
+        # Story #182: Sort by category priority (ascending), then Unassigned last, then alphabetically
+        def sort_key(repo):
+            golden_alias = repo.get("golden_repo_alias")
+            category_info = category_map.get(golden_alias, {})
+            priority = category_info.get("priority")
+
+            # Repos with priority come first (sorted by priority),
+            # then Unassigned repos (priority=None) at the end
+            if priority is None:
+                # Use large number to sort Unassigned last
+                return (float('inf'), repo.get("user_alias", ""))
+            else:
+                return (priority, repo.get("user_alias", ""))
+
+        all_repos.sort(key=sort_key)
+
         return _mcp_response({"success": True, "repositories": all_repos})
     except Exception as e:
         return _mcp_response({"success": False, "error": str(e), "repositories": []})
@@ -1338,11 +1475,78 @@ def deactivate_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e), "job_id": None})
 
 
+def list_repo_categories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """List all repository categories (Story #182)."""
+    try:
+        # Get category service from golden_repo_manager
+        if not hasattr(app_module, "golden_repo_manager") or not app_module.golden_repo_manager:
+            return _mcp_response({
+                "success": False,
+                "error": "Category service not available",
+                "categories": [],
+                "total": 0
+            })
+
+        category_service = getattr(
+            app_module.golden_repo_manager, "_repo_category_service", None
+        )
+        if not category_service:
+            return _mcp_response({
+                "success": False,
+                "error": "Category service not initialized",
+                "categories": [],
+                "total": 0
+            })
+
+        # Get all categories
+        categories = category_service.list_categories()
+
+        return _mcp_response({
+            "success": True,
+            "categories": categories,
+            "total": len(categories)
+        })
+    except Exception as e:
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-035",
+                f"Failed to list repository categories: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return _mcp_response({
+            "success": False,
+            "error": str(e),
+            "categories": [],
+            "total": 0
+        })
+
+
 def get_repository_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get detailed status of a repository."""
 
     try:
         user_alias = params["repository_alias"]
+
+        # Load category map for enrichment (Story #182 pattern)
+        category_map = {}
+        try:
+            if hasattr(app_module, "golden_repo_manager") and app_module.golden_repo_manager:
+                category_service = getattr(
+                    app_module.golden_repo_manager, "_repo_category_service", None
+                )
+                if category_service:
+                    category_map = category_service.get_repo_category_map()
+        except Exception as e:
+            # Log but don't fail if category lookup fails
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-035",
+                    f"Failed to load category map in get_repository_status: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Check if this is a global repository (ends with -global suffix)
         if user_alias and user_alias.endswith("-global"):
@@ -1375,12 +1579,25 @@ def get_repository_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "created_at": repo_entry.get("created_at"),
                 "index_path": repo_entry.get("index_path"),
             }
+
+            # Enrich with category info (Story #182)
+            golden_alias = repo_entry.get("repo_name")
+            category_info = category_map.get(golden_alias, {})
+            status["repo_category"] = category_info.get("category_name")
+
             return _mcp_response({"success": True, "status": status})
 
         # Activated repository (original code)
         status = app_module.repository_listing_manager.get_repository_details(
             user_alias, user.username
         )
+
+        # Enrich with category info (Story #182)
+        golden_alias = status.get("golden_repo_alias")
+        if golden_alias:
+            category_info = category_map.get(golden_alias, {})
+            status["repo_category"] = category_info.get("category_name")
+
         return _mcp_response({"success": True, "status": status})
     except Exception as e:
         return _mcp_response({"success": False, "error": str(e), "status": {}})
@@ -11241,3 +11458,4 @@ HANDLER_REGISTRY["scip_cleanup_workspaces"] = handle_scip_cleanup_workspaces
 HANDLER_REGISTRY["scip_cleanup_status"] = handle_scip_cleanup_status
 HANDLER_REGISTRY["start_trace"] = handle_start_trace
 HANDLER_REGISTRY["end_trace"] = handle_end_trace
+HANDLER_REGISTRY["list_repo_categories"] = list_repo_categories

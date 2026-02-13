@@ -1,0 +1,257 @@
+{% extends "base.html" %}
+
+{% block title %}Repository Categories - CIDX Admin{% endblock %}
+
+{% block content %}
+<div class="repo-categories-header">
+    <h1>Repository Category Management</h1>
+    <p>Organize repositories with regex pattern-based categories. Categories determine auto-assignment priority (lower priority number = higher precedence).</p>
+</div>
+
+<!-- Success/Error Messages -->
+{% if success_message %}
+<article class="message-success">
+    <p>{{ success_message }}</p>
+</article>
+{% endif %}
+
+{% if error_message %}
+<article class="message-error">
+    <p>{{ error_message }}</p>
+</article>
+{% endif %}
+
+<!-- Create Category Form -->
+<section class="form-section">
+    <article>
+        <header>
+            <h2>Create New Category</h2>
+        </header>
+        <form method="post" action="/admin/repo-categories/create"
+              hx-post="/admin/repo-categories/create"
+              hx-target="#categories-list-section"
+              hx-swap="innerHTML">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+            <label for="name">Category Name</label>
+            <input
+                type="text"
+                id="name"
+                name="name"
+                placeholder="e.g., Backend Services"
+                required
+                autocomplete="off"
+            >
+            <small>Unique name for this category</small>
+
+            <label for="pattern">Regex Pattern</label>
+            <input
+                type="text"
+                id="pattern"
+                name="pattern"
+                placeholder="e.g., ^backend-.*"
+                required
+                autocomplete="off"
+            >
+            <small>Regular expression to match repository aliases (max 500 characters)</small>
+
+            <div class="apply-now-option" onclick="document.getElementById('apply_now').click();" style="cursor: pointer;">
+                <input type="checkbox" id="apply_now" name="apply_now" value="1" checked onclick="event.stopPropagation();">
+                <span>Apply to uncategorized and auto-assigned repos now</span>
+            </div>
+
+            <div class="form-actions">
+                <button type="submit" class="primary">Create Category</button>
+            </div>
+        </form>
+    </article>
+</section>
+
+<!-- Categories List Section -->
+<section id="categories-list-section">
+    {% include "partials/repo_categories_list.html" %}
+</section>
+
+<!-- Edit Category Modal -->
+<dialog id="edit-modal">
+    <article>
+        <header>
+            <button aria-label="Close" rel="prev" onclick="closeEditModal()"></button>
+            <h3>Edit Category</h3>
+        </header>
+        <form id="edit-form" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" id="edit-category-id" value="">
+
+            <label for="edit-name">Category Name</label>
+            <input
+                type="text"
+                id="edit-name"
+                name="name"
+                required
+                autocomplete="off"
+            >
+
+            <label for="edit-pattern">Regex Pattern</label>
+            <input
+                type="text"
+                id="edit-pattern"
+                name="pattern"
+                required
+                autocomplete="off"
+            >
+
+            <div class="apply-now-option" onclick="document.getElementById('edit-apply-now').click();" style="cursor: pointer;">
+                <input type="checkbox" id="edit-apply-now" name="apply_now" value="1" checked onclick="event.stopPropagation();">
+                <span>Apply to uncategorized and auto-assigned repos now</span>
+            </div>
+
+            <footer>
+                <button type="button" class="secondary" onclick="closeEditModal()">Cancel</button>
+                <button type="submit">Update</button>
+            </footer>
+        </form>
+    </article>
+</dialog>
+
+<script>
+// Propagate fresh CSRF token from partial response to all forms on the page
+document.body.addEventListener('htmx:afterSettle', function(event) {
+    var target = event.detail.target;
+    if (target && target.id === 'categories-list-section') {
+        var freshToken = document.getElementById('fresh-csrf-token');
+        if (freshToken) {
+            var newToken = freshToken.getAttribute('data-token');
+            if (newToken) {
+                // Update create form token
+                var createInput = document.querySelector('form[action="/admin/repo-categories/create"] input[name="csrf_token"]');
+                if (createInput) createInput.value = newToken;
+                // Update edit modal token
+                var editInput = document.querySelector('#edit-form input[name="csrf_token"]');
+                if (editInput) editInput.value = newToken;
+            }
+        }
+    }
+});
+
+function showEditModal(id, name, pattern) {
+    const modal = document.getElementById('edit-modal');
+    const form = document.getElementById('edit-form');
+    const categoryIdInput = document.getElementById('edit-category-id');
+    const nameInput = document.getElementById('edit-name');
+    const patternInput = document.getElementById('edit-pattern');
+
+    // Set form action and values
+    form.action = '/admin/repo-categories/' + id + '/update';
+    categoryIdInput.value = id;
+    nameInput.value = name;
+    patternInput.value = pattern;
+
+    // Set up HTMX attributes
+    form.setAttribute('hx-post', '/admin/repo-categories/' + id + '/update');
+    form.setAttribute('hx-target', '#categories-list-section');
+    form.setAttribute('hx-swap', 'innerHTML');
+
+    modal.showModal();
+}
+
+function closeEditModal() {
+    const modal = document.getElementById('edit-modal');
+    modal.close();
+}
+
+function confirmDelete(id, name) {
+    if (confirm('Are you sure you want to delete category "' + name + '"? Repositories in this category will become Unassigned.')) {
+        document.getElementById('delete-form-' + id).submit();
+    }
+}
+
+function moveUp(id) {
+    reorderCategory(id, -1);
+}
+
+function moveDown(id) {
+    reorderCategory(id, 1);
+}
+
+function reorderCategory(id, direction) {
+    const tbody = document.querySelector('#categories-table tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr[data-category-id]'));
+    const currentIndex = rows.findIndex(row => row.getAttribute('data-category-id') === id.toString());
+
+    if (currentIndex === -1) return;
+
+    const newIndex = currentIndex + direction;
+    if (newIndex < 0 || newIndex >= rows.length) return;
+
+    // Swap rows in DOM
+    if (direction === -1) {
+        tbody.insertBefore(rows[currentIndex], rows[newIndex]);
+    } else {
+        tbody.insertBefore(rows[newIndex], rows[currentIndex]);
+    }
+
+    // Submit reorder to server
+    submitReorder();
+}
+
+function submitReorder() {
+    const tbody = document.querySelector('#categories-table tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr[data-category-id]'));
+    const orderedIds = rows.map(row => row.getAttribute('data-category-id')).join(',');
+
+    // Create and submit form
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/admin/repo-categories/reorder';
+    form.setAttribute('hx-post', '/admin/repo-categories/reorder');
+    form.setAttribute('hx-target', '#categories-list-section');
+    form.setAttribute('hx-swap', 'innerHTML');
+
+    const csrfInput = document.createElement('input');
+    csrfInput.type = 'hidden';
+    csrfInput.name = 'csrf_token';
+    csrfInput.value = '{{ csrf_token }}';
+    form.appendChild(csrfInput);
+
+    const idsInput = document.createElement('input');
+    idsInput.type = 'hidden';
+    idsInput.name = 'ordered_ids';
+    idsInput.value = orderedIds;
+    form.appendChild(idsInput);
+
+    document.body.appendChild(form);
+
+    // Trigger HTMX
+    htmx.process(form);
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+
+    // Clean up
+    setTimeout(() => document.body.removeChild(form), 100);
+}
+</script>
+
+<style>
+.apply-now-option {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.75rem 0;
+    cursor: pointer;
+}
+.apply-now-option input[type="checkbox"] {
+    -webkit-appearance: checkbox;
+    appearance: checkbox;
+    width: 1.1rem;
+    height: 1.1rem;
+    margin: 0;
+    flex-shrink: 0;
+    cursor: pointer;
+}
+.apply-now-option span {
+    font-size: 0.9rem;
+    cursor: pointer;
+    user-select: none;
+}
+</style>
+{% endblock %}

@@ -262,6 +262,10 @@ document.body.addEventListener('htmx:afterSettle', function(event) {
             if (typeof restoreOpenHealthDetails === 'function') {
                 restoreOpenHealthDetails();
             }
+            // Restore grouped view preference from localStorage
+            if (typeof applyStoredGroupedView === 'function') {
+                applyStoredGroupedView();
+            }
         });
     }
 });

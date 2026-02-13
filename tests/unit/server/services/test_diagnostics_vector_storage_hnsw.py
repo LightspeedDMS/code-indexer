@@ -278,6 +278,162 @@ class TestVectorStorageHNSWValidation:
         meta_file = collection_dir / "collection_meta.json"
         meta_file.write_text(json.dumps(metadata, indent=2))
 
+    @pytest.mark.asyncio
+    async def test_check_collection_health_empty_collection_with_metadata_is_healthy(
+        self, tmp_path
+    ):
+        """Test that empty collection (0 vectors, no HNSW file) is treated as healthy."""
+        golden_repos_dir = tmp_path / "data" / "golden-repos"
+        golden_repos_dir.mkdir(parents=True)
+
+        repo_dir = golden_repos_dir / "empty-collection-repo"
+        repo_index_dir = repo_dir / ".code-indexer" / "index" / "voyage-code-3"
+        repo_index_dir.mkdir(parents=True)
+
+        # Create metadata with vector_count=0 but NO hnsw_index.bin
+        self._create_collection_metadata(repo_index_dir, vector_count=0)
+
+        # Register repo in database
+        db_path = tmp_path / "cidx_server.db"
+        self._create_database_with_registered_repos(
+            db_path, [("empty-collection-repo", str(repo_dir))]
+        )
+
+        with patch(
+            "code_indexer.server.services.diagnostics_service.ServerConfigManager"
+        ) as mock_config_manager:
+            mock_config = Mock()
+            mock_config.server_dir = str(tmp_path)
+            mock_config_manager.return_value.load_config.return_value = mock_config
+
+            service = DiagnosticsService(db_path=str(db_path))
+            result = await service.check_vector_storage()
+
+            # Empty collection should be healthy (no issues reported)
+            assert result.status == DiagnosticStatus.WORKING
+            assert result.details["repos_checked"] == 1
+            assert result.details["repos_with_healthy_indexes"] == 1
+            assert len(result.details.get("repos_with_issues", [])) == 0
+
+    @pytest.mark.asyncio
+    async def test_check_collection_health_missing_hnsw_with_nonzero_vectors_reports_issue(
+        self, tmp_path
+    ):
+        """Test that missing HNSW file with nonzero vector count reports issue."""
+        golden_repos_dir = tmp_path / "data" / "golden-repos"
+        golden_repos_dir.mkdir(parents=True)
+
+        repo_dir = golden_repos_dir / "missing-hnsw-repo"
+        repo_index_dir = repo_dir / ".code-indexer" / "index" / "voyage-code-3"
+        repo_index_dir.mkdir(parents=True)
+
+        # Create metadata with vector_count=5 but NO hnsw_index.bin
+        self._create_collection_metadata(repo_index_dir, vector_count=5)
+
+        # Register repo in database
+        db_path = tmp_path / "cidx_server.db"
+        self._create_database_with_registered_repos(
+            db_path, [("missing-hnsw-repo", str(repo_dir))]
+        )
+
+        with patch(
+            "code_indexer.server.services.diagnostics_service.ServerConfigManager"
+        ) as mock_config_manager:
+            mock_config = Mock()
+            mock_config.server_dir = str(tmp_path)
+            mock_config_manager.return_value.load_config.return_value = mock_config
+
+            service = DiagnosticsService(db_path=str(db_path))
+            result = await service.check_vector_storage()
+
+            # Should detect the problem (nonzero vectors but missing HNSW)
+            assert result.status in [DiagnosticStatus.WARNING, DiagnosticStatus.ERROR]
+            assert "repos_with_issues" in result.details
+            assert len(result.details["repos_with_issues"]) == 1
+            assert "missing-hnsw-repo" in str(result.details["repos_with_issues"][0]).lower()
+            assert "missing hnsw" in str(result.details["repos_with_issues"][0]).lower()
+
+    @pytest.mark.asyncio
+    async def test_check_collection_health_empty_multimodal_collection_is_healthy(
+        self, tmp_path
+    ):
+        """Test production scenario: repo with healthy code index and empty multimodal index."""
+        golden_repos_dir = tmp_path / "data" / "golden-repos"
+        golden_repos_dir.mkdir(parents=True)
+
+        repo_dir = golden_repos_dir / "mixed-collections-repo"
+        repo_base = repo_dir / ".code-indexer" / "index"
+
+        # Create healthy voyage-code-3 collection with vectors + HNSW
+        code_index_dir = repo_base / "voyage-code-3"
+        code_index_dir.mkdir(parents=True)
+        self._create_valid_hnsw_index(code_index_dir, vector_count=10)
+
+        # Create empty voyage-multimodal-3 collection (metadata with 0 vectors, no HNSW)
+        multimodal_index_dir = repo_base / "voyage-multimodal-3"
+        multimodal_index_dir.mkdir(parents=True)
+        self._create_collection_metadata(multimodal_index_dir, vector_count=0)
+
+        # Register repo in database
+        db_path = tmp_path / "cidx_server.db"
+        self._create_database_with_registered_repos(
+            db_path, [("mixed-collections-repo", str(repo_dir))]
+        )
+
+        with patch(
+            "code_indexer.server.services.diagnostics_service.ServerConfigManager"
+        ) as mock_config_manager:
+            mock_config = Mock()
+            mock_config.server_dir = str(tmp_path)
+            mock_config_manager.return_value.load_config.return_value = mock_config
+
+            service = DiagnosticsService(db_path=str(db_path))
+            result = await service.check_vector_storage()
+
+            # Overall repo should be healthy (empty multimodal is OK)
+            assert result.status == DiagnosticStatus.WORKING
+            assert result.details["repos_checked"] == 1
+            assert result.details["repos_with_healthy_indexes"] == 1
+            assert len(result.details.get("repos_with_issues", [])) == 0
+
+    @pytest.mark.asyncio
+    async def test_check_collection_health_corrupted_metadata_no_hnsw_reports_issue(
+        self, tmp_path
+    ):
+        """Test that corrupted metadata with no HNSW file is reported as an issue."""
+        golden_repos_dir = tmp_path / "data" / "golden-repos"
+        golden_repos_dir.mkdir(parents=True)
+
+        repo_dir = golden_repos_dir / "corrupted-meta-repo"
+        repo_index_dir = repo_dir / ".code-indexer" / "index" / "voyage-code-3"
+        repo_index_dir.mkdir(parents=True)
+
+        # Create corrupted metadata (invalid JSON) with no hnsw_index.bin
+        meta_file = repo_index_dir / "collection_meta.json"
+        meta_file.write_text("{ not valid json }")
+
+        # Register repo in database
+        db_path = tmp_path / "cidx_server.db"
+        self._create_database_with_registered_repos(
+            db_path, [("corrupted-meta-repo", str(repo_dir))]
+        )
+
+        with patch(
+            "code_indexer.server.services.diagnostics_service.ServerConfigManager"
+        ) as mock_config_manager:
+            mock_config = Mock()
+            mock_config.server_dir = str(tmp_path)
+            mock_config_manager.return_value.load_config.return_value = mock_config
+
+            service = DiagnosticsService(db_path=str(db_path))
+            result = await service.check_vector_storage()
+
+            # Should report issue (corrupted metadata can't prove it's empty)
+            assert result.status in [DiagnosticStatus.WARNING, DiagnosticStatus.ERROR]
+            assert "repos_with_issues" in result.details
+            assert len(result.details["repos_with_issues"]) == 1
+            assert "corrupted-meta-repo" in str(result.details["repos_with_issues"][0]).lower()
+
     def _create_database_with_registered_repos(
         self, db_path: Path, repos: list[tuple[str, str]]
     ):

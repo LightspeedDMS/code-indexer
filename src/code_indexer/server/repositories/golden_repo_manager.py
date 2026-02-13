@@ -62,6 +62,8 @@ class GoldenRepo(BaseModel):
     created_at: str
     enable_temporal: bool = False
     temporal_options: Optional[Dict] = None
+    category_id: Optional[int] = None
+    category_auto_assigned: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert golden repository to dictionary."""
@@ -73,6 +75,8 @@ class GoldenRepo(BaseModel):
             "created_at": self.created_at,
             "enable_temporal": self.enable_temporal,
             "temporal_options": self.temporal_options,
+            "category_id": self.category_id,
+            "category_auto_assigned": self.category_auto_assigned,
         }
 
 
@@ -94,6 +98,7 @@ class GoldenRepoManager:
     background_job_manager: "BackgroundJobManager"
     activated_repo_manager: "ActivatedRepoManager"
     group_access_manager: Optional["GroupAccessManager"] = None
+    _repo_category_service: Optional[Any] = None  # RepoCategoryService (Story #181)
 
     def __init__(
         self,
@@ -319,6 +324,23 @@ class GoldenRepoManager:
                         temporal_options=temporal_options,
                     )
 
+                # Auto-assign category (Story #181 AC1)
+                # Non-blocking: log error but don't fail registration
+                if self._repo_category_service is not None:
+                    try:
+                        category_id = self._repo_category_service.auto_assign(alias)
+                        if category_id is not None:
+                            self._sqlite_backend.update_category(
+                                alias, category_id, auto_assigned=True
+                            )
+                            logging.info(
+                                f"Auto-assigned category {category_id} to '{alias}'"
+                            )
+                    except Exception as e:
+                        logging.warning(
+                            f"Category auto-assignment failed for '{alias}': {e}"
+                        )
+
                 # Automatic global activation (AC1 from Story #521)
                 # This is a non-blocking post-registration step (AC4)
                 try:
@@ -489,6 +511,23 @@ class GoldenRepoManager:
                 enable_temporal=False,
                     temporal_options=None,
                 )
+
+            # Auto-assign category (Story #181 AC1)
+            # Non-blocking: log error but don't fail registration
+            if self._repo_category_service is not None:
+                try:
+                    category_id = self._repo_category_service.auto_assign(alias)
+                    if category_id is not None:
+                        self._sqlite_backend.update_category(
+                            alias, category_id, auto_assigned=True
+                        )
+                        logging.info(
+                            f"Auto-assigned category {category_id} to '{alias}'"
+                        )
+                except Exception as e:
+                    logging.warning(
+                        f"Category auto-assignment failed for '{alias}': {e}"
+                    )
 
         # Global activation (non-blocking - logs error but doesn't fail)
         try:

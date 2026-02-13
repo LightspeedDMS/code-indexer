@@ -1062,6 +1062,30 @@ class DiagnosticsService:
         meta_file = collection_dir / "collection_meta.json"
 
         if not hnsw_file.exists():
+            # Check if this is an empty collection (legitimately has no HNSW file)
+            if meta_file.exists():
+                try:
+                    with open(meta_file, 'r') as f:
+                        metadata = json.load(f)
+
+                    # Get vector count from metadata
+                    vector_count = metadata.get("hnsw_index", {}).get("vector_count", None)
+
+                    # Empty collection (0 vectors) is healthy - no HNSW file expected
+                    if vector_count == 0:
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.debug(
+                            f"Empty collection '{collection_name}' in repo '{repo_name}' "
+                            f"(0 vectors, no HNSW file) - skipping health check"
+                        )
+                        return None
+
+                except (json.JSONDecodeError, KeyError, ValueError):
+                    # Corrupted metadata will be caught later
+                    pass
+
+            # Missing HNSW file with nonzero vectors (or no metadata) is a real problem
             return {
                 "repo": repo_name,
                 "issue": f"Missing HNSW index file in {collection_name}"

@@ -5,7 +5,10 @@ required_permission: query_repos
 tl_dr: List repositories YOU have activated (user-specific workspaces), distinct from global shared repositories.
 inputSchema:
   type: object
-  properties: {}
+  properties:
+    category:
+      type: string
+      description: Filter repositories by category name. Use "Unassigned" to show repos without a category. Omit to show all repos.
   required: []
 outputSchema:
   type: object
@@ -15,7 +18,7 @@ outputSchema:
       description: Whether operation succeeded
     repositories:
       type: array
-      description: Combined list of activated and global repositories
+      description: Combined list of activated and global repositories, sorted by category priority
       items:
         type: object
         description: Normalized repository information (activated or global)
@@ -52,6 +55,11 @@ outputSchema:
             - string
             - 'null'
             description: ISO 8601 timestamp when repository was added
+          repo_category:
+            type:
+            - string
+            - 'null'
+            description: Category name this repository belongs to, or null if unassigned
     error:
       type: string
       description: Error message if failed

@@ -266,6 +266,18 @@ class DatabaseSchema:
         )
     """
 
+    # Story #180: Repository Categories table
+    CREATE_REPO_CATEGORIES_TABLE = """
+        CREATE TABLE IF NOT EXISTS repo_categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            pattern TEXT NOT NULL,
+            priority INTEGER NOT NULL,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -333,6 +345,8 @@ class DatabaseSchema:
             conn.execute(self.CREATE_RESEARCH_MESSAGES_TABLE)
             # Diagnostic results persistence
             conn.execute(self.CREATE_DIAGNOSTIC_RESULTS_TABLE)
+            # Story #180: Repository Categories
+            conn.execute(self.CREATE_REPO_CATEGORIES_TABLE)
 
             conn.commit()
 
@@ -340,6 +354,7 @@ class DatabaseSchema:
             self._migrate_self_monitoring_issues_schema(conn)
             self._migrate_global_repos_schema(conn)
             self._migrate_research_sessions_schema(conn)
+            self._migrate_golden_repos_metadata_category(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
@@ -443,6 +458,42 @@ class DatabaseSchema:
             conn.commit()
             logger.info(
                 f"Migrated research_sessions schema: added {migrations_applied}"
+            )
+
+    def _migrate_golden_repos_metadata_category(self, conn: sqlite3.Connection) -> None:
+        """
+        Migrate golden_repos_metadata table schema for repository categories (Story #180).
+
+        Adds columns:
+        - category_id: Foreign key to repo_categories table (ON DELETE SET NULL)
+        - category_auto_assigned: Boolean flag indicating if category was auto-assigned
+
+        This is safe to run multiple times - it only adds missing columns.
+        """
+        # Get existing columns
+        cursor = conn.execute("PRAGMA table_info(golden_repos_metadata)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        migrations_applied = []
+
+        # Add category_id with foreign key constraint
+        if "category_id" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE golden_repos_metadata ADD COLUMN category_id INTEGER REFERENCES repo_categories(id) ON DELETE SET NULL"
+            )
+            migrations_applied.append("category_id")
+
+        # Add category_auto_assigned flag
+        if "category_auto_assigned" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE golden_repos_metadata ADD COLUMN category_auto_assigned INTEGER DEFAULT 0"
+            )
+            migrations_applied.append("category_auto_assigned")
+
+        if migrations_applied:
+            conn.commit()
+            logger.info(
+                f"Migrated golden_repos_metadata schema: added {migrations_applied}"
             )
 
 

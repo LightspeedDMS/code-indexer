@@ -184,6 +184,13 @@ class RefreshScheduler:
 
                     alias_name = repo.get("alias_name")
                     if alias_name:
+                        # Skip local repos - no remote means no refresh needed
+                        repo_url = repo.get("repo_url", "")
+                        if repo_url and repo_url.startswith("local://"):
+                            logger.debug(
+                                f"Skipping refresh for local repo in scheduler: {alias_name}"
+                            )
+                            continue
                         try:
                             self._submit_refresh_job(alias_name)
                         except Exception as e:
@@ -289,18 +296,8 @@ class RefreshScheduler:
                         "message": "Repo not in registry, skipped",
                     }
 
-                # Get golden repo path from alias (registry path becomes stale after refresh)
-                golden_repo_path = current_target
-
-                # AC6: Reconcile registry with filesystem at START of refresh
-                # This ensures registry flags reflect actual index state before refresh begins
-                detected_indexes = self._detect_existing_indexes(Path(golden_repo_path))
-                self._reconcile_registry_with_filesystem(alias_name, detected_indexes)
-                logger.info(
-                    f"Reconciled registry with filesystem at START for {alias_name}: {detected_indexes}"
-                )
-
                 # Skip refresh for local:// repos (no remote = no refresh = no versioning)
+                # Check this BEFORE expensive reconciliation operations
                 repo_url = repo_info.get("repo_url")
                 if repo_url and repo_url.startswith("local://"):
                     logger.info(
@@ -311,6 +308,17 @@ class RefreshScheduler:
                         "alias": alias_name,
                         "message": "Local repo, skipped",
                     }
+
+                # Get golden repo path from alias (registry path becomes stale after refresh)
+                golden_repo_path = current_target
+
+                # AC6: Reconcile registry with filesystem at START of refresh
+                # This ensures registry flags reflect actual index state before refresh begins
+                detected_indexes = self._detect_existing_indexes(Path(golden_repo_path))
+                self._reconcile_registry_with_filesystem(alias_name, detected_indexes)
+                logger.info(
+                    f"Reconciled registry with filesystem at START for {alias_name}: {detected_indexes}"
+                )
 
                 # Create updater for this repo
                 updater = GitPullUpdater(golden_repo_path)

@@ -1,11 +1,14 @@
 <h2>Activated Repositories</h2>
 
+<button id="toggle-grouped" class="outline small" onclick="toggleGroupedView()" style="margin-bottom: 0.5rem;">Group by Category</button>
+
 <table class="repos-table">
     <thead>
         <tr>
             <th>Name</th>
             <th>User</th>
             <th>Golden Repo</th>
+            <th>Category</th>
             <th>Indexes</th>
             <th>Activated Date</th>
             <th>File Count</th>
@@ -16,7 +19,7 @@
     <tbody>
         {% if repos %}
         {% for repo in repos %}
-        <tr>
+        <tr data-repo-alias="{{ repo.user_alias }}" data-category-id="{{ repo.category_id or '' }}" data-category-name="{{ repo.category_name or 'Unassigned' }}" data-category-priority="{{ repo.category_priority if repo.category_priority is not none else 999999 }}">
             <td>
                 <a href="#" onclick="toggleDetails('{{ repo.username }}', '{{ repo.user_alias }}'); return false;">
                     {{ repo.user_alias }}
@@ -24,6 +27,7 @@
             </td>
             <td>{{ repo.username }}</td>
             <td>{{ repo.golden_repo_alias or 'Composite' }}</td>
+            <td>{{ repo.category_name or 'Unassigned' }}</td>
             <td class="indexes-cell" style="white-space: nowrap;">
                 <span id="index-badges-{{ repo.username }}-{{ repo.user_alias }}" data-owner="{{ repo.username }}" data-alias="{{ repo.user_alias }}">
                     <span class="no-indexes">Loading...</span>
@@ -55,7 +59,7 @@
 
         <!-- Details Row (hidden by default) -->
         <tr id="details-{{ repo.username }}-{{ repo.user_alias }}" class="details-row" style="display: none;">
-            <td colspan="7">
+            <td colspan="9">
                 <article class="repo-details">
                     <div class="details-grid">
                         <div class="detail-item">
@@ -241,11 +245,14 @@
         {% endfor %}
         {% else %}
         <tr>
-            <td colspan="7" class="no-data">No activated repositories. Users can activate repositories from golden repos.</td>
+            <td colspan="9" class="no-data">No activated repositories. Users can activate repositories from golden repos.</td>
         </tr>
         {% endif %}
     </tbody>
 </table>
+
+<script src="/admin/static/js/repo_categories.js"></script>
+<script>applyStoredGroupedView();</script>
 
 {% if total_pages is defined and total_pages > 1 %}
 <!-- Pagination -->

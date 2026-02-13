@@ -1,9 +1,12 @@
 <h2>Golden Repositories</h2>
 
+<button id="toggle-grouped" class="outline small" onclick="toggleGroupedView()" style="margin-bottom: 0.5rem;">Group by Category</button>
+
 <table class="golden-repos-table" role="grid">
     <thead>
         <tr>
             <th>Name</th>
+            <th>Category</th>
             <th>Global Alias</th>
             <th>Version</th>
             <th>Indexes</th>
@@ -15,8 +18,18 @@
     <tbody>
         {% if repos %}
         {% for repo in repos %}
-        <tr>
+        <tr data-repo-alias="{{ repo.alias }}" data-category-id="{{ repo.category_id or '' }}" data-category-name="{{ repo.category_name or 'Unassigned' }}" data-category-priority="{{ repo.category_priority if repo.category_priority is not none else 999999 }}">
             <td>{{ repo.alias }}</td>
+            <td class="category-cell">
+                <select class="category-select" data-repo-alias="{{ repo.alias }}" data-original="{{ repo.category_id or '' }}">
+                    <option value="" {% if not repo.category_id %}selected{% endif %}>Unassigned</option>
+                    {% for cat in categories %}
+                    <option value="{{ cat.id }}" {% if repo.category_id == cat.id %}selected{% endif %}>{{ cat.name }}</option>
+                    {% endfor %}
+                </select>
+                <button class="outline small category-ok" onclick="saveCategory('{{ repo.alias }}', this)" title="Save">OK</button>
+                <button class="outline small category-cancel" onclick="cancelCategory(this)" title="Cancel">Cancel</button>
+            </td>
             <td>
                 {% if repo.global_alias %}
                 <code class="global-alias">{{ repo.global_alias }}</code>
@@ -64,7 +77,7 @@
 
         <!-- Details Row (hidden by default) -->
         <tr id="details-{{ repo.alias }}" class="details-row" style="display: none;">
-            <td colspan="7">
+            <td colspan="8">
                 <article class="repo-details">
                     <div class="details-grid">
                         <div class="detail-item">
@@ -347,13 +360,72 @@
         {% endfor %}
         {% else %}
         <tr>
-            <td colspan="7" class="no-data">No golden repositories configured. Click "Add Repository" to add one.</td>
+            <td colspan="8" class="no-data">No golden repositories configured. Click "Add Repository" to add one.</td>
         </tr>
         {% endif %}
     </tbody>
 </table>
 
+<script src="/admin/static/js/repo_categories.js"></script>
+<script>applyStoredGroupedView();</script>
+
 <style>
+/* Table layout to prevent horizontal overflow (Story #183) */
+.golden-repos-table {
+    table-layout: fixed;
+    width: 100%;
+}
+.golden-repos-table th:nth-child(1) { width: 15%; }  /* Name */
+.golden-repos-table th:nth-child(2) { width: 15%; }  /* Category */
+.golden-repos-table th:nth-child(3) { width: 14%; }  /* Global Alias */
+.golden-repos-table th:nth-child(4) { width: 7%; }   /* Version */
+.golden-repos-table th:nth-child(5) { width: 10%; }  /* Indexes */
+.golden-repos-table th:nth-child(6) { width: 14%; }  /* Path/URL */
+.golden-repos-table th:nth-child(7) { width: 5%; }   /* Status */
+.golden-repos-table th:nth-child(8) { width: 20%; }  /* Actions */
+
+/* Category column layout */
+.category-cell {
+    white-space: nowrap;
+    overflow: visible;
+}
+.category-cell .category-select {
+    display: inline-block;
+    width: auto;
+    min-width: 80px;
+    max-width: 110px;
+    padding: 0.2rem 0.3rem;
+    margin: 0;
+    font-size: 0.8rem;
+    vertical-align: middle;
+}
+.category-cell .category-ok,
+.category-cell .category-cancel {
+    display: inline-block;
+    padding: 0.1rem 0.3rem;
+    margin-left: 0.15rem;
+    font-size: 0.7rem;
+    vertical-align: middle;
+}
+/* Truncate long text in text-only columns (not interactive cells) */
+.golden-repos-table td:nth-child(1),
+.golden-repos-table td:nth-child(3),
+.golden-repos-table td:nth-child(4),
+.golden-repos-table td:nth-child(6) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+/* Actions cell needs to show all buttons */
+.golden-repos-table .actions-cell {
+    white-space: nowrap;
+    overflow: visible;
+}
+/* Group header bar must span full row width including overflow */
+.category-group-header td {
+    overflow: visible;
+    white-space: nowrap;
+}
 .index-badge {
     display: inline-block;
     padding: 2px 6px;

@@ -172,6 +172,7 @@ document.body.addEventListener('htmx:afterSettle', function(event) {
         requestAnimationFrame(() => {
             restoreOpenDetails();
             restoreOpenHealthDetails();  // Restore health details panels (Bug fix for Story #60)
+            applyStoredGroupedView();
         });
     }
 });

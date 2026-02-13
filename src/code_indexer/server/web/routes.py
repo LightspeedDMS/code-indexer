@@ -108,6 +108,17 @@ def _get_csrf_serializer() -> URLSafeTimedSerializer:
     return URLSafeTimedSerializer(session_manager._serializer.secret_key)
 
 
+def _get_repo_category_service():
+    """Create RepoCategoryService with database path (Story #183 helper)."""
+    from ..services.config_service import get_config_service
+    from ..services.repo_category_service import RepoCategoryService
+
+    config_service = get_config_service()
+    db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+
+    return RepoCategoryService(db_path)
+
+
 def generate_csrf_token() -> str:
     """Generate a new CSRF token."""
     return secrets.token_urlsafe(32)
@@ -1861,6 +1872,28 @@ def _get_golden_repos_list():
         # Get alias info for version and target path
         aliases_dir = golden_repos_dir / "aliases"
 
+        # Get category lookup by repo alias (Story #183)
+        category_lookup = {}
+        try:
+            category_service = _get_repo_category_service()
+            repo_map = category_service.get_repo_category_map()
+            for alias, info in repo_map.items():
+                if info.get("category_name"):
+                    category_lookup[alias] = {
+                        "category_id": info["category_id"],
+                        "category_name": info["category_name"],
+                        "category_priority": info["priority"]
+                    }
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "SCIP-GENERAL-048",
+                    "Could not load category information: %s",
+                    e,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Add status, global alias, version, and index information for display
         for repo in repos:
             # Default status to 'ready' if not set
@@ -1995,6 +2028,17 @@ def _get_golden_repos_list():
                         if scip_files:
                             repo["has_scip"] = True
 
+            # Add category information to each repo (Story #183)
+            alias = repo.get("alias", "")
+            if alias in category_lookup:
+                repo["category_id"] = category_lookup[alias]["category_id"]
+                repo["category_name"] = category_lookup[alias]["category_name"]
+                repo["category_priority"] = category_lookup[alias]["category_priority"]
+            else:
+                repo["category_id"] = None
+                repo["category_name"] = None
+                repo["category_priority"] = None
+
         return sorted(repos, key=lambda r: r.get("alias", "").lower())
     except Exception as e:
         logger.error(
@@ -2020,6 +2064,21 @@ def _create_golden_repos_page_response(
     repos = _get_golden_repos_list()
     users = _get_users_list()
 
+    # Get categories for dropdown (Story #183)
+    try:
+        category_service = _get_repo_category_service()
+        categories = category_service.list_categories()
+    except Exception as e:
+        logger.warning(
+            format_error_log(
+                "SCIP-GENERAL-049",
+                "Could not load categories for template: %s",
+                e,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        categories = []
+
     response = templates.TemplateResponse(
         "golden_repos.html",
         {
@@ -2030,6 +2089,7 @@ def _create_golden_repos_page_response(
             "csrf_token": csrf_token,
             "repos": repos,
             "users": [{"username": u.username} for u in users],
+            "categories": categories,
             "success_message": success_message,
             "error_message": error_message,
         },
@@ -2361,12 +2421,28 @@ def golden_repos_list_partial(request: Request):
         csrf_token = generate_csrf_token()
     repos = _get_golden_repos_list()
 
+    # Get categories for dropdown (Story #183)
+    try:
+        category_service = _get_repo_category_service()
+        categories = category_service.list_categories()
+    except Exception as e:
+        logger.warning(
+            format_error_log(
+                "SCIP-GENERAL-050",
+                "Could not load categories for partial template: %s",
+                e,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        categories = []
+
     response = templates.TemplateResponse(
         "partials/golden_repos_list.html",
         {
             "request": request,
             "csrf_token": csrf_token,
             "repos": repos,
+            "categories": categories,
         },
     )
 
@@ -2410,6 +2486,27 @@ def _get_all_activated_repos() -> list:
         if not os.path.exists(activated_repos_dir):
             return []
 
+        # Build category lookup by golden repo alias (Story #183 - AC7)
+        category_lookup = {}
+        try:
+            category_service = _get_repo_category_service()
+            repo_map = category_service.get_repo_category_map()
+            for alias, info in repo_map.items():
+                category_lookup[alias] = {
+                    "category_name": info.get("category_name") or "Unassigned",
+                    "category_id": info.get("category_id"),
+                    "category_priority": info.get("priority"),
+                }
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "SCIP-GENERAL-051",
+                    "Could not load category information for activated repos: %s",
+                    e,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Iterate over all user directories
         for username in os.listdir(activated_repos_dir):
             user_dir = os.path.join(activated_repos_dir, username)
@@ -2422,6 +2519,19 @@ def _get_all_activated_repos() -> list:
                     # Set default status if not present
                     if "status" not in repo:
                         repo["status"] = "active"
+
+                    # Add category info from golden repo (Story #183 - AC7)
+                    golden_alias = repo.get("golden_repo_alias", "")
+                    cat_info = category_lookup.get(golden_alias, {})
+                    if isinstance(cat_info, dict):
+                        repo["category_name"] = cat_info.get("category_name", "Unassigned")
+                        repo["category_id"] = cat_info.get("category_id")
+                        repo["category_priority"] = cat_info.get("category_priority")
+                    else:
+                        # Backward compatibility with old string format
+                        repo["category_name"] = cat_info or "Unassigned"
+                        repo["category_id"] = None
+                        repo["category_priority"] = None
 
                     # Fetch temporal status for this repository
                     try:

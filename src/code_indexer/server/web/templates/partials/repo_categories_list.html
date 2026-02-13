@@ -1,0 +1,99 @@
+<!-- Fresh CSRF token for JavaScript propagation to forms outside this partial -->
+<span id="fresh-csrf-token" data-token="{{ csrf_token }}" style="display:none;"></span>
+
+<!-- Success/Error Messages (for HTMX partial updates) -->
+{% if success_message %}
+<article class="message-success">
+    <p>{{ success_message }}</p>
+</article>
+{% endif %}
+
+{% if error_message %}
+<article class="message-error">
+    <p>{{ error_message }}</p>
+</article>
+{% endif %}
+
+<h2>Categories (Priority Order)</h2>
+<p class="help-text">Categories are evaluated in priority order (1 = highest). First matching pattern wins.</p>
+
+<table id="categories-table" class="repo-categories-table" role="grid">
+    <thead>
+        <tr>
+            <th>Priority</th>
+            <th>Name</th>
+            <th>Regex Pattern</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% if categories %}
+        {% for category in categories %}
+        <tr data-category-id="{{ category.id }}">
+            <td>{{ category.priority }}</td>
+            <td><strong>{{ category.name }}</strong></td>
+            <td><code>{{ category.pattern }}</code></td>
+            <td class="actions-cell" style="white-space: nowrap;">
+                <button
+                    class="small"
+                    onclick="showEditModal({{ category.id }}, '{{ category.name | replace("'", "\\'") }}', '{{ category.pattern | replace("'", "\\'") }}')"
+                    title="Edit category"
+                >
+                    Edit
+                </button>
+
+                <form
+                    id="delete-form-{{ category.id }}"
+                    method="post"
+                    action="/admin/repo-categories/{{ category.id }}/delete"
+                    style="display: inline-block; margin: 0; width: auto;"
+                    hx-post="/admin/repo-categories/{{ category.id }}/delete"
+                    hx-target="#categories-list-section"
+                    hx-swap="innerHTML"
+                    hx-confirm="Delete category '{{ category.name }}'? Repositories will become Unassigned."
+                >
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="small" style="background-color: #c62828; border-color: #c62828; width: auto;" title="Delete category">
+                        Delete
+                    </button>
+                </form>
+
+                <div class="reorder-buttons" style="display: inline-block;">
+                    {% if not loop.first %}
+                    <button
+                        class="small outline"
+                        onclick="moveUp({{ category.id }})"
+                        title="Move up (higher priority)"
+                    >
+                        ↑
+                    </button>
+                    {% endif %}
+
+                    {% if not loop.last %}
+                    <button
+                        class="small outline"
+                        onclick="moveDown({{ category.id }})"
+                        title="Move down (lower priority)"
+                    >
+                        ↓
+                    </button>
+                    {% endif %}
+                </div>
+            </td>
+        </tr>
+        {% endfor %}
+        {% else %}
+        <tr>
+            <td colspan="4" style="text-align: center; padding: 2rem;">
+                <em>No categories defined. Create one above to organize your repositories.</em>
+            </td>
+        </tr>
+        {% endif %}
+    </tbody>
+</table>
+
+{% if categories %}
+<p class="help-text">
+    <strong>Unassigned:</strong> Repositories not matching any pattern will appear as "Unassigned" (category_id = NULL).
+</p>
+{% endif %}

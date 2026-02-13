@@ -81,6 +81,7 @@ from .mcp.protocol import mcp_router
 from .global_routes.routes import router as global_routes_router
 from .global_routes.git_settings import router as git_settings_router
 from .web import web_router, user_router, login_router, api_router, init_session_manager
+from .web.repo_category_routes import repo_category_web_router
 from .routers.ssh_keys import router as ssh_keys_router
 from .routers.scip_queries import router as scip_queries_router
 from .routers.files import router as files_router
@@ -100,6 +101,10 @@ from .routers.groups import (
     users_router,
     audit_router,
     set_group_manager,
+)
+from .routers.repo_categories import (
+    router as repo_categories_router,
+    set_category_service,
 )
 from .routes.multi_query_routes import router as multi_query_router
 from .routes.scip_multi_routes import router as scip_multi_router
@@ -3395,6 +3400,14 @@ def create_app() -> FastAPI:
 
     # Inject ActivatedRepoManager for cascade deletion support
     golden_repo_manager.activated_repo_manager = activated_repo_manager
+
+    # Inject RepoCategoryService for auto-assignment (Story #181)
+    from code_indexer.server.services.repo_category_service import RepoCategoryService
+    repo_category_service = RepoCategoryService(db_path_str)
+
+    # Wire RepoCategoryService to REST API router (Story #182)
+    set_category_service(repo_category_service)
+    golden_repo_manager._repo_category_service = repo_category_service
 
     repository_listing_manager = RepositoryListingManager(
         golden_repo_manager=golden_repo_manager,
@@ -8299,6 +8312,7 @@ def create_app() -> FastAPI:
     app.include_router(groups_router)
     app.include_router(users_router)
     app.include_router(audit_router)
+    app.include_router(repo_categories_router)
     app.include_router(delegation_callbacks_router)
     app.include_router(maintenance_router)
     app.include_router(api_keys_router)
@@ -8325,6 +8339,9 @@ def create_app() -> FastAPI:
 
     # Include web router with /admin prefix
     app.include_router(web_router, prefix="/admin", tags=["admin"])
+
+    # Include repo category management router with /admin prefix (Story #180)
+    app.include_router(repo_category_web_router, prefix="/admin", tags=["admin"])
 
     # Include user router with /user prefix for non-admin self-service
     app.include_router(user_router, prefix="/user", tags=["user"])

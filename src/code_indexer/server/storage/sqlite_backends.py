@@ -1271,7 +1271,7 @@ class GoldenRepoMetadataSqliteBackend:
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             """SELECT alias, repo_url, default_branch, clone_path, created_at,
-                      enable_temporal, temporal_options
+                      enable_temporal, temporal_options, category_id, category_auto_assigned
                FROM golden_repos_metadata WHERE alias = ?""",
             (alias,),
         )
@@ -1288,6 +1288,8 @@ class GoldenRepoMetadataSqliteBackend:
             "created_at": row[4],
             "enable_temporal": bool(row[5]),
             "temporal_options": json.loads(row[6]) if row[6] else None,
+            "category_id": row[7],
+            "category_auto_assigned": bool(row[8]),
         }
 
     def list_repos(self) -> List[Dict[str, Any]]:
@@ -1415,6 +1417,69 @@ class GoldenRepoMetadataSqliteBackend:
         if updated:
             logger.info(f"Updated repo_url={repo_url} for golden repo: {alias}")
         return updated
+
+    def update_category(
+        self, alias: str, category_id: Optional[int], auto_assigned: bool = True
+    ) -> bool:
+        """
+        Update category assignment for a golden repository (Story #181).
+
+        Args:
+            alias: Alias of the repository to update.
+            category_id: Category ID to assign, or None for Unassigned.
+            auto_assigned: Whether this is an automatic assignment (True) or manual (False).
+
+        Returns:
+            True if a record was updated, False if alias not found.
+        """
+
+        def operation(conn):
+            cursor = conn.execute(
+                """UPDATE golden_repos_metadata
+                   SET category_id = ?, category_auto_assigned = ?
+                   WHERE alias = ?""",
+                (category_id, 1 if auto_assigned else 0, alias),
+            )
+            return cursor.rowcount > 0
+
+        updated: bool = self._conn_manager.execute_atomic(operation)
+        if updated:
+            logger.debug(
+                f"Updated category_id={category_id} (auto={auto_assigned}) for repo: {alias}"
+            )
+        return updated
+
+    def list_repos_with_categories(self) -> List[Dict[str, Any]]:
+        """
+        List all golden repositories with category information (Story #181).
+
+        Returns:
+            List of repository dictionaries including category_id and category_auto_assigned.
+        """
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            """SELECT alias, repo_url, default_branch, clone_path, created_at,
+                      enable_temporal, temporal_options, category_id, category_auto_assigned
+               FROM golden_repos_metadata"""
+        )
+
+        result = []
+        for row in cursor.fetchall():
+            result.append(
+                {
+                    "alias": row[0],
+                    "repo_url": row[1],
+                    "default_branch": row[2],
+                    "clone_path": row[3],
+                    "created_at": row[4],
+                    "enable_temporal": bool(row[5]),
+                    "temporal_options": json.loads(row[6]) if row[6] else None,
+                    "category_id": row[7],
+                    "category_auto_assigned": bool(row[8]),
+                }
+            )
+
+        return result
 
     def close(self) -> None:
         """Close database connections."""

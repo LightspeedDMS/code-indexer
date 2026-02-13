@@ -250,3 +250,52 @@ class TestGoldenReposDualViewBehavior:
         )
         assert has_load_trigger, \
             "Template should include triggers for loading global activated data"
+
+
+class TestRepoCategoriesJavaScriptBehavior:
+    """Test repo_categories.js JavaScript behavior for category management."""
+
+    JS_PATH = Path(__file__).parent.parent.parent.parent.parent / "src" / "code_indexer" / "server" / "web" / "static" / "js" / "repo_categories.js"
+
+    def test_saveCategory_regrouping_when_grouped_view_active(self):
+        """
+        Test saveCategory function includes regrouping logic after successful save.
+
+        When a category is changed and saved, if the table is in grouped view mode
+        (has 'grouped-view' class), the function should call groupRows(table) to
+        immediately re-sort and re-display rows in their new category groups.
+        """
+        content = self.JS_PATH.read_text()
+
+        # Verify the function includes the regrouping logic
+        assert "row.closest('table')" in content, \
+            "saveCategory should get reference to table element"
+
+        assert "classList.contains('grouped-view')" in content, \
+            "saveCategory should check if grouped view is active"
+
+        assert "groupRows(table)" in content, \
+            "saveCategory should call groupRows when grouped view is active"
+
+        # Verify the regrouping happens in the success handler (after updating data attributes)
+        lines = content.split('\n')
+        save_category_start = None
+        for i, line in enumerate(lines):
+            if 'function saveCategory' in line:
+                save_category_start = i
+                break
+
+        assert save_category_start is not None, "Could not find saveCategory function"
+
+        # Find the .then() success handler and verify grouped-view check is present
+        then_handler_found = False
+        grouped_view_check_found = False
+        for i in range(save_category_start, len(lines)):
+            if '.then(html =>' in lines[i] or '.then(function' in lines[i]:
+                then_handler_found = True
+            if then_handler_found and "classList.contains('grouped-view')" in lines[i]:
+                grouped_view_check_found = True
+                break
+
+        assert grouped_view_check_found, \
+            "saveCategory should include grouped-view check in success handler"
