@@ -22,8 +22,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from code_indexer.server.services.claude_cli_manager import ClaudeCliManager
-
 logger = logging.getLogger(__name__)
 
 
@@ -279,7 +277,7 @@ class DependencyMapAnalyzer:
         """
         Invoke Claude CLI with direct subprocess (AC1).
 
-        Uses ClaudeCliManager.sync_api_key() to obtain API key, then invokes
+        Verifies ANTHROPIC_API_KEY environment variable is available, then invokes
         Claude CLI as a subprocess from golden-repos root.
 
         Args:
@@ -294,12 +292,6 @@ class DependencyMapAnalyzer:
             subprocess.CalledProcessError: If Claude CLI fails
             subprocess.TimeoutExpired: If timeout is exceeded
         """
-        # Sync API key
-        try:
-            ClaudeCliManager.sync_api_key()
-        except Exception as e:
-            logger.warning(f"API key sync failed: {e}")
-
         # Verify API key is available
         if not os.environ.get("ANTHROPIC_API_KEY"):
             raise RuntimeError(
@@ -321,6 +313,7 @@ class DependencyMapAnalyzer:
             text=True,
             timeout=timeout,
             env={**os.environ},  # Inherit environment including ANTHROPIC_API_KEY
+            stdin=subprocess.DEVNULL,  # Prevent Claude CLI from hanging on stdin
         )
 
         if result.returncode != 0:
