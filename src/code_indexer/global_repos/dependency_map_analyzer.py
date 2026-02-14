@@ -450,6 +450,14 @@ class DependencyMapAnalyzer:
         prompt += "2. Confirm it has actual code-level or integration relationships with other repos in this domain\n"
         prompt += "3. If a repo does NOT belong in this domain based on source code evidence, state this explicitly\n\n"
 
+        prompt += "## MANDATORY: Technology Stack Verification\n\n"
+        prompt += "When describing a repository's technology stack or primary language:\n"
+        prompt += "1. Search for dependency manifests (requirements.txt, package.json, Cargo.toml, go.mod, *.csproj, pom.xml, pyproject.toml)\n"
+        prompt += "2. Check actual source file extensions in the repository (.py, .ts, .js, .rs, .go, .cs, .java, .pas)\n"
+        prompt += "3. Do NOT assume technology based on tool names, library names, or general knowledge\n"
+        prompt += "4. If a repo uses a Rust library (e.g., tantivy) as a Python binding, the repo is PYTHON, not Rust\n"
+        prompt += "5. State only what the dependency manifest and source files confirm\n\n"
+
         prompt += "## MANDATORY: Evidence-Based Claims\n\n"
         prompt += "Every dependency you document MUST include:\n"
         prompt += '1. **Source reference**: The specific module, package, or subsystem where the dependency manifests (e.g., "code-indexer\'s server/mcp/handlers.py module")\n'

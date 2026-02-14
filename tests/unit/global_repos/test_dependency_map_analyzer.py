@@ -252,6 +252,48 @@ class TestPass2PerDomain:
             # Verify meta-commentary was stripped
             assert "Based on my analysis" not in content
 
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_run_pass_2_prompt_includes_tech_stack_verification(
+        self, mock_subprocess, tmp_path
+    ):
+        """Test that run_pass_2_per_domain prompt includes Technology Stack Verification mandate."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout="# Domain Analysis\n\nContent here.",
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=60
+        )
+
+        # Verify subprocess was called with prompt containing tech stack verification
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args
+        prompt = call_args[0][0][-1]  # Last element is the prompt
+
+        # Verify the Technology Stack Verification section exists
+        assert "## MANDATORY: Technology Stack Verification" in prompt
+        assert "Search for dependency manifests" in prompt
+        assert "Check actual source file extensions" in prompt
+        assert "Do NOT assume technology based on tool names" in prompt
+        assert "If a repo uses a Rust library (e.g., tantivy) as a Python binding, the repo is PYTHON, not Rust" in prompt
+
 
 class TestPass3Index:
     """Test Pass 3: Index generation (AC1)."""

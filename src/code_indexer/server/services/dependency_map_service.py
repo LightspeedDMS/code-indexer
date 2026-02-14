@@ -401,7 +401,7 @@ class DependencyMapService:
                         if line.strip() == "---":
                             in_frontmatter = not in_frontmatter
                             continue
-                        if not in_frontmatter and line.strip():
+                        if not in_frontmatter and line.strip() and not line.strip().startswith('#'):
                             description_summary = line.strip()
                             break
                 except Exception as e:

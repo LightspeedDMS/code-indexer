@@ -401,3 +401,41 @@ def test_run_full_analysis_cleans_up_claude_md(
 
     # Verify CLAUDE.md was cleaned up
     assert not claude_md.exists()
+
+
+def test_get_activated_repos_skips_markdown_headings(
+    tmp_golden_repos_root: Path,
+    mock_golden_repos_manager,
+    mock_config_manager,
+    mock_tracking_backend,
+    mock_analyzer,
+):
+    """Test _get_activated_repos skips markdown headings when extracting description."""
+    cidx_meta = tmp_golden_repos_root / "cidx-meta"
+
+    # Test Case 1: Markdown file with frontmatter + heading + actual description
+    (cidx_meta / "repo1.md").write_text(
+        "---\ntitle: Repo 1\n---\n# claude-usage\nActual description of repo 1"
+    )
+
+    # Test Case 2: Markdown file with only headings (should fall back to "No description")
+    (cidx_meta / "repo2.md").write_text("---\ntitle: Repo 2\n---\n# Heading\n## Subheading")
+
+    service = DependencyMapService(
+        golden_repos_manager=mock_golden_repos_manager,
+        config_manager=mock_config_manager,
+        tracking_backend=mock_tracking_backend,
+        analyzer=mock_analyzer,
+    )
+
+    repos = service._get_activated_repos()
+
+    # Verify repo1 extracted actual description, not heading
+    repo1 = next((r for r in repos if r["alias"] == "repo1"), None)
+    assert repo1 is not None
+    assert repo1["description_summary"] == "Actual description of repo 1"
+
+    # Verify repo2 falls back to "No description" when only headings exist
+    repo2 = next((r for r in repos if r["alias"] == "repo2"), None)
+    assert repo2 is not None
+    assert repo2["description_summary"] == "No description"
