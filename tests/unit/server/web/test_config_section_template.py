@@ -216,6 +216,7 @@ def test_api_keys_section_renders_without_tokens():
     # Mock context data with no tokens
     context = {
         "csrf_token": "test-csrf-token",
+        "restart_required_fields": RESTART_REQUIRED_FIELDS,
         "config": {
             "server": {
                 "host": "127.0.0.1",
