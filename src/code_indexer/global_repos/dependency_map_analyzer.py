@@ -17,6 +17,7 @@ Output:
 import json
 import logging
 import os
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -176,6 +177,12 @@ class DependencyMapAnalyzer:
         prompt += "AIM for 3-7 domains for a typical multi-repo codebase. If you find fewer than 3 domains,\n"
         prompt += "consider whether you may be applying too strict a threshold for integration evidence.\n\n"
 
+        prompt += "### COMPLETENESS MANDATE\n\n"
+        prompt += f"There are exactly {len(repo_list)} repositories. Your output MUST assign ALL {len(repo_list)} of them.\n"
+        prompt += "Before submitting, count the total repos across all domains - it MUST equal " + str(len(repo_list)) + ".\n"
+        prompt += "If you cannot find integration evidence for a repo, assign it to its own standalone domain.\n"
+        prompt += "MISSING REPOS = FAILED ANALYSIS. Every valid alias must appear exactly once.\n\n"
+
         prompt += "### Unassigned Repository Handling\n\n"
         prompt += "If a repository does not fit any domain (no integration evidence found), assign it to a\n"
         prompt += "single-repo domain named after the repository itself (e.g., 'code-indexer' domain with\n"
@@ -188,7 +195,8 @@ class DependencyMapAnalyzer:
         for repo in repo_list:
             alias = repo.get("alias", "unknown")
             prompt += f"- `{alias}`\n"
-        prompt += "\nAny domain containing repos not in this list will be rejected by validation.\n\n"
+        prompt += "\nAny domain containing repos not in this list will be rejected by validation.\n"
+        prompt += f"\nCOMPLETENESS CHECK: Your output must contain exactly {len(repo_list)} repos total across all domains.\n\n"
 
         prompt += "## Output Format\n\n"
         prompt += "Output ONLY valid JSON array (no markdown, no explanations).\n"
@@ -229,16 +237,21 @@ class DependencyMapAnalyzer:
                         f"'{domain.get('name')}' - not in valid alias list"
                     )
                     continue
-                # Validate path if provided - check alias appears in path
+                # Validate path if provided - check alias appears as delimited segment
                 # (lenient: allows different directory structures like .versioned/)
+                # Uses regex to avoid false positives (e.g., "db" matching "adobe")
                 claimed_path = repo_paths.get(r)
-                if claimed_path and r not in claimed_path:
-                    logger.warning(
-                        f"Pass 1 repo '{r}' has suspicious path '{claimed_path}' "
-                        f"(alias not found in path) in domain "
-                        f"'{domain.get('name')}' - removed"
-                    )
-                    continue
+                if claimed_path:
+                    # Check alias appears as a delimited segment in path (not arbitrary substring)
+                    # This handles paths like /repos/.versioned/flask-large/v_123/
+                    pattern = r'(?:^|[/\\_.-])' + re.escape(r) + r'(?:$|[/\\_.-])'
+                    if not re.search(pattern, claimed_path):
+                        logger.warning(
+                            f"Pass 1 repo '{r}' has suspicious path '{claimed_path}' "
+                            f"(alias not found in path) in domain "
+                            f"'{domain.get('name')}' - removed"
+                        )
+                        continue
                 filtered_repos.append(r)
             removed = set(original_repos) - set(filtered_repos)
             if removed:
@@ -258,6 +271,16 @@ class DependencyMapAnalyzer:
         for domain in domain_list:
             assigned_repos.update(domain.get("participating_repos", []))
 
+        # Check for duplicate repo assignments
+        all_assigned = []
+        for domain in domain_list:
+            all_assigned.extend(domain.get("participating_repos", []))
+        seen = set()
+        for r in all_assigned:
+            if r in seen:
+                logger.warning(f"Pass 1 assigned repo '{r}' to multiple domains")
+            seen.add(r)
+
         unassigned = valid_aliases - assigned_repos
         for alias in sorted(unassigned):
             # Find description from repo_list
@@ -266,10 +289,18 @@ class DependencyMapAnalyzer:
                 if r.get("alias") == alias:
                     desc = r.get("description_summary", "No description")
                     break
+
+            # Strip markdown heading markers from description
+            desc = desc.lstrip('#').strip()
+
+            # If description equals alias name or is empty, use better default
+            if not desc or desc.lower() == alias.lower():
+                desc = f"{alias} (standalone repository)"
+
             domain_list.append(
                 {
                     "name": alias,
-                    "description": f"Standalone: {desc}",
+                    "description": desc,
                     "participating_repos": [alias],
                     "evidence": f"Auto-assigned: {alias} was not placed in any domain by Pass 1",
                 }
@@ -456,10 +487,15 @@ class DependencyMapAnalyzer:
 
         prompt += "## Output Format\n\n"
         prompt += "Provide: overview, repo roles, subdomain dependencies, cross-domain connections.\n"
+        prompt += "Do NOT include any meta-commentary about your process, thinking, or search strategy.\n"
+        prompt += "Start your output directly with the analysis content (headings, sections, findings).\n\n"
         prompt += "Output ONLY the content (no markdown code blocks, no preamble).\n"
 
         # Invoke Claude CLI
         result = self._invoke_claude_cli(prompt, self.pass_timeout, max_turns)
+
+        # Strip meta-commentary from output
+        result = self._strip_meta_commentary(result)
 
         # Build YAML frontmatter
         now = datetime.now(timezone.utc).isoformat()
@@ -557,6 +593,89 @@ class DependencyMapAnalyzer:
         if text.endswith("```"):
             text = text[:-3].rstrip()
         return text
+
+    @staticmethod
+    def _strip_meta_commentary(text: str) -> str:
+        """
+        Strip meta-commentary from Claude CLI output.
+
+        Claude sometimes returns meta-commentary before the actual analysis content:
+        - "Based on my comprehensive analysis..."
+        - "Perfect. Now I have sufficient evidence..."
+        - "Let me compile the findings:"
+
+        This method strips such lines from the beginning until actual content is found.
+
+        Args:
+            text: Raw Claude CLI output
+
+        Returns:
+            Text with meta-commentary removed
+        """
+        if not text:
+            return text
+
+        lines = text.split("\n")
+
+        # Meta-commentary patterns (case-insensitive starts)
+        meta_patterns = [
+            "based on",
+            "perfect.",
+            "now i have",
+            "let me",
+            "i now have",
+            "here is",
+            "here's",
+        ]
+
+        # Find first line of actual content
+        content_start_idx = 0
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+
+            # Skip empty lines at start
+            if not stripped:
+                continue
+
+            # Skip spurious YAML-like separators
+            if stripped == "---":
+                content_start_idx = i + 1
+                continue
+
+            # Check if line is meta-commentary
+            lower = stripped.lower()
+            is_meta = any(lower.startswith(pattern) for pattern in meta_patterns)
+
+            if is_meta:
+                content_start_idx = i + 1
+                continue
+
+            # Found actual content - stop stripping
+            # Content lines start with: #, ##, -, |, **, digits (numbered lists), or regular text
+            if (stripped.startswith("#") or
+                stripped.startswith("**") or
+                stripped.startswith("-") or
+                stripped.startswith("|") or
+                (stripped and stripped[0].isdigit())):
+                break
+
+            # If we hit a line that doesn't match meta patterns and isn't clearly content,
+            # assume it's the start of actual content
+            break
+
+        # Return from content start onwards
+        result_lines = lines[content_start_idx:]
+
+        # Strip leading empty lines from the result
+        while result_lines and not result_lines[0].strip():
+            result_lines.pop(0)
+
+        # If we stripped everything, return the original text (edge case: only meta-commentary)
+        result = "\n".join(result_lines)
+        if not result.strip():
+            return text
+
+        return result
 
     @staticmethod
     def _extract_json(text: str) -> Any:

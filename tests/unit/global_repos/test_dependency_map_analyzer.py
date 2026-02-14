@@ -210,11 +210,12 @@ class TestPass2PerDomain:
 
     @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     def test_run_pass_2_writes_domain_file_with_frontmatter(self, tmp_path):
-        """Test that run_pass_2_per_domain writes domain file with YAML frontmatter."""
+        """Test that run_pass_2_per_domain writes domain file with YAML frontmatter and strips meta-commentary."""
         with patch("subprocess.run") as mock_subprocess:
+            # Mock stdout with meta-commentary that should be stripped
             mock_subprocess.return_value = MagicMock(
                 returncode=0,
-                stdout="# Authentication\n\nDomain analysis content here.",
+                stdout="Based on my analysis:\n\n# Authentication\n\nDomain analysis content here.",
             )
 
             analyzer = DependencyMapAnalyzer(
@@ -248,6 +249,8 @@ class TestPass2PerDomain:
             assert "- web-app" in content
             assert "---\n" in content
             assert "Domain analysis content here" in content
+            # Verify meta-commentary was stripped
+            assert "Based on my analysis" not in content
 
 
 class TestPass3Index:
@@ -326,6 +329,186 @@ class TestPass3Index:
             assert "repos_analyzed_count: 1" in content
             assert "domains_count: 1" in content
             assert "Catalog content" in content
+
+
+class TestPassOneValidation:
+    """Test Pass 1 post-processing validation logic."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_strips_markdown_headings_from_auto_created_description(self, mock_subprocess, tmp_path):
+        """Unassigned repos with heading-prefixed descriptions get cleaned up."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps([]),  # Empty domain list - all repos unassigned
+        )
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        repo_list = [
+            {"alias": "my-repo", "description_summary": "## My Repo Description", "clone_path": "/path/to/my-repo"},
+        ]
+        result = analyzer.run_pass_1_synthesis(staging, {}, repo_list=repo_list, max_turns=50)
+        assert len(result) == 1
+        assert result[0]["name"] == "my-repo"
+        assert result[0]["description"] == "My Repo Description"
+        assert "##" not in result[0]["description"]
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_alias_only_description_gets_standalone_suffix(self, mock_subprocess, tmp_path):
+        """When description equals alias name, use '(standalone repository)' suffix."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps([]),
+        )
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        repo_list = [
+            {"alias": "my-repo", "description_summary": "my-repo", "clone_path": "/path/to/my-repo"},
+        ]
+        result = analyzer.run_pass_1_synthesis(staging, {}, repo_list=repo_list, max_turns=50)
+        assert result[0]["description"] == "my-repo (standalone repository)"
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_accepts_versioned_directory_paths(self, mock_subprocess, tmp_path):
+        """Repos with .versioned/ paths should not be filtered out."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps([{
+                "name": "test-domain",
+                "description": "Test domain",
+                "participating_repos": ["flask-large"],
+                "repo_paths": {"flask-large": "/golden-repos/.versioned/flask-large/v_20260214"},
+            }]),
+        )
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        repo_list = [
+            {"alias": "flask-large", "description_summary": "Flask framework", "clone_path": "/golden-repos/flask-large"},
+        ]
+        result = analyzer.run_pass_1_synthesis(staging, {}, repo_list=repo_list, max_turns=50)
+        # flask-large should NOT be filtered - the .versioned path contains the alias
+        domain_repos = result[0]["participating_repos"]
+        assert "flask-large" in domain_repos
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_filters_repos_with_wrong_paths(self, mock_subprocess, tmp_path):
+        """Repos with paths not containing the alias should be filtered out."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps([{
+                "name": "test-domain",
+                "description": "Test domain",
+                "participating_repos": ["my-repo"],
+                "repo_paths": {"my-repo": "/totally/wrong/directory"},
+            }]),
+        )
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        repo_list = [
+            {"alias": "my-repo", "description_summary": "My repository", "clone_path": "/path/to/my-repo"},
+        ]
+        result = analyzer.run_pass_1_synthesis(staging, {}, repo_list=repo_list, max_turns=50)
+        # my-repo should be filtered from the domain and auto-created as standalone
+        # The original domain should be removed (empty after filtering)
+        # my-repo should appear as an auto-created standalone domain
+        standalone = [d for d in result if d["name"] == "my-repo"]
+        assert len(standalone) == 1
+        assert "Auto-assigned" in standalone[0]["evidence"]
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_short_alias_not_false_positive_in_path(self, mock_subprocess, tmp_path):
+        """Short alias like 'db' should not match path containing 'adobe'."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps([{
+                "name": "test-domain",
+                "description": "Test domain",
+                "participating_repos": ["db"],
+                "repo_paths": {"db": "/home/repos/adobe-tools/src"},
+            }]),
+        )
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        repo_list = [
+            {"alias": "db", "description_summary": "Database repo", "clone_path": "/path/to/db"},
+        ]
+        result = analyzer.run_pass_1_synthesis(staging, {}, repo_list=repo_list, max_turns=50)
+        # "db" should be filtered because "adobe-tools" doesn't contain "db" as a delimited segment
+        standalone = [d for d in result if d["name"] == "db"]
+        assert len(standalone) == 1
+        assert "Auto-assigned" in standalone[0]["evidence"]
+
+
+class TestStripMetaCommentary:
+    """Test meta-commentary stripping from Pass 2 output."""
+
+    def test_strips_based_on_preamble(self):
+        text = "Based on my comprehensive analysis, here are the findings:\n\n## Overview\n\nContent here."
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("## Overview")
+
+    def test_strips_perfect_preamble(self):
+        text = "Perfect. Now I have sufficient evidence.\n\n---\n\n## Domain Analysis\n\nContent."
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("## Domain Analysis")
+
+    def test_preserves_content_starting_with_heading(self):
+        text = "## Overview\n\nThe domain consists of..."
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result == text
+
+    def test_preserves_content_starting_with_bold(self):
+        text = "**Domain Verification**: CONFIRMED\n\nContent."
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result == text
+
+    def test_strips_multiple_meta_lines(self):
+        text = "Let me compile the findings:\n\n---\n\n# Analysis\n\nDetails."
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("# Analysis")
+
+    def test_empty_input(self):
+        assert DependencyMapAnalyzer._strip_meta_commentary("") == ""
+
+    def test_only_meta_commentary(self):
+        text = "Based on my analysis, here is the result."
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        # Should return something (at least the text if no content found)
+        assert len(result) > 0
+
+    def test_strips_meta_with_interleaved_empty_lines(self):
+        text = "Based on analysis.\n\nHere is the result:\n\n## Findings\n\nContent."
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("## Findings")
 
 
 class TestPass1JsonParseFailure:
