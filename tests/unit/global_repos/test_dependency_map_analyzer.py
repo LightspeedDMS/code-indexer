@@ -98,7 +98,13 @@ class TestPass1Synthesis:
 
         repo_descriptions = {"repo1": "Content 1", "repo2": "Content 2"}
 
-        result = analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list=[], max_turns=50)
+        # Provide repo_list with matching aliases for validation
+        repo_list = [
+            {"alias": "auth-service", "description_summary": "Auth service"},
+            {"alias": "web-app", "description_summary": "Web application"},
+        ]
+
+        result = analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list=repo_list, max_turns=50)
 
         # Verify subprocess called with correct arguments
         mock_subprocess.assert_called_once()
@@ -140,7 +146,12 @@ class TestPass1Synthesis:
             staging_dir = tmp_path / "staging"
             staging_dir.mkdir()
 
-            analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=[], max_turns=50)
+            # Provide repo_list with matching alias for validation
+            repo_list = [
+                {"alias": "repo1", "description_summary": "First repository"},
+            ]
+
+            analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=50)
 
             domains_file = staging_dir / "_domains.json"
             assert domains_file.exists()

@@ -174,6 +174,14 @@ class DependencyMapAnalyzer:
         prompt += "just the code-indexer repo). This ensures every repository appears in at least one domain.\n"
         prompt += "Do NOT leave repositories unassigned.\n\n"
 
+        prompt += "### CRITICAL: Valid Repository Aliases\n\n"
+        prompt += "ONLY the following repository aliases are valid. Do NOT invent or modify alias names.\n"
+        prompt += "Every alias in your output MUST come from this exact list:\n\n"
+        for repo in repo_list:
+            alias = repo.get("alias", "unknown")
+            prompt += f"- `{alias}`\n"
+        prompt += "\nAny domain containing repos not in this list will be rejected by validation.\n\n"
+
         prompt += "## Output Format\n\n"
         prompt += "Output ONLY valid JSON array (no markdown, no explanations):\n"
         prompt += "[\n"
@@ -192,6 +200,51 @@ class DependencyMapAnalyzer:
             raise RuntimeError(
                 f"Pass 1 (Synthesis) returned unparseable output: {e}"
             ) from e
+
+        # Validate Pass 1 output: filter hallucinated repos, catch unassigned repos
+        valid_aliases = {r.get("alias") for r in repo_list}
+
+        # Filter out hallucinated repo aliases from domain assignments
+        for domain in domain_list:
+            original_repos = domain.get("participating_repos", [])
+            filtered_repos = [r for r in original_repos if r in valid_aliases]
+            removed = set(original_repos) - set(filtered_repos)
+            if removed:
+                logger.warning(
+                    f"Pass 1 hallucinated repo(s) {removed} in domain "
+                    f"'{domain.get('name')}' - removed"
+                )
+            domain["participating_repos"] = filtered_repos
+
+        # Remove domains that became empty after filtering
+        domain_list = [
+            d for d in domain_list if d.get("participating_repos")
+        ]
+
+        # Auto-create standalone domains for unassigned repos
+        assigned_repos = set()
+        for domain in domain_list:
+            assigned_repos.update(domain.get("participating_repos", []))
+
+        unassigned = valid_aliases - assigned_repos
+        for alias in sorted(unassigned):
+            # Find description from repo_list
+            desc = "No description"
+            for r in repo_list:
+                if r.get("alias") == alias:
+                    desc = r.get("description_summary", "No description")
+                    break
+            domain_list.append(
+                {
+                    "name": alias,
+                    "description": f"Standalone: {desc}",
+                    "participating_repos": [alias],
+                    "evidence": f"Auto-assigned: {alias} was not placed in any domain by Pass 1",
+                }
+            )
+            logger.warning(
+                f"Pass 1 did not assign repo '{alias}' - auto-creating standalone domain"
+            )
 
         # Write domains.json to staging
         domains_file = staging_dir / "_domains.json"
@@ -268,6 +321,20 @@ class DependencyMapAnalyzer:
         prompt += "- `limit`: Number of results (start with 10)\n\n"
         prompt += "This reveals cross-repo references that filesystem exploration alone cannot find.\n"
         prompt += "Do NOT skip MCP searches - they are essential for discovering service integration and semantic coupling.\n\n"
+
+        prompt += "### Minimum Search Requirements\n\n"
+        prompt += "You MUST call the `search_code` MCP tool AT LEAST 3 times during this analysis.\n"
+        prompt += "Failure to use MCP search invalidates the analysis. Recommended searches:\n"
+        prompt += "1. Each participating repo name (to find cross-repo references)\n"
+        prompt += "2. Key class/function/module names discovered during source code exploration\n"
+        prompt += "3. Shared identifiers, API endpoints, or configuration keys\n\n"
+        prompt += "### All Repository Aliases (for cross-domain reference searches)\n\n"
+        prompt += "These are ALL repos in the ecosystem. Search for these names to find cross-domain connections:\n\n"
+        all_aliases = sorted(r.get("alias", "unknown") for r in repo_list)
+        for alias in all_aliases:
+            if alias not in participating_repos:
+                prompt += f"- `{alias}` (other domain)\n"
+        prompt += "\n"
 
         prompt += "## Source Code Exploration Mandate\n\n"
         prompt += "DO NOT rely solely on README files or documentation. Actively explore:\n"
