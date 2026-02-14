@@ -72,9 +72,15 @@ class DependencyMapAnalyzer:
         for repo in repo_list:
             alias = repo.get("alias", "unknown")
             summary = repo.get("description_summary", "No description")
+            clone_path = repo.get("clone_path", "unknown")
             content += f"- **{alias}**: {summary}\n"
+            content += f"  - Path: `{clone_path}`\n"
 
-        content += "\n## Task\n\n"
+        content += "\n## Tools Available\n\n"
+        content += "You have a `cidx-local` MCP server available for semantic code search across all indexed repositories.\n"
+        content += "Use it to search for cross-repo references, find integration patterns, and discover semantic dependencies.\n\n"
+
+        content += "## Task\n\n"
         content += (
             "Analyze cross-repository dependencies at the domain and subdomain level.\n"
         )
@@ -97,6 +103,7 @@ class DependencyMapAnalyzer:
         self,
         staging_dir: Path,
         repo_descriptions: Dict[str, str],
+        repo_list: List[Dict[str, Any]],
         max_turns: int,
     ) -> List[Dict[str, Any]]:
         """
@@ -107,6 +114,7 @@ class DependencyMapAnalyzer:
         Args:
             staging_dir: Staging directory for output files
             repo_descriptions: Dict mapping repo alias to description content
+            repo_list: List of repository metadata dicts with alias and clone_path
             max_turns: Maximum Claude CLI turns for this pass
 
         Returns:
@@ -121,6 +129,15 @@ class DependencyMapAnalyzer:
         for alias, content in repo_descriptions.items():
             prompt += f"### {alias}\n\n"
             prompt += f"{content}\n\n"
+
+        prompt += "## Repository Filesystem Locations\n\n"
+        prompt += "Each repository is available on disk. Use these paths to explore source code:\n\n"
+        # Build alias-to-path mapping from repo_list
+        for repo in repo_list:
+            alias = repo.get("alias", "unknown")
+            clone_path = repo.get("clone_path", "unknown")
+            prompt += f"- **{alias}**: `{clone_path}`\n"
+        prompt += "\n"
 
         prompt += "## Instructions\n\n"
         prompt += "Identify domain clusters and list participating repos per domain.\n\n"
@@ -178,6 +195,7 @@ class DependencyMapAnalyzer:
         staging_dir: Path,
         domain: Dict[str, Any],
         domain_list: List[Dict[str, Any]],
+        repo_list: List[Dict[str, Any]],
         max_turns: int,
         previous_domain_dir: Optional[Path] = None,
     ) -> None:
@@ -190,6 +208,7 @@ class DependencyMapAnalyzer:
             staging_dir: Staging directory for output files
             domain: Domain dict with 'name', 'description', 'participating_repos'
             domain_list: Full list of all domains (for cross-domain awareness)
+            repo_list: List of repository metadata dicts with alias and clone_path
             max_turns: Maximum Claude CLI turns for this pass
             previous_domain_dir: Previous dependency-map dir for incremental improvement
         """
@@ -207,6 +226,21 @@ class DependencyMapAnalyzer:
 
         prompt += f"\n## Focus Analysis on Domain: {domain_name}\n\n"
         prompt += f"Analyze dependencies for: {', '.join(participating_repos)}\n\n"
+
+        prompt += "## Repository Filesystem Locations\n\n"
+        prompt += "IMPORTANT: Each repository is a directory on disk. You MUST explore source code using these paths.\n"
+        prompt += "Start by listing each repo's directory structure, then read key files (entry points, configs, manifests).\n\n"
+        # Build path mapping for participating repos
+        path_map = {r.get("alias"): r.get("clone_path") for r in repo_list}
+        for repo_alias in participating_repos:
+            clone_path = path_map.get(repo_alias, "path not found")
+            prompt += f"- **{repo_alias}**: `{clone_path}`\n"
+        prompt += "\n"
+
+        prompt += "## CIDX Semantic Search (MCP Tools)\n\n"
+        prompt += "You have a `cidx-local` MCP server available for semantic code search.\n"
+        prompt += "Use it to find cross-repo references and discover integration patterns that filesystem exploration alone may miss.\n"
+        prompt += "For example, search for repo names across all repositories to find who references them.\n\n"
 
         prompt += "## Source Code Exploration Mandate\n\n"
         prompt += "DO NOT rely solely on README files or documentation. Actively explore:\n"
@@ -256,6 +290,17 @@ class DependencyMapAnalyzer:
         prompt += "- General knowledge about how similar systems typically work\n"
         prompt += "- Documentation claims you cannot verify in source code\n\n"
         prompt += "If you cannot find concrete evidence of a dependency in actual source files, DO NOT include it.\n\n"
+
+        prompt += "### External Dependency Verification\n\n"
+        prompt += "For external/third-party dependencies, you MUST read the actual manifest file:\n"
+        prompt += "- Python: requirements.txt, setup.py, pyproject.toml\n"
+        prompt += "- JavaScript/TypeScript: package.json\n"
+        prompt += "- .NET/C#: *.csproj, *.sln, packages.config\n"
+        prompt += "- Go: go.mod\n"
+        prompt += "- Java: pom.xml, build.gradle\n"
+        prompt += "- Rust: Cargo.toml\n\n"
+        prompt += "DO NOT list external dependencies from memory or general knowledge of similar systems.\n"
+        prompt += "If you cannot find the dependency manifest file, state 'dependency manifest not found' rather than guessing.\n\n"
 
         prompt += "## Granularity Guidelines\n\n"
         prompt += "Document at MODULE/SUBSYSTEM level, not files or functions.\n\n"

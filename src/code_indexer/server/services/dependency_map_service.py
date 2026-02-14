@@ -232,6 +232,7 @@ class DependencyMapService:
         domain_list = self._analyzer.run_pass_1_synthesis(
             staging_dir=staging_dir,
             repo_descriptions=repo_descriptions,
+            repo_list=repo_list,
             max_turns=config.dependency_map_pass1_max_turns,
         )
 
@@ -243,6 +244,7 @@ class DependencyMapService:
                     staging_dir=staging_dir,
                     domain=domain,
                     domain_list=domain_list,
+                    repo_list=repo_list,
                     max_turns=config.dependency_map_pass2_max_turns,
                     previous_domain_dir=final_dir if final_dir.exists() else None,
                 )

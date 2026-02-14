@@ -98,7 +98,7 @@ class TestPass1Synthesis:
 
         repo_descriptions = {"repo1": "Content 1", "repo2": "Content 2"}
 
-        result = analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, max_turns=50)
+        result = analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list=[], max_turns=50)
 
         # Verify subprocess called with correct arguments
         mock_subprocess.assert_called_once()
@@ -140,7 +140,7 @@ class TestPass1Synthesis:
             staging_dir = tmp_path / "staging"
             staging_dir.mkdir()
 
-            analyzer.run_pass_1_synthesis(staging_dir, {}, max_turns=50)
+            analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=[], max_turns=50)
 
             domains_file = staging_dir / "_domains.json"
             assert domains_file.exists()
@@ -181,7 +181,7 @@ class TestPass2PerDomain:
 
         domain_list = [domain]
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, domain_list, max_turns=60)
+        analyzer.run_pass_2_per_domain(staging_dir, domain, domain_list, repo_list=[], max_turns=60)
 
         # Verify subprocess called with full timeout
         mock_subprocess.assert_called_once()
@@ -217,7 +217,7 @@ class TestPass2PerDomain:
             }
 
             analyzer.run_pass_2_per_domain(
-                staging_dir, domain, [domain], max_turns=60
+                staging_dir, domain, [domain], repo_list=[], max_turns=60
             )
 
             domain_file = staging_dir / "authentication.md"
@@ -337,7 +337,7 @@ class TestPass1JsonParseFailure:
         staging_dir.mkdir()
 
         with pytest.raises(RuntimeError, match="Pass 1 \\(Synthesis\\) returned unparseable output"):
-            analyzer.run_pass_1_synthesis(staging_dir, {}, max_turns=50)
+            analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=[], max_turns=50)
 
 
 class TestApiKeyValidation:
@@ -360,7 +360,7 @@ class TestApiKeyValidation:
 
         # Try to run Pass 1 - should raise before subprocess.run is called
         with pytest.raises(RuntimeError, match="Claude API key not available"):
-            analyzer.run_pass_1_synthesis(staging_dir, {}, max_turns=50)
+            analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=[], max_turns=50)
 
         # Verify subprocess was never called
         mock_subprocess.assert_not_called()
@@ -403,7 +403,7 @@ class TestIncrementalPass2:
         }
 
         analyzer.run_pass_2_per_domain(
-            staging_dir, domain, [domain], max_turns=60, previous_domain_dir=previous_dir
+            staging_dir, domain, [domain], repo_list=[], max_turns=60, previous_domain_dir=previous_dir
         )
 
         # Verify subprocess was called with prompt containing previous content
