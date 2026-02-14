@@ -3191,12 +3191,18 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 {"success": False, "error": "Missing required parameter: content"}
             )
 
-        # Start auto-watch before file creation (Story #640)
+        # Start auto-watch before file creation (Story #640, Story #197 AC3)
         try:
-            activated_repo_manager = ActivatedRepoManager()
-            repo_path = activated_repo_manager.get_activated_repo_path(
-                username=user.username, user_alias=repository_alias
-            )
+            # Check if this is a write exception (e.g., cidx-meta-global)
+            if file_crud_service.is_write_exception(repository_alias):
+                # Use canonical golden repo path for exceptions
+                repo_path = str(file_crud_service.get_write_exception_path(repository_alias))
+            else:
+                # Use activated repo path for normal repos
+                activated_repo_manager = ActivatedRepoManager()
+                repo_path = activated_repo_manager.get_activated_repo_path(
+                    username=user.username, user_alias=repository_alias
+                )
             auto_watch_manager.start_watch(repo_path)
         except Exception as e:
             # Log but don't fail - auto-watch is enhancement, not critical
@@ -3317,12 +3323,18 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 {"success": False, "error": "Missing required parameter: content_hash"}
             )
 
-        # Start auto-watch before file edit (Story #640)
+        # Start auto-watch before file edit (Story #640, Story #197 AC3)
         try:
-            activated_repo_manager = ActivatedRepoManager()
-            repo_path = activated_repo_manager.get_activated_repo_path(
-                username=user.username, user_alias=repository_alias
-            )
+            # Check if this is a write exception (e.g., cidx-meta-global)
+            if file_crud_service.is_write_exception(repository_alias):
+                # Use canonical golden repo path for exceptions
+                repo_path = str(file_crud_service.get_write_exception_path(repository_alias))
+            else:
+                # Use activated repo path for normal repos
+                activated_repo_manager = ActivatedRepoManager()
+                repo_path = activated_repo_manager.get_activated_repo_path(
+                    username=user.username, user_alias=repository_alias
+                )
             auto_watch_manager.start_watch(repo_path)
         except Exception as e:
             # Log but don't fail - auto-watch is enhancement, not critical
@@ -3439,12 +3451,18 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 {"success": False, "error": "Missing required parameter: file_path"}
             )
 
-        # Start auto-watch before file deletion (Story #640)
+        # Start auto-watch before file deletion (Story #640, Story #197 AC3)
         try:
-            activated_repo_manager = ActivatedRepoManager()
-            repo_path = activated_repo_manager.get_activated_repo_path(
-                username=user.username, user_alias=repository_alias
-            )
+            # Check if this is a write exception (e.g., cidx-meta-global)
+            if file_crud_service.is_write_exception(repository_alias):
+                # Use canonical golden repo path for exceptions
+                repo_path = str(file_crud_service.get_write_exception_path(repository_alias))
+            else:
+                # Use activated repo path for normal repos
+                activated_repo_manager = ActivatedRepoManager()
+                repo_path = activated_repo_manager.get_activated_repo_path(
+                    username=user.username, user_alias=repository_alias
+                )
             auto_watch_manager.start_watch(repo_path)
         except Exception as e:
             # Log but don't fail - auto-watch is enhancement, not critical
@@ -5583,6 +5601,66 @@ def _build_langfuse_section(
     }
 
 
+def _build_dependency_map_section(cidx_meta_path: Path) -> str:
+    """
+    Build dependency map section for quick reference (Story #194).
+
+    Args:
+        cidx_meta_path: Path to cidx-meta directory
+
+    Returns:
+        String with dependency map documentation when conditions met,
+        empty string otherwise
+    """
+    from pathlib import Path
+
+    # Check if dependency-map directory exists
+    dependency_map_dir = cidx_meta_path / "dependency-map"
+    if not dependency_map_dir.is_dir():
+        return ""
+
+    # Check if _index.md exists (required for complete map)
+    index_file = dependency_map_dir / "_index.md"
+    if not index_file.is_file():
+        return ""
+
+    # Count domain files (exclude _index.md and files starting with _)
+    domain_files = [
+        f for f in dependency_map_dir.glob("*.md")
+        if f.name != "_index.md" and not f.name.startswith("_")
+    ]
+    domain_count = len(domain_files)
+
+    # Build section content
+    section = f"""
+CROSS-REPOSITORY DEPENDENCY MAP
+
+The dependency map in cidx-meta/dependency-map/ provides a curated overview of cross-repository dependencies and architectural relationships. This map is MORE EFFICIENT than searching each repository individually.
+
+CHECK THE DEPENDENCY MAP FIRST before doing exploratory searches across repositories.
+
+Location: cidx-meta/dependency-map/ directory
+Available domain files: {domain_count}
+
+Recommended workflow for cross-repository tasks:
+1. Read cidx-meta/dependency-map/_index.md to understand the map structure
+2. Identify relevant domain files from the index
+3. Read the specific domain file(s) to understand dependencies
+4. Use the map's guidance to explore specific repositories efficiently
+
+This approach is more efficient than searching each repository individually because the dependency map provides curated architectural knowledge and relationship context.
+
+Correcting Inaccuracies:
+If you discover an inaccuracy in the dependency map, you can correct it directly:
+1. Use `edit_file` with repository_alias `cidx-meta-global` to edit the domain file
+2. Preserve the YAML frontmatter structure
+3. The correction takes effect immediately (auto-reindexed via watch)
+4. Next scheduled refresh will re-verify your correction against source code
+""".strip()
+
+    return section
+
+
 def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Generate quick reference documentation for available MCP tools.
@@ -5750,6 +5828,14 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             "category_filter": category_filter,
             "tools": tools_summary,
         }
+
+        # Story #194: Add dependency map section when available (prominent positioning)
+        if app_module.golden_repo_manager:
+            from pathlib import Path
+            cidx_meta_path = Path(app_module.golden_repo_manager.golden_repos_dir) / "cidx-meta"
+            dependency_map_section = _build_dependency_map_section(cidx_meta_path)
+            if dependency_map_section:
+                response["dependency_map"] = dependency_map_section
 
         # Conditionally add Langfuse section
         langfuse_section = _build_langfuse_section(
@@ -11470,8 +11556,119 @@ def handle_end_trace(
         return _mcp_response({"status": "error", "message": str(e)})
 
 
+def handle_trigger_dependency_analysis(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """
+    Trigger dependency map analysis manually (Story #195).
+
+    Args:
+        args: Tool arguments with optional mode ("full" or "delta")
+        user: The authenticated user making the request
+
+    Returns:
+        MCP response with job_id, mode, and status
+    """
+    import threading
+    import uuid
+    from datetime import datetime, timezone
+
+    try:
+        # AC4: Default mode is delta
+        mode = args.get("mode", "delta") or "delta"
+
+        # AC8: Validate mode parameter
+        if mode not in ["full", "delta"]:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": f"Invalid mode '{mode}'. Must be 'full' or 'delta'.",
+                    "job_id": None,
+                }
+            )
+
+        # AC6: Check if feature is enabled
+        config = getattr(app_module, "config", None)
+        if not config or not getattr(config, "dependency_map_enabled", False):
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Dependency map analysis is disabled",
+                    "job_id": None,
+                }
+            )
+
+        # AC5: Check if analysis is already running
+        dependency_map_service = getattr(app_module, "dependency_map_service", None)
+        if not dependency_map_service:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Dependency map service not available",
+                    "job_id": None,
+                }
+            )
+
+        if not dependency_map_service.is_available():
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Dependency map analysis already in progress",
+                    "job_id": None,
+                }
+            )
+
+        # Generate job ID
+        job_id = f"dep-map-{mode}-{uuid.uuid4().hex[:8]}-{int(datetime.now(timezone.utc).timestamp())}"
+
+        # AC2/AC3: Spawn background thread for analysis
+        def run_analysis_job():
+            """Background job to run dependency map analysis."""
+            try:
+                if mode == "full":
+                    dependency_map_service.run_full_analysis()
+                else:
+                    dependency_map_service.run_delta_analysis()
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "DEPMAP-TRIGGER-001",
+                        f"Background dependency map analysis failed: {e}",
+                        extra={"correlation_id": get_correlation_id(), "job_id": job_id},
+                    )
+                )
+
+        # Start background daemon thread
+        thread = threading.Thread(target=run_analysis_job, daemon=True)
+        thread.start()
+
+        # AC2/AC3: Return job_id immediately
+        return _mcp_response(
+            {
+                "success": True,
+                "job_id": job_id,
+                "mode": mode,
+                "status": "queued",
+                "message": f"Dependency map {mode} analysis started",
+            }
+        )
+
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "DEPMAP-TRIGGER-002",
+                f"Error triggering dependency map analysis: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return _mcp_response(
+            {"success": False, "error": str(e), "job_id": None}
+        )
+
+
 HANDLER_REGISTRY["scip_cleanup_workspaces"] = handle_scip_cleanup_workspaces
 HANDLER_REGISTRY["scip_cleanup_status"] = handle_scip_cleanup_status
 HANDLER_REGISTRY["start_trace"] = handle_start_trace
 HANDLER_REGISTRY["end_trace"] = handle_end_trace
 HANDLER_REGISTRY["list_repo_categories"] = list_repo_categories
+HANDLER_REGISTRY["trigger_dependency_analysis"] = handle_trigger_dependency_analysis

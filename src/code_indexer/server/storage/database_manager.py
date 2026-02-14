@@ -294,6 +294,18 @@ class DatabaseSchema:
         )
     """
 
+    # Story #192: Dependency Map Tracking table (singleton)
+    CREATE_DEPENDENCY_MAP_TRACKING_TABLE = """
+        CREATE TABLE IF NOT EXISTS dependency_map_tracking (
+            id INTEGER PRIMARY KEY,
+            last_run TEXT,
+            next_run TEXT,
+            status TEXT DEFAULT 'pending',
+            commit_hashes TEXT,
+            error_message TEXT
+        )
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -365,6 +377,8 @@ class DatabaseSchema:
             conn.execute(self.CREATE_REPO_CATEGORIES_TABLE)
             # Story #190: Description Refresh Tracking
             conn.execute(self.CREATE_DESCRIPTION_REFRESH_TRACKING_TABLE)
+            # Story #192: Dependency Map Tracking
+            conn.execute(self.CREATE_DEPENDENCY_MAP_TRACKING_TABLE)
 
             conn.commit()
 

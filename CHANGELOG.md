@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.0.0] - 2026-02-13
+
+### Added
+
+- **Inter-Repository Semantic Dependency Map (Epic #191)** - Multi-pass Claude CLI analysis pipeline that examines source code across all registered golden repos, identifies domain-level relationships (imports, API contracts, shared types, config references, message queues), and produces queryable documents in cidx-meta/dependency-map/. MCP clients can now determine the relevant repo set for cross-repo tasks by reading the dependency map instead of performing exploratory searches.
+
+  - **Full Analysis Pipeline (Story #192)**: Three-pass Claude CLI pipeline (Synthesis -> Per-domain Deep Dive -> Index Generation) with stage-then-swap atomicity. Produces _index.md (domain catalog + repo-to-domain matrix) and per-domain .md files with YAML frontmatter. New DependencyMapAnalyzer and DependencyMapService classes. SQLite tracking table for run state and commit hashes.
+
+  - **Incremental Delta Refresh (Story #193)**: Scheduled daemon thread with configurable interval (default: weekly). Three-way change detection (changed/new/removed repos) via metadata.json current_commit comparison. Updates only affected domain files in-place. Self-correction mandate in merge prompts prevents stale dependency accumulation.
+
+  - **MCP Quick Reference Integration (Story #194)**: New _build_dependency_map_section() in handlers.py. Dynamically shown when dependency-map/ exists with _index.md. Directs MCP clients to check the dependency map FIRST before exploratory searching. Includes domain count and step-by-step workflow.
+
+  - **Manual Trigger MCP Tool (Story #195)**: New trigger_dependency_analysis tool supporting full and delta modes. Returns job ID for progress tracking. Non-blocking lock prevents concurrent runs. Validates configuration (dependency_map_enabled) before execution.
+
+  - **Direct cidx-meta Editing (Story #197)**: Generic global repo write exceptions map allowing power users to edit cidx-meta-global directly via MCP file CRUD tools. Pre-seeded at bootstrap. Auto-watch triggers re-indexing on edits. Quick reference includes correction workflow guidance.
+
+- **New configuration fields**: dependency_map_enabled (default: False), dependency_map_interval_hours (default: 168/weekly), dependency_map_pass_timeout_seconds (default: 600). Accessible via Web UI Config Screen.
+
+---
+
 ## [8.17.0] - 2026-02-13
 
 ### Improved

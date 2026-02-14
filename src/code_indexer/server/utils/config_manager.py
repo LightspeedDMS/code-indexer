@@ -394,12 +394,12 @@ class IndexingConfig:
 @dataclass
 class ClaudeIntegrationConfig:
     """
-    Claude CLI integration configuration (Story #15 - AC3, Story #20, Story #23, Story #190).
+    Claude CLI integration configuration (Story #15 - AC3, Story #20, Story #23, Story #190, Story #192).
 
     Contains settings for Claude CLI integration that were previously
     loose settings on ServerConfig, plus VoyageAI API key (Story #20),
-    scheduled catch-up settings (Story #23 - AC6), and description refresh
-    scheduling (Story #190).
+    scheduled catch-up settings (Story #23 - AC6), description refresh
+    scheduling (Story #190), and dependency map configuration (Story #192).
     """
 
     # Anthropic API key for Claude CLI (moved from ServerConfig)
@@ -419,6 +419,21 @@ class ClaudeIntegrationConfig:
     scheduled_catchup_interval_minutes: int = 60
     # Research Assistant Claude CLI timeout in seconds (default: 20 minutes)
     research_assistant_timeout_seconds: int = 1200
+    # Story #192: Dependency map configuration
+    # Enable/disable dependency map generation
+    dependency_map_enabled: bool = False
+    # Dependency map refresh interval in hours (default: 168 = 1 week)
+    dependency_map_interval_hours: int = 168
+    # Pass timeout in seconds (default: 600 = 10 minutes, Pass 2 uses full, Pass 1/3 use half)
+    dependency_map_pass_timeout_seconds: int = 600
+    # Pass 1 (synthesis) max turns (default: 50)
+    dependency_map_pass1_max_turns: int = 50
+    # Pass 2 (per-domain) max turns (default: 60)
+    dependency_map_pass2_max_turns: int = 60
+    # Pass 3 (index) max turns (default: 30)
+    dependency_map_pass3_max_turns: int = 30
+    # Delta analysis max turns (default: 30, for future incremental updates)
+    dependency_map_delta_max_turns: int = 30
 
 
 @dataclass

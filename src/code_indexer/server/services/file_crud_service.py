@@ -56,6 +56,11 @@ class FileCRUDService:
     All operations require:
     - repo_alias: User's repository alias
     - username: Username for ActivatedRepoManager lookup
+
+    Write Exceptions (Story #197):
+    - Allows direct editing of golden repos like cidx-meta
+    - Bypasses activated repo requirement for registered aliases
+    - Uses canonical golden repo path instead of activated copy
     """
 
     def __init__(self):
@@ -64,6 +69,69 @@ class FileCRUDService:
         from ..repositories.activated_repo_manager import ActivatedRepoManager
 
         self.activated_repo_manager = ActivatedRepoManager()
+        # Write exceptions map: alias -> canonical path (Story #197)
+        self._global_write_exceptions: Dict[str, Path] = {}
+
+    def register_write_exception(self, alias: str, canonical_path: Path) -> None:
+        """
+        Register a golden repo alias for direct write access (Story #197).
+
+        Allows power users to edit golden repos directly without activation.
+        Used for cidx-meta dependency map corrections.
+
+        Args:
+            alias: Repository alias (e.g., 'cidx-meta-global')
+            canonical_path: Canonical path to golden repo
+        """
+        self._global_write_exceptions[alias] = canonical_path
+
+    def is_write_exception(self, repo_alias: str) -> bool:
+        """
+        Check if a repository alias is registered as a write exception.
+
+        Args:
+            repo_alias: Repository alias to check
+
+        Returns:
+            True if alias is in write exceptions map, False otherwise
+        """
+        return repo_alias in self._global_write_exceptions
+
+    def get_write_exception_path(self, repo_alias: str) -> Optional[Path]:
+        """
+        Get the canonical path for a write exception alias.
+
+        Args:
+            repo_alias: Repository alias to look up
+
+        Returns:
+            Canonical path if alias is registered, None otherwise
+        """
+        return self._global_write_exceptions.get(repo_alias)
+
+    def _resolve_repo_path(self, repo_alias: str, username: str) -> Path:
+        """
+        Resolve repository path, checking write exceptions first.
+
+        Args:
+            repo_alias: Repository alias
+            username: Username (for activated repo lookup)
+
+        Returns:
+            Path to repository (exception path or activated repo path)
+
+        Raises:
+            ValueError: If repo not found in either exceptions or activated repos
+        """
+        # Check write exceptions first (Story #197 AC1)
+        if repo_alias in self._global_write_exceptions:
+            return self._global_write_exceptions[repo_alias]
+
+        # Fall back to activated repo manager
+        repo_path_str = self.activated_repo_manager.get_activated_repo_path(
+            username=username, user_alias=repo_alias
+        )
+        return Path(repo_path_str)
 
     def create_file(
         self, repo_alias: str, file_path: str, content: str, username: str
@@ -98,13 +166,11 @@ class FileCRUDService:
         # Validate path security
         self._validate_crud_path(file_path, "create_file")
 
-        # Resolve repository path
-        repo_path = self.activated_repo_manager.get_activated_repo_path(
-            username=username, user_alias=repo_alias
-        )
+        # Resolve repository path (checks write exceptions first - Story #197)
+        repo_path = self._resolve_repo_path(repo_alias, username)
 
         # Construct full file path
-        full_path = Path(repo_path) / file_path
+        full_path = repo_path / file_path
 
         # Check if file already exists
         if full_path.exists():
@@ -178,13 +244,11 @@ class FileCRUDService:
         # Validate path security
         self._validate_crud_path(file_path, "edit_file")
 
-        # Resolve repository path
-        repo_path = self.activated_repo_manager.get_activated_repo_path(
-            username=username, user_alias=repo_alias
-        )
+        # Resolve repository path (checks write exceptions first - Story #197)
+        repo_path = self._resolve_repo_path(repo_alias, username)
 
         # Construct full file path
-        full_path = Path(repo_path) / file_path
+        full_path = repo_path / file_path
 
         if not full_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -269,13 +333,11 @@ class FileCRUDService:
         # Validate path security
         self._validate_crud_path(file_path, "delete_file")
 
-        # Resolve repository path
-        repo_path = self.activated_repo_manager.get_activated_repo_path(
-            username=username, user_alias=repo_alias
-        )
+        # Resolve repository path (checks write exceptions first - Story #197)
+        repo_path = self._resolve_repo_path(repo_alias, username)
 
         # Construct full file path
-        full_path = Path(repo_path) / file_path
+        full_path = repo_path / file_path
 
         if not full_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")

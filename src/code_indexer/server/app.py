@@ -2738,6 +2738,78 @@ def create_app() -> FastAPI:
                 )
             )
 
+        # Startup: Initialize Dependency Map Scheduler (Story #193)
+        dependency_map_service = None
+        logger.info(
+            "Server startup: Initializing dependency map scheduler",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.dependency_map_service import (
+                DependencyMapService,
+            )
+            from code_indexer.global_repos.dependency_map_analyzer import (
+                DependencyMapAnalyzer,
+            )
+            from code_indexer.server.storage.sqlite_backends import (
+                DependencyMapTrackingBackend,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+            from code_indexer.server.repositories.golden_repo_manager import (
+                get_golden_repo_manager,
+            )
+
+            # Get dependencies
+            config_service = get_config_service()
+            server_config = config_service.get_config()
+            db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")
+            golden_repos_manager = get_golden_repo_manager()
+
+            # Create tracking backend
+            tracking_backend = DependencyMapTrackingBackend(db_path)
+
+            # Create analyzer
+            cidx_meta_path = Path(golden_repos_dir) / "cidx-meta"
+            analyzer = DependencyMapAnalyzer(
+                golden_repos_root=Path(golden_repos_dir),
+                cidx_meta_path=cidx_meta_path,
+                pass_timeout=server_config.claude_integration_config.dependency_map_pass_timeout_seconds,
+            )
+
+            # Create service
+            dependency_map_service = DependencyMapService(
+                golden_repos_manager=golden_repos_manager,
+                config_manager=config_service,
+                tracking_backend=tracking_backend,
+                analyzer=analyzer,
+            )
+
+            # Start scheduler (internally checks if enabled)
+            dependency_map_service.start_scheduler()
+            app.state.dependency_map_service = dependency_map_service
+
+            if server_config.claude_integration_config.dependency_map_enabled:
+                logger.info(
+                    f"Dependency map scheduler started "
+                    f"(interval: {server_config.claude_integration_config.dependency_map_interval_hours}h)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.info(
+                    "Dependency map scheduler is disabled (can be enabled in Web UI)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
+        except Exception as e:
+            # Log error but don't block server startup
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-022",
+                    f"Failed to initialize dependency map scheduler: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Startup: Initialize and start SelfMonitoringService (Epic #71)
         self_monitoring_service = None
         logger.info(
@@ -3256,6 +3328,27 @@ def create_app() -> FastAPI:
                     )
                 )
 
+        # Shutdown: Stop dependency map scheduler (Story #193)
+        dependency_map_service_state = getattr(
+            app.state, "dependency_map_service", None
+        )
+        if dependency_map_service_state is not None:
+            try:
+                dependency_map_service_state.stop_scheduler()
+                logger.info(
+                    "Dependency map scheduler stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-028",
+                        f"Error stopping dependency map scheduler: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
         # Shutdown: Stop self-monitoring service (Epic #71)
         if self_monitoring_service is not None:
             try:
@@ -3459,11 +3552,20 @@ def create_app() -> FastAPI:
 
     # Migration and bootstrap using the main golden_repo_manager instance
     try:
-        migrate_legacy_cidx_meta(golden_repo_manager, str(golden_repos_dir))
-        bootstrap_cidx_meta(golden_repo_manager, str(golden_repos_dir))
-        register_langfuse_golden_repos(golden_repo_manager, str(golden_repos_dir))
+        migrate_legacy_cidx_meta(golden_repo_manager, golden_repo_manager.golden_repos_dir)
+        bootstrap_cidx_meta(golden_repo_manager, golden_repo_manager.golden_repos_dir)
+        register_langfuse_golden_repos(golden_repo_manager, golden_repo_manager.golden_repos_dir)
         logger.info(
             "cidx-meta migration and bootstrap completed",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+        # Register cidx-meta-global as write exception (Story #197 AC1/AC4)
+        from code_indexer.server.services.file_crud_service import file_crud_service
+        cidx_meta_path = Path(golden_repo_manager.golden_repos_dir) / "cidx-meta"
+        file_crud_service.register_write_exception("cidx-meta-global", cidx_meta_path)
+        logger.info(
+            "Registered cidx-meta-global as write exception for direct editing",
             extra={"correlation_id": get_correlation_id()},
         )
     except Exception as e:

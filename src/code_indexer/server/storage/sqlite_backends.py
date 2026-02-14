@@ -16,6 +16,9 @@ from .database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
 
+# Sentinel value for distinguishing "not provided" from "explicitly None"
+_UNSET = object()
+
 
 class GlobalReposSqliteBackend:
     """
@@ -1674,6 +1677,125 @@ class GoldenRepoMetadataSqliteBackend:
             )
 
         return result
+
+    def close(self) -> None:
+        """Close database connections."""
+        self._conn_manager.close_all()
+
+
+class DependencyMapTrackingBackend:
+    """
+    SQLite backend for dependency map tracking (Story #192).
+
+    Uses a singleton row (id=1) to track dependency map analysis state.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        """Initialize the backend."""
+        self._conn_manager = DatabaseConnectionManager(db_path)
+
+    def get_tracking(self) -> Dict[str, Any]:
+        """
+        Get the singleton tracking record.
+
+        Initializes the singleton row if it doesn't exist.
+
+        Returns:
+            Dictionary with tracking data (id, last_run, next_run, status,
+            commit_hashes, error_message)
+        """
+        conn = self._conn_manager.get_connection()
+
+        # Try to fetch existing singleton row
+        cursor = conn.execute(
+            """SELECT id, last_run, next_run, status, commit_hashes, error_message
+               FROM dependency_map_tracking WHERE id = 1"""
+        )
+        row = cursor.fetchone()
+
+        if row is None:
+            # Initialize singleton row
+            def operation(conn):
+                conn.execute(
+                    """INSERT INTO dependency_map_tracking (id, status)
+                       VALUES (1, 'pending')"""
+                )
+                return None
+
+            self._conn_manager.execute_atomic(operation)
+
+            # Fetch newly created row
+            cursor = conn.execute(
+                """SELECT id, last_run, next_run, status, commit_hashes, error_message
+                   FROM dependency_map_tracking WHERE id = 1"""
+            )
+            row = cursor.fetchone()
+
+        return {
+            "id": row[0],
+            "last_run": row[1],
+            "next_run": row[2],
+            "status": row[3],
+            "commit_hashes": row[4],
+            "error_message": row[5],
+        }
+
+    def update_tracking(
+        self,
+        last_run: Optional[str] = _UNSET,
+        next_run: Optional[str] = _UNSET,
+        status: Optional[str] = _UNSET,
+        commit_hashes: Optional[str] = _UNSET,
+        error_message: Optional[str] = _UNSET,
+    ) -> None:
+        """
+        Update the singleton tracking record.
+
+        Only updates fields that are explicitly provided (partial updates supported).
+
+        Args:
+            last_run: ISO timestamp of last analysis run
+            next_run: ISO timestamp of next scheduled run
+            status: Analysis status (pending/running/completed/failed)
+            commit_hashes: JSON string mapping repo alias to commit hash
+            error_message: Error message if analysis failed (None clears the error)
+        """
+        # Build UPDATE statement for provided fields only
+        updates = []
+        params = []
+
+        if last_run is not _UNSET:
+            updates.append("last_run = ?")
+            params.append(last_run)
+
+        if next_run is not _UNSET:
+            updates.append("next_run = ?")
+            params.append(next_run)
+
+        if status is not _UNSET:
+            updates.append("status = ?")
+            params.append(status)
+
+        if commit_hashes is not _UNSET:
+            updates.append("commit_hashes = ?")
+            params.append(commit_hashes)
+
+        if error_message is not _UNSET:
+            updates.append("error_message = ?")
+            params.append(error_message)
+
+        if not updates:
+            return  # No fields to update
+
+        def operation(conn):
+            conn.execute(
+                f"UPDATE dependency_map_tracking SET {', '.join(updates)} WHERE id = 1",
+                params,
+            )
+            return None
+
+        self._conn_manager.execute_atomic(operation)
+        logger.debug("Updated dependency map tracking record")
 
     def close(self) -> None:
         """Close database connections."""

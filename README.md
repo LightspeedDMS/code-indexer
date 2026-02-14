@@ -2,7 +2,7 @@
 
 AI-powered semantic code search for your codebase. Find code by meaning, not just keywords.
 
-**Version 8.17.0** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
+**Version 9.0.0** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
 
 ## Quick Navigation
 
@@ -15,6 +15,7 @@ AI-powered semantic code search for your codebase. Find code by meaning, not jus
   - [SCIP Code Intelligence](#scip-code-intelligence)
   - [Git History Search](#git-history-search-temporal)
   - [Langfuse Trace Sync](#langfuse-trace-sync-v810) (NEW in v8.10)
+  - [Inter-Repository Dependency Map](#inter-repository-dependency-map-v90) (NEW in v9.0)
 - [Operating Modes](#operating-modes)
 - [Common Commands](#common-commands)
 - [Documentation](#documentation)
@@ -212,6 +213,54 @@ search_code("SQL query generation", repository_alias="langfuse_MyProject_*")
 **Dashboard monitoring**: Real-time sync health, per-project metrics (traces checked/new/updated), storage statistics, and manual sync trigger from the admin dashboard.
 
 **Configuration**: Enable via the Web UI Config Screen under Langfuse settings. Requires Langfuse project public/secret key pair.
+
+### Inter-Repository Dependency Map (v9.0+)
+
+Pre-computed semantic dependency map that analyzes source code across all registered golden repos, identifies domain-level relationships, and produces queryable documents so MCP clients can immediately determine the relevant repo set for cross-repo tasks -- without performing exploratory searches.
+
+**How it works:**
+1. **Multi-pass analysis**: Claude CLI pipeline examines source code across all repos in three passes: domain synthesis, per-domain deep dive (imports, API contracts, shared types), and index generation
+2. **Domain-clustered output**: Produces per-domain `.md` files and an `_index.md` with domain catalog and repo-to-domain matrix, all stored in `cidx-meta/dependency-map/`
+3. **Incremental delta refresh**: Scheduled daemon detects changed/new/removed repos via commit hash comparison and updates only affected domain files
+4. **MCP discovery**: Quick reference automatically directs MCP clients to check the dependency map first for cross-repo tasks
+5. **Human corrections**: Power users can edit dependency map files directly via MCP file CRUD tools; changes are auto-reindexed
+
+**Dependency map output structure:**
+```
+cidx-meta/
+  dependency-map/
+    _index.md                 # Domain catalog + repo-to-domain matrix
+    authentication.md         # Per-domain: repo roles, subdomain deps, cross-domain connections
+    data-pipeline.md          # Each domain file has YAML frontmatter with participating repos
+    ...
+```
+
+**Usage via MCP:**
+```
+# Quick reference tells MCP clients about the dependency map
+cidx_quick_reference         # Shows dependency map section with workflow
+
+# Read the dependency map
+get_file_content("cidx-meta-global", "dependency-map/_index.md")
+get_file_content("cidx-meta-global", "dependency-map/authentication.md")
+
+# Search dependency map semantically
+search_code("authentication between repos", repository_alias="cidx-meta-global")
+
+# Admin: trigger analysis on demand
+trigger_dependency_analysis(mode="full")    # Full regeneration
+trigger_dependency_analysis(mode="delta")   # Incremental update
+
+# Power user: correct inaccuracies
+edit_file(repository_alias="cidx-meta-global", path="dependency-map/authentication.md", ...)
+```
+
+**Configuration** (via Web UI Config Screen):
+- `dependency_map_enabled`: Enable the feature (default: off, opt-in)
+- `dependency_map_interval_hours`: Refresh interval (default: 168 hours / weekly)
+- `dependency_map_pass_timeout_seconds`: Per-pass Claude CLI timeout (default: 600s)
+
+See: [Meta-Repo Discovery Guide](docs/meta-repo-discovery.md)
 
 ## Operating Modes
 
