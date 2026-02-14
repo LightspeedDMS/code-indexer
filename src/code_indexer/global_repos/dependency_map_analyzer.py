@@ -124,16 +124,31 @@ class DependencyMapAnalyzer:
 
         prompt += "## Instructions\n\n"
         prompt += "Identify domain clusters and list participating repos per domain.\n\n"
-        prompt += "If descriptions are thin or lack context:\n"
-        prompt += "- Examine directory structures (folder names, file naming patterns)\n"
-        prompt += "- Sample entry points (main.py, app.py, index.ts, README files)\n"
-        prompt += "- Check configuration files (package.json, setup.py, Dockerfile)\n"
-        prompt += "- Inspect interesting modules to infer purpose and integration patterns\n\n"
+
+        prompt += "### Source-Code-First Exploration (MANDATORY)\n\n"
+        prompt += "ALWAYS examine source code, not just descriptions. Documentation may be incomplete or misleading. Source code is the ground truth.\n\n"
+        prompt += "For each repository:\n"
+        prompt += "1. Assess documentation depth relative to codebase size (file count, directory depth)\n"
+        prompt += "2. If a repo description is short/generic but has many source files, the description is unreliable - explore source\n"
+        prompt += "3. Look at imports, entry points (main.py, app.py, index.ts), config files (package.json, setup.py, requirements.txt, Dockerfile)\n"
+        prompt += "4. Check build files, test patterns, directory structures to understand actual repo purpose\n"
+        prompt += "5. Examine interesting modules to infer purpose and integration patterns\n\n"
+
+        prompt += "### Evidence-Based Domain Clustering\n\n"
         prompt += "Cluster repositories by integration-level relationships, not just functional similarity.\n"
         prompt += "Consider: shared data sources, service-to-service calls, tool chains, deployment coupling.\n\n"
+        prompt += "For each domain clustering decision, briefly justify WHY repos belong together based on what you observed in source code (not just description similarity).\n\n"
+
+        prompt += "### Anti-Hallucination Directive\n\n"
+        prompt += "Only cluster repositories together if you find concrete evidence of integration in source code:\n"
+        prompt += "- Shared imports, API calls, configuration references, deployment scripts\n"
+        prompt += "- DO NOT cluster based on superficial naming similarity or assumed relationships\n"
+        prompt += "- DO NOT cluster based on general knowledge of how similar systems typically work\n\n"
+
+        prompt += "## Output Format\n\n"
         prompt += "Output ONLY valid JSON array (no markdown, no explanations):\n"
         prompt += "[\n"
-        prompt += '  {"name": "domain-name", "description": "1-sentence domain scope", "participating_repos": ["alias1", "alias2"]}\n'
+        prompt += '  {"name": "domain-name", "description": "1-sentence domain scope", "participating_repos": ["alias1", "alias2"], "evidence": "Brief justification referencing actual files/patterns observed"}\n'
         prompt += "]\n"
 
         # Invoke Claude CLI
@@ -193,6 +208,17 @@ class DependencyMapAnalyzer:
         prompt += f"\n## Focus Analysis on Domain: {domain_name}\n\n"
         prompt += f"Analyze dependencies for: {', '.join(participating_repos)}\n\n"
 
+        prompt += "## Source Code Exploration Mandate\n\n"
+        prompt += "DO NOT rely solely on README files or documentation. Actively explore:\n"
+        prompt += "- Import statements and package dependencies (requirements.txt, package.json, setup.py, go.mod)\n"
+        prompt += "- Entry points (main.py, app.py, index.ts, cmd/ directories)\n"
+        prompt += "- Configuration files for references to other repos/services\n"
+        prompt += "- API endpoint definitions and client code\n"
+        prompt += "- Test files (often reveal integration dependencies)\n"
+        prompt += "- Build and deployment scripts\n\n"
+        prompt += "Assess each repo's documentation depth relative to its codebase size.\n"
+        prompt += "A repo with 100+ source files and a 5-line README has unreliable documentation - explore its source code thoroughly.\n\n"
+
         prompt += "## Dependency Types to Identify\n\n"
         prompt += "**CRITICAL**: ABSENCE of code imports does NOT mean absence of dependency.\n\n"
         prompt += "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
@@ -211,6 +237,25 @@ class DependencyMapAnalyzer:
         prompt += "  Example: 'web-app requires auth-service to be running and reachable'\n\n"
         prompt += "- **Semantic coupling**: Behavioral contracts where changing logic in repo A breaks expectations in repo B\n"
         prompt += "  Example: 'analytics-pipeline expects user-service to always include email field in user records'\n\n"
+
+        prompt += "## MANDATORY: Fact-Check Pass 1 Domain Assignments\n\n"
+        prompt += "Before analyzing dependencies, verify that each repository listed in this domain actually belongs here.\n"
+        prompt += "For each participating repo:\n"
+        prompt += "1. Examine its source code, imports, and integration points\n"
+        prompt += "2. Confirm it has actual code-level or integration relationships with other repos in this domain\n"
+        prompt += "3. If a repo does NOT belong in this domain based on source code evidence, state this explicitly\n\n"
+
+        prompt += "## MANDATORY: Evidence-Based Claims\n\n"
+        prompt += "Every dependency you document MUST include:\n"
+        prompt += "1. **Source reference**: The specific module, package, or subsystem where the dependency manifests (e.g., \"code-indexer's server/mcp/handlers.py module\")\n"
+        prompt += "2. **Evidence type**: What you observed (import statement, API endpoint definition, configuration key, subprocess invocation, etc.)\n"
+        prompt += "3. **Reasoning**: Why this constitutes a dependency and what would break if the depended-on component changed\n\n"
+        prompt += "DO NOT document dependencies based on:\n"
+        prompt += "- Assumptions about what \"should\" exist\n"
+        prompt += "- Naming similarity between repos\n"
+        prompt += "- General knowledge about how similar systems typically work\n"
+        prompt += "- Documentation claims you cannot verify in source code\n\n"
+        prompt += "If you cannot find concrete evidence of a dependency in actual source files, DO NOT include it.\n\n"
 
         prompt += "## Granularity Guidelines\n\n"
         prompt += "Document at MODULE/SUBSYSTEM level, not files or functions.\n\n"
@@ -270,11 +315,22 @@ class DependencyMapAnalyzer:
         prompt += "1. Domain Catalog table listing all identified domains\n"
         prompt += "2. Repo-to-Domain Matrix mapping repos to domains\n\n"
 
-        prompt += "## Domain List\n\n"
+        prompt += "## AUTHORITATIVE Domain Assignments (from Pass 1 - use these EXACTLY)\n\n"
         for domain in domain_list:
-            prompt += f"- {domain['name']}: {domain.get('description', 'N/A')}\n"
+            prompt += f"- **{domain['name']}**: {domain.get('description', 'N/A')}\n"
+            participating = domain.get('participating_repos', [])
+            if participating:
+                prompt += f"  - Participating repos: {', '.join(participating)}\n"
+            else:
+                prompt += "  - Participating repos: (none)\n"
 
-        prompt += "\n## Repository List\n\n"
+        prompt += "\n## Fact-Check Requirement\n\n"
+        prompt += "The Repository-to-Domain Mapping Matrix MUST match the authoritative domain assignments above exactly.\n"
+        prompt += "Do NOT reassign repositories to different domains.\n"
+        prompt += "Do NOT omit any repository from the mapping.\n"
+        prompt += "Every repo in the Repository List below must appear in the mapping matrix.\n\n"
+
+        prompt += "## Repository List\n\n"
         for repo in repo_list:
             prompt += f"- {repo.get('alias', 'unknown')}: {repo.get('description_summary', 'N/A')}\n"
 
@@ -549,6 +605,11 @@ class DependencyMapAnalyzer:
         prompt += "5. For UNCHANGED repos: preserve existing analysis as-is\n\n"
 
         prompt += "If you cannot confirm a previously documented dependency from current source code, REMOVE it.\n\n"
+
+        prompt += "## Evidence-Based Claims Requirement\n\n"
+        prompt += "Every dependency you document MUST include a source reference (module/subsystem name) and evidence type.\n"
+        prompt += "Do NOT preserve or add dependencies you cannot verify from current source code.\n"
+        prompt += "\"I assume this exists\" is NOT evidence. \"I found import X in module Y\" IS evidence.\n\n"
 
         prompt += "## Granularity Guidelines\n\n"
         prompt += "Document at MODULE/SUBSYSTEM level, not files or functions.\n\n"
