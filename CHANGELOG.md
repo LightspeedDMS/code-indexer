@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.1.0] - 2026-02-14
+
+### Added
+
+- **MCP Self-Registration for Claude CLI Explorations (Story #203)** - CIDX server now auto-registers itself as an MCP server in Claude Code before the first Claude CLI job launch. This enables dependency map explorations to leverage CIDX semantic search tools, reducing API cost and improving analysis quality for inter-repository dependency mapping.
+
+  - MCPSelfRegistrationService with idempotent check-and-register logic
+  - MCPSelfRegistrationConfig dataclass for credential persistence across restarts
+  - Integration with DependencyMapAnalyzer and ClaudeCliManager worker pool
+  - Thread-safe double-check locking for concurrent worker access
+  - Graceful degradation when Claude CLI not installed (log + proceed)
+  - ConfigService.save_config() for credential persistence
+
+- **Config UI restart indicators** - Config section template now shows restart-required indicators for settings that need server restart to take effect.
+
+### Fixed
+
+- **Diagnostics health check false warnings (Bug #200)** - Empty collection detection now handles three indicators: vector_count==0, unique_file_count==0, or missing hnsw_index section in metadata. Prevents false health warnings for newly added repos.
+
+---
+
 ## [9.0.0] - 2026-02-13
 
 ### Added
