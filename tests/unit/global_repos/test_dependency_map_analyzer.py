@@ -115,8 +115,8 @@ class TestPass1Synthesis:
         call_args = mock_subprocess.call_args
 
         # Check command structure (last element is the prompt)
-        # Fix 1: Pass 1 no longer includes --allowedTools (doesn't need MCP tools)
-        assert call_args[0][0][:-1] == ["claude", "--print", "--model", "opus", "--max-turns", "50", "-p"]
+        # Pass 1 uses --allowedTools "" to disable all tools (forces direct JSON output)
+        assert call_args[0][0][:-1] == ["claude", "--print", "--model", "opus", "--max-turns", "50", "--allowedTools", "", "-p"]
         assert "Identify domain clusters" in call_args[0][0][-1]
         assert call_args[1]["cwd"] == str(tmp_path)
         assert call_args[1]["timeout"] == 300  # half of pass_timeout
@@ -663,7 +663,7 @@ class TestAllowedToolsPerPass:
     @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_pass_1_no_allowed_tools(self, mock_subprocess, tmp_path):
-        """Test that Pass 1 is called without --allowedTools flag."""
+        """Test that Pass 1 is called with --allowedTools empty string to disable all tools."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
             stdout=json.dumps([
@@ -691,11 +691,13 @@ class TestAllowedToolsPerPass:
 
         analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=5)
 
-        # Verify --allowedTools is NOT in the command
+        # Verify --allowedTools "" is present (empty string disables all tools)
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
         cmd = call_args[0][0]
-        assert "--allowedTools" not in cmd
+        assert "--allowedTools" in cmd
+        tools_idx = cmd.index("--allowedTools")
+        assert cmd[tools_idx + 1] == ""
 
     @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
@@ -734,7 +736,7 @@ class TestAllowedToolsPerPass:
     @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_pass_3_no_allowed_tools(self, mock_subprocess, tmp_path):
-        """Test that Pass 3 is called without --allowedTools flag."""
+        """Test that Pass 3 is called with --allowedTools empty string to disable all tools."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
             stdout="# Index\n\nCatalog here.",
@@ -754,11 +756,13 @@ class TestAllowedToolsPerPass:
 
         analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=5)
 
-        # Verify --allowedTools is NOT in the command
+        # Verify --allowedTools "" is present (empty string disables all tools)
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
         cmd = call_args[0][0]
-        assert "--allowedTools" not in cmd
+        assert "--allowedTools" in cmd
+        tools_idx = cmd.index("--allowedTools")
+        assert cmd[tools_idx + 1] == ""
 
 
 class TestEmptyOutputDetection:

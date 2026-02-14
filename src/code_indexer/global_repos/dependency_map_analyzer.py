@@ -223,7 +223,7 @@ class DependencyMapAnalyzer:
 
         # Invoke Claude CLI (Pass 1 does not need MCP tools - just reads descriptions and outputs JSON)
         timeout = self.pass_timeout // 2  # Pass 1 uses half timeout (lighter workload)
-        result = self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None)
+        result = self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools="")
 
         # Parse JSON response
         logger.debug(f"Pass 1 raw output length: {len(result)} chars")
@@ -604,7 +604,7 @@ class DependencyMapAnalyzer:
 
         # Invoke Claude CLI (Pass 3 does not need MCP tools - just reads domain files and generates index)
         timeout = self.pass_timeout // 2  # Pass 3 uses half timeout (lighter workload)
-        result = self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None)
+        result = self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools="")
 
         # Build YAML frontmatter
         now = datetime.now(timezone.utc).isoformat()
@@ -854,8 +854,10 @@ class DependencyMapAnalyzer:
             prompt: Prompt to send to Claude
             timeout: Timeout in seconds
             max_turns: Maximum number of agentic turns
-            allowed_tools: Optional MCP tools to allow (e.g., "mcp__cidx-local__search_code").
-                          If None, no --allowedTools flag is added.
+            allowed_tools: Tool access control for Claude CLI:
+                          - None: No --allowedTools flag (all default tools available)
+                          - "" (empty string): --allowedTools "" (NO tools, forces direct output)
+                          - "tool_name": --allowedTools "tool_name" (specific tool only)
 
         Returns:
             Claude CLI stdout output
