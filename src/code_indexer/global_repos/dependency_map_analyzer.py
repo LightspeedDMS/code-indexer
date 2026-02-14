@@ -89,8 +89,12 @@ class DependencyMapAnalyzer:
         content += "- Code-level dependencies (imports, shared libraries, type reuse)\n"
         content += "- Data contract dependencies (shared database tables/views/schemas, file formats)\n"
         content += "- Service integration dependencies (REST/HTTP/MCP/gRPC API calls)\n"
-        content += "- External tool invocation dependencies (CLI tools, subprocess calls)\n"
-        content += "- Configuration coupling (shared env vars, config keys, feature flags)\n"
+        content += (
+            "- External tool invocation dependencies (CLI tools, subprocess calls)\n"
+        )
+        content += (
+            "- Configuration coupling (shared env vars, config keys, feature flags)\n"
+        )
         content += "- Message/event contract dependencies (queues, webhooks, pub/sub)\n"
         content += "- Deployment dependencies (runtime availability requirements)\n"
         content += "- Semantic coupling (behavioral contracts without code imports)\n"
@@ -140,7 +144,9 @@ class DependencyMapAnalyzer:
         prompt += "\n"
 
         prompt += "## Instructions\n\n"
-        prompt += "Identify domain clusters and list participating repos per domain.\n\n"
+        prompt += (
+            "Identify domain clusters and list participating repos per domain.\n\n"
+        )
 
         prompt += "### Source-Code-First Exploration (MANDATORY)\n\n"
         prompt += "ALWAYS examine source code, not just descriptions. Documentation may be incomplete or misleading. Source code is the ground truth.\n\n"
@@ -163,7 +169,9 @@ class DependencyMapAnalyzer:
         prompt += "- Semantic: A reads data that B produces, A calls services that B exposes\n"
         prompt += "- Ecosystem: A and B are tools in the same workflow (e.g., one generates data, another visualizes it)\n\n"
         prompt += "DO NOT cluster based solely on naming similarity without verifying in source code.\n"
-        prompt += "DO NOT cluster based on general knowledge without source code evidence.\n"
+        prompt += (
+            "DO NOT cluster based on general knowledge without source code evidence.\n"
+        )
         prompt += "But DO cluster when you find source-code-verified integration of ANY type listed above.\n\n"
         prompt += "AIM for 3-7 domains for a typical multi-repo codebase. If you find fewer than 3 domains,\n"
         prompt += "consider whether you may be applying too strict a threshold for integration evidence.\n\n"
@@ -208,10 +216,6 @@ class DependencyMapAnalyzer:
 
         # Validate Pass 1 output: filter hallucinated repos, catch unassigned repos
         valid_aliases = {r.get("alias") for r in repo_list}
-        # Build known path map for path validation
-        known_paths = {
-            r.get("alias"): r.get("clone_path") for r in repo_list
-        }
 
         # Filter out hallucinated repo aliases and repos with wrong/missing paths
         for domain in domain_list:
@@ -225,13 +229,13 @@ class DependencyMapAnalyzer:
                         f"'{domain.get('name')}' - not in valid alias list"
                     )
                     continue
-                # Validate path if provided
+                # Validate path if provided - check alias appears in path
+                # (lenient: allows different directory structures like .versioned/)
                 claimed_path = repo_paths.get(r)
-                expected_path = known_paths.get(r)
-                if claimed_path and expected_path and claimed_path != expected_path:
+                if claimed_path and r not in claimed_path:
                     logger.warning(
-                        f"Pass 1 repo '{r}' has wrong path '{claimed_path}' "
-                        f"(expected '{expected_path}') in domain "
+                        f"Pass 1 repo '{r}' has suspicious path '{claimed_path}' "
+                        f"(alias not found in path) in domain "
                         f"'{domain.get('name')}' - removed"
                     )
                     continue
@@ -247,9 +251,7 @@ class DependencyMapAnalyzer:
             domain.pop("repo_paths", None)
 
         # Remove domains that became empty after filtering
-        domain_list = [
-            d for d in domain_list if d.get("participating_repos")
-        ]
+        domain_list = [d for d in domain_list if d.get("participating_repos")]
 
         # Auto-create standalone domains for unassigned repos
         assigned_repos = set()
@@ -339,7 +341,9 @@ class DependencyMapAnalyzer:
 
         prompt += "## CIDX Semantic Search (MCP Tools) - MANDATORY\n\n"
         prompt += "You MUST use the `cidx-local` MCP server's `search_code` tool during this analysis.\n"
-        prompt += "It provides semantic search across ALL indexed golden repositories.\n\n"
+        prompt += (
+            "It provides semantic search across ALL indexed golden repositories.\n\n"
+        )
         prompt += "### Required Searches\n\n"
         prompt += "For EACH participating repository, run at least one search:\n"
         for repo_alias in participating_repos:
@@ -367,23 +371,33 @@ class DependencyMapAnalyzer:
         prompt += "\n"
 
         prompt += "## Source Code Exploration Mandate\n\n"
-        prompt += "DO NOT rely solely on README files or documentation. Actively explore:\n"
+        prompt += (
+            "DO NOT rely solely on README files or documentation. Actively explore:\n"
+        )
         prompt += "- Import statements and package dependencies (requirements.txt, package.json, setup.py, go.mod)\n"
         prompt += "- Entry points (main.py, app.py, index.ts, cmd/ directories)\n"
         prompt += "- Configuration files for references to other repos/services\n"
         prompt += "- API endpoint definitions and client code\n"
         prompt += "- Test files (often reveal integration dependencies)\n"
         prompt += "- Build and deployment scripts\n\n"
-        prompt += "Assess each repo's documentation depth relative to its codebase size.\n"
+        prompt += (
+            "Assess each repo's documentation depth relative to its codebase size.\n"
+        )
         prompt += "A repo with 100+ source files and a 5-line README has unreliable documentation - explore its source code thoroughly.\n\n"
 
         prompt += "## Dependency Types to Identify\n\n"
         prompt += "**CRITICAL**: ABSENCE of code imports does NOT mean absence of dependency.\n\n"
-        prompt += "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
-        prompt += "  Example: 'web-app imports shared-types package for User interface'\n\n"
+        prompt += (
+            "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
+        )
+        prompt += (
+            "  Example: 'web-app imports shared-types package for User interface'\n\n"
+        )
         prompt += "- **Data contracts**: Shared database tables/views/schemas, shared file formats\n"
         prompt += "  Example: 'lambda-processor reads customer_summary_view exposed by core-db'\n\n"
-        prompt += "- **Service integration**: REST/HTTP/MCP/gRPC API calls between repos\n"
+        prompt += (
+            "- **Service integration**: REST/HTTP/MCP/gRPC API calls between repos\n"
+        )
         prompt += "  Example: 'frontend calls backend /api/auth endpoint for login'\n\n"
         prompt += "- **External tool invocation**: CLI tools, subprocess calls, shell commands invoking another repo\n"
         prompt += "  Example: 'deployment-scripts invoke cidx CLI for indexing'\n\n"
@@ -392,7 +406,9 @@ class DependencyMapAnalyzer:
         prompt += "- **Message/event contracts**: Queue messages, webhooks, pub/sub events, callback URLs\n"
         prompt += "  Example: 'order-service publishes order.created event consumed by notification-service'\n\n"
         prompt += "- **Deployment dependencies**: Runtime availability requirements (repo A must be running for repo B)\n"
-        prompt += "  Example: 'web-app requires auth-service to be running and reachable'\n\n"
+        prompt += (
+            "  Example: 'web-app requires auth-service to be running and reachable'\n\n"
+        )
         prompt += "- **Semantic coupling**: Behavioral contracts where changing logic in repo A breaks expectations in repo B\n"
         prompt += "  Example: 'analytics-pipeline expects user-service to always include email field in user records'\n\n"
 
@@ -405,11 +421,11 @@ class DependencyMapAnalyzer:
 
         prompt += "## MANDATORY: Evidence-Based Claims\n\n"
         prompt += "Every dependency you document MUST include:\n"
-        prompt += "1. **Source reference**: The specific module, package, or subsystem where the dependency manifests (e.g., \"code-indexer's server/mcp/handlers.py module\")\n"
+        prompt += '1. **Source reference**: The specific module, package, or subsystem where the dependency manifests (e.g., "code-indexer\'s server/mcp/handlers.py module")\n'
         prompt += "2. **Evidence type**: What you observed (import statement, API endpoint definition, configuration key, subprocess invocation, etc.)\n"
         prompt += "3. **Reasoning**: Why this constitutes a dependency and what would break if the depended-on component changed\n\n"
         prompt += "DO NOT document dependencies based on:\n"
-        prompt += "- Assumptions about what \"should\" exist\n"
+        prompt += '- Assumptions about what "should" exist\n'
         prompt += "- Naming similarity between repos\n"
         prompt += "- General knowledge about how similar systems typically work\n"
         prompt += "- Documentation claims you cannot verify in source code\n\n"
@@ -484,10 +500,12 @@ class DependencyMapAnalyzer:
         prompt += "1. Domain Catalog table listing all identified domains\n"
         prompt += "2. Repo-to-Domain Matrix mapping repos to domains\n\n"
 
-        prompt += "## AUTHORITATIVE Domain Assignments (from Pass 1 - use these EXACTLY)\n\n"
+        prompt += (
+            "## AUTHORITATIVE Domain Assignments (from Pass 1 - use these EXACTLY)\n\n"
+        )
         for domain in domain_list:
             prompt += f"- **{domain['name']}**: {domain.get('description', 'N/A')}\n"
-            participating = domain.get('participating_repos', [])
+            participating = domain.get("participating_repos", [])
             if participating:
                 prompt += f"  - Participating repos: {', '.join(participating)}\n"
             else:
@@ -578,9 +596,7 @@ class DependencyMapAnalyzer:
                 break
 
         if start_idx == -1:
-            raise ValueError(
-                f"No JSON found in output (first 200 chars): {text[:200]}"
-            )
+            raise ValueError(f"No JSON found in output (first 200 chars): {text[:200]}")
 
         # Step 3: Find matching closing bracket using bracket counting
         # Track string state to ignore brackets inside JSON string values
@@ -596,7 +612,7 @@ class DependencyMapAnalyzer:
             if escape_next:
                 escape_next = False
                 continue
-            if char == '\\' and in_string:
+            if char == "\\" and in_string:
                 escape_next = True
                 continue
 
@@ -699,13 +715,9 @@ class DependencyMapAnalyzer:
                 f"stderr (first 1000 chars): {(result.stderr or '')[:1000]}"
             )
         elif raw_stdout_len < 100:
-            logger.warning(
-                f"Claude CLI returned very short stdout: {result.stdout!r}"
-            )
+            logger.warning(f"Claude CLI returned very short stdout: {result.stdout!r}")
         else:
-            logger.debug(
-                f"Claude CLI stdout (first 500 chars): {result.stdout[:500]}"
-            )
+            logger.debug(f"Claude CLI stdout (first 500 chars): {result.stdout[:500]}")
 
         if result.returncode != 0:
             logger.error(f"Claude CLI failed: {result.stderr}")
@@ -785,9 +797,13 @@ class DependencyMapAnalyzer:
 
         prompt += "## Dependency Types to Identify\n\n"
         prompt += "**CRITICAL**: ABSENCE of code imports does NOT mean absence of dependency.\n\n"
-        prompt += "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
+        prompt += (
+            "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
+        )
         prompt += "- **Data contracts**: Shared database tables/views/schemas, shared file formats\n"
-        prompt += "- **Service integration**: REST/HTTP/MCP/gRPC API calls between repos\n"
+        prompt += (
+            "- **Service integration**: REST/HTTP/MCP/gRPC API calls between repos\n"
+        )
         prompt += "- **External tool invocation**: CLI tools, subprocess calls, shell commands invoking another repo\n"
         prompt += "- **Configuration coupling**: Shared env vars, config keys, feature flags, connection strings\n"
         prompt += "- **Message/event contracts**: Queue messages, webhooks, pub/sub events, callback URLs\n"
@@ -808,7 +824,7 @@ class DependencyMapAnalyzer:
         prompt += "## Evidence-Based Claims Requirement\n\n"
         prompt += "Every dependency you document MUST include a source reference (module/subsystem name) and evidence type.\n"
         prompt += "Do NOT preserve or add dependencies you cannot verify from current source code.\n"
-        prompt += "\"I assume this exists\" is NOT evidence. \"I found import X in module Y\" IS evidence.\n\n"
+        prompt += '"I assume this exists" is NOT evidence. "I found import X in module Y" IS evidence.\n\n'
 
         prompt += "## Granularity Guidelines\n\n"
         prompt += "Document at MODULE/SUBSYSTEM level, not files or functions.\n\n"
@@ -889,9 +905,13 @@ class DependencyMapAnalyzer:
 
         prompt += "## Dependency Types to Identify\n\n"
         prompt += "**CRITICAL**: ABSENCE of code imports does NOT mean absence of dependency.\n\n"
-        prompt += "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
+        prompt += (
+            "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
+        )
         prompt += "- **Data contracts**: Shared database tables/views/schemas, shared file formats\n"
-        prompt += "- **Service integration**: REST/HTTP/MCP/gRPC API calls between repos\n"
+        prompt += (
+            "- **Service integration**: REST/HTTP/MCP/gRPC API calls between repos\n"
+        )
         prompt += "- **External tool invocation**: CLI tools, subprocess calls, shell commands invoking another repo\n"
         prompt += "- **Configuration coupling**: Shared env vars, config keys, feature flags, connection strings\n"
         prompt += "- **Message/event contracts**: Queue messages, webhooks, pub/sub events, callback URLs\n"
