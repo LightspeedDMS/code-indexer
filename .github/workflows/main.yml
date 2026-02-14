@@ -122,6 +122,12 @@ jobs:
         # Extract version
         VERSION="${{ needs.check-version.outputs.current_version }}"
 
+        # Check if tag already exists on remote (pushed manually)
+        if git ls-remote --tags origin "refs/tags/v$VERSION" | grep -q "v$VERSION"; then
+          echo "Tag v$VERSION already exists on remote -- skipping creation"
+          exit 0
+        fi
+
         # Create git tag
         git config user.name github-actions
         git config user.email github-actions@github.com
