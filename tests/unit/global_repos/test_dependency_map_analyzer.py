@@ -67,15 +67,12 @@ class TestClaudeMdGeneration:
 class TestPass1Synthesis:
     """Test Pass 1: Domain synthesis (AC1)."""
 
-    @patch("code_indexer.global_repos.dependency_map_analyzer.ClaudeCliManager")
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_run_pass_1_invokes_claude_cli(
-        self, mock_subprocess, mock_claude_manager_class, tmp_path
+        self, mock_subprocess, tmp_path
     ):
         """Test that run_pass_1_synthesis invokes Claude CLI with correct parameters."""
-        # Mock sync_api_key
-        mock_claude_manager_class.sync_api_key = staticmethod(lambda: None)
-
         # Mock subprocess response
         mock_subprocess.return_value = MagicMock(
             returncode=0,
@@ -117,53 +114,49 @@ class TestPass1Synthesis:
         assert len(result) == 1
         assert result[0]["name"] == "authentication"
 
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     def test_run_pass_1_writes_domains_json(self, tmp_path):
         """Test that run_pass_1_synthesis writes _domains.json to staging directory."""
         with patch("subprocess.run") as mock_subprocess:
-            with patch(
-                "code_indexer.global_repos.dependency_map_analyzer.ClaudeCliManager.sync_api_key"
-            ):
-                mock_subprocess.return_value = MagicMock(
-                    returncode=0,
-                    stdout=json.dumps(
-                        [
-                            {
-                                "name": "domain1",
-                                "description": "First domain",
-                                "participating_repos": ["repo1"],
-                            }
-                        ]
-                    ),
-                )
+            mock_subprocess.return_value = MagicMock(
+                returncode=0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "name": "domain1",
+                            "description": "First domain",
+                            "participating_repos": ["repo1"],
+                        }
+                    ]
+                ),
+            )
 
-                analyzer = DependencyMapAnalyzer(
-                    golden_repos_root=tmp_path,
-                    cidx_meta_path=tmp_path / "cidx-meta",
-                    pass_timeout=600,
-                )
+            analyzer = DependencyMapAnalyzer(
+                golden_repos_root=tmp_path,
+                cidx_meta_path=tmp_path / "cidx-meta",
+                pass_timeout=600,
+            )
 
-                staging_dir = tmp_path / "staging"
-                staging_dir.mkdir()
+            staging_dir = tmp_path / "staging"
+            staging_dir.mkdir()
 
-                analyzer.run_pass_1_synthesis(staging_dir, {}, max_turns=50)
+            analyzer.run_pass_1_synthesis(staging_dir, {}, max_turns=50)
 
-                domains_file = staging_dir / "_domains.json"
-                assert domains_file.exists()
+            domains_file = staging_dir / "_domains.json"
+            assert domains_file.exists()
 
-                domains = json.loads(domains_file.read_text())
-                assert len(domains) == 1
-                assert domains[0]["name"] == "domain1"
+            domains = json.loads(domains_file.read_text())
+            assert len(domains) == 1
+            assert domains[0]["name"] == "domain1"
 
 
 class TestPass2PerDomain:
     """Test Pass 2: Per-domain analysis (AC1)."""
 
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
-    @patch(
-        "code_indexer.global_repos.dependency_map_analyzer.ClaudeCliManager.sync_api_key"
-    )
     def test_run_pass_2_invokes_claude_cli(
-        self, mock_sync, mock_subprocess, tmp_path
+        self, mock_subprocess, tmp_path
     ):
         """Test that run_pass_2_per_domain invokes Claude CLI with domain context."""
         mock_subprocess.return_value = MagicMock(
@@ -199,59 +192,55 @@ class TestPass2PerDomain:
         assert "60" in call_args[0][0]
         assert call_args[1]["timeout"] == 600  # full pass_timeout
 
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     def test_run_pass_2_writes_domain_file_with_frontmatter(self, tmp_path):
         """Test that run_pass_2_per_domain writes domain file with YAML frontmatter."""
         with patch("subprocess.run") as mock_subprocess:
-            with patch(
-                "code_indexer.global_repos.dependency_map_analyzer.ClaudeCliManager.sync_api_key"
-            ):
-                mock_subprocess.return_value = MagicMock(
-                    returncode=0,
-                    stdout="# Authentication\n\nDomain analysis content here.",
-                )
+            mock_subprocess.return_value = MagicMock(
+                returncode=0,
+                stdout="# Authentication\n\nDomain analysis content here.",
+            )
 
-                analyzer = DependencyMapAnalyzer(
-                    golden_repos_root=tmp_path,
-                    cidx_meta_path=tmp_path / "cidx-meta",
-                    pass_timeout=600,
-                )
+            analyzer = DependencyMapAnalyzer(
+                golden_repos_root=tmp_path,
+                cidx_meta_path=tmp_path / "cidx-meta",
+                pass_timeout=600,
+            )
 
-                staging_dir = tmp_path / "staging"
-                staging_dir.mkdir()
+            staging_dir = tmp_path / "staging"
+            staging_dir.mkdir()
 
-                domain = {
-                    "name": "authentication",
-                    "description": "Auth domain",
-                    "participating_repos": ["auth-service", "web-app"],
-                }
+            domain = {
+                "name": "authentication",
+                "description": "Auth domain",
+                "participating_repos": ["auth-service", "web-app"],
+            }
 
-                analyzer.run_pass_2_per_domain(
-                    staging_dir, domain, [domain], max_turns=60
-                )
+            analyzer.run_pass_2_per_domain(
+                staging_dir, domain, [domain], max_turns=60
+            )
 
-                domain_file = staging_dir / "authentication.md"
-                assert domain_file.exists()
+            domain_file = staging_dir / "authentication.md"
+            assert domain_file.exists()
 
-                content = domain_file.read_text()
-                assert content.startswith("---\n")
-                assert "domain: authentication" in content
-                assert "last_analyzed:" in content
-                assert "participating_repos:" in content
-                assert "- auth-service" in content
-                assert "- web-app" in content
-                assert "---\n" in content
-                assert "Domain analysis content here" in content
+            content = domain_file.read_text()
+            assert content.startswith("---\n")
+            assert "domain: authentication" in content
+            assert "last_analyzed:" in content
+            assert "participating_repos:" in content
+            assert "- auth-service" in content
+            assert "- web-app" in content
+            assert "---\n" in content
+            assert "Domain analysis content here" in content
 
 
 class TestPass3Index:
     """Test Pass 3: Index generation (AC1)."""
 
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
-    @patch(
-        "code_indexer.global_repos.dependency_map_analyzer.ClaudeCliManager.sync_api_key"
-    )
     def test_run_pass_3_invokes_claude_cli(
-        self, mock_sync, mock_subprocess, tmp_path
+        self, mock_subprocess, tmp_path
     ):
         """Test that run_pass_3_index invokes Claude CLI with index generation prompt."""
         mock_subprocess.return_value = MagicMock(
@@ -288,52 +277,48 @@ class TestPass3Index:
         assert "30" in call_args[0][0]
         assert call_args[1]["timeout"] == 300  # half of pass_timeout
 
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     def test_run_pass_3_writes_index_with_frontmatter(self, tmp_path):
         """Test that run_pass_3_index writes _index.md with YAML frontmatter."""
         with patch("subprocess.run") as mock_subprocess:
-            with patch(
-                "code_indexer.global_repos.dependency_map_analyzer.ClaudeCliManager.sync_api_key"
-            ):
-                mock_subprocess.return_value = MagicMock(
-                    returncode=0,
-                    stdout="# Index\n\nCatalog content...",
-                )
+            mock_subprocess.return_value = MagicMock(
+                returncode=0,
+                stdout="# Index\n\nCatalog content...",
+            )
 
-                analyzer = DependencyMapAnalyzer(
-                    golden_repos_root=tmp_path,
-                    cidx_meta_path=tmp_path / "cidx-meta",
-                    pass_timeout=600,
-                )
+            analyzer = DependencyMapAnalyzer(
+                golden_repos_root=tmp_path,
+                cidx_meta_path=tmp_path / "cidx-meta",
+                pass_timeout=600,
+            )
 
-                staging_dir = tmp_path / "staging"
-                staging_dir.mkdir()
+            staging_dir = tmp_path / "staging"
+            staging_dir.mkdir()
 
-                domain_list = [{"name": "d1", "description": "Domain 1", "participating_repos": []}]
-                repo_list = [{"alias": "r1", "description_summary": "Repo 1"}]
+            domain_list = [{"name": "d1", "description": "Domain 1", "participating_repos": []}]
+            repo_list = [{"alias": "r1", "description_summary": "Repo 1"}]
 
-                analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=30)
+            analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=30)
 
-                index_file = staging_dir / "_index.md"
-                assert index_file.exists()
+            index_file = staging_dir / "_index.md"
+            assert index_file.exists()
 
-                content = index_file.read_text()
-                assert content.startswith("---\n")
-                assert "schema_version:" in content
-                assert "last_analyzed:" in content
-                assert "repos_analyzed_count: 1" in content
-                assert "domains_count: 1" in content
-                assert "Catalog content" in content
+            content = index_file.read_text()
+            assert content.startswith("---\n")
+            assert "schema_version:" in content
+            assert "last_analyzed:" in content
+            assert "repos_analyzed_count: 1" in content
+            assert "domains_count: 1" in content
+            assert "Catalog content" in content
 
 
 class TestPass1JsonParseFailure:
     """Test Pass 1 JSON parse failure raises RuntimeError (FIX 3)."""
 
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
-    @patch(
-        "code_indexer.global_repos.dependency_map_analyzer.ClaudeCliManager.sync_api_key"
-    )
     def test_run_pass_1_raises_on_bad_json(
-        self, mock_sync, mock_subprocess, tmp_path
+        self, mock_subprocess, tmp_path
     ):
         """Test that run_pass_1_synthesis raises RuntimeError on unparseable JSON."""
         # Mock subprocess to return invalid JSON
@@ -358,13 +343,10 @@ class TestPass1JsonParseFailure:
 class TestApiKeyValidation:
     """Test API key validation (FIX 2)."""
 
-    @patch("subprocess.run")
-    @patch(
-        "code_indexer.global_repos.dependency_map_analyzer.ClaudeCliManager.sync_api_key"
-    )
     @patch.dict("os.environ", {}, clear=True)
+    @patch("subprocess.run")
     def test_invoke_claude_cli_raises_if_no_api_key(
-        self, mock_sync, mock_subprocess, tmp_path
+        self, mock_subprocess, tmp_path
     ):
         """Test that _invoke_claude_cli raises RuntimeError if ANTHROPIC_API_KEY missing."""
         analyzer = DependencyMapAnalyzer(
@@ -387,12 +369,10 @@ class TestApiKeyValidation:
 class TestIncrementalPass2:
     """Test incremental Pass 2 with previous_domain_dir (FIX 9)."""
 
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
-    @patch(
-        "code_indexer.global_repos.dependency_map_analyzer.ClaudeCliManager.sync_api_key"
-    )
     def test_run_pass_2_uses_previous_domain_content(
-        self, mock_sync, mock_subprocess, tmp_path
+        self, mock_subprocess, tmp_path
     ):
         """Test that run_pass_2_per_domain includes previous domain content in prompt."""
         mock_subprocess.return_value = MagicMock(

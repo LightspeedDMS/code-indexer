@@ -80,9 +80,14 @@ class DependencyMapAnalyzer:
         )
         content += "Focus on identifying:\n"
         content += "- Domain clusters that span multiple repositories\n"
-        content += "- Interface surfaces between repositories\n"
-        content += "- Shared data structures and types\n"
-        content += "- API contracts and event flows\n"
+        content += "- Code-level dependencies (imports, shared libraries, type reuse)\n"
+        content += "- Data contract dependencies (shared database tables/views/schemas, file formats)\n"
+        content += "- Service integration dependencies (REST/HTTP/MCP/gRPC API calls)\n"
+        content += "- External tool invocation dependencies (CLI tools, subprocess calls)\n"
+        content += "- Configuration coupling (shared env vars, config keys, feature flags)\n"
+        content += "- Message/event contract dependencies (queues, webhooks, pub/sub)\n"
+        content += "- Deployment dependencies (runtime availability requirements)\n"
+        content += "- Semantic coupling (behavioral contracts without code imports)\n"
 
         claude_md_path = self.golden_repos_root / "CLAUDE.md"
         claude_md_path.write_text(content)
@@ -109,6 +114,7 @@ class DependencyMapAnalyzer:
         """
         # Build synthesis prompt
         prompt = "# Domain Synthesis Task\n\n"
+        prompt += "You are running in the golden-repos root directory with filesystem access to all repositories.\n\n"
         prompt += "Analyze the following repository descriptions and identify domain clusters.\n\n"
 
         prompt += "## Repository Descriptions\n\n"
@@ -117,7 +123,14 @@ class DependencyMapAnalyzer:
             prompt += f"{content}\n\n"
 
         prompt += "## Instructions\n\n"
-        prompt += "Identify domain clusters and list participating repos per domain.\n"
+        prompt += "Identify domain clusters and list participating repos per domain.\n\n"
+        prompt += "If descriptions are thin or lack context:\n"
+        prompt += "- Examine directory structures (folder names, file naming patterns)\n"
+        prompt += "- Sample entry points (main.py, app.py, index.ts, README files)\n"
+        prompt += "- Check configuration files (package.json, setup.py, Dockerfile)\n"
+        prompt += "- Inspect interesting modules to infer purpose and integration patterns\n\n"
+        prompt += "Cluster repositories by integration-level relationships, not just functional similarity.\n"
+        prompt += "Consider: shared data sources, service-to-service calls, tool chains, deployment coupling.\n\n"
         prompt += "Output ONLY valid JSON array (no markdown, no explanations):\n"
         prompt += "[\n"
         prompt += '  {"name": "domain-name", "description": "1-sentence domain scope", "participating_repos": ["alias1", "alias2"]}\n'
@@ -177,7 +190,26 @@ class DependencyMapAnalyzer:
             prompt += f"  - Repos: {', '.join(d.get('participating_repos', []))}\n"
 
         prompt += f"\n## Focus Analysis on Domain: {domain_name}\n\n"
-        prompt += f"Analyze source code interface surfaces for: {', '.join(participating_repos)}\n\n"
+        prompt += f"Analyze dependencies for: {', '.join(participating_repos)}\n\n"
+
+        prompt += "## Dependency Types to Identify\n\n"
+        prompt += "**CRITICAL**: ABSENCE of code imports does NOT mean absence of dependency.\n\n"
+        prompt += "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
+        prompt += "  Example: 'web-app imports shared-types package for User interface'\n\n"
+        prompt += "- **Data contracts**: Shared database tables/views/schemas, shared file formats\n"
+        prompt += "  Example: 'lambda-processor reads customer_summary_view exposed by core-db'\n\n"
+        prompt += "- **Service integration**: REST/HTTP/MCP/gRPC API calls between repos\n"
+        prompt += "  Example: 'frontend calls backend /api/auth endpoint for login'\n\n"
+        prompt += "- **External tool invocation**: CLI tools, subprocess calls, shell commands invoking another repo\n"
+        prompt += "  Example: 'deployment-scripts invoke cidx CLI for indexing'\n\n"
+        prompt += "- **Configuration coupling**: Shared env vars, config keys, feature flags, connection strings\n"
+        prompt += "  Example: 'worker-service and api-service both read REDIS_URL from env'\n\n"
+        prompt += "- **Message/event contracts**: Queue messages, webhooks, pub/sub events, callback URLs\n"
+        prompt += "  Example: 'order-service publishes order.created event consumed by notification-service'\n\n"
+        prompt += "- **Deployment dependencies**: Runtime availability requirements (repo A must be running for repo B)\n"
+        prompt += "  Example: 'web-app requires auth-service to be running and reachable'\n\n"
+        prompt += "- **Semantic coupling**: Behavioral contracts where changing logic in repo A breaks expectations in repo B\n"
+        prompt += "  Example: 'analytics-pipeline expects user-service to always include email field in user records'\n\n"
 
         prompt += "## Granularity Guidelines\n\n"
         prompt += "Document at MODULE/SUBSYSTEM level, not files or functions.\n\n"
@@ -401,6 +433,17 @@ class DependencyMapAnalyzer:
             prompt += f"- {domain}\n"
         prompt += "\n"
 
+        prompt += "## Dependency Types to Identify\n\n"
+        prompt += "**CRITICAL**: ABSENCE of code imports does NOT mean absence of dependency.\n\n"
+        prompt += "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
+        prompt += "- **Data contracts**: Shared database tables/views/schemas, shared file formats\n"
+        prompt += "- **Service integration**: REST/HTTP/MCP/gRPC API calls between repos\n"
+        prompt += "- **External tool invocation**: CLI tools, subprocess calls, shell commands invoking another repo\n"
+        prompt += "- **Configuration coupling**: Shared env vars, config keys, feature flags, connection strings\n"
+        prompt += "- **Message/event contracts**: Queue messages, webhooks, pub/sub events, callback URLs\n"
+        prompt += "- **Deployment dependencies**: Runtime availability requirements (repo A must be running for repo B)\n"
+        prompt += "- **Semantic coupling**: Behavioral contracts where changing logic in repo A breaks expectations in repo B\n\n"
+
         prompt += "## CRITICAL SELF-CORRECTION RULES\n\n"
         prompt += "1. For every CHANGED repo: re-verify ALL dependencies listed for that repo against current source code\n"
         prompt += "2. REMOVE dependencies that are no longer present in source code (do NOT preserve stale deps)\n"
@@ -488,6 +531,17 @@ class DependencyMapAnalyzer:
 
         prompt += "## Task\n\n"
         prompt += f"Analyze source code to create a new domain analysis for '{domain_name}'.\n\n"
+
+        prompt += "## Dependency Types to Identify\n\n"
+        prompt += "**CRITICAL**: ABSENCE of code imports does NOT mean absence of dependency.\n\n"
+        prompt += "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
+        prompt += "- **Data contracts**: Shared database tables/views/schemas, shared file formats\n"
+        prompt += "- **Service integration**: REST/HTTP/MCP/gRPC API calls between repos\n"
+        prompt += "- **External tool invocation**: CLI tools, subprocess calls, shell commands invoking another repo\n"
+        prompt += "- **Configuration coupling**: Shared env vars, config keys, feature flags, connection strings\n"
+        prompt += "- **Message/event contracts**: Queue messages, webhooks, pub/sub events, callback URLs\n"
+        prompt += "- **Deployment dependencies**: Runtime availability requirements (repo A must be running for repo B)\n"
+        prompt += "- **Semantic coupling**: Behavioral contracts where changing logic in repo A breaks expectations in repo B\n\n"
 
         prompt += "## Granularity Guidelines\n\n"
         prompt += "Document at MODULE/SUBSYSTEM level, not files or functions.\n\n"
