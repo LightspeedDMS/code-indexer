@@ -119,9 +119,9 @@ class DependencyMapAnalyzer:
         prompt += "## Instructions\n\n"
         prompt += "Identify domain clusters and list participating repos per domain.\n"
         prompt += "Output ONLY valid JSON array (no markdown, no explanations):\n"
-        prompt += '[\n'
+        prompt += "[\n"
         prompt += '  {"name": "domain-name", "description": "1-sentence domain scope", "participating_repos": ["alias1", "alias2"]}\n'
-        prompt += ']\n'
+        prompt += "]\n"
 
         # Invoke Claude CLI
         timeout = self.pass_timeout // 2  # Pass 1 uses half timeout (lighter workload)
@@ -271,9 +271,18 @@ class DependencyMapAnalyzer:
         index_file.write_text(frontmatter + result)
         logger.info(f"Pass 3 complete: wrote {index_file}")
 
-    def _invoke_claude_cli(
-        self, prompt: str, timeout: int, max_turns: int
-    ) -> str:
+    @staticmethod
+    def _strip_code_fences(text: str) -> str:
+        """Strip markdown code fences from Claude CLI output."""
+        text = text.strip()
+        if text.startswith("```"):
+            # Remove first line (```json or ```)
+            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.endswith("```"):
+            text = text[:-3].rstrip()
+        return text
+
+    def _invoke_claude_cli(self, prompt: str, timeout: int, max_turns: int) -> str:
         """
         Invoke Claude CLI with direct subprocess (AC1).
 
@@ -322,7 +331,7 @@ class DependencyMapAnalyzer:
                 result.returncode, cmd, result.stdout, result.stderr
             )
 
-        return result.stdout
+        return self._strip_code_fences(result.stdout)
 
     # ========================================================================
     # Story #193: Delta Refresh Prompt Methods
@@ -395,7 +404,9 @@ class DependencyMapAnalyzer:
         prompt += "## CRITICAL SELF-CORRECTION RULES\n\n"
         prompt += "1. For every CHANGED repo: re-verify ALL dependencies listed for that repo against current source code\n"
         prompt += "2. REMOVE dependencies that are no longer present in source code (do NOT preserve stale deps)\n"
-        prompt += "3. CORRECT dependencies where the nature of the relationship changed\n"
+        prompt += (
+            "3. CORRECT dependencies where the nature of the relationship changed\n"
+        )
         prompt += "4. ADD new dependencies discovered in changed/new repos\n"
         prompt += "5. For UNCHANGED repos: preserve existing analysis as-is\n\n"
 
@@ -447,9 +458,9 @@ class DependencyMapAnalyzer:
         prompt += "or identify if it represents a new domain.\n\n"
 
         prompt += "Output JSON array:\n"
-        prompt += '[\n'
+        prompt += "[\n"
         prompt += '  {"repo": "alias", "domains": ["domain1", "domain2"]}\n'
-        prompt += ']\n'
+        prompt += "]\n"
 
         return prompt
 
