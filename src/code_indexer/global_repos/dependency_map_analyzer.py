@@ -168,6 +168,12 @@ class DependencyMapAnalyzer:
         prompt += "AIM for 3-7 domains for a typical multi-repo codebase. If you find fewer than 3 domains,\n"
         prompt += "consider whether you may be applying too strict a threshold for integration evidence.\n\n"
 
+        prompt += "### Unassigned Repository Handling\n\n"
+        prompt += "If a repository does not fit any domain (no integration evidence found), assign it to a\n"
+        prompt += "single-repo domain named after the repository itself (e.g., 'code-indexer' domain with\n"
+        prompt += "just the code-indexer repo). This ensures every repository appears in at least one domain.\n"
+        prompt += "Do NOT leave repositories unassigned.\n\n"
+
         prompt += "## Output Format\n\n"
         prompt += "Output ONLY valid JSON array (no markdown, no explanations):\n"
         prompt += "[\n"
@@ -561,7 +567,16 @@ class DependencyMapAnalyzer:
             self._mcp_registration_service.ensure_registered()
 
         # Build command
-        cmd = ["claude", "--print", "--max-turns", str(max_turns), "-p", prompt]
+        cmd = [
+            "claude",
+            "--print",
+            "--max-turns",
+            str(max_turns),
+            "--allowedTools",
+            "mcp__cidx-local__search_code",
+            "-p",
+            prompt,
+        ]
 
         # Run subprocess
         result = subprocess.run(
