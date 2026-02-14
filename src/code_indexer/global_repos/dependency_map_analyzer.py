@@ -77,8 +77,8 @@ class DependencyMapAnalyzer:
             content += f"  - Path: `{clone_path}`\n"
 
         content += "\n## Tools Available\n\n"
-        content += "You have a `cidx-local` MCP server available for semantic code search across all indexed repositories.\n"
-        content += "Use it to search for cross-repo references, find integration patterns, and discover semantic dependencies.\n\n"
+        content += "You MUST use the `cidx-local` MCP server's `search_code` tool for semantic code search.\n"
+        content += "Search for repo names, class names, and API endpoints across all repositories to discover integration patterns.\n\n"
 
         content += "## Task\n\n"
         content += (
@@ -156,11 +156,17 @@ class DependencyMapAnalyzer:
         prompt += "Consider: shared data sources, service-to-service calls, tool chains, deployment coupling.\n\n"
         prompt += "For each domain clustering decision, briefly justify WHY repos belong together based on what you observed in source code (not just description similarity).\n\n"
 
-        prompt += "### Anti-Hallucination Directive\n\n"
-        prompt += "Only cluster repositories together if you find concrete evidence of integration in source code:\n"
-        prompt += "- Shared imports, API calls, configuration references, deployment scripts\n"
-        prompt += "- DO NOT cluster based on superficial naming similarity or assumed relationships\n"
-        prompt += "- DO NOT cluster based on general knowledge of how similar systems typically work\n\n"
+        prompt += "### Domain Clustering Standards\n\n"
+        prompt += "Cluster repositories that have integration relationships. Evidence can include:\n"
+        prompt += "- Direct: shared imports, API calls, configuration references, deployment scripts\n"
+        prompt += "- Transitive: A depends on B depends on C (all three belong in same domain)\n"
+        prompt += "- Semantic: A reads data that B produces, A calls services that B exposes\n"
+        prompt += "- Ecosystem: A and B are tools in the same workflow (e.g., one generates data, another visualizes it)\n\n"
+        prompt += "DO NOT cluster based solely on naming similarity without verifying in source code.\n"
+        prompt += "DO NOT cluster based on general knowledge without source code evidence.\n"
+        prompt += "But DO cluster when you find source-code-verified integration of ANY type listed above.\n\n"
+        prompt += "AIM for 3-7 domains for a typical multi-repo codebase. If you find fewer than 3 domains,\n"
+        prompt += "consider whether you may be applying too strict a threshold for integration evidence.\n\n"
 
         prompt += "## Output Format\n\n"
         prompt += "Output ONLY valid JSON array (no markdown, no explanations):\n"
@@ -219,6 +225,11 @@ class DependencyMapAnalyzer:
         prompt = f"# Domain Analysis: {domain_name}\n\n"
         prompt += f"**Domain Description**: {domain.get('description', 'N/A')}\n\n"
 
+        # Include Pass 1 evidence for verification
+        evidence = domain.get("evidence", "")
+        if evidence:
+            prompt += f"**Pass 1 Evidence (verify or refute)**: {evidence}\n\n"
+
         prompt += "## Full Domain Structure (for cross-domain awareness)\n\n"
         for d in domain_list:
             prompt += f"- **{d['name']}**: {d.get('description', 'N/A')}\n"
@@ -237,10 +248,20 @@ class DependencyMapAnalyzer:
             prompt += f"- **{repo_alias}**: `{clone_path}`\n"
         prompt += "\n"
 
-        prompt += "## CIDX Semantic Search (MCP Tools)\n\n"
-        prompt += "You have a `cidx-local` MCP server available for semantic code search.\n"
-        prompt += "Use it to find cross-repo references and discover integration patterns that filesystem exploration alone may miss.\n"
-        prompt += "For example, search for repo names across all repositories to find who references them.\n\n"
+        prompt += "## CIDX Semantic Search (MCP Tools) - MANDATORY\n\n"
+        prompt += "You MUST use the `cidx-local` MCP server's `search_code` tool during this analysis.\n"
+        prompt += "It provides semantic search across ALL indexed golden repositories.\n\n"
+        prompt += "### Required Searches\n\n"
+        prompt += "For EACH participating repository, run at least one search:\n"
+        for repo_alias in participating_repos:
+            prompt += f"- Search for `{repo_alias}` references across all repos\n"
+        prompt += "\n"
+        prompt += "### How to Use\n\n"
+        prompt += "Call the `search_code` tool with:\n"
+        prompt += "- `query_text`: The search term (repo name, class name, API endpoint, etc.)\n"
+        prompt += "- `limit`: Number of results (start with 10)\n\n"
+        prompt += "This reveals cross-repo references that filesystem exploration alone cannot find.\n"
+        prompt += "Do NOT skip MCP searches - they are essential for discovering service integration and semantic coupling.\n\n"
 
         prompt += "## Source Code Exploration Mandate\n\n"
         prompt += "DO NOT rely solely on README files or documentation. Actively explore:\n"
