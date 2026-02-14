@@ -183,9 +183,14 @@ class DependencyMapAnalyzer:
         prompt += "\nAny domain containing repos not in this list will be rejected by validation.\n\n"
 
         prompt += "## Output Format\n\n"
-        prompt += "Output ONLY valid JSON array (no markdown, no explanations):\n"
+        prompt += "Output ONLY valid JSON array (no markdown, no explanations).\n"
+        prompt += "For each domain, include a `repo_paths` object mapping each alias to its FULL filesystem path.\n"
+        prompt += "If you cannot provide the real path for a repo, DO NOT include that repo.\n\n"
         prompt += "[\n"
-        prompt += '  {"name": "domain-name", "description": "1-sentence domain scope", "participating_repos": ["alias1", "alias2"], "evidence": "Brief justification referencing actual files/patterns observed"}\n'
+        prompt += '  {"name": "domain-name", "description": "1-sentence domain scope", '
+        prompt += '"participating_repos": ["alias1", "alias2"], '
+        prompt += '"repo_paths": {"alias1": "/full/path/to/alias1", "alias2": "/full/path/to/alias2"}, '
+        prompt += '"evidence": "Brief justification referencing actual files/patterns observed"}\n'
         prompt += "]\n"
 
         # Invoke Claude CLI
@@ -203,18 +208,43 @@ class DependencyMapAnalyzer:
 
         # Validate Pass 1 output: filter hallucinated repos, catch unassigned repos
         valid_aliases = {r.get("alias") for r in repo_list}
+        # Build known path map for path validation
+        known_paths = {
+            r.get("alias"): r.get("clone_path") for r in repo_list
+        }
 
-        # Filter out hallucinated repo aliases from domain assignments
+        # Filter out hallucinated repo aliases and repos with wrong/missing paths
         for domain in domain_list:
             original_repos = domain.get("participating_repos", [])
-            filtered_repos = [r for r in original_repos if r in valid_aliases]
+            repo_paths = domain.get("repo_paths", {})
+            filtered_repos = []
+            for r in original_repos:
+                if r not in valid_aliases:
+                    logger.warning(
+                        f"Pass 1 hallucinated repo '{r}' in domain "
+                        f"'{domain.get('name')}' - not in valid alias list"
+                    )
+                    continue
+                # Validate path if provided
+                claimed_path = repo_paths.get(r)
+                expected_path = known_paths.get(r)
+                if claimed_path and expected_path and claimed_path != expected_path:
+                    logger.warning(
+                        f"Pass 1 repo '{r}' has wrong path '{claimed_path}' "
+                        f"(expected '{expected_path}') in domain "
+                        f"'{domain.get('name')}' - removed"
+                    )
+                    continue
+                filtered_repos.append(r)
             removed = set(original_repos) - set(filtered_repos)
             if removed:
                 logger.warning(
-                    f"Pass 1 hallucinated repo(s) {removed} in domain "
-                    f"'{domain.get('name')}' - removed"
+                    f"Pass 1 filtered repo(s) {removed} from domain "
+                    f"'{domain.get('name')}'"
                 )
             domain["participating_repos"] = filtered_repos
+            # Clean up repo_paths from output (not needed downstream)
+            domain.pop("repo_paths", None)
 
         # Remove domains that became empty after filtering
         domain_list = [

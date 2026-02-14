@@ -82,6 +82,10 @@ class TestPass1Synthesis:
                         "name": "authentication",
                         "description": "Auth domain",
                         "participating_repos": ["auth-service", "web-app"],
+                        "repo_paths": {
+                            "auth-service": "/path/to/auth-service",
+                            "web-app": "/path/to/web-app",
+                        },
                     }
                 ]
             ),
@@ -98,10 +102,10 @@ class TestPass1Synthesis:
 
         repo_descriptions = {"repo1": "Content 1", "repo2": "Content 2"}
 
-        # Provide repo_list with matching aliases for validation
+        # Provide repo_list with matching aliases and clone_paths for validation
         repo_list = [
-            {"alias": "auth-service", "description_summary": "Auth service"},
-            {"alias": "web-app", "description_summary": "Web application"},
+            {"alias": "auth-service", "description_summary": "Auth service", "clone_path": "/path/to/auth-service"},
+            {"alias": "web-app", "description_summary": "Web application", "clone_path": "/path/to/web-app"},
         ]
 
         result = analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list=repo_list, max_turns=50)
@@ -132,6 +136,7 @@ class TestPass1Synthesis:
                             "name": "domain1",
                             "description": "First domain",
                             "participating_repos": ["repo1"],
+                            "repo_paths": {"repo1": "/path/to/repo1"},
                         }
                     ]
                 ),
@@ -146,9 +151,9 @@ class TestPass1Synthesis:
             staging_dir = tmp_path / "staging"
             staging_dir.mkdir()
 
-            # Provide repo_list with matching alias for validation
+            # Provide repo_list with matching alias and clone_path for validation
             repo_list = [
-                {"alias": "repo1", "description_summary": "First repository"},
+                {"alias": "repo1", "description_summary": "First repository", "clone_path": "/path/to/repo1"},
             ]
 
             analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=50)
