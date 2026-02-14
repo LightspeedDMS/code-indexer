@@ -50,6 +50,7 @@ RESTART_REQUIRED_FIELDS = [
     "scip_multi_max_workers",  # SCIP multi-repo thread pool size (singleton init)
     "max_concurrent_background_jobs",  # BackgroundJobManager thread pool size (singleton init)
     "subprocess_max_workers",  # Subprocess executor pool size (singleton init)
+    "dependency_map_enabled",  # Dependency map scheduler (background thread init)
 ]
 
 
@@ -4617,7 +4618,15 @@ def _get_current_config() -> dict:
         claude_cli_config = {
             "max_concurrent_claude_cli": 3,
             "description_refresh_interval_hours": 24,
+            "description_refresh_enabled": False,
             "research_assistant_timeout_seconds": 300,
+            "dependency_map_enabled": False,
+            "dependency_map_interval_hours": 168,
+            "dependency_map_pass_timeout_seconds": 600,
+            "dependency_map_pass1_max_turns": 50,
+            "dependency_map_pass2_max_turns": 60,
+            "dependency_map_pass3_max_turns": 30,
+            "dependency_map_delta_max_turns": 30,
         }
     else:
         # If dict exists, merge with defaults (preserve existing values)
@@ -4628,8 +4637,32 @@ def _get_current_config() -> dict:
             "description_refresh_interval_hours": claude_cli_raw.get(
                 "description_refresh_interval_hours", 24
             ),
+            "description_refresh_enabled": claude_cli_raw.get(
+                "description_refresh_enabled", False
+            ),
             "research_assistant_timeout_seconds": claude_cli_raw.get(
                 "research_assistant_timeout_seconds", 300
+            ),
+            "dependency_map_enabled": claude_cli_raw.get(
+                "dependency_map_enabled", False
+            ),
+            "dependency_map_interval_hours": claude_cli_raw.get(
+                "dependency_map_interval_hours", 168
+            ),
+            "dependency_map_pass_timeout_seconds": claude_cli_raw.get(
+                "dependency_map_pass_timeout_seconds", 600
+            ),
+            "dependency_map_pass1_max_turns": claude_cli_raw.get(
+                "dependency_map_pass1_max_turns", 50
+            ),
+            "dependency_map_pass2_max_turns": claude_cli_raw.get(
+                "dependency_map_pass2_max_turns", 60
+            ),
+            "dependency_map_pass3_max_turns": claude_cli_raw.get(
+                "dependency_map_pass3_max_turns", 30
+            ),
+            "dependency_map_delta_max_turns": claude_cli_raw.get(
+                "dependency_map_delta_max_turns", 30
             ),
         }
         # Preserve additional keys like API keys

@@ -175,6 +175,13 @@ class ConfigService:
                 "description_refresh_interval_hours": config.claude_integration_config.description_refresh_interval_hours,
                 "description_refresh_enabled": config.claude_integration_config.description_refresh_enabled,
                 "research_assistant_timeout_seconds": config.claude_integration_config.research_assistant_timeout_seconds,
+                "dependency_map_enabled": config.claude_integration_config.dependency_map_enabled,
+                "dependency_map_interval_hours": config.claude_integration_config.dependency_map_interval_hours,
+                "dependency_map_pass_timeout_seconds": config.claude_integration_config.dependency_map_pass_timeout_seconds,
+                "dependency_map_pass1_max_turns": config.claude_integration_config.dependency_map_pass1_max_turns,
+                "dependency_map_pass2_max_turns": config.claude_integration_config.dependency_map_pass2_max_turns,
+                "dependency_map_pass3_max_turns": config.claude_integration_config.dependency_map_pass3_max_turns,
+                "dependency_map_delta_max_turns": config.claude_integration_config.dependency_map_delta_max_turns,
             },
             # OIDC/SSO authentication
             "oidc": {
@@ -530,6 +537,20 @@ class ConfigService:
             claude_config.description_refresh_enabled = value in ["true", True, "True"]
         elif key == "research_assistant_timeout_seconds":
             claude_config.research_assistant_timeout_seconds = int(value)
+        elif key == "dependency_map_enabled":
+            claude_config.dependency_map_enabled = value in ["true", True, "True"]
+        elif key == "dependency_map_interval_hours":
+            claude_config.dependency_map_interval_hours = max(1, min(8760, int(value)))
+        elif key == "dependency_map_pass_timeout_seconds":
+            claude_config.dependency_map_pass_timeout_seconds = max(60, min(3600, int(value)))
+        elif key == "dependency_map_pass1_max_turns":
+            claude_config.dependency_map_pass1_max_turns = max(5, min(200, int(value)))
+        elif key == "dependency_map_pass2_max_turns":
+            claude_config.dependency_map_pass2_max_turns = max(5, min(200, int(value)))
+        elif key == "dependency_map_pass3_max_turns":
+            claude_config.dependency_map_pass3_max_turns = max(5, min(200, int(value)))
+        elif key == "dependency_map_delta_max_turns":
+            claude_config.dependency_map_delta_max_turns = max(5, min(200, int(value)))
         else:
             raise ValueError(f"Unknown claude_cli setting: {key}")
 

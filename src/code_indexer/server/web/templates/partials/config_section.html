@@ -1559,6 +1559,48 @@
                         <td class="config-value">{{ config.claude_cli.research_assistant_timeout_seconds }}</td>
                         <td class="config-note"><small>Timeout for Research Assistant Claude CLI execution (default: 1200 = 20 minutes)</small></td>
                     </tr>
+                    <!-- Dependency Map Settings -->
+                    <tr><td colspan="3" style="padding-top: 1em;"><strong>Dependency Map</strong></td></tr>
+                    <tr>
+                        <td class="config-label">Dependency Map Enabled</td>
+                        <td class="config-value">{{ 'Yes' if config.claude_cli.dependency_map_enabled else 'No' }}</td>
+                        <td class="config-note">
+                            {% if 'dependency_map_enabled' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Enable cross-repository dependency map generation (default: No)</small>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Refresh Interval (hours)</td>
+                        <td class="config-value">{{ config.claude_cli.dependency_map_interval_hours }}</td>
+                        <td class="config-note"><small>How often to run delta analysis (default: 168 = 1 week)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Pass Timeout (seconds)</td>
+                        <td class="config-value">{{ config.claude_cli.dependency_map_pass_timeout_seconds }}</td>
+                        <td class="config-note"><small>Timeout per analysis pass (default: 600 = 10 min, Pass 1/3 use half)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Pass 1 Max Turns (Synthesis)</td>
+                        <td class="config-value">{{ config.claude_cli.dependency_map_pass1_max_turns }}</td>
+                        <td class="config-note"><small>Max Claude CLI turns for domain clustering (default: 50)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Pass 2 Max Turns (Per-Domain)</td>
+                        <td class="config-value">{{ config.claude_cli.dependency_map_pass2_max_turns }}</td>
+                        <td class="config-note"><small>Max turns for per-domain source analysis (default: 60)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Pass 3 Max Turns (Index)</td>
+                        <td class="config-value">{{ config.claude_cli.dependency_map_pass3_max_turns }}</td>
+                        <td class="config-note"><small>Max turns for catalog/matrix generation (default: 30)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Delta Max Turns</td>
+                        <td class="config-value">{{ config.claude_cli.dependency_map_delta_max_turns }}</td>
+                        <td class="config-note"><small>Max turns for incremental delta analysis (default: 30)</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -1594,6 +1636,45 @@
                     Research Assistant Timeout (seconds)
                     <input type="number" id="claude-research-timeout" name="research_assistant_timeout_seconds" value="{{ config.claude_cli.research_assistant_timeout_seconds }}" min="60" max="7200">
                     <small>Timeout for Research Assistant Claude CLI execution (60-7200, default: 1200 = 20 minutes)</small>
+                </label>
+                <!-- Dependency Map Settings -->
+                <label for="depmap-enabled">
+                    Dependency Map Enabled
+                    <select id="depmap-enabled" name="dependency_map_enabled">
+                        <option value="true" {% if config.claude_cli.dependency_map_enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.claude_cli.dependency_map_enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Enable cross-repository dependency map generation (default: No)</small>
+                </label>
+                <label for="depmap-interval">
+                    Dependency Map Refresh Interval (hours)
+                    <input type="number" id="depmap-interval" name="dependency_map_interval_hours" value="{{ config.claude_cli.dependency_map_interval_hours }}" min="1" max="8760">
+                    <small>How often to run delta analysis (1-8760, default: 168 = 1 week)</small>
+                </label>
+                <label for="depmap-pass-timeout">
+                    Pass Timeout (seconds)
+                    <input type="number" id="depmap-pass-timeout" name="dependency_map_pass_timeout_seconds" value="{{ config.claude_cli.dependency_map_pass_timeout_seconds }}" min="60" max="3600">
+                    <small>Timeout per analysis pass (60-3600, default: 600 = 10 min)</small>
+                </label>
+                <label for="depmap-pass1-turns">
+                    Pass 1 Max Turns (Synthesis)
+                    <input type="number" id="depmap-pass1-turns" name="dependency_map_pass1_max_turns" value="{{ config.claude_cli.dependency_map_pass1_max_turns }}" min="5" max="200">
+                    <small>Max Claude CLI turns for domain clustering (5-200, default: 50)</small>
+                </label>
+                <label for="depmap-pass2-turns">
+                    Pass 2 Max Turns (Per-Domain)
+                    <input type="number" id="depmap-pass2-turns" name="dependency_map_pass2_max_turns" value="{{ config.claude_cli.dependency_map_pass2_max_turns }}" min="5" max="200">
+                    <small>Max turns for per-domain source analysis (5-200, default: 60)</small>
+                </label>
+                <label for="depmap-pass3-turns">
+                    Pass 3 Max Turns (Index)
+                    <input type="number" id="depmap-pass3-turns" name="dependency_map_pass3_max_turns" value="{{ config.claude_cli.dependency_map_pass3_max_turns }}" min="5" max="200">
+                    <small>Max turns for catalog/matrix generation (5-200, default: 30)</small>
+                </label>
+                <label for="depmap-delta-turns">
+                    Delta Max Turns
+                    <input type="number" id="depmap-delta-turns" name="dependency_map_delta_max_turns" value="{{ config.claude_cli.dependency_map_delta_max_turns }}" min="5" max="200">
+                    <small>Max turns for incremental delta analysis (5-200, default: 30)</small>
                 </label>
             </div>
             <div class="form-actions">

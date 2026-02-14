@@ -35,6 +35,7 @@ def test_api_keys_section_renders_with_github_token():
                 "workers": 4,
                 "log_level": "INFO",
                 "jwt_expiration_minutes": 10,
+                "service_display_name": "Neo",
             },
             "cache": {
                 "index_cache_ttl_minutes": 10.0,
@@ -160,7 +161,15 @@ def test_api_keys_section_renders_with_github_token():
             "claude_cli": {
                 "max_concurrent_claude_cli": 2,
                 "description_refresh_interval_hours": 24,
+                "description_refresh_enabled": False,
                 "research_assistant_timeout_seconds": 300,
+                "dependency_map_enabled": False,
+                "dependency_map_interval_hours": 168,
+                "dependency_map_pass_timeout_seconds": 600,
+                "dependency_map_pass1_max_turns": 50,
+                "dependency_map_pass2_max_turns": 60,
+                "dependency_map_pass3_max_turns": 30,
+                "dependency_map_delta_max_turns": 30,
             },
             "provider_api_keys": {
                 "anthropic_configured": False,
@@ -183,7 +192,7 @@ def test_api_keys_section_renders_with_github_token():
 
     # Verify API Keys section is present
     assert (
-        "CI/CD API Keys" in rendered
+        "CI/CD Platform Keys" in rendered
     ), "API Keys section header should be in rendered HTML"
     assert "GitHub" in rendered, "GitHub subsection should be in rendered HTML"
     assert "GitLab" in rendered, "GitLab subsection should be in rendered HTML"
@@ -224,6 +233,7 @@ def test_api_keys_section_renders_without_tokens():
                 "workers": 4,
                 "log_level": "INFO",
                 "jwt_expiration_minutes": 10,
+                "service_display_name": "Neo",
             },
             "cache": {
                 "index_cache_ttl_minutes": 10.0,
@@ -349,7 +359,15 @@ def test_api_keys_section_renders_without_tokens():
             "claude_cli": {
                 "max_concurrent_claude_cli": 2,
                 "description_refresh_interval_hours": 24,
+                "description_refresh_enabled": False,
                 "research_assistant_timeout_seconds": 300,
+                "dependency_map_enabled": False,
+                "dependency_map_interval_hours": 168,
+                "dependency_map_pass_timeout_seconds": 600,
+                "dependency_map_pass1_max_turns": 50,
+                "dependency_map_pass2_max_turns": 60,
+                "dependency_map_pass3_max_turns": 30,
+                "dependency_map_delta_max_turns": 30,
             },
             "provider_api_keys": {
                 "anthropic_configured": False,
@@ -369,7 +387,7 @@ def test_api_keys_section_renders_without_tokens():
 
     # Verify API Keys section is present
     assert (
-        "CI/CD API Keys" in rendered
+        "CI/CD Platform Keys" in rendered
     ), "API Keys section header should be in rendered HTML"
     assert "GitHub" in rendered, "GitHub subsection should be in rendered HTML"
     assert "GitLab" in rendered, "GitLab subsection should be in rendered HTML"

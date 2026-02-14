@@ -39,11 +39,20 @@ def test_restart_indicators_appear_for_worker_settings():
                 "workers": 4,
                 "log_level": "INFO",
                 "jwt_expiration_minutes": 10,
+                "service_display_name": "Neo",
             },
             "claude_cli": {
                 "max_concurrent_claude_cli": 2,
                 "description_refresh_interval_hours": 24,
                 "research_assistant_timeout_seconds": 300,
+                "description_refresh_enabled": False,
+                "dependency_map_enabled": False,
+                "dependency_map_interval_hours": 168,
+                "dependency_map_pass_timeout_seconds": 600,
+                "dependency_map_pass1_max_turns": 50,
+                "dependency_map_pass2_max_turns": 60,
+                "dependency_map_pass3_max_turns": 30,
+                "dependency_map_delta_max_turns": 30,
             },
             "multi_search": {
                 "multi_search_max_workers": 2,
@@ -188,14 +197,15 @@ def test_restart_indicators_appear_for_worker_settings():
     # Count occurrences of restart indicator
     restart_indicator_count = rendered.count("Requires server restart")
 
-    # We expect exactly 9 total:
+    # We expect exactly 10 total:
     # - 2 server settings: host, port
     # - 2 integration settings: telemetry_enabled, langfuse_enabled
     # - 5 worker settings: max_concurrent_claude_cli, multi_search_max_workers,
     #   scip_multi_max_workers, max_concurrent_background_jobs, subprocess_max_workers
+    # - 1 scheduler setting: dependency_map_enabled
     assert (
-        restart_indicator_count == 9
-    ), f"Expected exactly 9 restart indicators, found {restart_indicator_count}"
+        restart_indicator_count == 10
+    ), f"Expected exactly 10 restart indicators, found {restart_indicator_count}"
 
     # Verify specific sections contain the indicator near the relevant field labels
     # For max_concurrent_claude_cli
@@ -221,7 +231,7 @@ def test_restart_required_fields_list_contains_expected_fields():
     # Validate the actual production constant from routes.py
     # This ensures we're testing real behavior, not a self-referential copy
 
-    # All 9 expected fields
+    # All 10 expected fields
     expected_fields = {
         "host",
         "port",
@@ -232,11 +242,12 @@ def test_restart_required_fields_list_contains_expected_fields():
         "scip_multi_max_workers",
         "max_concurrent_background_jobs",
         "subprocess_max_workers",
+        "dependency_map_enabled",
     }
 
     # Validate the production constant
-    assert len(RESTART_REQUIRED_FIELDS) == 9, (
-        f"Expected 9 restart-required fields, found {len(RESTART_REQUIRED_FIELDS)}"
+    assert len(RESTART_REQUIRED_FIELDS) == 10, (
+        f"Expected 10 restart-required fields, found {len(RESTART_REQUIRED_FIELDS)}"
     )
 
     # Validate each expected field is present
