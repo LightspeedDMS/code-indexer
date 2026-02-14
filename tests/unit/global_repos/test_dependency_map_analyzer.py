@@ -115,7 +115,7 @@ class TestPass1Synthesis:
         call_args = mock_subprocess.call_args
 
         # Check command structure (last element is the prompt)
-        assert call_args[0][0][:-1] == ["claude", "--print", "--max-turns", "50", "--allowedTools", "mcp__cidx-local__search_code", "-p"]
+        assert call_args[0][0][:-1] == ["claude", "--print", "--model", "opus", "--max-turns", "50", "--allowedTools", "mcp__cidx-local__search_code", "-p"]
         assert "Identify domain clusters" in call_args[0][0][-1]
         assert call_args[1]["cwd"] == str(tmp_path)
         assert call_args[1]["timeout"] == 300  # half of pass_timeout

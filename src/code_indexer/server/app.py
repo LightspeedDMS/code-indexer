@@ -2702,6 +2702,7 @@ def create_app() -> FastAPI:
                 config_manager=config_service,
                 claude_cli_manager=get_claude_cli_manager(),
                 meta_dir=meta_dir,
+                analysis_model=server_config.golden_repos_config.analysis_model if server_config.golden_repos_config else "opus",
             )
 
             # Inject into meta_description_hook for tracking on repo add/remove
@@ -2773,6 +2774,7 @@ def create_app() -> FastAPI:
                 cidx_meta_path=cidx_meta_path,
                 pass_timeout=server_config.claude_integration_config.dependency_map_pass_timeout_seconds,
                 mcp_registration_service=mcp_registration_service,
+                analysis_model=server_config.golden_repos_config.analysis_model if server_config.golden_repos_config else "opus",
             )
 
             # Create service

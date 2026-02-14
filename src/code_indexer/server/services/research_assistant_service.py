@@ -954,22 +954,25 @@ class ResearchAssistantService:
                 session = self.get_default_session()
             working_dir = Path(session["folder_path"])
 
-            # Load timeout from config (default to 1200 seconds = 20 minutes if unavailable)
+            # Load timeout and analysis_model from config (defaults: 1200s, "opus")
             timeout_seconds = 1200
+            analysis_model = "opus"
             try:
                 from code_indexer.server.utils.config_manager import ServerConfigManager
                 config_manager = ServerConfigManager()
                 config = config_manager.load_config()
                 if config and config.claude_integration_config:
                     timeout_seconds = config.claude_integration_config.research_assistant_timeout_seconds
+                if config and config.golden_repos_config:
+                    analysis_model = config.golden_repos_config.analysis_model
             except Exception as e:
-                logger.warning(f"Failed to load research assistant timeout from config, using default {timeout_seconds}s: {e}")
+                logger.warning(f"Failed to load research assistant config, using defaults (timeout={timeout_seconds}s, model={analysis_model}): {e}")
 
             # Get the stored Claude session ID from database
             claude_session_id = self._get_or_create_claude_session_id(session_id)
 
             # Build base command
-            base_cmd = ["claude", "--dangerously-skip-permissions"]
+            base_cmd = ["claude", "--dangerously-skip-permissions", "--model", analysis_model]
 
             # Bug #153 Fix: Use --session-id for first message, --resume for subsequent
             if is_first_prompt:

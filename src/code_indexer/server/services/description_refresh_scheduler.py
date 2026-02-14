@@ -33,7 +33,7 @@ class DescriptionRefreshScheduler:
     """
 
     def __init__(
-        self, db_path: str, config_manager, claude_cli_manager=None, meta_dir: Optional[Path] = None
+        self, db_path: str, config_manager, claude_cli_manager=None, meta_dir: Optional[Path] = None, analysis_model: str = "opus"
     ) -> None:
         """
         Initialize the scheduler.
@@ -43,11 +43,13 @@ class DescriptionRefreshScheduler:
             config_manager: ServerConfigManager instance
             claude_cli_manager: Optional ClaudeCliManager instance (for submitting work)
             meta_dir: Path to cidx-meta directory (for reading existing .md files)
+            analysis_model: Claude model to use ("opus" or "sonnet", default: "opus")
         """
         self._db_path = db_path
         self._config_manager = config_manager
         self._claude_cli_manager = claude_cli_manager
         self._meta_dir = meta_dir
+        self._analysis_model = analysis_model
         self._tracking_backend = DescriptionRefreshTrackingBackend(db_path)
         self._golden_backend = GoldenRepoMetadataSqliteBackend(db_path)
         self._shutdown_event = threading.Event()
@@ -489,7 +491,7 @@ class DescriptionRefreshScheduler:
                     # Continue anyway - sync failure shouldn't block analysis
 
             # Use script to provide pseudo-TTY (required for Claude CLI in non-interactive environments)
-            claude_cmd = f"timeout 90 claude -p {shlex.quote(prompt)} --print --dangerously-skip-permissions"
+            claude_cmd = f"timeout 90 claude --model {shlex.quote(self._analysis_model)} -p {shlex.quote(prompt)} --print --dangerously-skip-permissions"
             full_cmd = ["script", "-q", "-c", claude_cmd, "/dev/null"]
 
             result = subprocess.run(

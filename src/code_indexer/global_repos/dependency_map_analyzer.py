@@ -42,6 +42,7 @@ class DependencyMapAnalyzer:
         cidx_meta_path: Path,
         pass_timeout: int,
         mcp_registration_service=None,
+        analysis_model: str = "opus",
     ):
         """
         Initialize dependency map analyzer.
@@ -51,11 +52,13 @@ class DependencyMapAnalyzer:
             cidx_meta_path: Path to cidx-meta directory for output
             pass_timeout: Timeout in seconds for each pass (Pass 2 uses full, others use half)
             mcp_registration_service: MCPSelfRegistrationService for auto-registering CIDX as MCP server
+            analysis_model: Claude model to use ("opus" or "sonnet", default: "opus")
         """
         self.golden_repos_root = Path(golden_repos_root)
         self.cidx_meta_path = Path(cidx_meta_path)
         self.pass_timeout = pass_timeout
         self._mcp_registration_service = mcp_registration_service
+        self.analysis_model = analysis_model
 
     def generate_claude_md(self, repo_list: List[Dict[str, Any]]) -> None:
         """
@@ -810,6 +813,8 @@ class DependencyMapAnalyzer:
         cmd = [
             "claude",
             "--print",
+            "--model",
+            self.analysis_model,
             "--max-turns",
             str(max_turns),
             "--allowedTools",
