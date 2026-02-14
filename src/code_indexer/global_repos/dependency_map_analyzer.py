@@ -508,6 +508,27 @@ class DependencyMapAnalyzer:
             stdin=subprocess.DEVNULL,  # Prevent Claude CLI from hanging on stdin
         )
 
+        # Diagnostic logging for debugging empty output issues
+        raw_stdout_len = len(result.stdout) if result.stdout else 0
+        raw_stderr_len = len(result.stderr) if result.stderr else 0
+        logger.info(
+            f"Claude CLI completed: returncode={result.returncode}, "
+            f"stdout={raw_stdout_len} chars, stderr={raw_stderr_len} chars"
+        )
+        if raw_stdout_len == 0:
+            logger.warning(
+                f"Claude CLI returned EMPTY stdout. "
+                f"stderr (first 1000 chars): {(result.stderr or '')[:1000]}"
+            )
+        elif raw_stdout_len < 100:
+            logger.warning(
+                f"Claude CLI returned very short stdout: {result.stdout!r}"
+            )
+        else:
+            logger.debug(
+                f"Claude CLI stdout (first 500 chars): {result.stdout[:500]}"
+            )
+
         if result.returncode != 0:
             logger.error(f"Claude CLI failed: {result.stderr}")
             raise subprocess.CalledProcessError(
