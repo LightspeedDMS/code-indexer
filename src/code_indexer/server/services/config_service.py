@@ -72,6 +72,16 @@ class ConfigService:
         assert self._config is not None  # load_config() always sets self._config
         return self._config
 
+    def get_claude_integration_config(self):
+        """
+        Get Claude integration config from server config.
+
+        Returns:
+            ClaudeIntegrationConfig object from current server configuration
+        """
+        config = self.get_config()
+        return config.claude_integration_config
+
     def get_all_settings(self) -> Dict[str, Any]:
         """
         Get all settings as a flat dictionary for UI display.

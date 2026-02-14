@@ -11572,6 +11572,7 @@ def handle_trigger_dependency_analysis(
     import threading
     import uuid
     from datetime import datetime, timezone
+    from code_indexer.server.utils.config_manager import ServerConfigManager
 
     try:
         # AC4: Default mode is delta
@@ -11588,8 +11589,10 @@ def handle_trigger_dependency_analysis(
             )
 
         # AC6: Check if feature is enabled
-        config = getattr(app_module, "config", None)
-        if not config or not getattr(config, "dependency_map_enabled", False):
+        _scm = ServerConfigManager()
+        _server_config = _scm.load_config()
+        _ci_config = _server_config.claude_integration_config if _server_config else None
+        if not _ci_config or not getattr(_ci_config, "dependency_map_enabled", False):
             return _mcp_response(
                 {
                     "success": False,
@@ -11599,7 +11602,7 @@ def handle_trigger_dependency_analysis(
             )
 
         # AC5: Check if analysis is already running
-        dependency_map_service = getattr(app_module, "dependency_map_service", None)
+        dependency_map_service = getattr(app_module.app.state, "dependency_map_service", None)
         if not dependency_map_service:
             return _mcp_response(
                 {

@@ -1,7 +1,7 @@
 ---
 name: trigger_dependency_analysis
 category: repos
-required_permission: manage_repos
+required_permission: manage_golden_repos
 tl_dr: Manually trigger dependency map analysis (full or delta mode).
 inputSchema:
   type: object
@@ -64,7 +64,7 @@ Only one dependency map analysis can run at a time. Concurrent requests will be 
 
 REQUIREMENTS:
 - dependency_map_enabled must be True in server configuration
-- Requires admin permission (manage_repos)
+- Requires admin permission (manage_golden_repos)
 
 EXAMPLE:
 {"mode": "delta"} Returns: {"success": true, "job_id": "abc123", "mode": "delta", "status": "queued", "message": "Dependency map delta analysis started"}

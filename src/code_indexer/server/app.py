@@ -2756,15 +2756,12 @@ def create_app() -> FastAPI:
                 DependencyMapTrackingBackend,
             )
             from code_indexer.server.services.config_service import get_config_service
-            from code_indexer.server.repositories.golden_repo_manager import (
-                get_golden_repo_manager,
-            )
 
             # Get dependencies
             config_service = get_config_service()
             server_config = config_service.get_config()
             db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")
-            golden_repos_manager = get_golden_repo_manager()
+            golden_repos_manager = golden_repo_manager
 
             # Create tracking backend
             tracking_backend = DependencyMapTrackingBackend(db_path)
