@@ -426,8 +426,9 @@ class ClaudeIntegrationConfig:
     dependency_map_interval_hours: int = 168
     # Pass timeout in seconds (default: 1800 = 30 minutes, Pass 2 uses full, Pass 1/3 use half)
     dependency_map_pass_timeout_seconds: int = 1800  # Fix 5: Increased from 600
-    # Pass 1 (synthesis) max turns (default: 5, no MCP tools needed)
-    dependency_map_pass1_max_turns: int = 5  # Fix 7: Reduced from 50
+    # Pass 1 (synthesis) max turns (default: 20, needs turns for built-in tool exploration)
+    # Built-in tools cannot be disabled - Pass 1 needs enough turns for exploration
+    dependency_map_pass1_max_turns: int = 20
     # Pass 2 (per-domain) max turns (default: 50)
     dependency_map_pass2_max_turns: int = 50  # Fix 6: Reduced from 60
     # Pass 3 (index) max turns (default: 30)
