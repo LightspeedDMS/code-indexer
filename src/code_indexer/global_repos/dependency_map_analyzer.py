@@ -141,9 +141,10 @@ class DependencyMapAnalyzer:
         result = self._invoke_claude_cli(prompt, timeout, max_turns)
 
         # Parse JSON response
+        logger.debug(f"Pass 1 raw output length: {len(result)} chars")
         try:
-            domain_list = json.loads(result)
-        except json.JSONDecodeError as e:
+            domain_list = self._extract_json(result)
+        except (json.JSONDecodeError, ValueError) as e:
             raise RuntimeError(
                 f"Pass 1 (Synthesis) returned unparseable output: {e}"
             ) from e
@@ -313,6 +314,100 @@ class DependencyMapAnalyzer:
         if text.endswith("```"):
             text = text[:-3].rstrip()
         return text
+
+    @staticmethod
+    def _extract_json(text: str) -> Any:
+        """
+        Extract JSON from Claude CLI output, handling preambles and code fences.
+
+        Claude CLI with --print sometimes returns natural language text before JSON:
+        "Based on my analysis... [JSON]" or "```json [JSON] ```"
+
+        This method:
+        1. Strips markdown code fences (```json...```)
+        2. Finds first JSON bracket ([ or {)
+        3. Extracts from that position to matching closing bracket
+        4. Validates and parses the JSON
+
+        Args:
+            text: Raw Claude CLI output
+
+        Returns:
+            Parsed JSON object (dict or list)
+
+        Raises:
+            ValueError: If no valid JSON found in the text
+        """
+        logger.debug(f"Extracting JSON from output (length={len(text)})")
+
+        # Step 1: Strip markdown code fences
+        text = DependencyMapAnalyzer._strip_code_fences(text)
+
+        # Step 2: Find first JSON bracket
+        start_idx = -1
+        start_bracket = None
+        for i, char in enumerate(text):
+            if char in "[{":
+                start_idx = i
+                start_bracket = char
+                break
+
+        if start_idx == -1:
+            raise ValueError(
+                f"No JSON found in output (first 200 chars): {text[:200]}"
+            )
+
+        # Step 3: Find matching closing bracket using bracket counting
+        # Track string state to ignore brackets inside JSON string values
+        bracket_count = 0
+        end_idx = -1
+        in_string = False
+        escape_next = False
+
+        for i in range(start_idx, len(text)):
+            char = text[i]
+
+            # Handle escape sequences
+            if escape_next:
+                escape_next = False
+                continue
+            if char == '\\' and in_string:
+                escape_next = True
+                continue
+
+            # Track string boundaries
+            if char == '"':
+                in_string = not in_string
+                continue
+
+            # Only count brackets outside of strings
+            if in_string:
+                continue
+
+            if char in "[{":
+                bracket_count += 1
+            elif char in "]}":
+                bracket_count -= 1
+                if bracket_count == 0:
+                    end_idx = i
+                    break
+
+        if end_idx == -1:
+            raise ValueError(
+                f"No matching closing bracket found for JSON starting at position {start_idx} "
+                f"(context: {text[start_idx:start_idx+200]})"
+            )
+
+        # Step 4: Extract and validate JSON
+        json_text = text[start_idx : end_idx + 1]
+        try:
+            parsed = json.loads(json_text)
+            logger.debug(f"Successfully extracted JSON: {type(parsed).__name__}")
+            return parsed
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"Extracted text is not valid JSON: {e} (first 200 chars): {json_text[:200]}"
+            ) from e
 
     def _invoke_claude_cli(self, prompt: str, timeout: int, max_turns: int) -> str:
         """
