@@ -7,6 +7,7 @@ particularly focusing on API Keys section that was having Jinja2 syntax errors.
 
 from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
+from code_indexer.server.web.routes import RESTART_REQUIRED_FIELDS
 
 
 def test_api_keys_section_renders_with_github_token():
@@ -26,6 +27,7 @@ def test_api_keys_section_renders_with_github_token():
     # Mock context data
     context = {
         "csrf_token": "test-csrf-token",
+        "restart_required_fields": RESTART_REQUIRED_FIELDS,
         "config": {
             "server": {
                 "host": "127.0.0.1",
@@ -75,6 +77,12 @@ def test_api_keys_section_renders_with_github_token():
                 "machine_metrics_interval_seconds": 60,
                 "trace_sample_rate": 1.0,
                 "deployment_environment": "development",
+            },
+            "langfuse": {
+                "enabled": False,
+                "public_key": "",
+                "secret_key": "",
+                "host": "",
             },
             "claude_delegation": {
                 "is_configured": False,
@@ -139,6 +147,27 @@ def test_api_keys_section_renders_with_github_token():
                 "web_session_timeout_seconds": 28800,
             },
             "auth": {"oauth_extension_threshold_hours": 4},
+            "multi_search": {
+                "multi_search_max_workers": 2,
+                "multi_search_timeout_seconds": 30,
+                "scip_multi_max_workers": 2,
+                "scip_multi_timeout_seconds": 30,
+            },
+            "background_jobs": {
+                "max_concurrent_background_jobs": 5,
+                "subprocess_max_workers": 2,
+            },
+            "claude_cli": {
+                "max_concurrent_claude_cli": 2,
+                "description_refresh_interval_hours": 24,
+                "research_assistant_timeout_seconds": 300,
+            },
+            "provider_api_keys": {
+                "anthropic_configured": False,
+                "voyageai_configured": False,
+            },
+            "omni_search": {},
+            "content_limits": {},
         },
         "validation_errors": {},
         "api_keys_status": [],
@@ -237,6 +266,12 @@ def test_api_keys_section_renders_without_tokens():
                 "trace_sample_rate": 1.0,
                 "deployment_environment": "development",
             },
+            "langfuse": {
+                "enabled": False,
+                "public_key": "",
+                "secret_key": "",
+                "host": "",
+            },
             "claude_delegation": {
                 "is_configured": False,
                 "function_repo_alias": "",
@@ -300,6 +335,27 @@ def test_api_keys_section_renders_without_tokens():
                 "web_session_timeout_seconds": 28800,
             },
             "auth": {"oauth_extension_threshold_hours": 4},
+            "multi_search": {
+                "multi_search_max_workers": 2,
+                "multi_search_timeout_seconds": 30,
+                "scip_multi_max_workers": 2,
+                "scip_multi_timeout_seconds": 30,
+            },
+            "background_jobs": {
+                "max_concurrent_background_jobs": 5,
+                "subprocess_max_workers": 2,
+            },
+            "claude_cli": {
+                "max_concurrent_claude_cli": 2,
+                "description_refresh_interval_hours": 24,
+                "research_assistant_timeout_seconds": 300,
+            },
+            "provider_api_keys": {
+                "anthropic_configured": False,
+                "voyageai_configured": False,
+            },
+            "omni_search": {},
+            "content_limits": {},
         },
         "validation_errors": {},
         "api_keys_status": [],

@@ -37,6 +37,21 @@ logger = logging.getLogger(__name__)
 SCAN_HISTORY_LIMIT = 50
 ISSUES_HISTORY_LIMIT = 100
 
+# Story #198: Settings that require server restart
+# These settings are read during server startup (singleton init, thread pool creation)
+# and changing them has no effect until the server is restarted
+RESTART_REQUIRED_FIELDS = [
+    "host",  # Server binding address (read at uvicorn startup)
+    "port",  # Server binding port (read at uvicorn startup)
+    "telemetry_enabled",  # Telemetry integration (read at server startup)
+    "langfuse_enabled",  # Langfuse integration (read at server startup)
+    "max_concurrent_claude_cli",  # ClaudeCliManager thread pool size (singleton init)
+    "multi_search_max_workers",  # Multi-search thread pool size (singleton init)
+    "scip_multi_max_workers",  # SCIP multi-repo thread pool size (singleton init)
+    "max_concurrent_background_jobs",  # BackgroundJobManager thread pool size (singleton init)
+    "subprocess_max_workers",  # Subprocess executor pool size (singleton init)
+]
+
 
 def _get_token_manager() -> CITokenManager:
     """Create CITokenManager with SQLite backend (Story #702 migration)."""
@@ -5633,6 +5648,7 @@ def _create_config_page_response(
             "api_keys_status": api_keys_status,
             "github_token_data": github_token_data,
             "gitlab_token_data": gitlab_token_data,
+            "restart_required_fields": RESTART_REQUIRED_FIELDS,
         },
     )
 

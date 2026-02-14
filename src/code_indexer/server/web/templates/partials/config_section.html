@@ -21,14 +21,18 @@
                         <td class="config-label">Host</td>
                         <td class="config-value">{{ config.server.host }}</td>
                         <td class="config-note">
-                            <small class="read-only-note">Requires server restart</small>
+                            {% if 'host' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
                         </td>
                     </tr>
                     <tr>
                         <td class="config-label">Port</td>
                         <td class="config-value">{{ config.server.port }}</td>
                         <td class="config-note">
-                            <small class="read-only-note">Requires server restart</small>
+                            {% if 'port' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
                         </td>
                     </tr>
                     <tr>
@@ -346,7 +350,12 @@
                     <tr>
                         <td class="config-label">Multi-Search Max Workers</td>
                         <td class="config-value">{{ config.multi_search.multi_search_max_workers }}</td>
-                        <td class="config-note"><small>Max concurrent threads for all multi-repository searches including REST API and MCP omni-search (default: 2)</small></td>
+                        <td class="config-note">
+                            {% if 'multi_search_max_workers' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Max concurrent threads for all multi-repository searches including REST API and MCP omni-search (default: 2)</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Multi-Search Timeout (seconds)</td>
@@ -357,7 +366,12 @@
                     <tr>
                         <td class="config-label">SCIP Multi Max Workers</td>
                         <td class="config-value">{{ config.multi_search.scip_multi_max_workers }}</td>
-                        <td class="config-note"><small>Max concurrent threads for multi-repo SCIP queries (default: 2)</small></td>
+                        <td class="config-note">
+                            {% if 'scip_multi_max_workers' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Max concurrent threads for multi-repo SCIP queries (default: 2)</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">SCIP Multi Timeout (seconds)</td>
@@ -870,12 +884,22 @@
                     <tr>
                         <td class="config-label">Max Concurrent Background Jobs</td>
                         <td class="config-value">{{ config.background_jobs.max_concurrent_background_jobs }}</td>
-                        <td class="config-note"><small>Maximum number of concurrent background jobs (default: 5)</small></td>
+                        <td class="config-note">
+                            {% if 'max_concurrent_background_jobs' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Maximum number of concurrent background jobs (default: 5)</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Subprocess Max Workers</td>
                         <td class="config-value">{{ config.background_jobs.subprocess_max_workers }}</td>
-                        <td class="config-note"><small>Max concurrent workers for subprocess operations like regex search (default: 2)</small></td>
+                        <td class="config-note">
+                            {% if 'subprocess_max_workers' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Max concurrent workers for subprocess operations like regex search (default: 2)</small>
+                        </td>
                     </tr>
                 </tbody>
             </table>
@@ -1513,7 +1537,12 @@
                     <tr>
                         <td class="config-label">Max Concurrent Claude CLI</td>
                         <td class="config-value">{{ config.claude_cli.max_concurrent_claude_cli }}</td>
-                        <td class="config-note"><small>Maximum parallel Claude CLI processes (default: 2)</small></td>
+                        <td class="config-note">
+                            {% if 'max_concurrent_claude_cli' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Maximum parallel Claude CLI processes (default: 2)</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Description Refresh Enabled</td>
@@ -1883,7 +1912,9 @@
                         <td class="config-label">Enabled</td>
                         <td class="config-value">{{ 'Yes' if config.telemetry.enabled else 'No' }}</td>
                         <td class="config-note">
-                            <small class="read-only-note">Requires server restart</small>
+                            {% if 'telemetry_enabled' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
                         </td>
                     </tr>
                     <tr>
@@ -2053,7 +2084,9 @@
                         <td class="config-label">Enabled</td>
                         <td class="config-value">{{ 'Yes' if config.langfuse.enabled else 'No' }}</td>
                         <td class="config-note">
-                            <small class="read-only-note">Requires server restart</small>
+                            {% if 'langfuse_enabled' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
                         </td>
                     </tr>
                     <tr>

@@ -1285,6 +1285,15 @@ button.danger, .button.danger {
 }
 
 /* ========================================
+   Story #198: Restart Required Indicators
+   ======================================== */
+
+.restart-note {
+    color: #856404;
+    font-style: italic;
+}
+
+/* ========================================
    Repository Health Status (Story #60)
    ======================================== */
 

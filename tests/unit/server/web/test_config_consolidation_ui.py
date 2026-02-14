@@ -79,6 +79,12 @@ class BaseTemplateSectionTest:
                     "trace_sample_rate": 1.0,
                     "deployment_environment": "development",
                 },
+                "langfuse": {
+                    "enabled": False,
+                    "public_key": "",
+                    "secret_key": "",
+                    "host": "",
+                },
                 "claude_delegation": {
                     "is_configured": False,
                     "function_repo_alias": "",
@@ -161,6 +167,26 @@ class BaseTemplateSectionTest:
                 },
                 # Story #3 - Phase 2: P3 settings (AC36)
                 "auth": {"oauth_extension_threshold_hours": 4},
+                # Story #25: Multi-search configuration
+                "multi_search": {
+                    "multi_search_max_workers": 2,
+                    "multi_search_timeout_seconds": 30,
+                    "scip_multi_max_workers": 2,
+                    "scip_multi_timeout_seconds": 30,
+                },
+                # Story #26: Background jobs configuration
+                "background_jobs": {
+                    "max_concurrent_background_jobs": 5,
+                    "subprocess_max_workers": 2,
+                },
+                # Claude CLI integration
+                "claude_cli": {
+                    "max_concurrent_claude_cli": 2,
+                    "description_refresh_interval_hours": 24,
+                    "research_assistant_timeout_seconds": 300,
+                },
+                # Story #28: Omni-search configuration
+                "omni_search": {},
             },
             "validation_errors": {},
             "api_keys_status": [],
