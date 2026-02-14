@@ -2605,6 +2605,7 @@ def create_app() -> FastAPI:
             claude_init_result = initialize_claude_manager_on_startup(
                 golden_repos_dir=str(golden_repos_dir),
                 server_config=server_config,
+                mcp_registration_service=mcp_registration_service,
             )
 
             if claude_init_result:
@@ -2774,6 +2775,7 @@ def create_app() -> FastAPI:
                 golden_repos_root=Path(golden_repos_dir),
                 cidx_meta_path=cidx_meta_path,
                 pass_timeout=server_config.claude_integration_config.dependency_map_pass_timeout_seconds,
+                mcp_registration_service=mcp_registration_service,
             )
 
             # Create service
@@ -3625,6 +3627,16 @@ def create_app() -> FastAPI:
     from code_indexer.server.auth.mcp_credential_manager import MCPCredentialManager
 
     mcp_credential_manager = MCPCredentialManager(user_manager=user_manager)
+
+    # Initialize MCP self-registration service (Story #203)
+    from code_indexer.server.services.mcp_self_registration_service import (
+        MCPSelfRegistrationService,
+    )
+
+    mcp_registration_service = MCPSelfRegistrationService(
+        config_manager=config_service,
+        mcp_credential_manager=mcp_credential_manager,
+    )
 
     # Set global dependencies
     dependencies.jwt_manager = jwt_manager

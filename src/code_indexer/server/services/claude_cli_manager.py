@@ -48,13 +48,14 @@ class ClaudeCliManager:
     - Configurable worker pool for concurrency control
     """
 
-    def __init__(self, api_key: Optional[str] = None, max_workers: int = 2):
+    def __init__(self, api_key: Optional[str] = None, max_workers: int = 2, mcp_registration_service=None):
         """
         Initialize ClaudeCliManager with worker pool.
 
         Args:
             api_key: Anthropic API key to sync to ~/.claude.json
             max_workers: Number of worker threads (default 2, Story #24)
+            mcp_registration_service: MCPSelfRegistrationService for auto-registering CIDX as MCP server
         """
         self._api_key = api_key
         self._max_workers = max_workers
@@ -69,6 +70,8 @@ class ClaudeCliManager:
         self._meta_dir: Optional[Path] = None  # Meta directory for fallback scanning
         self._cli_was_unavailable: bool = True
         self._cli_state_lock = threading.Lock()  # Lock for CLI state management
+        self._mcp_registration_service = mcp_registration_service
+        self._mcp_registration_attempted = False  # Flag to ensure registration only attempted once per manager
 
         # Start worker threads
         for i in range(max_workers):
@@ -549,6 +552,14 @@ class ClaudeCliManager:
             f"{thread_name} started", extra={"correlation_id": get_correlation_id()}
         )
 
+        # Story #203 AC6: Ensure MCP self-registration before processing work
+        # Double-check locking pattern for thread-safe one-time registration
+        if self._mcp_registration_service and not self._mcp_registration_attempted:
+            with self._cli_state_lock:
+                if not self._mcp_registration_attempted:
+                    self._mcp_registration_service.ensure_registered()
+                    self._mcp_registration_attempted = True
+
         while not self._shutdown_event.is_set():
             try:
                 item = self._work_queue.get(timeout=1.0)
@@ -654,6 +665,7 @@ def initialize_claude_cli_manager(
     api_key: Optional[str],
     meta_dir: Path,
     max_workers: int = 2,
+    mcp_registration_service=None,
 ) -> ClaudeCliManager:
     """
     Initialize the global ClaudeCliManager singleton.
@@ -665,6 +677,7 @@ def initialize_claude_cli_manager(
         api_key: Anthropic API key for Claude CLI (may be None if not yet configured)
         meta_dir: Path to the cidx-meta directory for fallback scanning
         max_workers: Number of worker threads (default 2)
+        mcp_registration_service: MCPSelfRegistrationService for auto-registering CIDX as MCP server
 
     Returns:
         The global ClaudeCliManager instance
@@ -686,7 +699,7 @@ def initialize_claude_cli_manager(
             return _global_cli_manager
 
         # Create the singleton instance
-        manager = ClaudeCliManager(api_key=api_key, max_workers=max_workers)
+        manager = ClaudeCliManager(api_key=api_key, max_workers=max_workers, mcp_registration_service=mcp_registration_service)
         manager.set_meta_dir(meta_dir)
         _global_cli_manager = manager
 

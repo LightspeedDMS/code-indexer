@@ -642,6 +642,19 @@ class LangfuseConfig:
 
 
 @dataclass
+class MCPSelfRegistrationConfig:
+    """
+    MCP self-registration credentials (Story #203).
+
+    Stores credentials for CIDX server's auto-registration as an MCP server
+    in Claude Code configuration. Persisted to enable reuse across restarts.
+    """
+
+    client_id: str = ""
+    client_secret: str = ""
+
+
+@dataclass
 class ServerConfig:
     """
     Server configuration data structure.
@@ -708,6 +721,9 @@ class ServerConfig:
     # Story #136 - Langfuse integration configuration
     langfuse_config: Optional[LangfuseConfig] = None
 
+    # Story #203 - MCP self-registration credentials
+    mcp_self_registration: Optional[MCPSelfRegistrationConfig] = None
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:
@@ -772,6 +788,9 @@ class ServerConfig:
         # Story #136 - Initialize Langfuse config
         if self.langfuse_config is None:
             self.langfuse_config = LangfuseConfig()
+        # Story #203 - Initialize MCP self-registration config
+        if self.mcp_self_registration is None:
+            self.mcp_self_registration = MCPSelfRegistrationConfig()
 
 
 class ServerConfigManager:
@@ -1166,6 +1185,14 @@ class ServerConfigManager:
             ):
                 config_dict["langfuse_config"] = LangfuseConfig(
                     **config_dict["langfuse_config"]
+                )
+
+            # Story #203: Convert mcp_self_registration dict to MCPSelfRegistrationConfig
+            if "mcp_self_registration" in config_dict and isinstance(
+                config_dict["mcp_self_registration"], dict
+            ):
+                config_dict["mcp_self_registration"] = MCPSelfRegistrationConfig(
+                    **config_dict["mcp_self_registration"]
                 )
 
             # Remove obsolete reindexing_config field (deleted in previous commit)

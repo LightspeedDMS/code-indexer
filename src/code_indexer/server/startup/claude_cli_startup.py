@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 def initialize_claude_manager_on_startup(
     golden_repos_dir: str,
     server_config: Any,
+    mcp_registration_service=None,
 ) -> bool:
     """
     Initialize the global ClaudeCliManager singleton during server startup.
@@ -31,6 +32,7 @@ def initialize_claude_manager_on_startup(
     Args:
         golden_repos_dir: Path to golden-repos directory (cidx-meta is at {golden_repos_dir}/cidx-meta)
         server_config: The ServerConfig instance with claude_integration_config
+        mcp_registration_service: MCPSelfRegistrationService for auto-registering CIDX as MCP server
 
     Returns:
         True if initialization succeeded, False on error
@@ -77,6 +79,7 @@ def initialize_claude_manager_on_startup(
             api_key=api_key,
             meta_dir=cidx_meta_dir,
             max_workers=max_workers,
+            mcp_registration_service=mcp_registration_service,
         )
 
         # Log success with key status

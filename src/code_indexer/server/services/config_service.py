@@ -937,6 +937,17 @@ class ConfigService:
         """Get the path to the configuration file."""
         return str(self.config_manager.config_file_path)
 
+    def save_config(self, config: ServerConfig) -> None:
+        """
+        Save configuration to disk (Story #203 - Fix Finding 2).
+
+        Delegates to underlying ServerConfigManager.save_config().
+
+        Args:
+            config: ServerConfig object to save
+        """
+        self.config_manager.save_config(config)
+
 
 # Global service instance
 _config_service: Optional[ConfigService] = None
