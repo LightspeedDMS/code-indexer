@@ -1068,16 +1068,22 @@ class DiagnosticsService:
                     with open(meta_file, 'r') as f:
                         metadata = json.load(f)
 
-                    # Get vector count from metadata
+                    # Get vector count from metadata (if hnsw_index section exists)
                     vector_count = metadata.get("hnsw_index", {}).get("vector_count", None)
+                    unique_file_count = metadata.get("unique_file_count", None)
 
-                    # Empty collection (0 vectors) is healthy - no HNSW file expected
-                    if vector_count == 0:
+                    # Empty collection is healthy - no HNSW file expected
+                    # Three indicators of empty collection:
+                    # 1. vector_count == 0 (finalized empty collection)
+                    # 2. unique_file_count == 0 (no files indexed)
+                    # 3. No hnsw_index section at all (never finalized)
+                    if vector_count == 0 or unique_file_count == 0 or "hnsw_index" not in metadata:
                         import logging
                         logger = logging.getLogger(__name__)
                         logger.debug(
                             f"Empty collection '{collection_name}' in repo '{repo_name}' "
-                            f"(0 vectors, no HNSW file) - skipping health check"
+                            f"(vector_count={vector_count}, unique_file_count={unique_file_count}, "
+                            f"hnsw_index_exists={'hnsw_index' in metadata}, no HNSW file) - skipping health check"
                         )
                         return None
 
