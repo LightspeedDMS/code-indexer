@@ -35,9 +35,9 @@ class TestDependencyMapConfigDefaults:
         # Verify defaults
         assert claude_config.dependency_map_enabled is False
         assert claude_config.dependency_map_interval_hours == 168  # 1 week
-        assert claude_config.dependency_map_pass_timeout_seconds == 600  # 10 minutes
-        assert claude_config.dependency_map_pass1_max_turns == 50
-        assert claude_config.dependency_map_pass2_max_turns == 60
+        assert claude_config.dependency_map_pass_timeout_seconds == 1800  # 30 minutes (Fix 5)
+        assert claude_config.dependency_map_pass1_max_turns == 5  # (Fix 7)
+        assert claude_config.dependency_map_pass2_max_turns == 50  # (Fix 6)
         assert claude_config.dependency_map_pass3_max_turns == 30
         assert claude_config.dependency_map_delta_max_turns == 30
 
@@ -101,12 +101,12 @@ class TestDependencyMapConfigPersistence:
         assert loaded_config.claude_integration_config is not None
         claude_config = loaded_config.claude_integration_config
 
-        # Verify defaults are applied
+        # Verify defaults are applied (with new defaults from Fixes 5, 6, 7)
         assert claude_config.dependency_map_enabled is False
         assert claude_config.dependency_map_interval_hours == 168
-        assert claude_config.dependency_map_pass_timeout_seconds == 600
-        assert claude_config.dependency_map_pass1_max_turns == 50
-        assert claude_config.dependency_map_pass2_max_turns == 60
+        assert claude_config.dependency_map_pass_timeout_seconds == 1800  # Fix 5
+        assert claude_config.dependency_map_pass1_max_turns == 5  # Fix 7
+        assert claude_config.dependency_map_pass2_max_turns == 50  # Fix 6
         assert claude_config.dependency_map_pass3_max_turns == 30
         assert claude_config.dependency_map_delta_max_turns == 30
 

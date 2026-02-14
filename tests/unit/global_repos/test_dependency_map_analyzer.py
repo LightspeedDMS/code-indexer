@@ -115,7 +115,8 @@ class TestPass1Synthesis:
         call_args = mock_subprocess.call_args
 
         # Check command structure (last element is the prompt)
-        assert call_args[0][0][:-1] == ["claude", "--print", "--model", "opus", "--max-turns", "50", "--allowedTools", "mcp__cidx-local__search_code", "-p"]
+        # Fix 1: Pass 1 no longer includes --allowedTools (doesn't need MCP tools)
+        assert call_args[0][0][:-1] == ["claude", "--print", "--model", "opus", "--max-turns", "50", "-p"]
         assert "Identify domain clusters" in call_args[0][0][-1]
         assert call_args[1]["cwd"] == str(tmp_path)
         assert call_args[1]["timeout"] == 300  # half of pass_timeout
@@ -177,7 +178,7 @@ class TestPass2PerDomain:
         """Test that run_pass_2_per_domain invokes Claude CLI with domain context."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
-            stdout="# Authentication Domain\n\nDetailed analysis...",
+            stdout="# Authentication Domain\n\nDetailed analysis with sufficient content to avoid retry...",
         )
 
         analyzer = DependencyMapAnalyzer(
@@ -260,7 +261,7 @@ class TestPass2PerDomain:
         """Test that run_pass_2_per_domain prompt includes Technology Stack Verification mandate."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
-            stdout="# Domain Analysis\n\nContent here.",
+            stdout="# Domain Analysis\n\nContent here with sufficient length to avoid retry logic...",
         )
 
         analyzer = DependencyMapAnalyzer(
@@ -292,7 +293,7 @@ class TestPass2PerDomain:
         assert "Search for dependency manifests" in prompt
         assert "Check actual source file extensions" in prompt
         assert "Do NOT assume technology based on tool names" in prompt
-        assert "If a repo uses a Rust library (e.g., tantivy) as a Python binding, the repo is PYTHON, not Rust" in prompt
+        assert "If a repo uses a library written in language X as a binding/wrapper in language Y, the repo's primary language is Y, not X" in prompt
 
 
 class TestPass3Index:
@@ -618,7 +619,7 @@ class TestIncrementalPass2:
         """Test that run_pass_2_per_domain includes previous domain content in prompt."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
-            stdout="# Updated Domain Analysis\n\nNew analysis...",
+            stdout="# Updated Domain Analysis\n\nNew analysis with sufficient content to avoid retry...",
         )
 
         analyzer = DependencyMapAnalyzer(
@@ -654,3 +655,280 @@ class TestIncrementalPass2:
 
         assert "Previous Analysis (refine and improve)" in prompt
         assert "Old content here" in prompt
+
+
+class TestAllowedToolsPerPass:
+    """Test Fix 1: Make --allowedTools per-pass configurable."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_pass_1_no_allowed_tools(self, mock_subprocess, tmp_path):
+        """Test that Pass 1 is called without --allowedTools flag."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps([
+                {
+                    "name": "test-domain",
+                    "description": "Test",
+                    "participating_repos": ["repo1"],
+                    "repo_paths": {"repo1": "/path/to/repo1"},
+                }
+            ]),
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        repo_list = [
+            {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
+        ]
+
+        analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=5)
+
+        # Verify --allowedTools is NOT in the command
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args
+        cmd = call_args[0][0]
+        assert "--allowedTools" not in cmd
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_pass_2_has_allowed_tools(self, mock_subprocess, tmp_path):
+        """Test that Pass 2 is called with --allowedTools mcp__cidx-local__search_code."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout="# Domain Analysis\n\nContent here with sufficient length to avoid retry logic...",
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Verify --allowedTools is present with correct value
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args
+        cmd = call_args[0][0]
+        assert "--allowedTools" in cmd
+        tools_idx = cmd.index("--allowedTools")
+        assert cmd[tools_idx + 1] == "mcp__cidx-local__search_code"
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_pass_3_no_allowed_tools(self, mock_subprocess, tmp_path):
+        """Test that Pass 3 is called without --allowedTools flag."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout="# Index\n\nCatalog here.",
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain_list = [{"name": "d1", "description": "Domain 1", "participating_repos": []}]
+        repo_list = [{"alias": "r1", "description_summary": "Repo 1"}]
+
+        analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=5)
+
+        # Verify --allowedTools is NOT in the command
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args
+        cmd = call_args[0][0]
+        assert "--allowedTools" not in cmd
+
+
+class TestEmptyOutputDetection:
+    """Test Fix 2: Add empty output detection + retry for Pass 2."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_pass_2_retries_on_empty_output(self, mock_subprocess, tmp_path):
+        """Test that Pass 2 retries with reduced turns when output is empty."""
+        # First call returns empty output, second call returns content
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return MagicMock(returncode=0, stdout="")
+            else:
+                return MagicMock(returncode=0, stdout="# Domain Analysis\n\nRetry succeeded.")
+
+        mock_subprocess.side_effect = side_effect
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Verify subprocess was called twice
+        assert mock_subprocess.call_count == 2
+
+        # Verify second call used max_turns=10
+        second_call_args = mock_subprocess.call_args_list[1]
+        cmd = second_call_args[0][0]
+        assert "--max-turns" in cmd
+        turns_idx = cmd.index("--max-turns")
+        assert cmd[turns_idx + 1] == "10"
+
+        # Verify output file was written with retry content
+        domain_file = staging_dir / "test-domain.md"
+        assert domain_file.exists()
+        content = domain_file.read_text()
+        assert "Retry succeeded" in content
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_pass_2_retries_on_very_short_output(self, mock_subprocess, tmp_path):
+        """Test that Pass 2 retries when output is very short (<50 chars)."""
+        # First call returns very short output, second call returns full content
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return MagicMock(returncode=0, stdout="Short")
+            else:
+                return MagicMock(returncode=0, stdout="# Domain Analysis\n\nFull content here.")
+
+        mock_subprocess.side_effect = side_effect
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Verify subprocess was called twice
+        assert mock_subprocess.call_count == 2
+
+
+class TestYamlFrontmatterStripping:
+    """Test Fix 3: Strip Claude's YAML frontmatter from output."""
+
+    def test_strips_yaml_frontmatter_block(self):
+        """Test that _strip_meta_commentary strips YAML frontmatter block."""
+        text = """---
+title: Domain Analysis
+author: Claude
+---
+
+# Actual Domain Analysis
+
+Content here."""
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert not result.startswith("---")
+        assert result.startswith("# Actual Domain Analysis")
+        assert "title:" not in result
+        assert "author:" not in result
+
+    def test_strips_yaml_frontmatter_before_meta_commentary(self):
+        """Test that YAML frontmatter is stripped before meta-commentary patterns."""
+        text = """---
+schema: 1.0
+---
+
+Based on my analysis, here are the findings:
+
+# Domain Analysis
+
+Content."""
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert not result.startswith("---")
+        assert result.startswith("# Domain Analysis")
+        assert "Based on my analysis" not in result
+
+    def test_preserves_content_without_frontmatter(self):
+        """Test that content without frontmatter is preserved."""
+        text = "# Domain Analysis\n\nContent here."
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result == text
+
+
+class TestAdditionalMetaCommentaryPatterns:
+    """Test Fix 4: Add more meta-commentary patterns."""
+
+    def test_strips_i_have_gathered(self):
+        text = "I have gathered sufficient evidence from the repositories.\n\n# Analysis\n\nContent."
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("# Analysis")
+        assert "I have gathered" not in result
+
+    def test_strips_now_i_can(self):
+        text = "Now I can produce the comprehensive domain analysis.\n\n# Domain\n\nContent."
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("# Domain")
+        assert "Now I can" not in result
+
+    def test_strips_i_ll(self):
+        text = "I'll compile the findings into the analysis.\n\n# Findings\n\nContent."
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("# Findings")
+        assert "I'll" not in result
+
+    def test_strips_i_will(self):
+        text = "I will now produce the final analysis.\n\n# Final Analysis\n\nContent."
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("# Final Analysis")
+        assert "I will" not in result
+
+    def test_strips_numbered_list_pre_findings(self):
+        """Test that numbered list items before headings are treated as meta-commentary."""
+        text = """1. cidx-meta contains only markdown documentation files
+2. The repository structure shows clear patterns
+3. Multiple repos share common dependencies
+
+# Domain Analysis
+
+Actual analysis content here."""
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("# Domain Analysis")
+        assert "cidx-meta contains" not in result
+        assert "repository structure" not in result

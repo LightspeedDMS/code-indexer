@@ -157,7 +157,7 @@ class DependencyMapAnalyzer:
         prompt += "For each repository:\n"
         prompt += "1. Assess documentation depth relative to codebase size (file count, directory depth)\n"
         prompt += "2. If a repo description is short/generic but has many source files, the description is unreliable - explore source\n"
-        prompt += "3. Look at imports, entry points (main.py, app.py, index.ts), config files (package.json, setup.py, requirements.txt, Dockerfile)\n"
+        prompt += "3. Look at imports, entry points, and config/manifest files (e.g., package.json, requirements.txt, setup.py, pyproject.toml, go.mod, Cargo.toml, pom.xml, build.gradle, *.csproj, CMakeLists.txt, Makefile, Dockerfile)\n"
         prompt += "4. Check build files, test patterns, directory structures to understand actual repo purpose\n"
         prompt += "5. Examine interesting modules to infer purpose and integration patterns\n\n"
 
@@ -177,7 +177,16 @@ class DependencyMapAnalyzer:
             "DO NOT cluster based on general knowledge without source code evidence.\n"
         )
         prompt += "But DO cluster when you find source-code-verified integration of ANY type listed above.\n\n"
-        prompt += "AIM for 3-7 domains for a typical multi-repo codebase. If you find fewer than 3 domains,\n"
+        repo_count = len(repo_list)
+        if repo_count <= 20:
+            domain_guidance = "3-7"
+        elif repo_count <= 50:
+            domain_guidance = "5-15"
+        elif repo_count <= 100:
+            domain_guidance = "10-30"
+        else:
+            domain_guidance = "15-50"
+        prompt += f"AIM for {domain_guidance} domains for a codebase of {repo_count} repositories. If you find very few domains,\n"
         prompt += "consider whether you may be applying too strict a threshold for integration evidence.\n\n"
 
         prompt += "### COMPLETENESS MANDATE\n\n"
@@ -212,9 +221,9 @@ class DependencyMapAnalyzer:
         prompt += '"evidence": "Brief justification referencing actual files/patterns observed"}\n'
         prompt += "]\n"
 
-        # Invoke Claude CLI
+        # Invoke Claude CLI (Pass 1 does not need MCP tools - just reads descriptions and outputs JSON)
         timeout = self.pass_timeout // 2  # Pass 1 uses half timeout (lighter workload)
-        result = self._invoke_claude_cli(prompt, timeout, max_turns)
+        result = self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None)
 
         # Parse JSON response
         logger.debug(f"Pass 1 raw output length: {len(result)} chars")
@@ -458,7 +467,7 @@ class DependencyMapAnalyzer:
         prompt += "1. Search for dependency manifests (requirements.txt, package.json, Cargo.toml, go.mod, *.csproj, pom.xml, pyproject.toml)\n"
         prompt += "2. Check actual source file extensions in the repository (.py, .ts, .js, .rs, .go, .cs, .java, .pas)\n"
         prompt += "3. Do NOT assume technology based on tool names, library names, or general knowledge\n"
-        prompt += "4. If a repo uses a Rust library (e.g., tantivy) as a Python binding, the repo is PYTHON, not Rust\n"
+        prompt += "4. If a repo uses a library written in language X as a binding/wrapper in language Y, the repo's primary language is Y, not X\n"
         prompt += "5. State only what the dependency manifest and source files confirm\n\n"
 
         prompt += "## MANDATORY: Evidence-Based Claims\n\n"
@@ -502,11 +511,32 @@ class DependencyMapAnalyzer:
         prompt += "Start your output directly with the analysis content (headings, sections, findings).\n\n"
         prompt += "Output ONLY the content (no markdown code blocks, no preamble).\n"
 
-        # Invoke Claude CLI
-        result = self._invoke_claude_cli(prompt, self.pass_timeout, max_turns)
+        # Invoke Claude CLI (Pass 2 needs MCP search_code tool for source code analysis)
+        result = self._invoke_claude_cli(
+            prompt, self.pass_timeout, max_turns, allowed_tools="mcp__cidx-local__search_code"
+        )
 
         # Strip meta-commentary from output
         result = self._strip_meta_commentary(result)
+
+        # Check for empty output and retry with reduced turns (Fix 2)
+        if len(result.strip()) < 50:
+            logger.warning(
+                f"Pass 2 returned insufficient output for domain '{domain_name}' "
+                f"({len(result)} chars), retrying with reduced turns"
+            )
+            # Retry with max_turns=10 to force output generation with minimal exploration
+            result = self._invoke_claude_cli(
+                prompt, self.pass_timeout, 10, allowed_tools="mcp__cidx-local__search_code"
+            )
+            result = self._strip_meta_commentary(result)
+
+            # If retry also fails (empty), log error and continue
+            if len(result.strip()) < 50:
+                logger.error(
+                    f"Pass 2 retry also returned insufficient output for domain '{domain_name}' "
+                    f"({len(result)} chars) - continuing with available content"
+                )
 
         # Build YAML frontmatter
         now = datetime.now(timezone.utc).isoformat()
@@ -572,9 +602,9 @@ class DependencyMapAnalyzer:
         prompt += "Generate markdown with domain catalog and matrix tables.\n"
         prompt += "Output ONLY the content (no markdown code blocks, no preamble).\n"
 
-        # Invoke Claude CLI
+        # Invoke Claude CLI (Pass 3 does not need MCP tools - just reads domain files and generates index)
         timeout = self.pass_timeout // 2  # Pass 3 uses half timeout (lighter workload)
-        result = self._invoke_claude_cli(prompt, timeout, max_turns)
+        result = self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None)
 
         # Build YAML frontmatter
         now = datetime.now(timezone.utc).isoformat()
@@ -615,6 +645,8 @@ class DependencyMapAnalyzer:
         - "Perfect. Now I have sufficient evidence..."
         - "Let me compile the findings:"
 
+        Also strips YAML frontmatter blocks that Claude may generate.
+
         This method strips such lines from the beginning until actual content is found.
 
         Args:
@@ -625,6 +657,17 @@ class DependencyMapAnalyzer:
         """
         if not text:
             return text
+
+        # Strip YAML frontmatter block if present at start (Fix 3)
+        lines = text.split("\n")
+        stripped_first = lines[0].strip() if lines else ""
+        if stripped_first == "---":
+            # Find closing ---
+            for i in range(1, len(lines)):
+                if lines[i].strip() == "---":
+                    # Found closing delimiter - strip entire frontmatter
+                    text = "\n".join(lines[i + 1:])
+                    break
 
         lines = text.split("\n")
 
@@ -637,6 +680,10 @@ class DependencyMapAnalyzer:
             "i now have",
             "here is",
             "here's",
+            "i have gathered",  # Fix 4
+            "now i can",  # Fix 4
+            "i'll",  # Fix 4
+            "i will",  # Fix 4
         ]
 
         # Find first line of actual content
@@ -662,12 +709,26 @@ class DependencyMapAnalyzer:
                 continue
 
             # Found actual content - stop stripping
-            # Content lines start with: #, ##, -, |, **, digits (numbered lists), or regular text
+            # Content lines start with: #, ##, -, |, **, or regular text
+            # NOTE: Numbered lists (digits) require special handling (see below)
             if (stripped.startswith("#") or
                 stripped.startswith("**") or
                 stripped.startswith("-") or
-                stripped.startswith("|") or
-                (stripped and stripped[0].isdigit())):
+                stripped.startswith("|")):
+                break
+
+            # Special handling for numbered list items (Fix 4)
+            # If line starts with digit + period + space, and doesn't contain "#",
+            # it's likely Claude's internal notes before the real analysis
+            if stripped and stripped[0].isdigit():
+                # Check if it's a numbered list item (e.g., "1. Some text")
+                if len(stripped) > 2 and stripped[1] == "." and stripped[2] == " ":
+                    # Check if this numbered item contains a heading marker
+                    if "#" not in stripped:
+                        # It's a pre-findings note - skip and continue looking for real content
+                        content_start_idx = i + 1
+                        continue
+                # If it's a numbered list that IS part of the content, break
                 break
 
             # If we hit a line that doesn't match meta patterns and isn't clearly content,
@@ -780,7 +841,9 @@ class DependencyMapAnalyzer:
                 f"Extracted text is not valid JSON: {e} (first 200 chars): {json_text[:200]}"
             ) from e
 
-    def _invoke_claude_cli(self, prompt: str, timeout: int, max_turns: int) -> str:
+    def _invoke_claude_cli(
+        self, prompt: str, timeout: int, max_turns: int, allowed_tools: Optional[str] = None
+    ) -> str:
         """
         Invoke Claude CLI with direct subprocess (AC1).
 
@@ -791,6 +854,8 @@ class DependencyMapAnalyzer:
             prompt: Prompt to send to Claude
             timeout: Timeout in seconds
             max_turns: Maximum number of agentic turns
+            allowed_tools: Optional MCP tools to allow (e.g., "mcp__cidx-local__search_code").
+                          If None, no --allowedTools flag is added.
 
         Returns:
             Claude CLI stdout output
@@ -817,11 +882,13 @@ class DependencyMapAnalyzer:
             self.analysis_model,
             "--max-turns",
             str(max_turns),
-            "--allowedTools",
-            "mcp__cidx-local__search_code",
-            "-p",
-            prompt,
         ]
+
+        # Add --allowedTools only if specified
+        if allowed_tools is not None:
+            cmd.extend(["--allowedTools", allowed_tools])
+
+        cmd.extend(["-p", prompt])
 
         # Run subprocess
         result = subprocess.run(

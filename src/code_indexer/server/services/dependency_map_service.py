@@ -225,8 +225,9 @@ class DependencyMapService:
         # Generate CLAUDE.md (AC2: CLAUDE.md Orientation File)
         self._analyzer.generate_claude_md(repo_list)
 
-        # Read repo descriptions from cidx-meta
-        repo_descriptions = self._read_repo_descriptions(cidx_meta_path)
+        # Read repo descriptions from cidx-meta (Fix 8: filter stale repos)
+        active_aliases = {r.get("alias") for r in repo_list}
+        repo_descriptions = self._read_repo_descriptions(cidx_meta_path, active_aliases=active_aliases)
 
         # Pass 1: Synthesis (AC1: Multi-pass Pipeline)
         domain_list = self._analyzer.run_pass_1_synthesis(
@@ -350,12 +351,15 @@ class DependencyMapService:
         except Exception as e:
             logger.warning(f"cidx index re-indexing failed: {e}")
 
-    def _read_repo_descriptions(self, cidx_meta_path: Path) -> Dict[str, str]:
+    def _read_repo_descriptions(
+        self, cidx_meta_path: Path, active_aliases: Optional[Set[str]] = None
+    ) -> Dict[str, str]:
         """
         Read repository descriptions from cidx-meta .md files.
 
         Args:
             cidx_meta_path: Path to cidx-meta directory
+            active_aliases: Optional set of active repo aliases to filter by (Fix 8)
 
         Returns:
             Dict mapping repo alias to description content
@@ -364,7 +368,12 @@ class DependencyMapService:
         for md_file in cidx_meta_path.glob("*.md"):
             if md_file.name.startswith("_"):
                 continue
-            descriptions[md_file.stem] = md_file.read_text()
+            alias = md_file.stem
+            # Filter stale repos if active_aliases provided (Fix 8)
+            if active_aliases is not None and alias not in active_aliases:
+                logger.debug(f"Skipping stale repo description: {alias}")
+                continue
+            descriptions[alias] = md_file.read_text()
         return descriptions
 
     def _get_activated_repos(self) -> List[Dict[str, Any]]:

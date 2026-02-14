@@ -439,3 +439,36 @@ def test_get_activated_repos_skips_markdown_headings(
     repo2 = next((r for r in repos if r["alias"] == "repo2"), None)
     assert repo2 is not None
     assert repo2["description_summary"] == "No description"
+
+
+def test_read_repo_descriptions_filters_stale_repos(
+    tmp_golden_repos_root: Path,
+    mock_golden_repos_manager,
+    mock_config_manager,
+    mock_tracking_backend,
+    mock_analyzer,
+):
+    """Test Fix 8: _read_repo_descriptions filters out stale repos not in active set."""
+    cidx_meta = tmp_golden_repos_root / "cidx-meta"
+
+    # Create descriptions for 3 repos
+    (cidx_meta / "repo1.md").write_text("# Repo 1\nActive repo 1")
+    (cidx_meta / "repo2.md").write_text("# Repo 2\nActive repo 2")
+    (cidx_meta / "stale-repo.md").write_text("# Stale Repo\nThis repo is no longer registered")
+
+    service = DependencyMapService(
+        golden_repos_manager=mock_golden_repos_manager,
+        config_manager=mock_config_manager,
+        tracking_backend=mock_tracking_backend,
+        analyzer=mock_analyzer,
+    )
+
+    # Call with active_aliases containing only repo1 and repo2
+    active_aliases = {"repo1", "repo2"}
+    descriptions = service._read_repo_descriptions(cidx_meta, active_aliases=active_aliases)
+
+    # Verify only active repos are included
+    assert "repo1" in descriptions
+    assert "repo2" in descriptions
+    assert "stale-repo" not in descriptions
+    assert len(descriptions) == 2

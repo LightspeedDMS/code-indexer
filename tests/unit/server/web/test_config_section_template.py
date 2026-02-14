@@ -192,7 +192,7 @@ def test_api_keys_section_renders_with_github_token():
 
     # Verify API Keys section is present
     assert (
-        "CI/CD Platform Keys" in rendered
+        "GitHub/GitLab Keys" in rendered
     ), "API Keys section header should be in rendered HTML"
     assert "GitHub" in rendered, "GitHub subsection should be in rendered HTML"
     assert "GitLab" in rendered, "GitLab subsection should be in rendered HTML"
@@ -387,7 +387,7 @@ def test_api_keys_section_renders_without_tokens():
 
     # Verify API Keys section is present
     assert (
-        "CI/CD Platform Keys" in rendered
+        "GitHub/GitLab Keys" in rendered
     ), "API Keys section header should be in rendered HTML"
     assert "GitHub" in rendered, "GitHub subsection should be in rendered HTML"
     assert "GitLab" in rendered, "GitLab subsection should be in rendered HTML"
