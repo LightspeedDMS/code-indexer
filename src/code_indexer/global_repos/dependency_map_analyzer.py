@@ -974,7 +974,12 @@ class DependencyMapAnalyzer:
             ) from e
 
     def _invoke_claude_cli(
-        self, prompt: str, timeout: int, max_turns: int, allowed_tools: Optional[str] = None, post_tool_hook: Optional[str] = None
+        self,
+        prompt: str,
+        timeout: int,
+        max_turns: int,
+        allowed_tools: Optional[str] = None,
+        post_tool_hook: Optional[str] = None,
     ) -> str:
         """
         Invoke Claude CLI with direct subprocess (AC1).
