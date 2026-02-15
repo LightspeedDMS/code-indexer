@@ -634,7 +634,15 @@ class DependencyMapAnalyzer:
                         f"Skipping low-quality previous analysis for domain '{domain_name}' "
                         f"({len(existing_content)} chars, headings={self._has_markdown_headings(existing_content)})"
                     )
-    
+
+            # Iteration 14: Add conciseness constraints BEFORE prohibitions
+            prompt += "## Content Guidelines\n\n"
+            prompt += "Write CONCISE analysis focused on inter-repository navigation. Your audience is an MCP user deciding which repos to explore.\n"
+            prompt += "- Document precise dependency connections (who calls who, shared data, integration points)\n"
+            prompt += "- Include specific evidence (file names, function names, config keys) but NOT full code snippets\n"
+            prompt += "- Keep each section to 3-8 sentences. Shorter is better if precise.\n"
+            prompt += "- Do NOT reproduce source code, JSON schemas, or directory listings\n\n"
+
             # Fix: Iteration 9 - Add guardrails against YAML output and speculative content
             prompt += "## PROHIBITED Content\n\n"
             prompt += "Do NOT include any of the following in your output:\n"
@@ -656,10 +664,11 @@ class DependencyMapAnalyzer:
 
         # Fix 1 (Iteration 12): PostToolUse hook to prevent turn exhaustion
         # _invoke_claude_cli() builds turn-aware bash script with escalating urgency messages
+        # Iteration 14: Purpose-driven hook emphasizing conciseness and navigation assistance
         hook_reminder = (
-            "REMINDER: Your final output MUST begin with a markdown heading "
-            "(# Domain Analysis: [name]). No meta-commentary, no summaries, "
-            "no preamble before the heading."
+            "Remember: you are documenting precise, factual, short semantic dependencies "
+            "to assist inter-repository navigation. Be concise — no code snippets, no schema dumps, "
+            "no full file listings. Your output MUST begin with # Domain Analysis heading."
         )
 
         # Iteration 13: Use earlier hook thresholds for large domains
@@ -721,11 +730,16 @@ class DependencyMapAnalyzer:
                 f"Pass 2 returned insufficient output for domain '{domain_name}' "
                 f"({reason}), retrying with reduced turns"
             )
-            # Retry with max_turns=10 to force output generation with minimal exploration
-            # Include post_tool_hook in retry to maintain format reminders
+            # Iteration 14: Retry with write-only mode (no MCP tools) and write-focused prompt
+            # Primary attempt produced no headings, so force writing with existing knowledge
+            retry_prompt = (
+                "IMPORTANT: Your previous attempt did not produce properly formatted output. "
+                "Write your dependency analysis NOW with NO searching. Use the Pass 1 evidence and "
+                "any knowledge you have. Focus on precise inter-repo connections for navigation.\n\n"
+            ) + prompt
             result = self._invoke_claude_cli(
-                prompt, self.pass_timeout, 10,
-                allowed_tools="mcp__cidx-local__search_code",
+                retry_prompt, self.pass_timeout, 10,
+                allowed_tools="",  # No MCP tools - write only
                 post_tool_hook=hook_reminder
             )
             result = self._strip_meta_commentary(result)
@@ -1105,11 +1119,9 @@ class DependencyMapAnalyzer:
 
         # Step 2: Find first JSON bracket
         start_idx = -1
-        start_bracket = None
         for i, char in enumerate(text):
             if char in "[{":
                 start_idx = i
-                start_bracket = char
                 break
 
         if start_idx == -1:
@@ -1253,13 +1265,14 @@ class DependencyMapAnalyzer:
                     late_threshold = max(10, int(max_turns * 0.6))
 
                 # Build bash one-liner that reads/increments counter and escalates messages
+                # Iteration 14: Purpose-driven threshold messages emphasizing conciseness
                 bash_script = (
                     f"F={shlex.quote(counter_file.name)}; "
                     f"C=$(cat \"$F\"); C=$((C+1)); echo \"$C\" > \"$F\"; "
                     f"if [ \"$C\" -gt {late_threshold} ]; then "
-                    f"echo {shlex.quote('CRITICAL: You have used many tool calls. STOP searching NOW and write your complete analysis output IMMEDIATELY. Start with # Domain Analysis heading.')}; "
+                    f"echo {shlex.quote('CRITICAL: STOP searching. Write your concise dependency analysis NOW. Document precise inter-repo connections only — no code snippets, no implementation details. Start with # Domain Analysis heading.')}; "
                     f"elif [ \"$C\" -gt {early_threshold} ]; then "
-                    f"echo {shlex.quote('WARNING: You are running low on turns. Start consolidating findings and prepare to write your final output soon. Output must start with # Domain Analysis heading.')}; "
+                    f"echo {shlex.quote('WARNING: Running low on turns. Start writing your concise dependency analysis. Focus on precise inter-repo connections for navigation — no code snippets, no verbose details. Output starts with # Domain Analysis heading.')}; "
                     f"else "
                     f"echo {shlex.quote(post_tool_hook)}; "
                     f"fi"

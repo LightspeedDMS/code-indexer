@@ -2541,3 +2541,173 @@ class TestIteration13OutputFirstPrompt:
         assert "Extend" in prompt
         assert "Do NOT start from scratch" in prompt
         assert "Good quality content here" in prompt
+
+
+class TestIteration14PurposeDrivenHooks:
+    """Test Iteration 14: Purpose-driven hook reminders and retry fixes."""
+
+    def test_hook_reminder_contains_purpose(self, tmp_path):
+        """Test that hook_reminder includes purpose-driven language about inter-repo navigation and conciseness."""
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        # We need to extract hook_reminder from run_pass_2_per_domain
+        # The hook_reminder is built inside the method, so we'll mock _invoke_claude_cli
+        # to capture it
+        with patch.object(analyzer, "_invoke_claude_cli") as mock_invoke:
+            mock_invoke.return_value = "# Domain Analysis\n\nContent. " + "X" * 1000
+
+            try:
+                analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+            except Exception:
+                pass  # We just want to capture the call
+
+            # Extract post_tool_hook from the call
+            assert mock_invoke.called
+            call_kwargs = mock_invoke.call_args[1]
+            hook_reminder = call_kwargs.get("post_tool_hook", "")
+
+            # Verify purpose-driven language
+            assert "inter-repository navigation" in hook_reminder or "inter-repo" in hook_reminder
+            assert "concise" in hook_reminder.lower()
+            assert "# Domain Analysis" in hook_reminder
+
+    def test_threshold_messages_contain_purpose(self, tmp_path):
+        """Test that CRITICAL and WARNING threshold messages mention conciseness, not 'complete analysis'."""
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        # Test _invoke_claude_cli with hook_thresholds to check generated messages
+        with patch("subprocess.run") as mock_subprocess:
+            # Mock sufficient output to avoid "very short stdout" warning
+            mock_subprocess.return_value = MagicMock(returncode=0, stdout="# Test\n\nOutput. " + "X" * 1000)
+
+            # Call with hook thresholds (simulating large domain)
+            result = analyzer._invoke_claude_cli(
+                prompt="test",
+                timeout=300,
+                max_turns=50,
+                allowed_tools="mcp__cidx-local__search_code",
+                post_tool_hook="TEST HOOK",
+                hook_thresholds=(3, 8)
+            )
+
+            # Extract the --settings JSON from subprocess call
+            call_args = mock_subprocess.call_args[0][0]
+            assert "--settings" in call_args
+            settings_idx = call_args.index("--settings")
+            settings_json = call_args[settings_idx + 1]
+            settings = json.loads(settings_json)
+
+            # Extract bash script from PostToolUse hook
+            bash_command = settings["hooks"]["PostToolUse"][0]["command"]
+            assert "bash -c" in bash_command
+            # Extract the quoted bash script
+            bash_script = bash_command.split("bash -c ", 1)[1].strip("'\"")
+
+            # Verify CRITICAL message mentions conciseness and NOT "complete analysis"
+            assert "CRITICAL" in bash_script
+            assert "concise" in bash_script.lower()
+            assert "complete analysis" not in bash_script
+
+            # Verify WARNING message mentions conciseness
+            assert "WARNING" in bash_script
+            # The WARNING message should also mention conciseness
+
+    def test_standard_prompt_conciseness_guidelines(self, tmp_path):
+        """Test that standard prompt (small domains <=3 repos) includes Content Guidelines with conciseness constraints."""
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        # Small domain with 2 repos (<=3 triggers standard prompt)
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1", "repo2"],
+        }
+
+        with patch.object(analyzer, "_invoke_claude_cli") as mock_invoke:
+            mock_invoke.return_value = "# Domain Analysis\n\nContent. " + "X" * 1000
+
+            try:
+                analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+            except Exception:
+                pass
+
+            # Extract prompt from the call
+            assert mock_invoke.called
+            call_args = mock_invoke.call_args[0]
+            prompt = call_args[0]
+
+            # Verify Content Guidelines section exists
+            assert "## Content Guidelines" in prompt
+            assert "CONCISE" in prompt or "concise" in prompt
+            assert "inter-repository navigation" in prompt or "inter-repo" in prompt
+            assert "no code snippets" in prompt.lower() or "not full code snippets" in prompt.lower()
+            assert "3-8 sentences" in prompt or "shorter is better" in prompt.lower()
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_insufficient_output_retry_is_write_only(self, mock_subprocess, tmp_path):
+        """Test that insufficient-output retry uses allowed_tools='' (write-only) and includes write-focused prompt."""
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        # First call returns insufficient output (no headings, <1000 chars)
+        # Second call (retry) should be write-only
+        mock_subprocess.side_effect = [
+            MagicMock(returncode=0, stdout="Short output without headings"),
+            MagicMock(returncode=0, stdout="# Domain Analysis\n\nRetry content. " + "Y" * 1000)
+        ]
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Should have been called twice (primary + retry)
+        assert mock_subprocess.call_count == 2
+
+        # Check retry call (second call)
+        retry_call = mock_subprocess.call_args_list[1]
+        retry_cmd = retry_call[0][0]
+
+        # Verify allowed_tools="" (write-only mode)
+        if "--allowedTools" in retry_cmd:
+            tools_idx = retry_cmd.index("--allowedTools")
+            assert retry_cmd[tools_idx + 1] == "", "Retry should use allowed_tools='' (write-only)"
+
+        # Verify retry prompt includes write-focused language
+        retry_prompt = retry_cmd[-1]
+        assert "Write your dependency analysis NOW" in retry_prompt
+        assert "NO searching" in retry_prompt or "without searching" in retry_prompt.lower()
