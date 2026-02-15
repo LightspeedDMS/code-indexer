@@ -176,9 +176,11 @@ class TestPass2PerDomain:
         self, mock_subprocess, tmp_path
     ):
         """Test that run_pass_2_per_domain invokes Claude CLI with domain context."""
+        # Generate output >1000 chars to avoid retry logic
+        content = "# Authentication Domain\n\nDetailed analysis with sufficient content to avoid retry. " + "X" * 1000
         mock_subprocess.return_value = MagicMock(
             returncode=0,
-            stdout="# Authentication Domain\n\nDetailed analysis with sufficient content to avoid retry...",
+            stdout=content,
         )
 
         analyzer = DependencyMapAnalyzer(
@@ -259,9 +261,11 @@ class TestPass2PerDomain:
         self, mock_subprocess, tmp_path
     ):
         """Test that run_pass_2_per_domain prompt includes Technology Stack Verification mandate."""
+        # Generate output >1000 chars to avoid retry logic
+        content = "# Domain Analysis\n\nContent here with sufficient length to avoid retry logic. " + "Y" * 1000
         mock_subprocess.return_value = MagicMock(
             returncode=0,
-            stdout="# Domain Analysis\n\nContent here with sufficient length to avoid retry logic...",
+            stdout=content,
         )
 
         analyzer = DependencyMapAnalyzer(
@@ -617,9 +621,11 @@ class TestIncrementalPass2:
         self, mock_subprocess, tmp_path
     ):
         """Test that run_pass_2_per_domain includes previous domain content in prompt."""
+        # Generate output >1000 chars to avoid retry logic
+        content = "# Updated Domain Analysis\n\nNew analysis with sufficient content to avoid retry. " + "Z" * 1000
         mock_subprocess.return_value = MagicMock(
             returncode=0,
-            stdout="# Updated Domain Analysis\n\nNew analysis with sufficient content to avoid retry...",
+            stdout=content,
         )
 
         analyzer = DependencyMapAnalyzer(
@@ -703,9 +709,11 @@ class TestAllowedToolsPerPass:
     @patch("subprocess.run")
     def test_pass_2_has_allowed_tools(self, mock_subprocess, tmp_path):
         """Test that Pass 2 is called with --allowedTools mcp__cidx-local__search_code."""
+        # Generate output >1000 chars to avoid retry logic
+        content = "# Domain Analysis\n\nContent here with sufficient length to avoid retry logic. " + "W" * 1000
         mock_subprocess.return_value = MagicMock(
             returncode=0,
-            stdout="# Domain Analysis\n\nContent here with sufficient length to avoid retry logic...",
+            stdout=content,
         )
 
         analyzer = DependencyMapAnalyzer(
@@ -1029,3 +1037,156 @@ Actual analysis content here."""
         assert result.startswith("# Domain Analysis")
         assert "cidx-meta contains" not in result
         assert "repository structure" not in result
+
+    def test_strips_i_have_all_pattern(self):
+        """Test that 'I have all' meta-commentary is stripped (Fix 3)."""
+        text = "I have all the domain information from the staging directory. Now I'll generate the Domain Catalog.\n\n# Domain Catalog\n\nContent."
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("# Domain Catalog")
+        assert "I have all" not in result
+
+
+class TestInsufficientOutputThreshold:
+    """Test Fix 1: Raise Pass 2 insufficient output threshold to 1000 chars."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_pass_2_retries_on_insufficient_output_1000_chars(self, mock_subprocess, tmp_path):
+        """Test that Pass 2 retries when output is <1000 chars (not just <50)."""
+        # First call returns 626 chars (insufficient), second call returns full content
+        call_count = [0]
+        insufficient_output = "# Analysis\n\n" + "x" * 600  # 626 chars total
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return MagicMock(returncode=0, stdout=insufficient_output)
+            else:
+                return MagicMock(returncode=0, stdout="# Full Analysis\n\n" + "y" * 2000)
+
+        mock_subprocess.side_effect = side_effect
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Verify subprocess was called twice (original + retry)
+        assert mock_subprocess.call_count == 2
+
+        # Verify second call used max_turns=10
+        second_call_args = mock_subprocess.call_args_list[1]
+        cmd = second_call_args[0][0]
+        assert "--max-turns" in cmd
+        turns_idx = cmd.index("--max-turns")
+        assert cmd[turns_idx + 1] == "10"
+
+        # Verify output file was written with retry content
+        domain_file = staging_dir / "test-domain.md"
+        assert domain_file.exists()
+        content = domain_file.read_text()
+        assert "Full Analysis" in content
+        assert "yyy" in content  # From the 2000-char retry output
+
+
+class TestYamlStrippingWithoutOpeningDelimiter:
+    """Test Fix 2: Strip YAML content without opening --- delimiter."""
+
+    def test_strips_yaml_without_opening_delimiter(self):
+        """Test that YAML-like content without opening --- is stripped."""
+        text = """domain: some-domain
+last_analyzed: 2026-02-14T23:00:00.000000+00:00
+participating_repos:
+  - repo1
+  - repo2
+---
+
+# Domain Analysis
+
+Real content here."""
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("# Domain Analysis")
+        assert "domain:" not in result
+        assert "last_analyzed:" not in result
+        assert "participating_repos:" not in result
+        assert "Real content here" in result
+
+    def test_strips_yaml_with_schema_version_no_opening(self):
+        """Test YAML stripping for schema_version without opening delimiter."""
+        text = """schema_version: 1.0
+last_analyzed: 2026-02-14
+---
+
+# Content
+
+Analysis here."""
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("# Content")
+        assert "schema_version:" not in result
+
+    def test_preserves_proper_yaml_stripping(self):
+        """Test that existing YAML with opening --- still works."""
+        text = """---
+domain: test
+last_analyzed: 2026-01-01
+---
+
+# Analysis
+
+Content."""
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("# Analysis")
+        assert "domain:" not in result
+
+
+class TestPass3MetaCommentaryStripping:
+    """Test Fix 3: Add _strip_meta_commentary to Pass 3 output."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_pass_3_strips_meta_commentary(self, mock_subprocess, tmp_path):
+        """Test that Pass 3 strips meta-commentary from output."""
+        # Return output with meta-commentary
+        meta_output = "I have all the domain information from the staging directory. Now I'll generate the catalog.\n\n# Domain Catalog\n\nTable here."
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout=meta_output,
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain_list = [{"name": "d1", "description": "Domain 1", "participating_repos": []}]
+        repo_list = [{"alias": "r1", "description_summary": "Repo 1"}]
+
+        analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=30)
+
+        # Verify output file does NOT contain meta-commentary
+        index_file = staging_dir / "_index.md"
+        assert index_file.exists()
+        content = index_file.read_text()
+
+        # Should have frontmatter and content, but NOT meta-commentary
+        assert content.startswith("---\n")
+        assert "# Domain Catalog" in content
+        assert "Table here" in content
+        assert "I have all the domain information" not in content
+        assert "Now I'll generate" not in content

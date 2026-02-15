@@ -519,8 +519,8 @@ class DependencyMapAnalyzer:
         # Strip meta-commentary from output
         result = self._strip_meta_commentary(result)
 
-        # Check for empty output and retry with reduced turns (Fix 2)
-        if len(result.strip()) < 50:
+        # Check for insufficient output and retry with reduced turns (Fix 1: raised threshold to 1000)
+        if len(result.strip()) < 1000:
             logger.warning(
                 f"Pass 2 returned insufficient output for domain '{domain_name}' "
                 f"({len(result)} chars), retrying with reduced turns"
@@ -531,8 +531,8 @@ class DependencyMapAnalyzer:
             )
             result = self._strip_meta_commentary(result)
 
-            # If retry also fails (empty), log error and continue
-            if len(result.strip()) < 50:
+            # If retry also fails (insufficient), log error and continue
+            if len(result.strip()) < 1000:
                 logger.error(
                     f"Pass 2 retry also returned insufficient output for domain '{domain_name}' "
                     f"({len(result)} chars) - continuing with available content"
@@ -606,6 +606,9 @@ class DependencyMapAnalyzer:
         timeout = self.pass_timeout // 2  # Pass 3 uses half timeout (lighter workload)
         result = self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None)
 
+        # Strip meta-commentary from output (Fix 3: same as Pass 2)
+        result = self._strip_meta_commentary(result)
+
         # Build YAML frontmatter
         now = datetime.now(timezone.utc).isoformat()
         frontmatter = "---\n"
@@ -668,6 +671,17 @@ class DependencyMapAnalyzer:
                     # Found closing delimiter - strip entire frontmatter
                     text = "\n".join(lines[i + 1:])
                     break
+        else:
+            # Fix 2: Also detect YAML-like content without opening ---
+            # Claude sometimes omits the opening delimiter
+            yaml_keys = ("domain:", "last_analyzed:", "participating_repos:", "schema_version:")
+            first_content = stripped_first.lower()
+            if any(first_content.startswith(k) for k in yaml_keys):
+                # Find closing ---
+                for i in range(1, len(lines)):
+                    if lines[i].strip() == "---":
+                        text = "\n".join(lines[i + 1:])
+                        break
 
         lines = text.split("\n")
 
@@ -681,6 +695,7 @@ class DependencyMapAnalyzer:
             "here is",
             "here's",
             "i have gathered",  # Fix 4
+            "i have all",  # Fix 3: Pass 3 meta-commentary
             "now i can",  # Fix 4
             "i'll",  # Fix 4
             "i will",  # Fix 4
