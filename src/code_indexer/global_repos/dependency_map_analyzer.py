@@ -344,6 +344,106 @@ class DependencyMapAnalyzer:
 
         return domain_list
 
+    def _build_output_first_prompt(
+        self,
+        domain: Dict[str, Any],
+        domain_list: List[Dict[str, Any]],
+        repo_list: List[Dict[str, Any]],
+        previous_domain_dir: Optional[Path] = None,
+    ) -> str:
+        """Build output-first prompt for large domains (>3 repos)."""
+        domain_name = domain["name"]
+        participating_repos = domain.get("participating_repos", [])
+
+        prompt = f"# Domain Analysis: {domain_name}\n\n"
+        prompt += "## CRITICAL INSTRUCTION: WRITE YOUR ANALYSIS FIRST\n\n"
+        prompt += "You MUST write your complete domain analysis output BEFORE doing any MCP searches.\n"
+        prompt += "Your primary source material is the Pass 1 evidence and repository descriptions below.\n"
+        prompt += "MCP searches are OPTIONAL and limited to AT MOST 5 calls for verification only.\n\n"
+
+        prompt += f"**Domain Description**: {domain.get('description', 'N/A')}\n\n"
+
+        # Pass 1 evidence prominently
+        evidence = domain.get("evidence", "")
+        if evidence:
+            prompt += f"## Pass 1 Evidence (PRIMARY SOURCE)\n\n{evidence}\n\n"
+
+        # Domain structure
+        prompt += "## Full Domain Structure\n\n"
+        for d in domain_list:
+            prompt += f"- **{d['name']}**: {d.get('description', 'N/A')}\n"
+            prompt += f"  - Repos: {', '.join(d.get('participating_repos', []))}\n"
+
+        prompt += "\n## Participating Repositories\n\n"
+        path_map = {r.get("alias"): r.get("clone_path") for r in repo_list}
+        for repo_alias in participating_repos:
+            clone_path = path_map.get(repo_alias, "path not found")
+            prompt += f"- **{repo_alias}**: `{clone_path}`\n"
+        prompt += "\n"
+
+        # Feed previous analysis if good quality - with explicit improvement mandate
+        if previous_domain_dir and (previous_domain_dir / f"{domain_name}.md").exists():
+            existing_content = (previous_domain_dir / f"{domain_name}.md").read_text()
+            if self._has_markdown_headings(existing_content) and len(existing_content.strip()) > 1000:
+                prompt += "## Previous Analysis (EXTEND, IMPROVE, and CORRECT)\n\n"
+                prompt += "A previous analysis exists for this domain. You MUST:\n"
+                prompt += "1. **Preserve** accurate findings from the previous analysis\n"
+                prompt += "2. **Correct** any errors, inaccuracies, or outdated information\n"
+                prompt += "3. **Extend** with new dependencies or details not previously documented\n"
+                prompt += "4. **Improve** clarity, evidence quality, and structural organization\n\n"
+                prompt += "Do NOT start from scratch - build upon the previous work.\n\n"
+                prompt += existing_content + "\n\n"
+
+        # Output template
+        prompt += "## OUTPUT TEMPLATE (fill in each section)\n\n"
+        prompt += "Your output MUST follow this exact structure:\n\n"
+        prompt += "```\n"
+        prompt += f"# Domain Analysis: {domain_name}\n\n"
+        prompt += "## Overview\n"
+        prompt += "[1-2 paragraphs describing domain scope, purpose, and how repos relate]\n\n"
+        prompt += "## Repository Roles\n"
+        prompt += "[For each repo: name, primary language, role within domain]\n\n"
+        prompt += "## Intra-Domain Dependencies\n"
+        prompt += "[Dependencies BETWEEN repos in this domain, with evidence]\n\n"
+        prompt += "## Cross-Domain Connections\n"
+        prompt += "[Dependencies to/from repos in OTHER domains]\n"
+        prompt += "```\n\n"
+
+        # Dependency types (condensed)
+        prompt += "## Dependency Types to Document\n\n"
+        prompt += "- Code-level (imports, shared libraries)\n"
+        prompt += "- Data contracts (shared schemas, file formats)\n"
+        prompt += "- Service integration (REST/HTTP/MCP/gRPC API calls)\n"
+        prompt += "- External tool invocation (CLI tools, subprocess calls)\n"
+        prompt += "- Configuration coupling (shared env vars, config keys)\n"
+        prompt += "- Deployment dependencies (runtime requirements)\n"
+        prompt += "- Semantic coupling (behavioral contracts)\n\n"
+
+        # Evidence requirements (condensed)
+        prompt += "## Evidence Requirements\n\n"
+        prompt += "Every dependency MUST include: source reference (module/subsystem), evidence type, reasoning.\n"
+        prompt += "If you cannot find concrete evidence, DO NOT include the dependency.\n\n"
+
+        # OPTIONAL verification searches at the end
+        prompt += "## OPTIONAL: MCP Verification Searches (max 5 calls)\n\n"
+        prompt += "After writing your analysis, you MAY use the `search_code` MCP tool for verification.\n"
+        prompt += "Limit: AT MOST 5 search_code calls total. Do NOT explore extensively.\n"
+        prompt += "These searches are for CONFIRMING what you wrote, not for discovery.\n\n"
+
+        # Prohibited content
+        prompt += "## PROHIBITED Content\n\n"
+        prompt += "- YAML frontmatter blocks (system adds automatically)\n"
+        prompt += "- Speculative sections (Recommendations, Future Considerations)\n"
+        prompt += "- Meta-commentary about your process or thinking\n"
+        prompt += "- Content not supported by evidence\n\n"
+
+        prompt += "## Output Format\n\n"
+        prompt += f"Your output MUST begin with: # Domain Analysis: {domain_name}\n"
+        prompt += "Follow the template structure above exactly.\n"
+        prompt += "Output ONLY the content (no markdown code blocks, no preamble).\n"
+
+        return prompt
+
     def run_pass_2_per_domain(
         self,
         staging_dir: Path,
@@ -368,183 +468,191 @@ class DependencyMapAnalyzer:
         """
         domain_name = domain["name"]
         participating_repos = domain.get("participating_repos", [])
+        is_large_domain = len(participating_repos) > 3
 
         # Build per-domain prompt
-        prompt = f"# Domain Analysis: {domain_name}\n\n"
-        prompt += f"**Domain Description**: {domain.get('description', 'N/A')}\n\n"
+        if is_large_domain:
+            # Use output-first prompt for large domains (>3 repos)
+            prompt = self._build_output_first_prompt(
+                domain, domain_list, repo_list, previous_domain_dir
+            )
+        else:
+            # Use standard prompt for small domains (<=3 repos)
+            prompt = f"# Domain Analysis: {domain_name}\n\n"
+            prompt += f"**Domain Description**: {domain.get('description', 'N/A')}\n\n"
 
-        # Include Pass 1 evidence for verification
-        evidence = domain.get("evidence", "")
-        if evidence:
-            prompt += f"**Pass 1 Evidence (verify or refute)**: {evidence}\n\n"
-
-        prompt += "## Full Domain Structure (for cross-domain awareness)\n\n"
-        for d in domain_list:
-            prompt += f"- **{d['name']}**: {d.get('description', 'N/A')}\n"
-            prompt += f"  - Repos: {', '.join(d.get('participating_repos', []))}\n"
-
-        prompt += f"\n## Focus Analysis on Domain: {domain_name}\n\n"
-        prompt += f"Analyze dependencies for: {', '.join(participating_repos)}\n\n"
-
-        prompt += "## Repository Filesystem Locations\n\n"
-        prompt += "IMPORTANT: Each repository is a directory on disk. You MUST explore source code using these paths.\n"
-        prompt += "Start by listing each repo's directory structure, then read key files (entry points, configs, manifests).\n\n"
-        # Build path mapping for participating repos
-        path_map = {r.get("alias"): r.get("clone_path") for r in repo_list}
-        for repo_alias in participating_repos:
-            clone_path = path_map.get(repo_alias, "path not found")
-            prompt += f"- **{repo_alias}**: `{clone_path}`\n"
-        prompt += "\n"
-
-        prompt += "## CIDX Semantic Search (MCP Tools) - MANDATORY\n\n"
-        prompt += "You MUST use the `cidx-local` MCP server's `search_code` tool during this analysis.\n"
-        prompt += (
-            "It provides semantic search across ALL indexed golden repositories.\n\n"
-        )
-        prompt += "### Required Searches\n\n"
-        prompt += "For EACH participating repository, run at least one search:\n"
-        for repo_alias in participating_repos:
-            prompt += f"- Search for `{repo_alias}` references across all repos\n"
-        prompt += "\n"
-        prompt += "### How to Use\n\n"
-        prompt += "Call the `search_code` tool with:\n"
-        prompt += "- `query_text`: The search term (repo name, class name, API endpoint, etc.)\n"
-        prompt += "- `limit`: Number of results (start with 10)\n\n"
-        prompt += "This reveals cross-repo references that filesystem exploration alone cannot find.\n"
-        prompt += "Do NOT skip MCP searches - they are essential for discovering service integration and semantic coupling.\n\n"
-
-        prompt += "### Minimum Search Requirements\n\n"
-        prompt += "You MUST call the `search_code` MCP tool AT LEAST 3 times during this analysis.\n"
-        prompt += "Failure to use MCP search invalidates the analysis. Recommended searches:\n"
-        prompt += "1. Each participating repo name (to find cross-repo references)\n"
-        prompt += "2. Key class/function/module names discovered during source code exploration\n"
-        prompt += "3. Shared identifiers, API endpoints, or configuration keys\n\n"
-        prompt += "### All Repository Aliases (for cross-domain reference searches)\n\n"
-        prompt += "These are ALL repos in the ecosystem. Search for these names to find cross-domain connections:\n\n"
-        all_aliases = sorted(r.get("alias", "unknown") for r in repo_list)
-        for alias in all_aliases:
-            if alias not in participating_repos:
-                prompt += f"- `{alias}` (other domain)\n"
-        prompt += "\n"
-
-        prompt += "## Source Code Exploration Mandate\n\n"
-        prompt += (
-            "DO NOT rely solely on README files or documentation. Actively explore:\n"
-        )
-        prompt += "- Import statements and package dependencies (requirements.txt, package.json, setup.py, go.mod)\n"
-        prompt += "- Entry points (main.py, app.py, index.ts, cmd/ directories)\n"
-        prompt += "- Configuration files for references to other repos/services\n"
-        prompt += "- API endpoint definitions and client code\n"
-        prompt += "- Test files (often reveal integration dependencies)\n"
-        prompt += "- Build and deployment scripts\n\n"
-        prompt += (
-            "Assess each repo's documentation depth relative to its codebase size.\n"
-        )
-        prompt += "A repo with 100+ source files and a 5-line README has unreliable documentation - explore its source code thoroughly.\n\n"
-
-        prompt += "## Dependency Types to Identify\n\n"
-        prompt += "**CRITICAL**: ABSENCE of code imports does NOT mean absence of dependency.\n\n"
-        prompt += (
-            "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
-        )
-        prompt += (
-            "  Example: 'web-app imports shared-types package for User interface'\n\n"
-        )
-        prompt += "- **Data contracts**: Shared database tables/views/schemas, shared file formats\n"
-        prompt += "  Example: 'lambda-processor reads customer_summary_view exposed by core-db'\n\n"
-        prompt += (
-            "- **Service integration**: REST/HTTP/MCP/gRPC API calls between repos\n"
-        )
-        prompt += "  Example: 'frontend calls backend /api/auth endpoint for login'\n\n"
-        prompt += "- **External tool invocation**: CLI tools, subprocess calls, shell commands invoking another repo\n"
-        prompt += "  Example: 'deployment-scripts invoke cidx CLI for indexing'\n\n"
-        prompt += "- **Configuration coupling**: Shared env vars, config keys, feature flags, connection strings\n"
-        prompt += "  Example: 'worker-service and api-service both read REDIS_URL from env'\n\n"
-        prompt += "- **Message/event contracts**: Queue messages, webhooks, pub/sub events, callback URLs\n"
-        prompt += "  Example: 'order-service publishes order.created event consumed by notification-service'\n\n"
-        prompt += "- **Deployment dependencies**: Runtime availability requirements (repo A must be running for repo B)\n"
-        prompt += (
-            "  Example: 'web-app requires auth-service to be running and reachable'\n\n"
-        )
-        prompt += "- **Semantic coupling**: Behavioral contracts where changing logic in repo A breaks expectations in repo B\n"
-        prompt += "  Example: 'analytics-pipeline expects user-service to always include email field in user records'\n\n"
-
-        prompt += "## MANDATORY: Fact-Check Pass 1 Domain Assignments\n\n"
-        prompt += "Before analyzing dependencies, verify that each repository listed in this domain actually belongs here.\n"
-        prompt += "For each participating repo:\n"
-        prompt += "1. Examine its source code, imports, and integration points\n"
-        prompt += "2. Confirm it has actual code-level or integration relationships with other repos in this domain\n"
-        prompt += "3. If a repo does NOT belong in this domain based on source code evidence, state this explicitly\n\n"
-
-        prompt += "## MANDATORY: Technology Stack Verification\n\n"
-        prompt += "When describing a repository's technology stack or primary language:\n"
-        prompt += "1. Search for dependency manifests (requirements.txt, package.json, Cargo.toml, go.mod, *.csproj, pom.xml, pyproject.toml)\n"
-        prompt += "2. Check actual source file extensions in the repository (.py, .ts, .js, .rs, .go, .cs, .java, .pas)\n"
-        prompt += "3. Do NOT assume technology based on tool names, library names, or general knowledge\n"
-        prompt += "4. If a repo uses a library written in language X as a binding/wrapper in language Y, the repo's primary language is Y, not X\n"
-        prompt += "5. State only what the dependency manifest and source files confirm\n\n"
-
-        prompt += "## MANDATORY: Evidence-Based Claims\n\n"
-        prompt += "Every dependency you document MUST include:\n"
-        prompt += '1. **Source reference**: The specific module, package, or subsystem where the dependency manifests (e.g., "code-indexer\'s server/mcp/handlers.py module")\n'
-        prompt += "2. **Evidence type**: What you observed (import statement, API endpoint definition, configuration key, subprocess invocation, etc.)\n"
-        prompt += "3. **Reasoning**: Why this constitutes a dependency and what would break if the depended-on component changed\n\n"
-        prompt += "DO NOT document dependencies based on:\n"
-        prompt += '- Assumptions about what "should" exist\n'
-        prompt += "- Naming similarity between repos\n"
-        prompt += "- General knowledge about how similar systems typically work\n"
-        prompt += "- Documentation claims you cannot verify in source code\n\n"
-        prompt += "If you cannot find concrete evidence of a dependency in actual source files, DO NOT include it.\n\n"
-
-        prompt += "### External Dependency Verification\n\n"
-        prompt += "For external/third-party dependencies, you MUST read the actual manifest file:\n"
-        prompt += "- Python: requirements.txt, setup.py, pyproject.toml\n"
-        prompt += "- JavaScript/TypeScript: package.json\n"
-        prompt += "- .NET/C#: *.csproj, *.sln, packages.config\n"
-        prompt += "- Go: go.mod\n"
-        prompt += "- Java: pom.xml, build.gradle\n"
-        prompt += "- Rust: Cargo.toml\n\n"
-        prompt += "DO NOT list external dependencies from memory or general knowledge of similar systems.\n"
-        prompt += "If you cannot find the dependency manifest file, state 'dependency manifest not found' rather than guessing.\n\n"
-
-        prompt += "## Granularity Guidelines\n\n"
-        prompt += "Document at MODULE/SUBSYSTEM level, not files or functions.\n\n"
-        prompt += "**CORRECT**: 'auth-service JWT subsystem provides token validation consumed by web-app middleware layer'\n\n"
-        prompt += "**INCORRECT (too granular)**: 'auth-service/src/jwt/validator.py:validate_token() called by web-app/src/middleware/auth.py'\n\n"
-        prompt += "**INCORRECT (too abstract)**: 'auth-service is used by web-app'\n\n"
-
-        # Feed existing analysis for incremental improvement
-        # FIX 2 (Iteration 11): Only feed previous analysis if it was good quality (has headings and sufficient length)
-        # Bad previous content (meta-commentary) can confuse Claude into producing more meta-commentary
-        if previous_domain_dir and (previous_domain_dir / f"{domain_name}.md").exists():
-            existing_content = (previous_domain_dir / f"{domain_name}.md").read_text()
-            if self._has_markdown_headings(existing_content) and len(existing_content.strip()) > 1000:
-                prompt += "## Previous Analysis (refine and improve)\n\n"
-                prompt += existing_content + "\n\n"
-            else:
-                logger.info(
-                    f"Skipping low-quality previous analysis for domain '{domain_name}' "
-                    f"({len(existing_content)} chars, headings={self._has_markdown_headings(existing_content)})"
-                )
-
-        # Fix: Iteration 9 - Add guardrails against YAML output and speculative content
-        prompt += "## PROHIBITED Content\n\n"
-        prompt += "Do NOT include any of the following in your output:\n"
-        prompt += "- YAML frontmatter blocks (the system adds these automatically)\n"
-        prompt += "- Speculative sections like 'Recommendations', 'Potential Integration Opportunities', 'Future Considerations', or 'Suggested Improvements'\n"
-        prompt += "- Advisory content about what SHOULD be done or COULD be integrated\n"
-        prompt += "- Any content not directly supported by source code evidence\n\n"
-        prompt += "Document ONLY verified, factual dependencies and relationships found in source code.\n\n"
-
-        prompt += "## Output Format\n\n"
-        prompt += "CRITICAL: Your output MUST begin with a markdown heading (# Domain Analysis: domain-name).\n"
-        prompt += "Do NOT start with summary text, meta-commentary, or a description of what you found.\n"
-        prompt += "The VERY FIRST LINE of your output must be a markdown heading.\n\n"
-        prompt += "Provide: overview, repo roles, subdomain dependencies, cross-domain connections.\n"
-        prompt += "Do NOT include any meta-commentary about your process, thinking, or search strategy.\n"
-        prompt += "Do NOT generate YAML frontmatter (--- blocks). The system handles frontmatter automatically.\n"
-        prompt += "Start your output directly with the analysis content (headings, sections, findings).\n\n"
-        prompt += "Output ONLY the content (no markdown code blocks, no preamble).\n"
+            # Include Pass 1 evidence for verification
+            evidence = domain.get("evidence", "")
+            if evidence:
+                prompt += f"**Pass 1 Evidence (verify or refute)**: {evidence}\n\n"
+    
+            prompt += "## Full Domain Structure (for cross-domain awareness)\n\n"
+            for d in domain_list:
+                prompt += f"- **{d['name']}**: {d.get('description', 'N/A')}\n"
+                prompt += f"  - Repos: {', '.join(d.get('participating_repos', []))}\n"
+    
+            prompt += f"\n## Focus Analysis on Domain: {domain_name}\n\n"
+            prompt += f"Analyze dependencies for: {', '.join(participating_repos)}\n\n"
+    
+            prompt += "## Repository Filesystem Locations\n\n"
+            prompt += "IMPORTANT: Each repository is a directory on disk. You MUST explore source code using these paths.\n"
+            prompt += "Start by listing each repo's directory structure, then read key files (entry points, configs, manifests).\n\n"
+            # Build path mapping for participating repos
+            path_map = {r.get("alias"): r.get("clone_path") for r in repo_list}
+            for repo_alias in participating_repos:
+                clone_path = path_map.get(repo_alias, "path not found")
+                prompt += f"- **{repo_alias}**: `{clone_path}`\n"
+            prompt += "\n"
+    
+            prompt += "## CIDX Semantic Search (MCP Tools) - MANDATORY\n\n"
+            prompt += "You MUST use the `cidx-local` MCP server's `search_code` tool during this analysis.\n"
+            prompt += (
+                "It provides semantic search across ALL indexed golden repositories.\n\n"
+            )
+            prompt += "### Required Searches\n\n"
+            prompt += "For EACH participating repository, run at least one search:\n"
+            for repo_alias in participating_repos:
+                prompt += f"- Search for `{repo_alias}` references across all repos\n"
+            prompt += "\n"
+            prompt += "### How to Use\n\n"
+            prompt += "Call the `search_code` tool with:\n"
+            prompt += "- `query_text`: The search term (repo name, class name, API endpoint, etc.)\n"
+            prompt += "- `limit`: Number of results (start with 10)\n\n"
+            prompt += "This reveals cross-repo references that filesystem exploration alone cannot find.\n"
+            prompt += "Do NOT skip MCP searches - they are essential for discovering service integration and semantic coupling.\n\n"
+    
+            prompt += "### Minimum Search Requirements\n\n"
+            prompt += "You MUST call the `search_code` MCP tool AT LEAST 3 times during this analysis.\n"
+            prompt += "Failure to use MCP search invalidates the analysis. Recommended searches:\n"
+            prompt += "1. Each participating repo name (to find cross-repo references)\n"
+            prompt += "2. Key class/function/module names discovered during source code exploration\n"
+            prompt += "3. Shared identifiers, API endpoints, or configuration keys\n\n"
+            prompt += "### All Repository Aliases (for cross-domain reference searches)\n\n"
+            prompt += "These are ALL repos in the ecosystem. Search for these names to find cross-domain connections:\n\n"
+            all_aliases = sorted(r.get("alias", "unknown") for r in repo_list)
+            for alias in all_aliases:
+                if alias not in participating_repos:
+                    prompt += f"- `{alias}` (other domain)\n"
+            prompt += "\n"
+    
+            prompt += "## Source Code Exploration Mandate\n\n"
+            prompt += (
+                "DO NOT rely solely on README files or documentation. Actively explore:\n"
+            )
+            prompt += "- Import statements and package dependencies (requirements.txt, package.json, setup.py, go.mod)\n"
+            prompt += "- Entry points (main.py, app.py, index.ts, cmd/ directories)\n"
+            prompt += "- Configuration files for references to other repos/services\n"
+            prompt += "- API endpoint definitions and client code\n"
+            prompt += "- Test files (often reveal integration dependencies)\n"
+            prompt += "- Build and deployment scripts\n\n"
+            prompt += (
+                "Assess each repo's documentation depth relative to its codebase size.\n"
+            )
+            prompt += "A repo with 100+ source files and a 5-line README has unreliable documentation - explore its source code thoroughly.\n\n"
+    
+            prompt += "## Dependency Types to Identify\n\n"
+            prompt += "**CRITICAL**: ABSENCE of code imports does NOT mean absence of dependency.\n\n"
+            prompt += (
+                "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
+            )
+            prompt += (
+                "  Example: 'web-app imports shared-types package for User interface'\n\n"
+            )
+            prompt += "- **Data contracts**: Shared database tables/views/schemas, shared file formats\n"
+            prompt += "  Example: 'lambda-processor reads customer_summary_view exposed by core-db'\n\n"
+            prompt += (
+                "- **Service integration**: REST/HTTP/MCP/gRPC API calls between repos\n"
+            )
+            prompt += "  Example: 'frontend calls backend /api/auth endpoint for login'\n\n"
+            prompt += "- **External tool invocation**: CLI tools, subprocess calls, shell commands invoking another repo\n"
+            prompt += "  Example: 'deployment-scripts invoke cidx CLI for indexing'\n\n"
+            prompt += "- **Configuration coupling**: Shared env vars, config keys, feature flags, connection strings\n"
+            prompt += "  Example: 'worker-service and api-service both read REDIS_URL from env'\n\n"
+            prompt += "- **Message/event contracts**: Queue messages, webhooks, pub/sub events, callback URLs\n"
+            prompt += "  Example: 'order-service publishes order.created event consumed by notification-service'\n\n"
+            prompt += "- **Deployment dependencies**: Runtime availability requirements (repo A must be running for repo B)\n"
+            prompt += (
+                "  Example: 'web-app requires auth-service to be running and reachable'\n\n"
+            )
+            prompt += "- **Semantic coupling**: Behavioral contracts where changing logic in repo A breaks expectations in repo B\n"
+            prompt += "  Example: 'analytics-pipeline expects user-service to always include email field in user records'\n\n"
+    
+            prompt += "## MANDATORY: Fact-Check Pass 1 Domain Assignments\n\n"
+            prompt += "Before analyzing dependencies, verify that each repository listed in this domain actually belongs here.\n"
+            prompt += "For each participating repo:\n"
+            prompt += "1. Examine its source code, imports, and integration points\n"
+            prompt += "2. Confirm it has actual code-level or integration relationships with other repos in this domain\n"
+            prompt += "3. If a repo does NOT belong in this domain based on source code evidence, state this explicitly\n\n"
+    
+            prompt += "## MANDATORY: Technology Stack Verification\n\n"
+            prompt += "When describing a repository's technology stack or primary language:\n"
+            prompt += "1. Search for dependency manifests (requirements.txt, package.json, Cargo.toml, go.mod, *.csproj, pom.xml, pyproject.toml)\n"
+            prompt += "2. Check actual source file extensions in the repository (.py, .ts, .js, .rs, .go, .cs, .java, .pas)\n"
+            prompt += "3. Do NOT assume technology based on tool names, library names, or general knowledge\n"
+            prompt += "4. If a repo uses a library written in language X as a binding/wrapper in language Y, the repo's primary language is Y, not X\n"
+            prompt += "5. State only what the dependency manifest and source files confirm\n\n"
+    
+            prompt += "## MANDATORY: Evidence-Based Claims\n\n"
+            prompt += "Every dependency you document MUST include:\n"
+            prompt += '1. **Source reference**: The specific module, package, or subsystem where the dependency manifests (e.g., "code-indexer\'s server/mcp/handlers.py module")\n'
+            prompt += "2. **Evidence type**: What you observed (import statement, API endpoint definition, configuration key, subprocess invocation, etc.)\n"
+            prompt += "3. **Reasoning**: Why this constitutes a dependency and what would break if the depended-on component changed\n\n"
+            prompt += "DO NOT document dependencies based on:\n"
+            prompt += '- Assumptions about what "should" exist\n'
+            prompt += "- Naming similarity between repos\n"
+            prompt += "- General knowledge about how similar systems typically work\n"
+            prompt += "- Documentation claims you cannot verify in source code\n\n"
+            prompt += "If you cannot find concrete evidence of a dependency in actual source files, DO NOT include it.\n\n"
+    
+            prompt += "### External Dependency Verification\n\n"
+            prompt += "For external/third-party dependencies, you MUST read the actual manifest file:\n"
+            prompt += "- Python: requirements.txt, setup.py, pyproject.toml\n"
+            prompt += "- JavaScript/TypeScript: package.json\n"
+            prompt += "- .NET/C#: *.csproj, *.sln, packages.config\n"
+            prompt += "- Go: go.mod\n"
+            prompt += "- Java: pom.xml, build.gradle\n"
+            prompt += "- Rust: Cargo.toml\n\n"
+            prompt += "DO NOT list external dependencies from memory or general knowledge of similar systems.\n"
+            prompt += "If you cannot find the dependency manifest file, state 'dependency manifest not found' rather than guessing.\n\n"
+    
+            prompt += "## Granularity Guidelines\n\n"
+            prompt += "Document at MODULE/SUBSYSTEM level, not files or functions.\n\n"
+            prompt += "**CORRECT**: 'auth-service JWT subsystem provides token validation consumed by web-app middleware layer'\n\n"
+            prompt += "**INCORRECT (too granular)**: 'auth-service/src/jwt/validator.py:validate_token() called by web-app/src/middleware/auth.py'\n\n"
+            prompt += "**INCORRECT (too abstract)**: 'auth-service is used by web-app'\n\n"
+    
+            # Feed existing analysis for incremental improvement
+            # FIX 2 (Iteration 11): Only feed previous analysis if it was good quality (has headings and sufficient length)
+            # Bad previous content (meta-commentary) can confuse Claude into producing more meta-commentary
+            if previous_domain_dir and (previous_domain_dir / f"{domain_name}.md").exists():
+                existing_content = (previous_domain_dir / f"{domain_name}.md").read_text()
+                if self._has_markdown_headings(existing_content) and len(existing_content.strip()) > 1000:
+                    prompt += "## Previous Analysis (refine and improve)\n\n"
+                    prompt += existing_content + "\n\n"
+                else:
+                    logger.info(
+                        f"Skipping low-quality previous analysis for domain '{domain_name}' "
+                        f"({len(existing_content)} chars, headings={self._has_markdown_headings(existing_content)})"
+                    )
+    
+            # Fix: Iteration 9 - Add guardrails against YAML output and speculative content
+            prompt += "## PROHIBITED Content\n\n"
+            prompt += "Do NOT include any of the following in your output:\n"
+            prompt += "- YAML frontmatter blocks (the system adds these automatically)\n"
+            prompt += "- Speculative sections like 'Recommendations', 'Potential Integration Opportunities', 'Future Considerations', or 'Suggested Improvements'\n"
+            prompt += "- Advisory content about what SHOULD be done or COULD be integrated\n"
+            prompt += "- Any content not directly supported by source code evidence\n\n"
+            prompt += "Document ONLY verified, factual dependencies and relationships found in source code.\n\n"
+    
+            prompt += "## Output Format\n\n"
+            prompt += "CRITICAL: Your output MUST begin with a markdown heading (# Domain Analysis: domain-name).\n"
+            prompt += "Do NOT start with summary text, meta-commentary, or a description of what you found.\n"
+            prompt += "The VERY FIRST LINE of your output must be a markdown heading.\n\n"
+            prompt += "Provide: overview, repo roles, subdomain dependencies, cross-domain connections.\n"
+            prompt += "Do NOT include any meta-commentary about your process, thinking, or search strategy.\n"
+            prompt += "Do NOT generate YAML frontmatter (--- blocks). The system handles frontmatter automatically.\n"
+            prompt += "Start your output directly with the analysis content (headings, sections, findings).\n\n"
+            prompt += "Output ONLY the content (no markdown code blocks, no preamble).\n"
 
         # Fix 1 (Iteration 12): PostToolUse hook to prevent turn exhaustion
         # _invoke_claude_cli() builds turn-aware bash script with escalating urgency messages
@@ -554,34 +662,54 @@ class DependencyMapAnalyzer:
             "no preamble before the heading."
         )
 
+        # Iteration 13: Use earlier hook thresholds for large domains
+        if is_large_domain:
+            hook_thresh = (max(3, int(max_turns * 0.15)), max(8, int(max_turns * 0.35)))
+        else:
+            hook_thresh = None
+
         # Invoke Claude CLI (Pass 2 needs MCP search_code tool for source code analysis)
         result = self._invoke_claude_cli(
             prompt, self.pass_timeout, max_turns,
             allowed_tools="mcp__cidx-local__search_code",
-            post_tool_hook=hook_reminder
+            post_tool_hook=hook_reminder,
+            hook_thresholds=hook_thresh,
         )
 
         # Strip meta-commentary from output
         result = self._strip_meta_commentary(result)
 
         # Fix 2 (Iteration 12): Detect max-turns exhaustion and retry with search budget guidance
-        # When Claude exhausts all turns without writing output, retry with strict search budget
+        # Iteration 13: Large domains use write-only retry, small domains use budget search retry
         if re.search(r"Error:\s*Reached max turns\s*\(\d+\)", result.strip()):
             logger.warning(
                 f"Pass 2 hit max-turns exhaustion for domain '{domain_name}', "
-                f"retrying with search budget guidance"
+                f"retrying with {'write-only mode' if is_large_domain else 'search budget guidance'}"
             )
-            # Build a budget-aware prompt that limits search calls and forces output
-            budget_prompt = (
-                "CRITICAL INSTRUCTION: You have a STRICT search budget. "
-                "Use AT MOST 3 search_code calls total. After your searches, "
-                "you MUST write your complete analysis output immediately.\n\n"
-            ) + prompt
-            result = self._invoke_claude_cli(
-                budget_prompt, self.pass_timeout, 15,
-                allowed_tools="mcp__cidx-local__search_code",
-                post_tool_hook=hook_reminder,
-            )
+            if is_large_domain:
+                # Large domain: retry with strict write-only mode (no MCP tools)
+                budget_prompt = (
+                    "CRITICAL: You MUST write your complete analysis NOW. "
+                    "Do NOT use any search tools. Write based on your existing knowledge "
+                    "and the Pass 1 evidence provided.\n\n"
+                ) + prompt
+                result = self._invoke_claude_cli(
+                    budget_prompt, self.pass_timeout, 8,
+                    allowed_tools="",  # NO MCP tools
+                    post_tool_hook=hook_reminder,
+                )
+            else:
+                # Small domain: existing retry logic (budget search)
+                budget_prompt = (
+                    "CRITICAL INSTRUCTION: You have a STRICT search budget. "
+                    "Use AT MOST 3 search_code calls total. After your searches, "
+                    "you MUST write your complete analysis output immediately.\n\n"
+                ) + prompt
+                result = self._invoke_claude_cli(
+                    budget_prompt, self.pass_timeout, 15,
+                    allowed_tools="mcp__cidx-local__search_code",
+                    post_tool_hook=hook_reminder,
+                )
             result = self._strip_meta_commentary(result)
 
         # Check for insufficient output and retry with reduced turns (Fix 1: raised threshold to 1000)
@@ -1046,6 +1174,7 @@ class DependencyMapAnalyzer:
         max_turns: int,
         allowed_tools: Optional[str] = None,
         post_tool_hook: Optional[str] = None,
+        hook_thresholds: Optional[tuple] = None,
     ) -> str:
         """
         Invoke Claude CLI with direct subprocess (AC1).
@@ -1117,8 +1246,11 @@ class DependencyMapAnalyzer:
                 counter_file.close()
 
                 # Calculate thresholds
-                early_threshold = max_turns
-                late_threshold = int(max_turns * 1.6)
+                if hook_thresholds is not None:
+                    early_threshold, late_threshold = hook_thresholds
+                else:
+                    early_threshold = max(5, int(max_turns * 0.3))
+                    late_threshold = max(10, int(max_turns * 0.6))
 
                 # Build bash one-liner that reads/increments counter and escalates messages
                 bash_script = (

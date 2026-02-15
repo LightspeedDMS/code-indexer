@@ -2074,3 +2074,470 @@ class TestIteration11Fix3SkipGarbageWrite:
 
         # Should be called TWICE (retry for short output that is NOT max-turns exhaustion)
         assert mock_subprocess.call_count == 2
+
+
+class TestIteration13HookThresholdFix:
+    """Test hook threshold calculation fixes (Iteration 13)."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_hook_thresholds_fixed_default(self, mock_subprocess, tmp_path):
+        """Verify early=max(5, int(50*0.3))=15 and late=max(10, int(50*0.6))=30 for max_turns=50."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Verify subprocess was called with correct thresholds in --settings JSON
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args[0][0]
+
+        # Find --settings argument
+        settings_idx = call_args.index("--settings")
+        settings_json = call_args[settings_idx + 1]
+        settings = json.loads(settings_json)
+
+        # Extract bash script that contains threshold checks
+        bash_script = settings["hooks"]["PostToolUse"][0]["command"]
+
+        # Verify thresholds: early=15, late=30
+        assert "[ \"$C\" -gt 30 ]" in bash_script, "Late threshold should be 30"
+        assert "[ \"$C\" -gt 15 ]" in bash_script, "Early threshold should be 15"
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_hook_thresholds_custom_override(self, mock_subprocess, tmp_path):
+        """Verify hook_thresholds=(7,17) overrides default calculation."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1", "repo2", "repo3", "repo4", "repo5"],  # Large domain
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Verify subprocess was called with custom thresholds
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args[0][0]
+
+        settings_idx = call_args.index("--settings")
+        settings_json = call_args[settings_idx + 1]
+        settings = json.loads(settings_json)
+
+        bash_script = settings["hooks"]["PostToolUse"][0]["command"]
+
+        # For large domain (5 repos), thresholds should be (7, 17) not (15, 30)
+        assert "[ \"$C\" -gt 17 ]" in bash_script, "Late threshold should be 17 for large domain"
+        assert "[ \"$C\" -gt 7 ]" in bash_script, "Early threshold should be 7 for large domain"
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_hook_thresholds_small_max_turns(self, mock_subprocess, tmp_path):
+        """Verify max_turns=10 gives early=max(5,3)=5 and late=max(10,6)=10."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=10)
+
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args[0][0]
+
+        settings_idx = call_args.index("--settings")
+        settings_json = call_args[settings_idx + 1]
+        settings = json.loads(settings_json)
+
+        bash_script = settings["hooks"]["PostToolUse"][0]["command"]
+
+        # early = max(5, int(10*0.3)) = max(5, 3) = 5
+        # late = max(10, int(10*0.6)) = max(10, 6) = 10
+        assert "[ \"$C\" -gt 10 ]" in bash_script, "Late threshold should be 10"
+        assert "[ \"$C\" -gt 5 ]" in bash_script, "Early threshold should be 5"
+
+
+class TestIteration13LargeDomainDetection:
+    """Test large domain detection and output-first prompt selection (Iteration 13)."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_large_domain_uses_output_first_prompt(self, mock_subprocess, tmp_path):
+        """With 4+ repos, verify prompt starts with WRITE YOUR ANALYSIS FIRST."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout="# Domain Analysis: test-domain\n\nContent. " + "X" * 1000,
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1", "repo2", "repo3", "repo4"],  # 4 repos = large
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args[0][0]
+        prompt = call_args[-1]  # Last element is the prompt
+
+        # Verify output-first prompt characteristics
+        assert "WRITE YOUR ANALYSIS FIRST" in prompt
+        assert "Source Code Exploration Mandate" not in prompt
+        assert "Required Searches" not in prompt
+        assert "run at least one search" not in prompt.lower()
+        assert "AT MOST 5" in prompt  # Limited searches
+        assert "OPTIONAL" in prompt  # Searches are optional
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_small_domain_uses_standard_prompt(self, mock_subprocess, tmp_path):
+        """With 3 or fewer repos, verify prompt DOES contain Source Code Exploration Mandate."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1", "repo2", "repo3"],  # 3 repos = small
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args[0][0]
+        prompt = call_args[-1]
+
+        # Verify standard prompt characteristics (existing behavior)
+        assert "Source Code Exploration Mandate" in prompt
+        assert "Required Searches" in prompt
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_large_domain_earlier_hook_thresholds(self, mock_subprocess, tmp_path):
+        """Verify 5-repo domain with max_turns=50 uses hook thresholds (7,17) not default (15,30)."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1", "repo2", "repo3", "repo4", "repo5"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args[0][0]
+
+        settings_idx = call_args.index("--settings")
+        settings_json = call_args[settings_idx + 1]
+        settings = json.loads(settings_json)
+
+        bash_script = settings["hooks"]["PostToolUse"][0]["command"]
+
+        # Large domain should use earlier thresholds: (7, 17)
+        assert "[ \"$C\" -gt 17 ]" in bash_script
+        assert "[ \"$C\" -gt 7 ]" in bash_script
+
+
+class TestIteration13LargeDomainRetry:
+    """Test large domain max-turns retry uses write-only mode (Iteration 13)."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_large_domain_max_turns_retry_uses_write_only(self, mock_subprocess, tmp_path):
+        """Verify max-turns exhaustion for large domain retries with max_turns=8 and no MCP tools."""
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First attempt: max-turns exhaustion
+                return MagicMock(returncode=0, stdout="Error: Reached max turns (50)")
+            else:
+                # Retry: succeeds
+                return MagicMock(returncode=0, stdout="# Domain Analysis\n\nContent. " + "X" * 1000)
+
+        mock_subprocess.side_effect = side_effect
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1", "repo2", "repo3", "repo4"],  # 4 repos = large
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Should be called twice
+        assert mock_subprocess.call_count == 2
+
+        # Verify retry call (second call) has max_turns=8 and empty allowed_tools
+        retry_call_args = mock_subprocess.call_args_list[1][0][0]
+
+        # Check max_turns=8
+        max_turns_idx = retry_call_args.index("--max-turns")
+        assert retry_call_args[max_turns_idx + 1] == "8"
+
+        # When allowed_tools="" (empty string), --allowedTools is present with empty value
+        assert "--allowedTools" in retry_call_args
+        allowed_tools_idx = retry_call_args.index("--allowedTools")
+        assert retry_call_args[allowed_tools_idx + 1] == ""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_small_domain_max_turns_retry_uses_budget_search(self, mock_subprocess, tmp_path):
+        """Verify max-turns exhaustion for small domain uses max_turns=15 with search tools (existing behavior)."""
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return MagicMock(returncode=0, stdout="Error: Reached max turns (50)")
+            else:
+                return MagicMock(returncode=0, stdout="# Domain Analysis\n\nContent. " + "X" * 1000)
+
+        mock_subprocess.side_effect = side_effect
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1", "repo2"],  # 2 repos = small
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        assert mock_subprocess.call_count == 2
+
+        # Verify retry call has max_turns=15 and search tools allowed
+        retry_call_args = mock_subprocess.call_args_list[1][0][0]
+
+        max_turns_idx = retry_call_args.index("--max-turns")
+        assert retry_call_args[max_turns_idx + 1] == "15"
+
+        # Should have --allowedTools with search_code
+        assert "--allowedTools" in retry_call_args
+        allowed_tools_idx = retry_call_args.index("--allowedTools")
+        assert "search_code" in retry_call_args[allowed_tools_idx + 1]
+
+
+class TestIteration13OutputFirstPrompt:
+    """Test _build_output_first_prompt method (Iteration 13)."""
+
+    def test_output_first_prompt_has_template_sections(self, tmp_path):
+        """Verify _build_output_first_prompt output contains all required template sections."""
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain description",
+            "participating_repos": ["repo1", "repo2"],
+            "evidence": "Some evidence from Pass 1",
+        }
+
+        domain_list = [domain]
+        repo_list = [
+            {"alias": "repo1", "clone_path": "/path/to/repo1"},
+            {"alias": "repo2", "clone_path": "/path/to/repo2"},
+        ]
+
+        prompt = analyzer._build_output_first_prompt(domain, domain_list, repo_list, None)
+
+        # Verify template sections present
+        assert "## Overview" in prompt
+        assert "## Repository Roles" in prompt
+        assert "## Intra-Domain Dependencies" in prompt
+        assert "## Cross-Domain Connections" in prompt
+
+    def test_output_first_prompt_limits_search_calls(self, tmp_path):
+        """Verify prompt contains 'AT MOST 5' and 'OPTIONAL'."""
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        prompt = analyzer._build_output_first_prompt(domain, [domain], [], None)
+
+        assert "AT MOST 5" in prompt
+        assert "OPTIONAL" in prompt
+
+    def test_output_first_prompt_includes_pass1_evidence(self, tmp_path):
+        """Verify prompt includes evidence from domain dict."""
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+            "evidence": "Critical evidence from Pass 1 analysis",
+        }
+
+        prompt = analyzer._build_output_first_prompt(domain, [domain], [], None)
+
+        assert "Critical evidence from Pass 1 analysis" in prompt
+        assert "Pass 1 Evidence (PRIMARY SOURCE)" in prompt
+
+    def test_output_first_prompt_skips_low_quality_previous(self, tmp_path):
+        """Verify low-quality previous analysis is NOT included."""
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        # Create previous domain directory with low-quality content (short, no headings)
+        previous_dir = tmp_path / "previous"
+        previous_dir.mkdir()
+        previous_file = previous_dir / "test-domain.md"
+        previous_file.write_text("Short low quality content")
+
+        prompt = analyzer._build_output_first_prompt(domain, [domain], [], previous_dir)
+
+        # Should NOT include previous analysis section
+        assert "Previous Analysis" not in prompt
+        assert "Short low quality content" not in prompt
+
+    def test_output_first_prompt_includes_high_quality_previous_with_improvement_mandate(self, tmp_path):
+        """Verify high-quality previous analysis includes EXTEND/IMPROVE/CORRECT instructions."""
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        # Create previous domain directory with high-quality content
+        previous_dir = tmp_path / "previous"
+        previous_dir.mkdir()
+        previous_file = previous_dir / "test-domain.md"
+        previous_file.write_text("# Previous Analysis\n\nGood quality content here. " + "Y" * 1000)
+
+        prompt = analyzer._build_output_first_prompt(domain, [domain], [], previous_dir)
+
+        # Should include previous analysis with improvement mandate
+        assert "EXTEND, IMPROVE, and CORRECT" in prompt
+        assert "Preserve" in prompt
+        assert "Correct" in prompt
+        assert "Extend" in prompt
+        assert "Do NOT start from scratch" in prompt
+        assert "Good quality content here" in prompt
