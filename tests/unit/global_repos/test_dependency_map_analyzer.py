@@ -921,7 +921,7 @@ class TestEmptyOutputDetection:
     @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_pass_2_retries_on_very_short_output(self, mock_subprocess, tmp_path):
-        """Test that Pass 2 retries when output is very short (<50 chars)."""
+        """Test that Pass 2 retries when output is very short (<1000 chars)."""
         # First call returns very short output, second call returns full content
         call_count = [0]
 
@@ -1190,3 +1190,151 @@ class TestPass3MetaCommentaryStripping:
         assert "Table here" in content
         assert "I have all the domain information" not in content
         assert "Now I'll generate" not in content
+
+
+class TestDuplicateYamlStripping:
+    """Test Fix 1 (Iteration 9): Strip multiple consecutive YAML frontmatter blocks."""
+
+    def test_strips_two_consecutive_yaml_blocks_with_opening_delimiter(self):
+        """Test stripping two consecutive YAML blocks with opening --- delimiters."""
+        text = """---
+domain: langfuse-telemetry-data
+last_analyzed: 2026-02-14T20:00:00.000000+00:00
+participating_repos:
+  - repo1
+---
+
+---
+domain: langfuse-telemetry-data
+last_analyzed: 2026-02-15T01:57:39.708781+00:00
+participating_repos:
+  - repo1
+---
+
+# Domain Analysis: langfuse-telemetry-data
+
+Actual content here."""
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("# Domain Analysis")
+        assert "domain:" not in result
+        assert "last_analyzed:" not in result
+        assert "participating_repos:" not in result
+        assert "Actual content here" in result
+
+    def test_strips_yaml_with_delimiter_then_yaml_without_delimiter(self):
+        """Test stripping YAML with --- followed by YAML without opening ---."""
+        text = """---
+domain: test-domain
+last_analyzed: 2026-02-14
+---
+
+domain: second-block
+last_analyzed: 2026-02-15
+---
+
+# Analysis
+
+Content here."""
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("# Analysis")
+        assert "domain:" not in result
+        assert "last_analyzed:" not in result
+        assert "second-block" not in result
+        assert "Content here" in result
+
+    def test_strips_yaml_without_delimiter_then_yaml_with_delimiter(self):
+        """Test stripping YAML without --- followed by YAML with opening ---."""
+        text = """domain: first-block
+last_analyzed: 2026-02-14
+---
+
+---
+domain: second-block
+participating_repos:
+  - repo1
+---
+
+# Content
+
+Analysis text."""
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("# Content")
+        assert "domain:" not in result
+        assert "first-block" not in result
+        assert "second-block" not in result
+        assert "Analysis text" in result
+
+    def test_no_infinite_loop_on_non_yaml_content(self):
+        """Test that regular content without YAML passes through unchanged."""
+        text = "# Regular Content\n\nThis is just normal text with no YAML."
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result == text
+
+
+class TestPass2PromptGuardrails:
+    """Test Fix 2 (Iteration 9): Prompt guardrails against YAML output and speculative content."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_prompt_prohibits_yaml_frontmatter_output(self, mock_subprocess, tmp_path):
+        """Test that Pass 2 prompt explicitly prohibits YAML frontmatter output."""
+        content = "# Domain Analysis\n\n" + "X" * 1000
+        mock_subprocess.return_value = MagicMock(returncode=0, stdout=content)
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=60)
+
+        # Verify prompt contains YAML prohibition
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args
+        prompt = call_args[0][0][-1]  # Last element is the prompt
+
+        assert "## PROHIBITED Content" in prompt
+        assert "YAML frontmatter blocks (the system adds these automatically)" in prompt
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_prompt_prohibits_speculative_content(self, mock_subprocess, tmp_path):
+        """Test that Pass 2 prompt prohibits speculative/advisory content."""
+        content = "# Domain Analysis\n\n" + "Y" * 1000
+        mock_subprocess.return_value = MagicMock(returncode=0, stdout=content)
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=60)
+
+        # Verify prompt contains speculative content prohibition
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args
+        prompt = call_args[0][0][-1]
+
+        # Check for exact text in PROHIBITED section
+        assert "## PROHIBITED Content" in prompt
+        assert "Speculative sections" in prompt

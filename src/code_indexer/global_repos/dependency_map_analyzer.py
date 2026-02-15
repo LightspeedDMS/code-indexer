@@ -505,9 +505,19 @@ class DependencyMapAnalyzer:
             prompt += "## Previous Analysis (refine and improve)\n\n"
             prompt += existing_content + "\n\n"
 
+        # Fix: Iteration 9 - Add guardrails against YAML output and speculative content
+        prompt += "## PROHIBITED Content\n\n"
+        prompt += "Do NOT include any of the following in your output:\n"
+        prompt += "- YAML frontmatter blocks (the system adds these automatically)\n"
+        prompt += "- Speculative sections like 'Recommendations', 'Potential Integration Opportunities', 'Future Considerations', or 'Suggested Improvements'\n"
+        prompt += "- Advisory content about what SHOULD be done or COULD be integrated\n"
+        prompt += "- Any content not directly supported by source code evidence\n\n"
+        prompt += "Document ONLY verified, factual dependencies and relationships found in source code.\n\n"
+
         prompt += "## Output Format\n\n"
         prompt += "Provide: overview, repo roles, subdomain dependencies, cross-domain connections.\n"
         prompt += "Do NOT include any meta-commentary about your process, thinking, or search strategy.\n"
+        prompt += "Do NOT generate YAML frontmatter (--- blocks). The system handles frontmatter automatically.\n"
         prompt += "Start your output directly with the analysis content (headings, sections, findings).\n\n"
         prompt += "Output ONLY the content (no markdown code blocks, no preamble).\n"
 
@@ -661,27 +671,47 @@ class DependencyMapAnalyzer:
         if not text:
             return text
 
-        # Strip YAML frontmatter block if present at start (Fix 3)
-        lines = text.split("\n")
-        stripped_first = lines[0].strip() if lines else ""
-        if stripped_first == "---":
-            # Find closing ---
-            for i in range(1, len(lines)):
-                if lines[i].strip() == "---":
-                    # Found closing delimiter - strip entire frontmatter
-                    text = "\n".join(lines[i + 1:])
-                    break
-        else:
-            # Fix 2: Also detect YAML-like content without opening ---
-            # Claude sometimes omits the opening delimiter
-            yaml_keys = ("domain:", "last_analyzed:", "participating_repos:", "schema_version:")
-            first_content = stripped_first.lower()
-            if any(first_content.startswith(k) for k in yaml_keys):
+        # Strip YAML frontmatter blocks (loop to handle multiple consecutive blocks)
+        # Fix: Iteration 9 - Claude sometimes outputs two consecutive YAML frontmatter blocks
+        max_iterations = 10  # Safety limit to prevent infinite loops
+        iteration = 0
+        while iteration < max_iterations:
+            iteration += 1
+            # Strip leading whitespace/newlines between YAML blocks
+            text = text.lstrip()
+            if not text:
+                break
+
+            lines = text.split("\n")
+            stripped_first = lines[0].strip() if lines else ""
+
+            # Track if we found and stripped a YAML block in this iteration
+            stripped_yaml = False
+
+            if stripped_first == "---":
                 # Find closing ---
                 for i in range(1, len(lines)):
                     if lines[i].strip() == "---":
+                        # Found closing delimiter - strip entire frontmatter
                         text = "\n".join(lines[i + 1:])
+                        stripped_yaml = True
                         break
+            else:
+                # Fix 2: Also detect YAML-like content without opening ---
+                # Claude sometimes omits the opening delimiter
+                yaml_keys = ("domain:", "last_analyzed:", "participating_repos:", "schema_version:")
+                first_content = stripped_first.lower()
+                if any(first_content.startswith(k) for k in yaml_keys):
+                    # Find closing ---
+                    for i in range(1, len(lines)):
+                        if lines[i].strip() == "---":
+                            text = "\n".join(lines[i + 1:])
+                            stripped_yaml = True
+                            break
+
+            # If no YAML block was found/stripped, we're done
+            if not stripped_yaml:
+                break
 
         lines = text.split("\n")
 
@@ -1060,6 +1090,14 @@ class DependencyMapAnalyzer:
         prompt += "**INCORRECT (too granular)**: 'auth-service/src/jwt/validator.py:validate_token() called by web-app/src/middleware/auth.py'\n\n"
         prompt += "**INCORRECT (too abstract)**: 'auth-service is used by web-app'\n\n"
 
+        prompt += "## PROHIBITED Content\n\n"
+        prompt += "Do NOT include any of the following in your output:\n"
+        prompt += "- YAML frontmatter blocks (the system adds these automatically)\n"
+        prompt += "- Speculative sections like 'Recommendations', 'Potential Integration Opportunities', 'Future Considerations', or 'Suggested Improvements'\n"
+        prompt += "- Advisory content about what SHOULD be done or COULD be integrated\n"
+        prompt += "- Any content not directly supported by source code evidence\n\n"
+        prompt += "Document ONLY verified, factual dependencies and relationships found in source code.\n\n"
+
         prompt += "## Output Format\n\n"
         prompt += "Provide: overview, repo roles, subdomain dependencies, cross-domain connections.\n"
         prompt += "Output ONLY the content (no markdown code blocks, no preamble).\n"
@@ -1148,6 +1186,14 @@ class DependencyMapAnalyzer:
 
         prompt += "## Granularity Guidelines\n\n"
         prompt += "Document at MODULE/SUBSYSTEM level, not files or functions.\n\n"
+
+        prompt += "## PROHIBITED Content\n\n"
+        prompt += "Do NOT include any of the following in your output:\n"
+        prompt += "- YAML frontmatter blocks (the system adds these automatically)\n"
+        prompt += "- Speculative sections like 'Recommendations', 'Potential Integration Opportunities', 'Future Considerations', or 'Suggested Improvements'\n"
+        prompt += "- Advisory content about what SHOULD be done or COULD be integrated\n"
+        prompt += "- Any content not directly supported by source code evidence\n\n"
+        prompt += "Document ONLY verified, factual dependencies and relationships found in source code.\n\n"
 
         prompt += "## Output Format\n\n"
         prompt += "Provide: overview, repo roles, subdomain dependencies, cross-domain connections.\n"
