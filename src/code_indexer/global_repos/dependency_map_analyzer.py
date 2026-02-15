@@ -225,8 +225,8 @@ class DependencyMapAnalyzer:
         prompt += '"evidence": "Brief justification referencing actual files/patterns observed"}\n'
         prompt += "]\n"
 
-        # Invoke Claude CLI (Pass 1 does not need MCP tools - just reads descriptions and outputs JSON)
-        timeout = self.pass_timeout // 2  # Pass 1 uses half timeout (lighter workload)
+        # Invoke Claude CLI (Pass 1 explores all repos to identify domains and outputs JSON)
+        timeout = self.pass_timeout  # Pass 1 uses full timeout (heaviest phase: explores all repos)
         result = self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None)
 
         # Parse JSON response

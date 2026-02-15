@@ -124,7 +124,7 @@ class TestPass1Synthesis:
         assert "-p" in cmd
         assert "Identify domain clusters" in cmd[-1]  # Last element is the prompt
         assert call_args[1]["cwd"] == str(tmp_path)
-        assert call_args[1]["timeout"] == 300  # half of pass_timeout
+        assert call_args[1]["timeout"] == 600  # full pass_timeout (Pass 1 is heaviest phase)
 
         # Verify result
         assert len(result) == 1
