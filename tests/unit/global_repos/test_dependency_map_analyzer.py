@@ -558,6 +558,57 @@ class TestStripMetaCommentary:
         assert result.startswith("## Findings")
 
 
+class TestPass1PromptGuardrails:
+    """Test Pass 1 prompt contains guardrails against non-JSON output."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_prompt_contains_internal_verification_instruction(self, mock_subprocess, tmp_path):
+        """Test that Pass 1 prompt instructs Claude to verify internally without outputting verification text."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps([
+                {
+                    "name": "test-domain",
+                    "description": "Test",
+                    "participating_repos": ["repo1"],
+                    "repo_paths": {"repo1": "/path/to/repo1"},
+                }
+            ]),
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        repo_list = [
+            {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
+        ]
+
+        analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=50)
+
+        # Verify prompt contains critical guardrails
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args
+        prompt = call_args[0][0][-1]  # Last element is the prompt
+
+        # Verify COMPLETENESS MANDATE section instructs internal verification
+        assert "Verify INTERNALLY that total repos across all domains equals" in prompt
+        assert "Do NOT output the verification" in prompt
+        assert "All verification must be done INTERNALLY" in prompt
+        assert "Your output must contain ONLY JSON" in prompt
+
+        # Verify Output Format section prohibits non-JSON content
+        assert "Your ENTIRE response must be ONLY a valid JSON array" in prompt
+        assert "Do NOT output completeness checks, summaries, or commentary" in prompt
+        assert "ONLY the JSON array" in prompt
+
+
 class TestPass1JsonParseFailure:
     """Test Pass 1 JSON parse failure raises RuntimeError (FIX 3)."""
 

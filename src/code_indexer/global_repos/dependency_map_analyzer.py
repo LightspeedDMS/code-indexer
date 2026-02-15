@@ -191,9 +191,10 @@ class DependencyMapAnalyzer:
 
         prompt += "### COMPLETENESS MANDATE\n\n"
         prompt += f"There are exactly {len(repo_list)} repositories. Your output MUST assign ALL {len(repo_list)} of them.\n"
-        prompt += "Before submitting, count the total repos across all domains - it MUST equal " + str(len(repo_list)) + ".\n"
+        prompt += "Verify INTERNALLY that total repos across all domains equals " + str(len(repo_list)) + ". Do NOT output the verification.\n"
         prompt += "If you cannot find integration evidence for a repo, assign it to its own standalone domain.\n"
-        prompt += "MISSING REPOS = FAILED ANALYSIS. Every valid alias must appear exactly once.\n\n"
+        prompt += "MISSING REPOS = FAILED ANALYSIS. Every valid alias must appear exactly once.\n"
+        prompt += "All verification must be done INTERNALLY. Your output must contain ONLY JSON.\n\n"
 
         prompt += "### Unassigned Repository Handling\n\n"
         prompt += "If a repository does not fit any domain (no integration evidence found), assign it to a\n"
@@ -211,7 +212,8 @@ class DependencyMapAnalyzer:
         prompt += f"\nCOMPLETENESS CHECK: Your output must contain exactly {len(repo_list)} repos total across all domains.\n\n"
 
         prompt += "## Output Format\n\n"
-        prompt += "Output ONLY valid JSON array (no markdown, no explanations).\n"
+        prompt += "Your ENTIRE response must be ONLY a valid JSON array. No markdown, no explanations, no verification text, no preamble.\n"
+        prompt += "Do NOT output completeness checks, summaries, or commentary. ONLY the JSON array.\n"
         prompt += "For each domain, include a `repo_paths` object mapping each alias to its FULL filesystem path.\n"
         prompt += "If you cannot provide the real path for a repo, DO NOT include that repo.\n\n"
         prompt += "[\n"
