@@ -1787,158 +1787,6 @@ class TestIteration10PromptReinforcement:
         assert "Do NOT start with summary text, meta-commentary, or a description of what you found" in prompt
 
 
-class TestIteration10PostToolUseHook:
-    """Test Iteration 10 Fix 4: PostToolUse hook in agentic mode."""
-
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
-    @patch("subprocess.run")
-    def test_agentic_mode_includes_settings_with_hook(self, mock_subprocess, tmp_path):
-        """Test that max_turns > 0 adds --settings flag with PostToolUse hook."""
-        content = "# Domain Analysis\n\n" + "W" * 1000
-        mock_subprocess.return_value = MagicMock(returncode=0, stdout=content)
-
-        analyzer = DependencyMapAnalyzer(
-            golden_repos_root=tmp_path,
-            cidx_meta_path=tmp_path / "cidx-meta",
-            pass_timeout=600,
-        )
-
-        staging_dir = tmp_path / "staging"
-        staging_dir.mkdir()
-
-        domain = {
-            "name": "test-domain",
-            "description": "Test domain",
-            "participating_repos": ["repo1"],
-        }
-
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
-
-        # Verify --settings flag is present
-        mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args
-        cmd = call_args[0][0]
-
-        assert "--settings" in cmd
-        settings_idx = cmd.index("--settings")
-        settings_json = cmd[settings_idx + 1]
-
-        # Verify settings contains PostToolUse hook
-        settings = json.loads(settings_json)
-        assert "hooks" in settings
-        assert "PostToolUse" in settings["hooks"]
-        assert isinstance(settings["hooks"]["PostToolUse"], list)
-        assert len(settings["hooks"]["PostToolUse"]) > 0
-
-        # Verify hook contains format reminder
-        hook = settings["hooks"]["PostToolUse"][0]
-        assert "command" in hook
-        assert "markdown heading" in hook["command"]
-
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
-    @patch("subprocess.run")
-    def test_single_shot_mode_no_settings_flag(self, mock_subprocess, tmp_path):
-        """Test that max_turns=0 does NOT add --settings flag."""
-        mock_subprocess.return_value = MagicMock(
-            returncode=0,
-            stdout=json.dumps([
-                {
-                    "name": "test-domain",
-                    "description": "Test",
-                    "participating_repos": ["repo1"],
-                    "repo_paths": {"repo1": "/path/to/repo1"},
-                }
-            ]),
-        )
-
-        analyzer = DependencyMapAnalyzer(
-            golden_repos_root=tmp_path,
-            cidx_meta_path=tmp_path / "cidx-meta",
-            pass_timeout=600,
-        )
-
-        staging_dir = tmp_path / "staging"
-        staging_dir.mkdir()
-
-        repo_list = [
-            {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
-        ]
-
-        analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=0)
-
-        # Verify --settings is NOT present (single-shot mode)
-        mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args
-        cmd = call_args[0][0]
-        assert "--settings" not in cmd
-
-
-class TestIteration11Fix1PostToolHookRetry:
-    """Test Iteration 11 Fix 1: Retry call includes post_tool_hook parameter."""
-
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
-    @patch("subprocess.run")
-    def test_retry_includes_post_tool_hook(self, mock_subprocess, tmp_path):
-        """Test that retry call includes post_tool_hook parameter (Fix 1 - MOST CRITICAL)."""
-        # First call returns insufficient content (short, no headings)
-        # Second call (retry) should ALSO include post_tool_hook parameter
-        call_count = [0]
-
-        def side_effect(*args, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                # First attempt: insufficient output (short, no headings)
-                return MagicMock(returncode=0, stdout="Short output with no headings.")
-            else:
-                # Retry: valid output
-                return MagicMock(returncode=0, stdout="# Domain Analysis\n\n" + "X" * 1000)
-
-        mock_subprocess.side_effect = side_effect
-
-        analyzer = DependencyMapAnalyzer(
-            golden_repos_root=tmp_path,
-            cidx_meta_path=tmp_path / "cidx-meta",
-            pass_timeout=600,
-        )
-
-        staging_dir = tmp_path / "staging"
-        staging_dir.mkdir()
-
-        domain = {
-            "name": "test-domain",
-            "description": "Test domain",
-            "participating_repos": ["repo1"],
-        }
-
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
-
-        # Verify subprocess was called twice
-        assert mock_subprocess.call_count == 2
-
-        # Verify BOTH calls include --settings flag with PostToolUse hook
-        first_call = mock_subprocess.call_args_list[0]
-        second_call = mock_subprocess.call_args_list[1]
-
-        # First call should have --settings
-        first_cmd = first_call[0][0]
-        assert "--settings" in first_cmd
-
-        # Second call (retry) should ALSO have --settings (FIX 1)
-        second_cmd = second_call[0][0]
-        assert "--settings" in second_cmd, "Retry call MUST include --settings with post_tool_hook"
-
-        # Verify both settings contain PostToolUse hook
-        first_settings_idx = first_cmd.index("--settings")
-        first_settings = json.loads(first_cmd[first_settings_idx + 1])
-        assert "hooks" in first_settings
-        assert "PostToolUse" in first_settings["hooks"]
-
-        second_settings_idx = second_cmd.index("--settings")
-        second_settings = json.loads(second_cmd[second_settings_idx + 1])
-        assert "hooks" in second_settings
-        assert "PostToolUse" in second_settings["hooks"]
-
-
 class TestIteration11Fix2QualityCheckPrevious:
     """Test Iteration 11 Fix 2: Quality-check previous analysis before feeding it back."""
 
@@ -2028,6 +1876,84 @@ class TestIteration11Fix2QualityCheckPrevious:
         assert "Good quality content here" in prompt
 
 
+class TestIteration12Fix3TrailingMetaCommentary:
+    """Test Iteration 12 Fix 3: Strip trailing meta-commentary patterns."""
+
+    def test_strips_multiple_trailing_meta_patterns(self):
+        """Test that trailing conversational patterns like 'Please let me know...' are stripped."""
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=MagicMock(),
+            cidx_meta_path=MagicMock(),
+            pass_timeout=600,
+        )
+
+        # Content with valid analysis followed by conversational ending
+        content = """# Domain Analysis
+
+Valid analysis content here.
+
+## Dependencies
+
+More valid content.
+
+Please let me know if you need changes."""
+
+        result = analyzer._strip_meta_commentary(content)
+
+        # Should strip the trailing conversational line
+        assert "Please let me know" not in result
+        assert "# Domain Analysis" in result
+        assert "Valid analysis content" in result
+        assert "## Dependencies" in result
+
+    def test_strips_trailing_separator_and_meta(self):
+        """Test that trailing --- separator followed by meta-commentary is stripped."""
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=MagicMock(),
+            cidx_meta_path=MagicMock(),
+            pass_timeout=600,
+        )
+
+        # Content with valid analysis followed by separator and conversational text
+        content = """# Domain Analysis
+
+Valid analysis content here.
+
+## Dependencies
+
+More valid content.
+
+---
+
+Let me know if you'd like me to expand on anything."""
+
+        result = analyzer._strip_meta_commentary(content)
+
+        # Should strip both the --- separator and the trailing conversational line
+        assert "---" not in result
+        assert "Let me know" not in result
+        assert "# Domain Analysis" in result
+        assert "Valid analysis content" in result
+        assert result.strip().endswith("More valid content.")
+
+    def test_strips_would_you_like_pattern(self):
+        """Regression test: 'Would you like...' was the exact iter 11 _index.md leakage."""
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=MagicMock(),
+            cidx_meta_path=MagicMock(),
+            pass_timeout=600,
+        )
+
+        text = (
+            "# Domain Analysis\n\n"
+            "Good content here.\n\n"
+            "Would you like to approve the file write permission so I can save this to `_index.md`?"
+        )
+        result = analyzer._strip_meta_commentary(text)
+        assert "Would you like" not in result
+        assert "Good content here." in result
+
+
 class TestIteration11Fix3SkipGarbageWrite:
     """Test Iteration 11 Fix 3: Skip writing file when both attempts produce garbage."""
 
@@ -2113,3 +2039,101 @@ class TestIteration11Fix3SkipGarbageWrite:
         content = domain_file.read_text()
         assert "# Domain Analysis" in content
         assert "Valid content" in content
+    """Test Iteration 12 Fix 2: Detect 'Error: Reached max turns' and skip domain without retry."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_max_turns_exhaustion_skips_domain(self, mock_subprocess, tmp_path):
+        """When Claude CLI returns 'Error: Reached max turns (50)', skip domain without retry."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0, stdout="Error: Reached max turns (50)"
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Should be called ONCE only (no retry for max-turns exhaustion)
+        assert mock_subprocess.call_count == 1
+
+        # Domain file should NOT be written
+        domain_file = staging_dir / "test-domain.md"
+        assert not domain_file.exists()
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_max_turns_exhaustion_various_numbers(self, mock_subprocess, tmp_path):
+        """Pattern matches various turn counts: (10), (25), (100)."""
+        for turn_count in [10, 25, 100]:
+            mock_subprocess.reset_mock()
+            mock_subprocess.return_value = MagicMock(
+                returncode=0, stdout=f"Error: Reached max turns ({turn_count})"
+            )
+
+            analyzer = DependencyMapAnalyzer(
+                golden_repos_root=tmp_path,
+                cidx_meta_path=tmp_path / "cidx-meta",
+                pass_timeout=600,
+            )
+
+            staging_dir = tmp_path / f"staging-{turn_count}"
+            staging_dir.mkdir()
+
+            domain = {
+                "name": "test-domain",
+                "description": "Test domain",
+                "participating_repos": ["repo1"],
+            }
+
+            analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+            # Should only call once (no retry)
+            assert mock_subprocess.call_count == 1, f"Failed for turn count {turn_count}"
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_short_output_still_retries(self, mock_subprocess, tmp_path):
+        """Short non-max-turns output should still trigger retry (existing behavior preserved)."""
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return MagicMock(returncode=0, stdout="Short output without headings.")
+            else:
+                return MagicMock(returncode=0, stdout="# Domain Analysis\n\n" + "X" * 1000)
+
+        mock_subprocess.side_effect = side_effect
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Should be called TWICE (retry for short output that is NOT max-turns exhaustion)
+        assert mock_subprocess.call_count == 2

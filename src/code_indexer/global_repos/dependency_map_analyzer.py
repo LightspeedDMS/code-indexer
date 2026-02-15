@@ -20,6 +20,7 @@ import os
 import re
 import shlex
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -545,7 +546,8 @@ class DependencyMapAnalyzer:
         prompt += "Start your output directly with the analysis content (headings, sections, findings).\n\n"
         prompt += "Output ONLY the content (no markdown code blocks, no preamble).\n"
 
-        # Define PostToolUse hook reminder for Pass 2
+        # Fix 1 (Iteration 12): PostToolUse hook to prevent turn exhaustion
+        # _invoke_claude_cli() builds turn-aware bash script with escalating urgency messages
         hook_reminder = (
             "REMINDER: Your final output MUST begin with a markdown heading "
             "(# Domain Analysis: [name]). No meta-commentary, no summaries, "
@@ -554,11 +556,33 @@ class DependencyMapAnalyzer:
 
         # Invoke Claude CLI (Pass 2 needs MCP search_code tool for source code analysis)
         result = self._invoke_claude_cli(
-            prompt, self.pass_timeout, max_turns, allowed_tools="mcp__cidx-local__search_code", post_tool_hook=hook_reminder
+            prompt, self.pass_timeout, max_turns,
+            allowed_tools="mcp__cidx-local__search_code",
+            post_tool_hook=hook_reminder
         )
 
         # Strip meta-commentary from output
         result = self._strip_meta_commentary(result)
+
+        # Fix 2 (Iteration 12): Detect max-turns exhaustion and retry with search budget guidance
+        # When Claude exhausts all turns without writing output, retry with strict search budget
+        if re.search(r"Error:\s*Reached max turns\s*\(\d+\)", result.strip()):
+            logger.warning(
+                f"Pass 2 hit max-turns exhaustion for domain '{domain_name}', "
+                f"retrying with search budget guidance"
+            )
+            # Build a budget-aware prompt that limits search calls and forces output
+            budget_prompt = (
+                "CRITICAL INSTRUCTION: You have a STRICT search budget. "
+                "Use AT MOST 3 search_code calls total. After your searches, "
+                "you MUST write your complete analysis output immediately.\n\n"
+            ) + prompt
+            result = self._invoke_claude_cli(
+                budget_prompt, self.pass_timeout, 15,
+                allowed_tools="mcp__cidx-local__search_code",
+                post_tool_hook=hook_reminder,
+            )
+            result = self._strip_meta_commentary(result)
 
         # Check for insufficient output and retry with reduced turns (Fix 1: raised threshold to 1000)
         # FIX 2 (Iteration 10): Also check for missing headings (pure meta-commentary)
@@ -570,10 +594,11 @@ class DependencyMapAnalyzer:
                 f"({reason}), retrying with reduced turns"
             )
             # Retry with max_turns=10 to force output generation with minimal exploration
-            # FIX 1 (Iteration 11): Include post_tool_hook in retry call (MOST CRITICAL)
-            # Without the hook, Claude drifts into conversational mode asking for permissions
+            # Include post_tool_hook in retry to maintain format reminders
             result = self._invoke_claude_cli(
-                prompt, self.pass_timeout, 10, allowed_tools="mcp__cidx-local__search_code", post_tool_hook=hook_reminder
+                prompt, self.pass_timeout, 10,
+                allowed_tools="mcp__cidx-local__search_code",
+                post_tool_hook=hook_reminder
             )
             result = self._strip_meta_commentary(result)
 
@@ -874,6 +899,47 @@ class DependencyMapAnalyzer:
         while result_lines and not result_lines[0].strip():
             result_lines.pop(0)
 
+        # FIX 3 (Iteration 12): Strip trailing meta-commentary patterns
+        # Claude sometimes adds conversational endings like "Please let me know if you need changes."
+        # or standalone `---` separators before conversational text
+        trailing_patterns = [
+            "would you like",
+            "should i ",
+            "shall i ",
+            "do you want",
+            "i can also",
+            "if you'd like",
+            "is there anything",
+            "do you need",
+            "please ",
+            "let me know",
+            "if you need",
+            "happy to",
+            "feel free",
+        ]
+
+        # Strip from the end backwards
+        while result_lines:
+            last_line = result_lines[-1].strip().lower()
+
+            # Skip trailing empty lines
+            if not last_line:
+                result_lines.pop()
+                continue
+
+            # Strip standalone --- separator at the end (often precedes conversational text)
+            if last_line == "---":
+                result_lines.pop()
+                continue
+
+            # Check for trailing meta-commentary patterns (use 'in' not 'startswith')
+            if any(p in last_line for p in trailing_patterns):
+                result_lines.pop()
+                continue
+
+            # No more trailing meta-commentary found
+            break
+
         # If we stripped everything, return the original text (edge case: only meta-commentary)
         result = "\n".join(result_lines)
         if not result.strip():
@@ -1035,18 +1101,43 @@ class DependencyMapAnalyzer:
 
         # max_turns=0 means single-shot print mode (no tool use, no agentic loop)
         # max_turns>0 means agentic mode with tool use for up to N turns
+        counter_file = None
         if max_turns > 0:
             cmd.extend(["--max-turns", str(max_turns)])
-            # Iteration 10: PostToolUse hook to reinforce output format during agentic sessions.
-            # After each tool call, a reminder is injected into the conversation context,
-            # keeping the format instruction fresh and preventing meta-commentary in final output.
-            # Only added when post_tool_hook is explicitly provided (Pass 2 only).
+            # Fix 1 (Iteration 12): Turn-aware PostToolUse hook with counter file.
+            # Replaces static echo with bash script that tracks tool call count and
+            # escalates urgency messages as turns run out (prevents Claude from
+            # exhausting all 50 turns on search without ever writing output).
             if post_tool_hook is not None:
+                # Create temporary counter file
+                counter_file = tempfile.NamedTemporaryFile(
+                    mode='w', prefix='depmap_hook_', suffix='.cnt', delete=False
+                )
+                counter_file.write("0")
+                counter_file.close()
+
+                # Calculate thresholds
+                early_threshold = max_turns
+                late_threshold = int(max_turns * 1.6)
+
+                # Build bash one-liner that reads/increments counter and escalates messages
+                bash_script = (
+                    f"F={shlex.quote(counter_file.name)}; "
+                    f"C=$(cat \"$F\"); C=$((C+1)); echo \"$C\" > \"$F\"; "
+                    f"if [ \"$C\" -gt {late_threshold} ]; then "
+                    f"echo {shlex.quote('CRITICAL: You have used many tool calls. STOP searching NOW and write your complete analysis output IMMEDIATELY. Start with # Domain Analysis heading.')}; "
+                    f"elif [ \"$C\" -gt {early_threshold} ]; then "
+                    f"echo {shlex.quote('WARNING: You are running low on turns. Start consolidating findings and prepare to write your final output soon. Output must start with # Domain Analysis heading.')}; "
+                    f"else "
+                    f"echo {shlex.quote(post_tool_hook)}; "
+                    f"fi"
+                )
+
                 hook_settings = json.dumps({
                     "hooks": {
                         "PostToolUse": [{
                             "matcher": "",
-                            "command": f"echo {shlex.quote(post_tool_hook)}"
+                            "command": f"bash -c {shlex.quote(bash_script)}"
                         }]
                     }
                 })
@@ -1058,16 +1149,24 @@ class DependencyMapAnalyzer:
 
         cmd.extend(["-p", prompt])
 
-        # Run subprocess
-        result = subprocess.run(
-            cmd,
-            cwd=str(self.golden_repos_root),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env={**os.environ},  # Inherit environment including ANTHROPIC_API_KEY
-            stdin=subprocess.DEVNULL,  # Prevent Claude CLI from hanging on stdin
-        )
+        # Run subprocess (wrapped in try/finally to ensure counter file cleanup)
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=str(self.golden_repos_root),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env={**os.environ},  # Inherit environment including ANTHROPIC_API_KEY
+                stdin=subprocess.DEVNULL,  # Prevent Claude CLI from hanging on stdin
+            )
+        finally:
+            # Clean up counter file if it was created
+            if counter_file is not None:
+                try:
+                    os.unlink(counter_file.name)
+                except OSError:
+                    pass
 
         # Diagnostic logging for debugging empty output issues
         raw_stdout_len = len(result.stdout) if result.stdout else 0
