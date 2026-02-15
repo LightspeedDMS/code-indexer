@@ -663,7 +663,7 @@ class TestAllowedToolsPerPass:
     @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_pass_1_no_allowed_tools(self, mock_subprocess, tmp_path):
-        """Test that Pass 1 is called with allowed_tools=None (no --allowedTools flag)."""
+        """Test that Pass 1 is called with allowed_tools=None (no --allowedTools flag) and max_turns=0 (single-shot)."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
             stdout=json.dumps([
@@ -689,13 +689,15 @@ class TestAllowedToolsPerPass:
             {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
         ]
 
-        analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=5)
+        analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=0)
 
         # Verify --allowedTools is NOT present (allowed_tools=None means no flag)
+        # Verify --max-turns is NOT present (max_turns=0 means single-shot mode)
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
         cmd = call_args[0][0]
         assert "--allowedTools" not in cmd
+        assert "--max-turns" not in cmd
 
     @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
@@ -734,7 +736,7 @@ class TestAllowedToolsPerPass:
     @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_pass_3_no_allowed_tools(self, mock_subprocess, tmp_path):
-        """Test that Pass 3 is called with allowed_tools=None (no --allowedTools flag)."""
+        """Test that Pass 3 is called with allowed_tools=None (no --allowedTools flag) and max_turns=0 (single-shot)."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
             stdout="# Index\n\nCatalog here.",
@@ -752,13 +754,108 @@ class TestAllowedToolsPerPass:
         domain_list = [{"name": "d1", "description": "Domain 1", "participating_repos": []}]
         repo_list = [{"alias": "r1", "description_summary": "Repo 1"}]
 
-        analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=5)
+        analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=0)
 
         # Verify --allowedTools is NOT present (allowed_tools=None means no flag)
+        # Verify --max-turns is NOT present (max_turns=0 means single-shot mode)
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
         cmd = call_args[0][0]
         assert "--allowedTools" not in cmd
+        assert "--max-turns" not in cmd
+
+
+class TestSingleShotVsAgenticMode:
+    """Test that max_turns=0 enables single-shot mode (no --max-turns flag)."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_single_shot_mode_omits_max_turns(self, mock_subprocess, tmp_path):
+        """Test that max_turns=0 omits --max-turns flag (single-shot print mode)."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps([
+                {
+                    "name": "test-domain",
+                    "description": "Test",
+                    "participating_repos": ["repo1"],
+                    "repo_paths": {"repo1": "/path/to/repo1"},
+                }
+            ]),
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        repo_list = [
+            {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
+        ]
+
+        # max_turns=0 should omit --max-turns from command
+        analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=0)
+
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args
+        cmd = call_args[0][0]
+
+        # Verify command structure: claude --print --model opus -p <prompt>
+        # WITHOUT --max-turns
+        assert cmd[0] == "claude"
+        assert "--print" in cmd
+        assert "--model" in cmd
+        assert "--max-turns" not in cmd
+        assert "-p" in cmd
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_agentic_mode_includes_max_turns(self, mock_subprocess, tmp_path):
+        """Test that max_turns>0 includes --max-turns flag (agentic mode)."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps([
+                {
+                    "name": "test-domain",
+                    "description": "Test",
+                    "participating_repos": ["repo1"],
+                    "repo_paths": {"repo1": "/path/to/repo1"},
+                }
+            ]),
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        repo_list = [
+            {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
+        ]
+
+        # max_turns=50 should include --max-turns 50
+        analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=50)
+
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args
+        cmd = call_args[0][0]
+
+        # Verify command includes --max-turns 50
+        assert cmd[0] == "claude"
+        assert "--print" in cmd
+        assert "--model" in cmd
+        assert "--max-turns" in cmd
+        turns_idx = cmd.index("--max-turns")
+        assert cmd[turns_idx + 1] == "50"
+        assert "-p" in cmd
 
 
 class TestEmptyOutputDetection:

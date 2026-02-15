@@ -853,7 +853,9 @@ class DependencyMapAnalyzer:
         Args:
             prompt: Prompt to send to Claude
             timeout: Timeout in seconds
-            max_turns: Maximum number of agentic turns
+            max_turns: Maximum number of agentic turns.
+                      - 0 = single-shot print mode (no --max-turns flag, no tool use, no agentic loop)
+                      - >0 = agentic mode with --max-turns N (enables tool use for up to N turns)
             allowed_tools: Tool access control for Claude CLI (only controls MCP server tools):
                           - None: No --allowedTools flag is added (all built-in tools available;
                                   MCP tools available only if registered). Built-in tools (Read, Bash,
@@ -884,9 +886,17 @@ class DependencyMapAnalyzer:
             "--print",
             "--model",
             self.analysis_model,
-            "--max-turns",
-            str(max_turns),
         ]
+
+        # Guard against negative max_turns
+        if max_turns < 0:
+            logger.warning(f"max_turns={max_turns} is negative, treating as 0 (single-shot mode)")
+            max_turns = 0
+
+        # max_turns=0 means single-shot print mode (no tool use, no agentic loop)
+        # max_turns>0 means agentic mode with tool use for up to N turns
+        if max_turns > 0:
+            cmd.extend(["--max-turns", str(max_turns)])
 
         # Add --allowedTools only if specified
         if allowed_tools is not None:

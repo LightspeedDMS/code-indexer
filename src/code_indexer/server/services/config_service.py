@@ -544,11 +544,11 @@ class ConfigService:
         elif key == "dependency_map_pass_timeout_seconds":
             claude_config.dependency_map_pass_timeout_seconds = max(60, min(3600, int(value)))
         elif key == "dependency_map_pass1_max_turns":
-            claude_config.dependency_map_pass1_max_turns = max(5, min(200, int(value)))
+            claude_config.dependency_map_pass1_max_turns = max(0, min(200, int(value)))
         elif key == "dependency_map_pass2_max_turns":
             claude_config.dependency_map_pass2_max_turns = max(5, min(200, int(value)))
         elif key == "dependency_map_pass3_max_turns":
-            claude_config.dependency_map_pass3_max_turns = max(5, min(200, int(value)))
+            claude_config.dependency_map_pass3_max_turns = max(0, min(200, int(value)))
         elif key == "dependency_map_delta_max_turns":
             claude_config.dependency_map_delta_max_turns = max(5, min(200, int(value)))
         else:

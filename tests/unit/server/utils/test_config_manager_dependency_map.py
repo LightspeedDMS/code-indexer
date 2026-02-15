@@ -36,9 +36,9 @@ class TestDependencyMapConfigDefaults:
         assert claude_config.dependency_map_enabled is False
         assert claude_config.dependency_map_interval_hours == 168  # 1 week
         assert claude_config.dependency_map_pass_timeout_seconds == 1800  # 30 minutes (Fix 5)
-        assert claude_config.dependency_map_pass1_max_turns == 20  # Needs turns for built-in tool exploration
-        assert claude_config.dependency_map_pass2_max_turns == 50  # (Fix 6)
-        assert claude_config.dependency_map_pass3_max_turns == 30
+        assert claude_config.dependency_map_pass1_max_turns == 0  # Single-shot mode (no tool use)
+        assert claude_config.dependency_map_pass2_max_turns == 50  # Agentic mode with search_code tool
+        assert claude_config.dependency_map_pass3_max_turns == 0  # Single-shot mode (no tool use)
         assert claude_config.dependency_map_delta_max_turns == 30
 
 
@@ -105,9 +105,9 @@ class TestDependencyMapConfigPersistence:
         assert claude_config.dependency_map_enabled is False
         assert claude_config.dependency_map_interval_hours == 168
         assert claude_config.dependency_map_pass_timeout_seconds == 1800  # Fix 5
-        assert claude_config.dependency_map_pass1_max_turns == 20  # Needs turns for built-in tool exploration
+        assert claude_config.dependency_map_pass1_max_turns == 0  # Single-shot mode (no tool use)
         assert claude_config.dependency_map_pass2_max_turns == 50  # Fix 6
-        assert claude_config.dependency_map_pass3_max_turns == 30
+        assert claude_config.dependency_map_pass3_max_turns == 0  # Single-shot mode (no tool use)
         assert claude_config.dependency_map_delta_max_turns == 30
 
 
