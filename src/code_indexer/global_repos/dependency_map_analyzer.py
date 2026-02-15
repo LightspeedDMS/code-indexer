@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -526,9 +527,16 @@ class DependencyMapAnalyzer:
         prompt += "Start your output directly with the analysis content (headings, sections, findings).\n\n"
         prompt += "Output ONLY the content (no markdown code blocks, no preamble).\n"
 
+        # Define PostToolUse hook reminder for Pass 2
+        hook_reminder = (
+            "REMINDER: Your final output MUST begin with a markdown heading "
+            "(# Domain Analysis: [name]). No meta-commentary, no summaries, "
+            "no preamble before the heading."
+        )
+
         # Invoke Claude CLI (Pass 2 needs MCP search_code tool for source code analysis)
         result = self._invoke_claude_cli(
-            prompt, self.pass_timeout, max_turns, allowed_tools="mcp__cidx-local__search_code"
+            prompt, self.pass_timeout, max_turns, allowed_tools="mcp__cidx-local__search_code", post_tool_hook=hook_reminder
         )
 
         # Strip meta-commentary from output
@@ -941,7 +949,7 @@ class DependencyMapAnalyzer:
             ) from e
 
     def _invoke_claude_cli(
-        self, prompt: str, timeout: int, max_turns: int, allowed_tools: Optional[str] = None
+        self, prompt: str, timeout: int, max_turns: int, allowed_tools: Optional[str] = None, post_tool_hook: Optional[str] = None
     ) -> str:
         """
         Invoke Claude CLI with direct subprocess (AC1).
@@ -961,6 +969,9 @@ class DependencyMapAnalyzer:
                                   Glob, etc.) are ALWAYS available regardless of --allowedTools flag.
                           - "" (empty string): --allowedTools "" (NO MCP tools, but built-in tools still available)
                           - "tool_name": --allowedTools "tool_name" (specific MCP tool only)
+            post_tool_hook: Optional PostToolUse hook reminder text. If provided with max_turns > 0,
+                           adds --settings flag with PostToolUse hook that echoes the reminder after
+                           each tool call. Use for Pass 2 to reinforce output format requirements.
 
         Returns:
             Claude CLI stdout output
@@ -996,6 +1007,20 @@ class DependencyMapAnalyzer:
         # max_turns>0 means agentic mode with tool use for up to N turns
         if max_turns > 0:
             cmd.extend(["--max-turns", str(max_turns)])
+            # Iteration 10: PostToolUse hook to reinforce output format during agentic sessions.
+            # After each tool call, a reminder is injected into the conversation context,
+            # keeping the format instruction fresh and preventing meta-commentary in final output.
+            # Only added when post_tool_hook is explicitly provided (Pass 2 only).
+            if post_tool_hook is not None:
+                hook_settings = json.dumps({
+                    "hooks": {
+                        "PostToolUse": [{
+                            "matcher": "",
+                            "command": f"echo {shlex.quote(post_tool_hook)}"
+                        }]
+                    }
+                })
+                cmd.extend(["--settings", hook_settings])
 
         # Add --allowedTools only if specified
         if allowed_tools is not None:
@@ -1153,6 +1178,7 @@ class DependencyMapAnalyzer:
         prompt += "Document ONLY verified, factual dependencies and relationships found in source code.\n\n"
 
         prompt += "## Output Format\n\n"
+        prompt += "CRITICAL: Your output MUST begin with a markdown heading (# Domain Analysis: domain-name).\n"
         prompt += "Provide: overview, repo roles, subdomain dependencies, cross-domain connections.\n"
         prompt += "Output ONLY the content (no markdown code blocks, no preamble).\n"
 
@@ -1250,6 +1276,7 @@ class DependencyMapAnalyzer:
         prompt += "Document ONLY verified, factual dependencies and relationships found in source code.\n\n"
 
         prompt += "## Output Format\n\n"
+        prompt += "CRITICAL: Your output MUST begin with a markdown heading (# Domain Analysis: domain-name).\n"
         prompt += "Provide: overview, repo roles, subdomain dependencies, cross-domain connections.\n"
         prompt += "Output ONLY the content (no markdown code blocks, no preamble).\n"
 
