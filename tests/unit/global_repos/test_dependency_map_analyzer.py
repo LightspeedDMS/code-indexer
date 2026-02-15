@@ -221,9 +221,10 @@ class TestPass2PerDomain:
         """Test that run_pass_2_per_domain writes domain file with YAML frontmatter and strips meta-commentary."""
         with patch("subprocess.run") as mock_subprocess:
             # Mock stdout with meta-commentary that should be stripped
+            # Must be >1000 chars to pass quality gate (Fix 3)
             mock_subprocess.return_value = MagicMock(
                 returncode=0,
-                stdout="Based on my analysis:\n\n# Authentication\n\nDomain analysis content here.",
+                stdout="Based on my analysis:\n\n# Authentication\n\nDomain analysis content here. " + "X" * 1000,
             )
 
             analyzer = DependencyMapAnalyzer(
@@ -641,6 +642,141 @@ class TestPass1JsonParseFailure:
         with pytest.raises(RuntimeError, match="Pass 1 \\(Synthesis\\) returned unparseable output"):
             analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=[], max_turns=50)
 
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_pass_1_single_shot_retry_succeeds(self, mock_subprocess, tmp_path):
+        """Test Pass 1 single-shot retry succeeds when agentic attempt returns commentary."""
+        # First call (agentic): returns commentary instead of JSON
+        # Second call (single-shot): returns valid JSON
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # Agentic attempt: commentary output (no JSON)
+                return MagicMock(
+                    returncode=0,
+                    stdout="The domain synthesis analysis is complete. The JSON output above contains 7 domain clusters...",
+                )
+            else:
+                # Single-shot retry: valid JSON
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps([
+                        {
+                            "name": "test-domain",
+                            "description": "Test domain",
+                            "participating_repos": ["repo1"],
+                            "repo_paths": {"repo1": "/path/to/repo1"},
+                        }
+                    ]),
+                )
+
+        mock_subprocess.side_effect = side_effect
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        repo_list = [
+            {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
+        ]
+
+        result = analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=50)
+
+        # Verify subprocess was called twice (agentic + single-shot retry)
+        assert mock_subprocess.call_count == 2
+
+        # Verify first call used max_turns=50 (agentic)
+        first_call_args = mock_subprocess.call_args_list[0]
+        first_cmd = first_call_args[0][0]
+        assert "--max-turns" in first_cmd
+        first_turns_idx = first_cmd.index("--max-turns")
+        assert first_cmd[first_turns_idx + 1] == "50"
+
+        # Verify second call used max_turns=0 (single-shot - no --max-turns flag)
+        second_call_args = mock_subprocess.call_args_list[1]
+        second_cmd = second_call_args[0][0]
+        assert "--max-turns" not in second_cmd
+
+        # Verify result is from successful retry
+        assert len(result) == 1
+        assert result[0]["name"] == "test-domain"
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_pass_1_both_attempts_fail(self, mock_subprocess, tmp_path):
+        """Test Pass 1 raises RuntimeError when both agentic and single-shot attempts fail."""
+        # Both calls return commentary (no JSON)
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout="This is commentary with no JSON array.",
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        repo_list = [
+            {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
+        ]
+
+        # Verify RuntimeError is raised with "both attempts" message
+        with pytest.raises(RuntimeError, match="Pass 1 \\(Synthesis\\) returned unparseable output on both attempts"):
+            analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=50)
+
+        # Verify subprocess was called twice
+        assert mock_subprocess.call_count == 2
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_pass_1_first_attempt_succeeds_no_retry(self, mock_subprocess, tmp_path):
+        """Test Pass 1 does not retry when first agentic attempt returns valid JSON."""
+        # First call returns valid JSON - no retry needed
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps([
+                {
+                    "name": "test-domain",
+                    "description": "Test domain",
+                    "participating_repos": ["repo1"],
+                    "repo_paths": {"repo1": "/path/to/repo1"},
+                }
+            ]),
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        repo_list = [
+            {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
+        ]
+
+        result = analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=50)
+
+        # Verify subprocess was called only once (no retry)
+        assert mock_subprocess.call_count == 1
+
+        # Verify result is correct
+        assert len(result) == 1
+        assert result[0]["name"] == "test-domain"
+
 
 class TestApiKeyValidation:
     """Test API key validation (FIX 2)."""
@@ -694,10 +830,11 @@ class TestIncrementalPass2:
         staging_dir.mkdir()
 
         # Create previous domain directory with existing content
+        # Must be >1000 chars with headings to pass Fix 2 quality check
         previous_dir = tmp_path / "previous"
         previous_dir.mkdir()
         previous_domain_file = previous_dir / "authentication.md"
-        previous_content = "---\nOld frontmatter\n---\n\n# Previous Analysis\n\nOld content here."
+        previous_content = "---\nOld frontmatter\n---\n\n# Previous Analysis\n\nOld content here. " + "Y" * 1000
         previous_domain_file.write_text(previous_content)
 
         domain = {
@@ -937,7 +1074,8 @@ class TestEmptyOutputDetection:
             if call_count[0] == 1:
                 return MagicMock(returncode=0, stdout="")
             else:
-                return MagicMock(returncode=0, stdout="# Domain Analysis\n\nRetry succeeded.")
+                # Must be >1000 chars to pass quality gate (Fix 3)
+                return MagicMock(returncode=0, stdout="# Domain Analysis\n\nRetry succeeded. " + "X" * 1000)
 
         mock_subprocess.side_effect = side_effect
 
@@ -986,7 +1124,8 @@ class TestEmptyOutputDetection:
             if call_count[0] == 1:
                 return MagicMock(returncode=0, stdout="Short")
             else:
-                return MagicMock(returncode=0, stdout="# Domain Analysis\n\nFull content here.")
+                # Must be >1000 chars with heading to pass quality gate (Fix 3)
+                return MagicMock(returncode=0, stdout="# Domain Analysis: test-domain\n\n" + "Detailed analysis content. " * 60)
 
         mock_subprocess.side_effect = side_effect
 
@@ -1009,6 +1148,13 @@ class TestEmptyOutputDetection:
 
         # Verify subprocess was called twice
         assert mock_subprocess.call_count == 2
+
+        # Verify output file was written with retry content
+        domain_file = staging_dir / "test-domain.md"
+        assert domain_file.exists()
+        content = domain_file.read_text()
+        assert "# Domain Analysis: test-domain" in content
+        assert "Detailed analysis content" in content
 
 
 class TestYamlFrontmatterStripping:
@@ -1725,3 +1871,245 @@ class TestIteration10PostToolUseHook:
         call_args = mock_subprocess.call_args
         cmd = call_args[0][0]
         assert "--settings" not in cmd
+
+
+class TestIteration11Fix1PostToolHookRetry:
+    """Test Iteration 11 Fix 1: Retry call includes post_tool_hook parameter."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_retry_includes_post_tool_hook(self, mock_subprocess, tmp_path):
+        """Test that retry call includes post_tool_hook parameter (Fix 1 - MOST CRITICAL)."""
+        # First call returns insufficient content (short, no headings)
+        # Second call (retry) should ALSO include post_tool_hook parameter
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First attempt: insufficient output (short, no headings)
+                return MagicMock(returncode=0, stdout="Short output with no headings.")
+            else:
+                # Retry: valid output
+                return MagicMock(returncode=0, stdout="# Domain Analysis\n\n" + "X" * 1000)
+
+        mock_subprocess.side_effect = side_effect
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Verify subprocess was called twice
+        assert mock_subprocess.call_count == 2
+
+        # Verify BOTH calls include --settings flag with PostToolUse hook
+        first_call = mock_subprocess.call_args_list[0]
+        second_call = mock_subprocess.call_args_list[1]
+
+        # First call should have --settings
+        first_cmd = first_call[0][0]
+        assert "--settings" in first_cmd
+
+        # Second call (retry) should ALSO have --settings (FIX 1)
+        second_cmd = second_call[0][0]
+        assert "--settings" in second_cmd, "Retry call MUST include --settings with post_tool_hook"
+
+        # Verify both settings contain PostToolUse hook
+        first_settings_idx = first_cmd.index("--settings")
+        first_settings = json.loads(first_cmd[first_settings_idx + 1])
+        assert "hooks" in first_settings
+        assert "PostToolUse" in first_settings["hooks"]
+
+        second_settings_idx = second_cmd.index("--settings")
+        second_settings = json.loads(second_cmd[second_settings_idx + 1])
+        assert "hooks" in second_settings
+        assert "PostToolUse" in second_settings["hooks"]
+
+
+class TestIteration11Fix2QualityCheckPrevious:
+    """Test Iteration 11 Fix 2: Quality-check previous analysis before feeding it back."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_skips_low_quality_previous_analysis(self, mock_subprocess, tmp_path):
+        """Test that low-quality previous analysis (no headings or <1000 chars) is NOT fed into prompt."""
+        content = "# Domain Analysis\n\n" + "Y" * 1000
+        mock_subprocess.return_value = MagicMock(returncode=0, stdout=content)
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        # Create previous domain directory with LOW-QUALITY content (no headings, short)
+        previous_dir = tmp_path / "previous"
+        previous_dir.mkdir()
+        previous_domain_file = previous_dir / "test-domain.md"
+        # 485 bytes of meta-commentary with no headings (iteration 10 garbage)
+        low_quality_content = "---\nOld frontmatter\n---\n\nPlease approve my write to test-domain.md. " + "X" * 400
+        previous_domain_file.write_text(low_quality_content)
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=60, previous_domain_dir=previous_dir
+        )
+
+        # Verify subprocess was called with prompt that does NOT include previous content
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args
+        prompt = call_args[0][0][-1]  # Last element is the prompt
+
+        # Should NOT contain "Previous Analysis" section
+        assert "Previous Analysis (refine and improve)" not in prompt
+        assert "Please approve my write" not in prompt
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_includes_high_quality_previous_analysis(self, mock_subprocess, tmp_path):
+        """Test that high-quality previous analysis (has headings AND >1000 chars) IS fed into prompt."""
+        content = "# Updated Analysis\n\n" + "Z" * 1000
+        mock_subprocess.return_value = MagicMock(returncode=0, stdout=content)
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        # Create previous domain directory with HIGH-QUALITY content (has headings, >1000 chars)
+        previous_dir = tmp_path / "previous"
+        previous_dir.mkdir()
+        previous_domain_file = previous_dir / "test-domain.md"
+        high_quality_content = "---\nOld frontmatter\n---\n\n# Previous Analysis\n\nGood quality content here. " + "Y" * 1000
+        previous_domain_file.write_text(high_quality_content)
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=60, previous_domain_dir=previous_dir
+        )
+
+        # Verify subprocess was called with prompt that DOES include previous content
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args
+        prompt = call_args[0][0][-1]  # Last element is the prompt
+
+        # Should contain "Previous Analysis" section
+        assert "Previous Analysis (refine and improve)" in prompt
+        assert "Good quality content here" in prompt
+
+
+class TestIteration11Fix3SkipGarbageWrite:
+    """Test Iteration 11 Fix 3: Skip writing file when both attempts produce garbage."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_skips_file_write_when_both_attempts_fail(self, mock_subprocess, tmp_path):
+        """Test that domain file is NOT written when both attempts return garbage (no headings)."""
+        # Both calls return garbage (no headings)
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First attempt: 1232 bytes but no headings (claude-ai-toolchain case)
+                return MagicMock(returncode=0, stdout="Meta-commentary about analysis. " + "X" * 1200)
+            else:
+                # Retry: 485 bytes, no headings (please approve my write case)
+                return MagicMock(returncode=0, stdout="Please approve my write to the file. " + "Y" * 400)
+
+        mock_subprocess.side_effect = side_effect
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Verify subprocess was called twice
+        assert mock_subprocess.call_count == 2
+
+        # Verify domain file was NOT written (FIX 3)
+        domain_file = staging_dir / "test-domain.md"
+        assert not domain_file.exists(), "Domain file should NOT be written when both attempts fail quality checks"
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_writes_file_when_retry_succeeds(self, mock_subprocess, tmp_path):
+        """Test that domain file IS written when retry succeeds (has headings, >1000 chars)."""
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First attempt: fails (no headings)
+                return MagicMock(returncode=0, stdout="Meta-commentary. " + "X" * 100)
+            else:
+                # Retry: succeeds (has heading, >1000 chars)
+                return MagicMock(returncode=0, stdout="# Domain Analysis\n\nValid content. " + "Y" * 1000)
+
+        mock_subprocess.side_effect = side_effect
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Verify domain file WAS written with retry content
+        domain_file = staging_dir / "test-domain.md"
+        assert domain_file.exists()
+        content = domain_file.read_text()
+        assert "# Domain Analysis" in content
+        assert "Valid content" in content

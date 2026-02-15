@@ -233,9 +233,19 @@ class DependencyMapAnalyzer:
         try:
             domain_list = self._extract_json(result)
         except (json.JSONDecodeError, ValueError) as e:
-            raise RuntimeError(
-                f"Pass 1 (Synthesis) returned unparseable output: {e}"
-            ) from e
+            logger.warning(
+                f"Pass 1 agentic attempt returned no parseable JSON ({e}), "
+                f"output preview: {result[:200]!r} -- "
+                "retrying in single-shot mode (max_turns=0)"
+            )
+            result = self._invoke_claude_cli(prompt, timeout, 0, allowed_tools=None)
+            logger.debug(f"Pass 1 single-shot retry output length: {len(result)} chars")
+            try:
+                domain_list = self._extract_json(result)
+            except (json.JSONDecodeError, ValueError) as e2:
+                raise RuntimeError(
+                    f"Pass 1 (Synthesis) returned unparseable output on both attempts: {e2}"
+                ) from e2
 
         # Validate Pass 1 output: filter hallucinated repos, catch unassigned repos
         valid_aliases = {r.get("alias") for r in repo_list}
@@ -503,10 +513,18 @@ class DependencyMapAnalyzer:
         prompt += "**INCORRECT (too abstract)**: 'auth-service is used by web-app'\n\n"
 
         # Feed existing analysis for incremental improvement
+        # FIX 2 (Iteration 11): Only feed previous analysis if it was good quality (has headings and sufficient length)
+        # Bad previous content (meta-commentary) can confuse Claude into producing more meta-commentary
         if previous_domain_dir and (previous_domain_dir / f"{domain_name}.md").exists():
             existing_content = (previous_domain_dir / f"{domain_name}.md").read_text()
-            prompt += "## Previous Analysis (refine and improve)\n\n"
-            prompt += existing_content + "\n\n"
+            if self._has_markdown_headings(existing_content) and len(existing_content.strip()) > 1000:
+                prompt += "## Previous Analysis (refine and improve)\n\n"
+                prompt += existing_content + "\n\n"
+            else:
+                logger.info(
+                    f"Skipping low-quality previous analysis for domain '{domain_name}' "
+                    f"({len(existing_content)} chars, headings={self._has_markdown_headings(existing_content)})"
+                )
 
         # Fix: Iteration 9 - Add guardrails against YAML output and speculative content
         prompt += "## PROHIBITED Content\n\n"
@@ -544,25 +562,32 @@ class DependencyMapAnalyzer:
 
         # Check for insufficient output and retry with reduced turns (Fix 1: raised threshold to 1000)
         # FIX 2 (Iteration 10): Also check for missing headings (pure meta-commentary)
-        if len(result.strip()) < 1000 or not self._has_markdown_headings(result):
-            reason = "no headings" if self._has_markdown_headings(result) is False else f"{len(result)} chars"
+        has_headings = self._has_markdown_headings(result)
+        if len(result.strip()) < 1000 or not has_headings:
+            reason = "no headings" if not has_headings else f"{len(result)} chars"
             logger.warning(
                 f"Pass 2 returned insufficient output for domain '{domain_name}' "
                 f"({reason}), retrying with reduced turns"
             )
             # Retry with max_turns=10 to force output generation with minimal exploration
+            # FIX 1 (Iteration 11): Include post_tool_hook in retry call (MOST CRITICAL)
+            # Without the hook, Claude drifts into conversational mode asking for permissions
             result = self._invoke_claude_cli(
-                prompt, self.pass_timeout, 10, allowed_tools="mcp__cidx-local__search_code"
+                prompt, self.pass_timeout, 10, allowed_tools="mcp__cidx-local__search_code", post_tool_hook=hook_reminder
             )
             result = self._strip_meta_commentary(result)
 
-            # If retry also fails (insufficient), log error and continue
-            if len(result.strip()) < 1000 or not self._has_markdown_headings(result):
-                reason = "no headings" if self._has_markdown_headings(result) is False else f"{len(result)} chars"
+            # If retry also fails (insufficient), skip writing garbage file
+            # FIX 3 (Iteration 11): When both attempts fail, skip this domain - don't write garbage
+            # Writing 485 bytes of "please approve my write" is worse than no file at all
+            has_headings = self._has_markdown_headings(result)
+            if len(result.strip()) < 1000 or not has_headings:
+                reason = "no headings" if not has_headings else f"{len(result)} chars"
                 logger.error(
                     f"Pass 2 retry also returned insufficient output for domain '{domain_name}' "
-                    f"({reason}) - continuing with available content"
+                    f"({reason}) - SKIPPING domain file (will not write garbage content)"
                 )
+                return
 
         # Build YAML frontmatter
         now = datetime.now(timezone.utc).isoformat()
