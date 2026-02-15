@@ -472,3 +472,341 @@ def test_read_repo_descriptions_filters_stale_repos(
     assert "repo2" in descriptions
     assert "stale-repo" not in descriptions
     assert len(descriptions) == 2
+
+
+class TestIteration15Journal:
+    """Test Iteration 15: Journal-based resumability for dependency map pipeline."""
+
+    def test_journal_created_on_fresh_run(
+        self,
+        tmp_golden_repos_root: Path,
+        mock_golden_repos_manager,
+        mock_config_manager,
+        mock_tracking_backend,
+        mock_analyzer,
+    ):
+        """Test that _journal.json is created in staging_dir during fresh run."""
+        service = DependencyMapService(
+            golden_repos_manager=mock_golden_repos_manager,
+            config_manager=mock_config_manager,
+            tracking_backend=mock_tracking_backend,
+            analyzer=mock_analyzer,
+        )
+
+        with patch("subprocess.run"):
+            service.run_full_analysis()
+
+        # Verify journal exists in final directory after swap
+        cidx_meta = tmp_golden_repos_root / "cidx-meta"
+        dep_map_dir = cidx_meta / "dependency-map"
+        journal_path = dep_map_dir / "_journal.json"
+        assert journal_path.exists(), "Journal should exist in final directory after swap"
+        journal = json.loads(journal_path.read_text())
+        assert journal["pass1"]["status"] == "completed"
+        assert journal["pass3"]["status"] == "completed"
+        assert "repo_sizes" in journal
+
+    def test_journal_skip_completed_pass1(
+        self,
+        tmp_golden_repos_root: Path,
+        mock_golden_repos_manager,
+        mock_config_manager,
+        mock_tracking_backend,
+        mock_analyzer,
+    ):
+        """Test that Pass 1 is skipped when journal shows it's completed."""
+        # Create files in repos to match journal sizes (so _should_resume doesn't reject it)
+        repo1_dir = tmp_golden_repos_root / "repo1"
+        repo2_dir = tmp_golden_repos_root / "repo2"
+        (repo1_dir / "file1.py").write_text("x" * 100000)  # 100KB
+        (repo2_dir / "file1.py").write_text("x" * 50000)   # 50KB
+
+        service = DependencyMapService(
+            golden_repos_manager=mock_golden_repos_manager,
+            config_manager=mock_config_manager,
+            tracking_backend=mock_tracking_backend,
+            analyzer=mock_analyzer,
+        )
+
+        cidx_meta = tmp_golden_repos_root / "cidx-meta"
+        staging_dir = cidx_meta / "dependency-map.staging"
+        staging_dir.mkdir(parents=True)
+
+        # Create a journal with completed Pass 1 (sizes must match actual repo sizes within 5%)
+        journal = {
+            "pipeline_id": "test-123",
+            "started_at": "2026-02-15T12:00:00Z",
+            "repo_sizes": {
+                "repo1": {"file_count": 2, "total_bytes": 100000},  # file1.py + metadata.json
+                "repo2": {"file_count": 2, "total_bytes": 50000},
+            },
+            "pass1": {"status": "completed", "domains_count": 2},
+            "pass2": {},
+            "pass3": {"status": "pending"},
+        }
+        (staging_dir / "_journal.json").write_text(json.dumps(journal))
+
+        # Create _domains.json that should be loaded instead of running Pass 1
+        domains = [
+            {"name": "domain1", "description": "Domain 1", "participating_repos": ["repo1"]},
+            {"name": "domain2", "description": "Domain 2", "participating_repos": ["repo2"]},
+        ]
+        (staging_dir / "_domains.json").write_text(json.dumps(domains))
+
+        with patch("subprocess.run"):
+            service.run_full_analysis()
+
+        # Verify Pass 1 was NOT called (analyzer.run_pass_1_synthesis should not be called)
+        assert mock_analyzer.run_pass_1_synthesis.call_count == 0
+
+    def test_journal_skip_completed_domain(
+        self,
+        tmp_golden_repos_root: Path,
+        mock_golden_repos_manager,
+        mock_config_manager,
+        mock_tracking_backend,
+        mock_analyzer,
+    ):
+        """Test that completed domains in Pass 2 are skipped."""
+        # Create files in repos to match journal sizes
+        repo1_dir = tmp_golden_repos_root / "repo1"
+        repo2_dir = tmp_golden_repos_root / "repo2"
+        (repo1_dir / "file1.py").write_text("x" * 100000)
+        (repo2_dir / "file1.py").write_text("x" * 50000)
+
+        service = DependencyMapService(
+            golden_repos_manager=mock_golden_repos_manager,
+            config_manager=mock_config_manager,
+            tracking_backend=mock_tracking_backend,
+            analyzer=mock_analyzer,
+        )
+
+        cidx_meta = tmp_golden_repos_root / "cidx-meta"
+        staging_dir = cidx_meta / "dependency-map.staging"
+        staging_dir.mkdir(parents=True)
+
+        # Create journal with domain1 completed, domain2 pending
+        journal = {
+            "pipeline_id": "test-456",
+            "started_at": "2026-02-15T12:00:00Z",
+            "repo_sizes": {
+                "repo1": {"file_count": 2, "total_bytes": 100000},
+                "repo2": {"file_count": 2, "total_bytes": 50000},
+            },
+            "pass1": {"status": "completed", "domains_count": 2},
+            "pass2": {
+                "domain1": {"status": "completed", "chars": 5000},
+                "domain2": {"status": "pending"},
+            },
+            "pass3": {"status": "pending"},
+        }
+        (staging_dir / "_journal.json").write_text(json.dumps(journal))
+
+        # Create domains list
+        domains = [
+            {"name": "domain1", "description": "Domain 1", "participating_repos": ["repo1"]},
+            {"name": "domain2", "description": "Domain 2", "participating_repos": ["repo2"]},
+        ]
+        (staging_dir / "_domains.json").write_text(json.dumps(domains))
+
+        # Mock analyzer to track which domains are analyzed
+        mock_analyzer.run_pass_2_per_domain = Mock()
+
+        with patch("subprocess.run"):
+            service.run_full_analysis()
+
+        # Verify run_pass_2_per_domain was called only for domain2 (not domain1)
+        # Should be called once (for domain2 only)
+        assert mock_analyzer.run_pass_2_per_domain.call_count == 1
+
+    def test_journal_fresh_start_on_repo_change(
+        self,
+        tmp_golden_repos_root: Path,
+        mock_golden_repos_manager,
+        mock_config_manager,
+        mock_tracking_backend,
+        mock_analyzer,
+    ):
+        """Test that journal is discarded and fresh start happens when repo size changes >5%."""
+        # Create repo with different size than journal
+        repo1_dir = tmp_golden_repos_root / "repo1"
+        (repo1_dir / "newfile.py").write_text("x" * 10000)  # Add new content
+
+        service = DependencyMapService(
+            golden_repos_manager=mock_golden_repos_manager,
+            config_manager=mock_config_manager,
+            tracking_backend=mock_tracking_backend,
+            analyzer=mock_analyzer,
+        )
+
+        cidx_meta = tmp_golden_repos_root / "cidx-meta"
+        staging_dir = cidx_meta / "dependency-map.staging"
+        staging_dir.mkdir(parents=True)
+
+        # Create journal with OLD repo sizes (significantly different from current)
+        journal = {
+            "pipeline_id": "old-789",
+            "started_at": "2026-02-14T12:00:00Z",
+            "repo_sizes": {
+                "repo1": {"file_count": 10, "total_bytes": 100000},  # Much smaller than current
+                "repo2": {"file_count": 50, "total_bytes": 500000},
+            },
+            "pass1": {"status": "completed", "domains_count": 2},
+            "pass2": {},
+            "pass3": {"status": "pending"},
+        }
+        (staging_dir / "_journal.json").write_text(json.dumps(journal))
+
+        with patch("subprocess.run"):
+            service.run_full_analysis()
+
+        # Verify Pass 1 WAS called (fresh start, journal discarded)
+        assert mock_analyzer.run_pass_1_synthesis.call_count == 1
+
+    def test_journal_fresh_start_on_new_repo(
+        self,
+        tmp_golden_repos_root: Path,
+        mock_config_manager,
+        mock_tracking_backend,
+        mock_analyzer,
+    ):
+        """Test that journal is discarded when a new repo is added (not in journal)."""
+        # Create mock that returns 3 repos (repo1, repo2, repo3)
+        mock_golden_repos_manager = Mock()
+        mock_golden_repos_manager.golden_repos_dir = str(tmp_golden_repos_root)
+        mock_golden_repos_manager.list_golden_repos.return_value = [
+            {"alias": "repo1", "clone_path": str(tmp_golden_repos_root / "repo1")},
+            {"alias": "repo2", "clone_path": str(tmp_golden_repos_root / "repo2")},
+            {"alias": "repo3", "clone_path": str(tmp_golden_repos_root / "repo3")},  # NEW
+        ]
+
+        # Create repo3 directory
+        repo3_dir = tmp_golden_repos_root / "repo3"
+        repo3_dir.mkdir()
+        (repo3_dir / ".code-indexer").mkdir()
+        (repo3_dir / ".code-indexer" / "metadata.json").write_text(
+            json.dumps({"current_commit": "repo3-commit-xyz"})
+        )
+
+        service = DependencyMapService(
+            golden_repos_manager=mock_golden_repos_manager,
+            config_manager=mock_config_manager,
+            tracking_backend=mock_tracking_backend,
+            analyzer=mock_analyzer,
+        )
+
+        cidx_meta = tmp_golden_repos_root / "cidx-meta"
+        staging_dir = cidx_meta / "dependency-map.staging"
+        staging_dir.mkdir(parents=True)
+
+        # Create journal with ONLY repo1 and repo2 (repo3 is new)
+        journal = {
+            "pipeline_id": "old-999",
+            "started_at": "2026-02-14T12:00:00Z",
+            "repo_sizes": {
+                "repo1": {"file_count": 100, "total_bytes": 1000000},
+                "repo2": {"file_count": 50, "total_bytes": 500000},
+                # repo3 NOT in journal
+            },
+            "pass1": {"status": "completed", "domains_count": 2},
+            "pass2": {},
+            "pass3": {"status": "pending"},
+        }
+        (staging_dir / "_journal.json").write_text(json.dumps(journal))
+
+        with patch("subprocess.run"):
+            service.run_full_analysis()
+
+        # Verify Pass 1 WAS called (fresh start due to new repo)
+        assert mock_analyzer.run_pass_1_synthesis.call_count == 1
+
+    def test_journal_saved_after_each_domain(
+        self,
+        tmp_golden_repos_root: Path,
+        mock_golden_repos_manager,
+        mock_config_manager,
+        mock_tracking_backend,
+        mock_analyzer,
+    ):
+        """Test that journal is saved incrementally after each domain completes."""
+        service = DependencyMapService(
+            golden_repos_manager=mock_golden_repos_manager,
+            config_manager=mock_config_manager,
+            tracking_backend=mock_tracking_backend,
+            analyzer=mock_analyzer,
+        )
+
+        cidx_meta = tmp_golden_repos_root / "cidx-meta"
+        staging_dir = cidx_meta / "dependency-map.staging"
+
+        # Track journal writes by monitoring file writes
+        journal_writes = []
+
+        original_write_text = Path.write_text
+
+        def track_journal_writes(self, content, *args, **kwargs):
+            # Track writes to both _journal.tmp (atomic write) and _journal.json (legacy/test direct writes)
+            if self.name in ("_journal.json", "_journal.tmp"):
+                journal_writes.append(json.loads(content))
+            return original_write_text(self, content, *args, **kwargs)
+
+        with patch.object(Path, "write_text", track_journal_writes):
+            with patch("subprocess.run"):
+                service.run_full_analysis()
+
+        # Verify journal was written multiple times (after Pass 1, after each domain, after Pass 3)
+        # Should be at least 4 writes: initial, after pass1, after 2 domains, after pass3
+        assert len(journal_writes) >= 4
+
+    def test_enrich_repo_sizes_sorts_descending(
+        self,
+        tmp_golden_repos_root: Path,
+        mock_golden_repos_manager,
+        mock_config_manager,
+        mock_tracking_backend,
+        mock_analyzer,
+    ):
+        """Test that _enrich_repo_sizes computes sizes and sorts repos by total_bytes descending."""
+        # Create repos with different sizes
+        small_repo = tmp_golden_repos_root / "small-repo"
+        small_repo.mkdir()
+        (small_repo / "file1.txt").write_text("x" * 100)
+
+        large_repo = tmp_golden_repos_root / "large-repo"
+        large_repo.mkdir()
+        (large_repo / "file1.txt").write_text("x" * 10000)
+        (large_repo / "file2.txt").write_text("x" * 10000)
+
+        medium_repo = tmp_golden_repos_root / "medium-repo"
+        medium_repo.mkdir()
+        (medium_repo / "file1.txt").write_text("x" * 5000)
+
+        service = DependencyMapService(
+            golden_repos_manager=mock_golden_repos_manager,
+            config_manager=mock_config_manager,
+            tracking_backend=mock_tracking_backend,
+            analyzer=mock_analyzer,
+        )
+
+        repo_list = [
+            {"alias": "small-repo", "clone_path": str(small_repo)},
+            {"alias": "large-repo", "clone_path": str(large_repo)},
+            {"alias": "medium-repo", "clone_path": str(medium_repo)},
+        ]
+
+        # Call _enrich_repo_sizes
+        enriched = service._enrich_repo_sizes(repo_list)
+
+        # Verify sizes were computed
+        assert all("file_count" in r for r in enriched)
+        assert all("total_bytes" in r for r in enriched)
+
+        # Verify sorted descending by total_bytes
+        assert enriched[0]["alias"] == "large-repo"
+        assert enriched[1]["alias"] == "medium-repo"
+        assert enriched[2]["alias"] == "small-repo"
+
+        # Verify file counts are correct
+        assert enriched[0]["file_count"] == 2  # large has 2 files
+        assert enriched[1]["file_count"] == 1  # medium has 1 file
+        assert enriched[2]["file_count"] == 1  # small has 1 file

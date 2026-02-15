@@ -192,6 +192,9 @@ class DependencyMapService:
                 "message": "No activated golden repos",
             }
 
+        # Enrich with repo sizes and sort by size (Iteration 15)
+        repo_list = self._enrich_repo_sizes(repo_list)
+
         return {
             "early_return": False,
             "config": config,
@@ -203,7 +206,7 @@ class DependencyMapService:
         self, config, paths: Dict[str, Path], repo_list: List[Dict[str, Any]]
     ) -> Tuple[List[Dict[str, Any]], List[str]]:
         """
-        Execute the three-pass analysis pipeline.
+        Execute the three-pass analysis pipeline with journal-based resumability.
 
         Args:
             config: Claude integration config
@@ -217,29 +220,73 @@ class DependencyMapService:
         final_dir = paths["final_dir"]
         cidx_meta_path = paths["cidx_meta_path"]
 
-        # Setup staging (AC4: Stage-then-Swap Atomic Writes)
-        if staging_dir.exists():
-            shutil.rmtree(staging_dir)
-        staging_dir.mkdir(parents=True)
+        # Check for resumable journal (Iteration 15)
+        journal = self._should_resume(staging_dir, repo_list)
+
+        if journal is None:
+            # Fresh start — clean staging
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir)
+            staging_dir.mkdir(parents=True)
+            journal = {
+                "pipeline_id": f"dep-map-{int(datetime.now(timezone.utc).timestamp())}",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "repo_sizes": {
+                    r["alias"]: {"file_count": r.get("file_count", 0), "total_bytes": r.get("total_bytes", 0)}
+                    for r in repo_list
+                },
+                "pass1": {"status": "pending"},
+                "pass2": {},
+                "pass3": {"status": "pending"},
+            }
+            # Save journal immediately to prevent loss if crash occurs before Pass 1
+            self._save_journal(staging_dir, journal)
 
         # Generate CLAUDE.md (AC2: CLAUDE.md Orientation File)
         self._analyzer.generate_claude_md(repo_list)
 
-        # Read repo descriptions from cidx-meta (Fix 8: filter stale repos)
-        active_aliases = {r.get("alias") for r in repo_list}
-        repo_descriptions = self._read_repo_descriptions(cidx_meta_path, active_aliases=active_aliases)
+        # Pass 1: Synthesis (skip if already completed)
+        if journal.get("pass1", {}).get("status") != "completed":
+            # Read repo descriptions from cidx-meta (Fix 8: filter stale repos)
+            active_aliases = {r.get("alias") for r in repo_list}
+            repo_descriptions = self._read_repo_descriptions(cidx_meta_path, active_aliases=active_aliases)
 
-        # Pass 1: Synthesis (AC1: Multi-pass Pipeline)
-        domain_list = self._analyzer.run_pass_1_synthesis(
-            staging_dir=staging_dir,
-            repo_descriptions=repo_descriptions,
-            repo_list=repo_list,
-            max_turns=config.dependency_map_pass1_max_turns,
-        )
+            domain_list = self._analyzer.run_pass_1_synthesis(
+                staging_dir=staging_dir,
+                repo_descriptions=repo_descriptions,
+                repo_list=repo_list,
+                max_turns=config.dependency_map_pass1_max_turns,
+            )
+            journal["pass1"] = {
+                "status": "completed",
+                "domains_count": len(domain_list),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            # Initialize pass2 tracking for all domains
+            for d in domain_list:
+                if d["name"] not in journal["pass2"]:
+                    journal["pass2"][d["name"]] = {"status": "pending"}
+            self._save_journal(staging_dir, journal)
+        else:
+            # Load domain_list from _domains.json with boundary check
+            domains_file = staging_dir / "_domains.json"
+            if not domains_file.exists():
+                raise FileNotFoundError(
+                    f"Cannot resume: {domains_file} not found despite pass1 completed"
+                )
+            domain_list = json.loads(domains_file.read_text())
+            logger.info(f"Pass 1 already completed ({journal['pass1']['domains_count']} domains), skipping")
 
-        # Pass 2: Per-domain (continue on failure)
+        # Pass 2: Per-domain (skip completed domains)
         errors = []
         for domain in domain_list:
+            domain_name = domain["name"]
+            domain_status = journal.get("pass2", {}).get(domain_name, {}).get("status")
+
+            if domain_status == "completed":
+                logger.info(f"Pass 2 already completed for '{domain_name}', skipping")
+                continue
+
             try:
                 self._analyzer.run_pass_2_per_domain(
                     staging_dir=staging_dir,
@@ -249,17 +296,36 @@ class DependencyMapService:
                     max_turns=config.dependency_map_pass2_max_turns,
                     previous_domain_dir=final_dir if final_dir.exists() else None,
                 )
+                # Read output size
+                domain_file = staging_dir / f"{domain_name}.md"
+                chars = len(domain_file.read_text()) if domain_file.exists() else 0
+                journal["pass2"][domain_name] = {
+                    "status": "completed",
+                    "chars": chars,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }
             except Exception as e:
-                errors.append(f"Domain '{domain['name']}': {e}")
-                logger.warning(f"Pass 2 failed for domain '{domain['name']}': {e}")
+                errors.append(f"Domain '{domain_name}': {e}")
+                logger.warning(f"Pass 2 failed for domain '{domain_name}': {e}")
+                journal["pass2"][domain_name] = {"status": "failed", "error": str(e)}
 
-        # Pass 3: Index generation
-        self._analyzer.run_pass_3_index(
-            staging_dir=staging_dir,
-            domain_list=domain_list,
-            repo_list=repo_list,
-            max_turns=config.dependency_map_pass3_max_turns,
-        )
+            self._save_journal(staging_dir, journal)  # Save after each domain
+
+        # Pass 3: Index generation (skip if already completed)
+        if journal.get("pass3", {}).get("status") != "completed":
+            self._analyzer.run_pass_3_index(
+                staging_dir=staging_dir,
+                domain_list=domain_list,
+                repo_list=repo_list,
+                max_turns=config.dependency_map_pass3_max_turns,
+            )
+            journal["pass3"] = {
+                "status": "completed",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self._save_journal(staging_dir, journal)
+        else:
+            logger.info("Pass 3 already completed, skipping")
 
         return domain_list, errors
 
@@ -425,6 +491,92 @@ class DependencyMapService:
             )
 
         return result
+
+    def _load_journal(self, staging_dir: Path) -> Optional[Dict]:
+        """Load existing journal from staging_dir if it exists."""
+        journal_path = staging_dir / "_journal.json"
+        if journal_path.exists():
+            try:
+                return json.loads(journal_path.read_text())
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning(f"Corrupted journal at {journal_path}, starting fresh: {e}")
+                return None
+        return None
+
+    def _save_journal(self, staging_dir: Path, journal: Dict) -> None:
+        """Atomically write journal to staging_dir."""
+        journal_path = staging_dir / "_journal.json"
+        tmp_path = journal_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(journal, indent=2))
+        tmp_path.rename(journal_path)
+
+    def _should_resume(self, staging_dir: Path, repo_list: List[Dict[str, Any]]) -> Optional[Dict]:
+        """
+        Check if a previous run can be resumed.
+
+        Returns journal dict if resumable, None if fresh start needed.
+        Resume conditions:
+        - staging_dir exists with _journal.json
+        - repo_sizes match (no new/changed repos)
+        """
+        journal = self._load_journal(staging_dir)
+        if not journal:
+            return None
+
+        # Check if repo set changed
+        current_sizes = {r["alias"]: r.get("total_bytes", 0) for r in repo_list}
+        journal_sizes = {k: v.get("total_bytes", 0) for k, v in journal.get("repo_sizes", {}).items()}
+
+        if set(current_sizes.keys()) != set(journal_sizes.keys()):
+            logger.info("Journal found but repo set changed — starting fresh")
+            return None
+
+        # Check if any repo size changed significantly (>5% difference)
+        for alias, current_bytes in current_sizes.items():
+            journal_bytes = journal_sizes.get(alias, 0)
+            # If either was zero and the other isn't, that's a significant change
+            if (journal_bytes == 0) != (current_bytes == 0):
+                logger.info(f"Journal found but {alias} size changed from {journal_bytes} to {current_bytes} — starting fresh")
+                return None
+            if journal_bytes > 0 and abs(current_bytes - journal_bytes) / journal_bytes > 0.05:
+                logger.info(f"Journal found but {alias} size changed — starting fresh")
+                return None
+
+        logger.info(f"Resuming from journal: pass1={journal.get('pass1', {}).get('status')}")
+        return journal
+
+    def _enrich_repo_sizes(self, repo_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Add file_count and total_bytes to each repo dict. Sort by total_bytes descending.
+
+        Args:
+            repo_list: List of repo dicts with clone_path
+
+        Returns:
+            Enriched and sorted repo list
+        """
+        for repo in repo_list:
+            clone_path = Path(repo.get("clone_path", ""))
+            if clone_path.exists():
+                file_count = 0
+                total_bytes = 0
+                for f in clone_path.rglob("*"):
+                    # Exclude .git and .code-indexer directories
+                    if f.is_file() and ".git" not in f.parts and ".code-indexer" not in f.parts:
+                        file_count += 1
+                        try:
+                            total_bytes += f.stat().st_size
+                        except OSError:
+                            pass  # Broken symlink, permission denied, etc.
+                repo["file_count"] = file_count
+                repo["total_bytes"] = total_bytes
+            else:
+                repo["file_count"] = 0
+                repo["total_bytes"] = 0
+
+        # Sort descending by total_bytes
+        repo_list.sort(key=lambda r: r.get("total_bytes", 0), reverse=True)
+        return repo_list
 
     def _get_commit_hashes(self, repo_list: List[Dict[str, Any]]) -> Dict[str, str]:
         """

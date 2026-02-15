@@ -146,7 +146,9 @@ class DependencyMapAnalyzer:
         for repo in repo_list:
             alias = repo.get("alias", "unknown")
             clone_path = repo.get("clone_path", "unknown")
-            prompt += f"- **{alias}**: `{clone_path}`\n"
+            file_count = repo.get("file_count", "?")
+            total_mb = round(repo.get("total_bytes", 0) / (1024 * 1024), 1)
+            prompt += f"- **{alias}**: `{clone_path}` ({file_count} files, {total_mb} MB)\n"
         prompt += "\n"
 
         prompt += "## Instructions\n\n"
@@ -355,6 +357,12 @@ class DependencyMapAnalyzer:
         domain_name = domain["name"]
         participating_repos = domain.get("participating_repos", [])
 
+        # Sort participating repos by size (largest first) using repo_list metadata
+        repo_size_map = {r.get("alias"): r.get("total_bytes", 0) for r in repo_list}
+        participating_repos_sorted = sorted(
+            participating_repos, key=lambda a: repo_size_map.get(a, 0), reverse=True
+        )
+
         prompt = f"# Domain Analysis: {domain_name}\n\n"
         prompt += "## CRITICAL INSTRUCTION: WRITE YOUR ANALYSIS FIRST\n\n"
         prompt += "You MUST write your complete domain analysis output BEFORE doing any MCP searches.\n"
@@ -376,10 +384,21 @@ class DependencyMapAnalyzer:
 
         prompt += "\n## Participating Repositories\n\n"
         path_map = {r.get("alias"): r.get("clone_path") for r in repo_list}
-        for repo_alias in participating_repos:
+        repo_file_count_map = {r.get("alias"): r.get("file_count", "?") for r in repo_list}
+        for repo_alias in participating_repos_sorted:
             clone_path = path_map.get(repo_alias, "path not found")
-            prompt += f"- **{repo_alias}**: `{clone_path}`\n"
+            file_count = repo_file_count_map.get(repo_alias, "?")
+            total_mb = round(repo_size_map.get(repo_alias, 0) / (1024 * 1024), 1)
+            prompt += f"- **{repo_alias}**: `{clone_path}` ({file_count} files, {total_mb} MB)\n"
         prompt += "\n"
+
+        # Inside-out analysis strategy (only if there are repos)
+        if participating_repos_sorted:
+            prompt += "## INSIDE-OUT ANALYSIS STRATEGY\n\n"
+            prompt += f"Start your analysis from **{participating_repos_sorted[0]}** (largest repository, "
+            prompt += f"{repo_size_map.get(participating_repos_sorted[0], 0) // 1024} KB). "
+            prompt += "Map its integration points first, then fan out to discover how the smaller repositories connect to it.\n"
+            prompt += "This ensures the dominant codebase anchors the dependency graph.\n\n"
 
         # Feed previous analysis if good quality - with explicit improvement mandate
         if previous_domain_dir and (previous_domain_dir / f"{domain_name}.md").exists():
@@ -478,6 +497,12 @@ class DependencyMapAnalyzer:
             )
         else:
             # Use standard prompt for small domains (<=3 repos)
+            # Sort participating repos by size (largest first)
+            repo_size_map = {r.get("alias"): r.get("total_bytes", 0) for r in repo_list}
+            participating_repos_sorted = sorted(
+                participating_repos, key=lambda a: repo_size_map.get(a, 0), reverse=True
+            )
+
             prompt = f"# Domain Analysis: {domain_name}\n\n"
             prompt += f"**Domain Description**: {domain.get('description', 'N/A')}\n\n"
 
@@ -485,23 +510,34 @@ class DependencyMapAnalyzer:
             evidence = domain.get("evidence", "")
             if evidence:
                 prompt += f"**Pass 1 Evidence (verify or refute)**: {evidence}\n\n"
-    
+
             prompt += "## Full Domain Structure (for cross-domain awareness)\n\n"
             for d in domain_list:
                 prompt += f"- **{d['name']}**: {d.get('description', 'N/A')}\n"
                 prompt += f"  - Repos: {', '.join(d.get('participating_repos', []))}\n"
-    
+
             prompt += f"\n## Focus Analysis on Domain: {domain_name}\n\n"
-            prompt += f"Analyze dependencies for: {', '.join(participating_repos)}\n\n"
-    
+            prompt += f"Analyze dependencies for: {', '.join(participating_repos_sorted)}\n\n"
+
+            # Inside-out analysis strategy (only if there are repos)
+            if participating_repos_sorted:
+                prompt += "## INSIDE-OUT ANALYSIS STRATEGY\n\n"
+                prompt += f"Start your analysis from **{participating_repos_sorted[0]}** (largest repository, "
+                prompt += f"{repo_size_map.get(participating_repos_sorted[0], 0) // 1024} KB). "
+                prompt += "Map its integration points first, then fan out to discover how the smaller repositories connect to it.\n"
+                prompt += "This ensures the dominant codebase anchors the dependency graph.\n\n"
+
             prompt += "## Repository Filesystem Locations\n\n"
             prompt += "IMPORTANT: Each repository is a directory on disk. You MUST explore source code using these paths.\n"
             prompt += "Start by listing each repo's directory structure, then read key files (entry points, configs, manifests).\n\n"
             # Build path mapping for participating repos
             path_map = {r.get("alias"): r.get("clone_path") for r in repo_list}
-            for repo_alias in participating_repos:
+            repo_file_count_map = {r.get("alias"): r.get("file_count", "?") for r in repo_list}
+            for repo_alias in participating_repos_sorted:
                 clone_path = path_map.get(repo_alias, "path not found")
-                prompt += f"- **{repo_alias}**: `{clone_path}`\n"
+                file_count = repo_file_count_map.get(repo_alias, "?")
+                total_mb = round(repo_size_map.get(repo_alias, 0) / (1024 * 1024), 1)
+                prompt += f"- **{repo_alias}**: `{clone_path}` ({file_count} files, {total_mb} MB)\n"
             prompt += "\n"
     
             prompt += "## CIDX Semantic Search (MCP Tools) - MANDATORY\n\n"
@@ -511,7 +547,7 @@ class DependencyMapAnalyzer:
             )
             prompt += "### Required Searches\n\n"
             prompt += "For EACH participating repository, run at least one search:\n"
-            for repo_alias in participating_repos:
+            for repo_alias in participating_repos_sorted:
                 prompt += f"- Search for `{repo_alias}` references across all repos\n"
             prompt += "\n"
             prompt += "### How to Use\n\n"
@@ -643,12 +679,36 @@ class DependencyMapAnalyzer:
             prompt += "- Keep each section to 3-8 sentences. Shorter is better if precise.\n"
             prompt += "- Do NOT reproduce source code, JSON schemas, or directory listings\n\n"
 
+            # Iteration 15: Add output budget
+            prompt += "## Output Budget\n\n"
+            prompt += "Your analysis MUST be between 3,000 and 10,000 characters.\n"
+            prompt += "If you find yourself writing more, you are including too much detail.\n"
+            prompt += "Focus on WHAT connects repos, not HOW the internals work.\n\n"
+
+            # Iteration 15: Add output template (same as output-first prompt)
+            prompt += "## OUTPUT TEMPLATE (fill in each section)\n\n"
+            prompt += "Your output MUST follow this exact structure:\n\n"
+            prompt += f"# Domain Analysis: {domain_name}\n\n"
+            prompt += "## Overview\n"
+            prompt += "[1-2 paragraphs: domain scope, purpose, how repos relate]\n\n"
+            prompt += "## Repository Roles\n"
+            prompt += "[Table: repo | language | role within domain]\n\n"
+            prompt += "## Intra-Domain Dependencies\n"
+            prompt += "[Numbered list of dependencies BETWEEN repos, with evidence]\n\n"
+            prompt += "## Cross-Domain Connections\n"
+            prompt += "[Dependencies to/from repos in OTHER domains]\n\n"
+
             # Fix: Iteration 9 - Add guardrails against YAML output and speculative content
+            # Iteration 15: Add more prohibited items
             prompt += "## PROHIBITED Content\n\n"
             prompt += "Do NOT include any of the following in your output:\n"
             prompt += "- YAML frontmatter blocks (the system adds these automatically)\n"
             prompt += "- Speculative sections like 'Recommendations', 'Potential Integration Opportunities', 'Future Considerations', or 'Suggested Improvements'\n"
             prompt += "- Advisory content about what SHOULD be done or COULD be integrated\n"
+            prompt += "- 'MCP Searches Performed' or search audit trail sections\n"
+            prompt += "- Code snippets or source code blocks\n"
+            prompt += "- JSON schema definitions or field-by-field breakdowns\n"
+            prompt += "- Directory listings or file tree dumps\n"
             prompt += "- Any content not directly supported by source code evidence\n\n"
             prompt += "Document ONLY verified, factual dependencies and relationships found in source code.\n\n"
     
@@ -665,10 +725,12 @@ class DependencyMapAnalyzer:
         # Fix 1 (Iteration 12): PostToolUse hook to prevent turn exhaustion
         # _invoke_claude_cli() builds turn-aware bash script with escalating urgency messages
         # Iteration 14: Purpose-driven hook emphasizing conciseness and navigation assistance
+        # Iteration 15: Add character budget to hook reminder
         hook_reminder = (
             "Remember: you are documenting precise, factual, short semantic dependencies "
-            "to assist inter-repository navigation. Be concise — no code snippets, no schema dumps, "
-            "no full file listings. Your output MUST begin with # Domain Analysis heading."
+            "to assist inter-repository navigation. TARGET: 3,000-10,000 chars. "
+            "Be concise — no code snippets, no schema dumps, no full file listings. "
+            "Your output MUST begin with # Domain Analysis heading."
         )
 
         # Iteration 13: Use earlier hook thresholds for large domains

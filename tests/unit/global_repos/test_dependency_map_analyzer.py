@@ -2711,3 +2711,302 @@ class TestIteration14PurposeDrivenHooks:
         retry_prompt = retry_cmd[-1]
         assert "Write your dependency analysis NOW" in retry_prompt
         assert "NO searching" in retry_prompt or "without searching" in retry_prompt.lower()
+
+
+class TestIteration15InsideOutAndConciseness:
+    """Test Iteration 15: Inside-out mapping with repo sizes, conciseness template, and journal resumability."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_repo_sizes_in_pass1_prompt(self, mock_subprocess, tmp_path):
+        """Test that Pass 1 prompt includes file_count and MB size for each repo."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps([
+                {
+                    "name": "test-domain",
+                    "description": "Test",
+                    "participating_repos": ["repo1"],
+                    "repo_paths": {"repo1": "/path/to/repo1"},
+                }
+            ]),
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        repo_list = [
+            {
+                "alias": "repo1",
+                "description_summary": "Repo 1",
+                "clone_path": "/path/to/repo1",
+                "file_count": 150,
+                "total_bytes": 5242880,  # 5 MB
+            },
+        ]
+
+        analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=50)
+
+        # Extract prompt from subprocess call
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args[0][0]
+        prompt = call_args[-1]
+
+        # Verify file count and MB size in prompt
+        assert "150 files" in prompt
+        assert "5.0 MB" in prompt or "5 MB" in prompt
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_pass2_inside_out_instruction_present(self, mock_subprocess, tmp_path):
+        """Test that Pass 2 prompt includes INSIDE-OUT ANALYSIS STRATEGY section."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1", "repo2"],
+        }
+
+        repo_list = [
+            {"alias": "repo1", "clone_path": "/path/to/repo1", "total_bytes": 10000000},
+            {"alias": "repo2", "clone_path": "/path/to/repo2", "total_bytes": 5000000},
+        ]
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=repo_list, max_turns=50)
+
+        # Extract prompt
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args[0][0]
+        prompt = call_args[-1]
+
+        # Verify INSIDE-OUT section present
+        assert "INSIDE-OUT ANALYSIS STRATEGY" in prompt
+        assert "largest repository" in prompt
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_participating_repos_sorted_by_size(self, mock_subprocess, tmp_path):
+        """Test that participating repos are sorted by size (largest first) in Pass 2 prompt."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["small-repo", "large-repo", "medium-repo"],
+        }
+
+        repo_list = [
+            {"alias": "small-repo", "clone_path": "/path/small", "total_bytes": 1000000},
+            {"alias": "large-repo", "clone_path": "/path/large", "total_bytes": 10000000},
+            {"alias": "medium-repo", "clone_path": "/path/medium", "total_bytes": 5000000},
+        ]
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=repo_list, max_turns=50)
+
+        # Extract prompt
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args[0][0]
+        prompt = call_args[-1]
+
+        # Extract the "Repository Filesystem Locations" section where repos should be sorted
+        repo_section_start = prompt.find("## Repository Filesystem Locations")
+        assert repo_section_start >= 0, "Repository Filesystem Locations section not found"
+        next_section_start = prompt.find("##", repo_section_start + 10)
+        if next_section_start >= 0:
+            repo_section = prompt[repo_section_start:next_section_start]
+        else:
+            repo_section = prompt[repo_section_start:]
+
+        # Find the order repos appear in the Repository Filesystem Locations section
+        large_idx = repo_section.find("large-repo")
+        medium_idx = repo_section.find("medium-repo")
+        small_idx = repo_section.find("small-repo")
+
+        # Verify repos appear in size-descending order in the Repository Filesystem Locations section
+        assert large_idx < medium_idx < small_idx, (
+            f"Repos not sorted by size in Repository Filesystem Locations section: large@{large_idx}, medium@{medium_idx}, small@{small_idx}"
+        )
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_standard_prompt_has_output_template(self, mock_subprocess, tmp_path):
+        """Test that standard prompt (<=3 repos) includes OUTPUT TEMPLATE section with headings."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        # Small domain (3 repos) should use standard prompt
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1", "repo2", "repo3"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Extract prompt
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args[0][0]
+        prompt = call_args[-1]
+
+        # Verify OUTPUT TEMPLATE section with required headings
+        assert "OUTPUT TEMPLATE" in prompt
+        assert "## Overview" in prompt
+        assert "## Repository Roles" in prompt
+        assert "## Intra-Domain Dependencies" in prompt
+        assert "## Cross-Domain Connections" in prompt
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_standard_prompt_has_output_budget(self, mock_subprocess, tmp_path):
+        """Test that standard prompt includes Output Budget section with 3,000-10,000 character limit."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Extract prompt
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args[0][0]
+        prompt = call_args[-1]
+
+        # Verify Output Budget section
+        assert "Output Budget" in prompt
+        assert "3,000" in prompt or "3000" in prompt
+        assert "10,000" in prompt or "10000" in prompt
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_prohibited_content_includes_search_audit(self, mock_subprocess, tmp_path):
+        """Test that PROHIBITED Content section explicitly forbids 'MCP Searches Performed' sections."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Extract prompt
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args[0][0]
+        prompt = call_args[-1]
+
+        # Verify PROHIBITED section mentions MCP Searches
+        assert "PROHIBITED" in prompt
+        assert "MCP Searches Performed" in prompt or "search audit trail" in prompt
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_hook_reminder_includes_budget(self, mock_subprocess, tmp_path):
+        """Test that hook_reminder includes character budget guidance (3,000-10,000 chars)."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        # We need to capture the hook reminder from the settings JSON
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Extract settings from subprocess call
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args[0][0]
+
+        # Find --settings argument
+        if "--settings" in call_args:
+            settings_idx = call_args.index("--settings")
+            settings_json = call_args[settings_idx + 1]
+            settings = json.loads(settings_json)
+
+            # Extract bash script from PostToolUse hook
+            bash_script = settings["hooks"]["PostToolUse"][0]["command"]
+
+            # Verify character budget mentioned in hook messages
+            assert "3,000" in bash_script or "3000" in bash_script or "10,000" in bash_script or "10000" in bash_script
