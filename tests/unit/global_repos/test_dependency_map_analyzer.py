@@ -1389,3 +1389,334 @@ class TestPass2PromptGuardrails:
         # Check for exact text in PROHIBITED section
         assert "## PROHIBITED Content" in prompt
         assert "Speculative sections" in prompt
+
+
+class TestHeadingBasedMetaStripping:
+    """Test Iteration 10 Fix 1: Heading-based meta-commentary stripping."""
+
+    def test_strips_meta_commentary_before_heading(self):
+        """Test that meta-commentary before first heading is stripped."""
+        text = """I have enough data from the directory listings I already obtained.
+
+# Domain Analysis: foo
+
+Actual analysis content here."""
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("# Domain Analysis: foo")
+        assert "I have enough data" not in result
+        assert "Actual analysis content here" in result
+
+    def test_strips_multiline_meta_before_heading(self):
+        """Test that multiple paragraphs of meta-commentary before heading are stripped."""
+        text = """Good - the code-indexer references to 'txt-db' are purely test fixture data.
+This means there are no actual dependencies.
+
+Now let me write the final analysis output.
+
+## Overview
+
+Domain content starts here."""
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("## Overview")
+        assert "Good -" not in result
+        assert "Now let me write" not in result
+        assert "Domain content starts here" in result
+
+    def test_preserves_content_starting_with_heading(self):
+        """Test that content starting directly with heading is preserved unchanged."""
+        text = """# Domain Analysis
+
+This is the actual content with no preamble."""
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result == text
+
+    def test_meta_only_no_heading_returns_original(self):
+        """Test that input with ONLY meta-commentary (no headings) returns original text."""
+        text = """Based on my comprehensive analysis of the repositories, I have identified
+the following patterns and dependencies across the codebase."""
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        # Should return original since we can't strip to nothing
+        assert result == text
+
+    def test_real_iter9_claude_ai_toolchain_pattern(self):
+        """Test the actual Iteration 9 claude-ai-toolchain.md pattern - pure meta-commentary."""
+        text = """The domain analysis is complete. All dependencies were verified against source code evidence.
+
+Key findings:
+- **Confirmed all 4 repos** belong in this domain with specific source file evidence
+- **Verified technology stacks** from actual dependency manifests
+- **Documented 8 intra-domain dependencies** with precise source file references"""
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        # No headings, so should return original (this will trigger quality gate failure)
+        assert result == text
+
+    def test_real_iter9_langfuse_pattern(self):
+        """Test the actual Iteration 9 langfuse pattern - meta before heading."""
+        text = """I have enough evidence from my searches to produce the comprehensive domain analysis.
+
+# Domain Analysis: langfuse-telemetry-data
+
+## Overview
+
+Actual analysis content."""
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("# Domain Analysis: langfuse-telemetry-data")
+        assert "I have enough evidence" not in result
+        assert "Actual analysis content" in result
+
+    def test_yaml_then_meta_then_heading(self):
+        """Test full pipeline: YAML frontmatter + meta-commentary + heading content."""
+        text = """---
+domain: test-domain
+last_analyzed: 2026-02-14
+---
+
+Based on my analysis, here are the findings.
+
+# Domain Analysis
+
+Real content here."""
+        result = DependencyMapAnalyzer._strip_meta_commentary(text)
+        assert result.startswith("# Domain Analysis")
+        assert "domain:" not in result
+        assert "Based on my analysis" not in result
+        assert "Real content here" in result
+
+    def test_heading_level_2_and_3_also_detected(self):
+        """Test that heading levels 2 and 3 are also detected for stripping."""
+        text1 = """Meta-commentary here.
+
+## Section Heading
+
+Content."""
+        result1 = DependencyMapAnalyzer._strip_meta_commentary(text1)
+        assert result1.startswith("## Section Heading")
+
+        text2 = """Meta-commentary here.
+
+### Subsection Heading
+
+Content."""
+        result2 = DependencyMapAnalyzer._strip_meta_commentary(text2)
+        assert result2.startswith("### Subsection Heading")
+
+
+class TestHasMarkdownHeadings:
+    """Test _has_markdown_headings helper function."""
+
+    def test_has_headings_true(self):
+        """Test that text with # heading returns True."""
+        text = "Some content\n\n# Heading\n\nMore content"
+        result = DependencyMapAnalyzer._has_markdown_headings(text)
+        assert result is True
+
+    def test_has_headings_false(self):
+        """Test that text without any headings returns False."""
+        text = "Just regular text with no headings at all."
+        result = DependencyMapAnalyzer._has_markdown_headings(text)
+        assert result is False
+
+    def test_has_headings_h2(self):
+        """Test that text with ## heading returns True."""
+        text = "Content\n\n## Section\n\nMore"
+        result = DependencyMapAnalyzer._has_markdown_headings(text)
+        assert result is True
+
+    def test_has_headings_in_code_block_still_counts(self):
+        """Test that heading inside code block is acceptable false positive."""
+        text = """Some text.
+
+```python
+# This is a code comment, not a heading
+print("hello")
+```
+
+More text."""
+        result = DependencyMapAnalyzer._has_markdown_headings(text)
+        # This will return True (false positive) - that's acceptable
+        assert result is True
+
+
+class TestIteration10QualityGate:
+    """Test Iteration 10 Fix 2: Quality gate for missing headings in Pass 2."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_quality_gate_no_headings_triggers_retry(self, mock_subprocess, tmp_path):
+        """Test that run_pass_2_per_domain detects and retries when output has no headings."""
+        # First call returns output WITHOUT any markdown headings (1.2KB but invalid)
+        # Second call returns valid output with headings
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # 1.2KB of meta-commentary with NO headings (claude-ai-toolchain case)
+                return MagicMock(
+                    returncode=0,
+                    stdout="The domain analysis is complete. All dependencies were verified.\n\n" + "X" * 1000,
+                )
+            else:
+                # Valid output with heading
+                return MagicMock(
+                    returncode=0,
+                    stdout="# Domain Analysis: test\n\nValid content here.\n\n" + "Y" * 1000,
+                )
+
+        mock_subprocess.side_effect = side_effect
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Verify subprocess was called twice (original + retry due to missing headings)
+        assert mock_subprocess.call_count == 2
+
+        # Verify second call used max_turns=10 (reduced turns retry)
+        second_call_args = mock_subprocess.call_args_list[1]
+        cmd = second_call_args[0][0]
+        assert "--max-turns" in cmd
+        turns_idx = cmd.index("--max-turns")
+        assert cmd[turns_idx + 1] == "10"
+
+        # Verify output file was written with retry content (has heading)
+        domain_file = staging_dir / "test-domain.md"
+        assert domain_file.exists()
+        content = domain_file.read_text()
+        assert "# Domain Analysis: test" in content
+        assert "Valid content here" in content
+
+
+class TestIteration10PromptReinforcement:
+    """Test Iteration 10 Fix 3: Prompt reinforcement for heading requirement."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_pass2_prompt_contains_heading_requirement(self, mock_subprocess, tmp_path):
+        """Test that Pass 2 prompt includes heading requirement instruction."""
+        content = "# Domain Analysis\n\n" + "Z" * 1000
+        mock_subprocess.return_value = MagicMock(returncode=0, stdout=content)
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=60)
+
+        # Verify prompt contains heading requirement
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args
+        prompt = call_args[0][0][-1]  # Last element is the prompt
+
+        assert "CRITICAL: Your output MUST begin with a markdown heading" in prompt
+        assert "Do NOT start with summary text, meta-commentary, or a description of what you found" in prompt
+
+
+class TestIteration10PostToolUseHook:
+    """Test Iteration 10 Fix 4: PostToolUse hook in agentic mode."""
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_agentic_mode_includes_settings_with_hook(self, mock_subprocess, tmp_path):
+        """Test that max_turns > 0 adds --settings flag with PostToolUse hook."""
+        content = "# Domain Analysis\n\n" + "W" * 1000
+        mock_subprocess.return_value = MagicMock(returncode=0, stdout=content)
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain = {
+            "name": "test-domain",
+            "description": "Test domain",
+            "participating_repos": ["repo1"],
+        }
+
+        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+
+        # Verify --settings flag is present
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args
+        cmd = call_args[0][0]
+
+        assert "--settings" in cmd
+        settings_idx = cmd.index("--settings")
+        settings_json = cmd[settings_idx + 1]
+
+        # Verify settings contains PostToolUse hook
+        settings = json.loads(settings_json)
+        assert "hooks" in settings
+        assert "PostToolUse" in settings["hooks"]
+        assert isinstance(settings["hooks"]["PostToolUse"], list)
+        assert len(settings["hooks"]["PostToolUse"]) > 0
+
+        # Verify hook contains format reminder
+        hook = settings["hooks"]["PostToolUse"][0]
+        assert "command" in hook
+        assert "markdown heading" in hook["command"]
+
+    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
+    @patch("subprocess.run")
+    def test_single_shot_mode_no_settings_flag(self, mock_subprocess, tmp_path):
+        """Test that max_turns=0 does NOT add --settings flag."""
+        mock_subprocess.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps([
+                {
+                    "name": "test-domain",
+                    "description": "Test",
+                    "participating_repos": ["repo1"],
+                    "repo_paths": {"repo1": "/path/to/repo1"},
+                }
+            ]),
+        )
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        repo_list = [
+            {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
+        ]
+
+        analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=0)
+
+        # Verify --settings is NOT present (single-shot mode)
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args
+        cmd = call_args[0][0]
+        assert "--settings" not in cmd

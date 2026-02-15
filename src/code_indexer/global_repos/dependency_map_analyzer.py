@@ -517,6 +517,9 @@ class DependencyMapAnalyzer:
         prompt += "Document ONLY verified, factual dependencies and relationships found in source code.\n\n"
 
         prompt += "## Output Format\n\n"
+        prompt += "CRITICAL: Your output MUST begin with a markdown heading (# Domain Analysis: domain-name).\n"
+        prompt += "Do NOT start with summary text, meta-commentary, or a description of what you found.\n"
+        prompt += "The VERY FIRST LINE of your output must be a markdown heading.\n\n"
         prompt += "Provide: overview, repo roles, subdomain dependencies, cross-domain connections.\n"
         prompt += "Do NOT include any meta-commentary about your process, thinking, or search strategy.\n"
         prompt += "Do NOT generate YAML frontmatter (--- blocks). The system handles frontmatter automatically.\n"
@@ -532,10 +535,12 @@ class DependencyMapAnalyzer:
         result = self._strip_meta_commentary(result)
 
         # Check for insufficient output and retry with reduced turns (Fix 1: raised threshold to 1000)
-        if len(result.strip()) < 1000:
+        # FIX 2 (Iteration 10): Also check for missing headings (pure meta-commentary)
+        if len(result.strip()) < 1000 or not self._has_markdown_headings(result):
+            reason = "no headings" if self._has_markdown_headings(result) is False else f"{len(result)} chars"
             logger.warning(
                 f"Pass 2 returned insufficient output for domain '{domain_name}' "
-                f"({len(result)} chars), retrying with reduced turns"
+                f"({reason}), retrying with reduced turns"
             )
             # Retry with max_turns=10 to force output generation with minimal exploration
             result = self._invoke_claude_cli(
@@ -544,10 +549,11 @@ class DependencyMapAnalyzer:
             result = self._strip_meta_commentary(result)
 
             # If retry also fails (insufficient), log error and continue
-            if len(result.strip()) < 1000:
+            if len(result.strip()) < 1000 or not self._has_markdown_headings(result):
+                reason = "no headings" if self._has_markdown_headings(result) is False else f"{len(result)} chars"
                 logger.error(
                     f"Pass 2 retry also returned insufficient output for domain '{domain_name}' "
-                    f"({len(result)} chars) - continuing with available content"
+                    f"({reason}) - continuing with available content"
                 )
 
         # Build YAML frontmatter
@@ -651,6 +657,30 @@ class DependencyMapAnalyzer:
         return text
 
     @staticmethod
+    def _has_markdown_headings(text: str) -> bool:
+        """
+        Check if text contains markdown headings (levels 1-3).
+
+        Used to detect if Claude output contains actual structured content
+        vs pure meta-commentary.
+
+        Args:
+            text: Text to check
+
+        Returns:
+            True if text contains at least one markdown heading (# , ## , ### )
+        """
+        if not text:
+            return False
+
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("# ") or stripped.startswith("## ") or stripped.startswith("### "):
+                return True
+
+        return False
+
+    @staticmethod
     def _strip_meta_commentary(text: str) -> str:
         """
         Strip meta-commentary from Claude CLI output.
@@ -715,6 +745,28 @@ class DependencyMapAnalyzer:
             if not stripped_yaml:
                 break
 
+        # FIX 1 (Iteration 10): Strip everything before first markdown heading
+        # This handles meta-commentary like "I have enough data..." or "Good - the code-indexer..."
+        # that appears before the actual analysis content starts
+        lines = text.split("\n")
+        first_heading_idx = None
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            # Check for markdown heading (level 1, 2, or 3: #, ##, ###)
+            if stripped.startswith("# ") or stripped.startswith("## ") or stripped.startswith("### "):
+                first_heading_idx = i
+                break
+
+        # If we found a heading, strip everything before it
+        if first_heading_idx is not None:
+            text = "\n".join(lines[first_heading_idx:])
+        else:
+            # No heading found - return as-is (quality gate will catch this)
+            # Don't run line-by-line cleanup since there's no structured content
+            return text
+
+        # Re-split for the line-by-line meta-pattern cleanup (secondary cleanup)
+        # This only runs if we found a heading above
         lines = text.split("\n")
 
         # Meta-commentary patterns (case-insensitive starts)
