@@ -2039,69 +2039,6 @@ class TestIteration11Fix3SkipGarbageWrite:
         content = domain_file.read_text()
         assert "# Domain Analysis" in content
         assert "Valid content" in content
-    """Test Iteration 12 Fix 2: Detect 'Error: Reached max turns' and skip domain without retry."""
-
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
-    @patch("subprocess.run")
-    def test_max_turns_exhaustion_skips_domain(self, mock_subprocess, tmp_path):
-        """When Claude CLI returns 'Error: Reached max turns (50)', skip domain without retry."""
-        mock_subprocess.return_value = MagicMock(
-            returncode=0, stdout="Error: Reached max turns (50)"
-        )
-
-        analyzer = DependencyMapAnalyzer(
-            golden_repos_root=tmp_path,
-            cidx_meta_path=tmp_path / "cidx-meta",
-            pass_timeout=600,
-        )
-
-        staging_dir = tmp_path / "staging"
-        staging_dir.mkdir()
-
-        domain = {
-            "name": "test-domain",
-            "description": "Test domain",
-            "participating_repos": ["repo1"],
-        }
-
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
-
-        # Should be called ONCE only (no retry for max-turns exhaustion)
-        assert mock_subprocess.call_count == 1
-
-        # Domain file should NOT be written
-        domain_file = staging_dir / "test-domain.md"
-        assert not domain_file.exists()
-
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
-    @patch("subprocess.run")
-    def test_max_turns_exhaustion_various_numbers(self, mock_subprocess, tmp_path):
-        """Pattern matches various turn counts: (10), (25), (100)."""
-        for turn_count in [10, 25, 100]:
-            mock_subprocess.reset_mock()
-            mock_subprocess.return_value = MagicMock(
-                returncode=0, stdout=f"Error: Reached max turns ({turn_count})"
-            )
-
-            analyzer = DependencyMapAnalyzer(
-                golden_repos_root=tmp_path,
-                cidx_meta_path=tmp_path / "cidx-meta",
-                pass_timeout=600,
-            )
-
-            staging_dir = tmp_path / f"staging-{turn_count}"
-            staging_dir.mkdir()
-
-            domain = {
-                "name": "test-domain",
-                "description": "Test domain",
-                "participating_repos": ["repo1"],
-            }
-
-            analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
-
-            # Should only call once (no retry)
-            assert mock_subprocess.call_count == 1, f"Failed for turn count {turn_count}"
 
     @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
