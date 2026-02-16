@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.9] - 2026-02-16
+
+### Changed
+
+- **Auto-updater uses direct JWT token generation instead of HTTP login (#208)** - Replaced HTTP-based `_get_auth_token()` (which required admin password via env vars) with direct JWT minting using the server's `~/.cidx-server/.jwt_secret` file. Eliminates password dependency, works on all servers regardless of admin password, and removes need for `CODE_INDEXER_ADMIN_USER`/`CODE_INDEXER_ADMIN_PASSWORD` environment variables.
+
+---
+
 ## [9.3.8] - 2026-02-16
 
 ### Fixed

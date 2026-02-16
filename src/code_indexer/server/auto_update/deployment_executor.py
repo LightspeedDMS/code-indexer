@@ -16,7 +16,6 @@ import time
 import sys
 import pwd
 import shutil
-import os
 
 import requests
 from code_indexer.server.logging_utils import format_error_log
@@ -75,53 +74,47 @@ class DeploymentExecutor:
         self._auth_token: Optional[str] = None  # Cached auth token for maintenance API
 
     def _get_auth_token(self) -> Optional[str]:
-        """Get authentication token by logging in with admin credentials.
+        """Generate JWT token directly using the server's JWT secret.
 
-        Reads credentials from environment variables with fallback to defaults:
-        - CODE_INDEXER_ADMIN_USER (default: admin)
-        - CODE_INDEXER_ADMIN_PASSWORD (default: admin)
+        The auto-updater runs as the same OS user as the server, so it can
+        read the JWT secret file directly. This avoids needing to know the
+        admin password or make HTTP calls for authentication.
 
         Token is cached for reuse across multiple maintenance API calls.
 
         Returns:
-            JWT token string if login successful, None on error
+            JWT token string if generation successful, None on error
         """
         if self._auth_token:
             return self._auth_token
 
         try:
-            username = os.environ.get("CODE_INDEXER_ADMIN_USER", "admin")
-            password = os.environ.get("CODE_INDEXER_ADMIN_PASSWORD", "admin")
+            from code_indexer.server.utils.jwt_secret_manager import JWTSecretManager
+            from code_indexer.server.auth.jwt_manager import JWTManager
 
-            url = f"{self.server_url}/auth/login"
-            response = requests.post(
-                url,
-                json={"username": username, "password": password},
-                timeout=10,
-            )
+            secret_manager = JWTSecretManager()
+            secret_key = secret_manager.get_or_create_secret()
 
-            if response.status_code == 200:
-                data = response.json()
-                token = data.get("access_token")
-                if token:
-                    self._auth_token = token
-                    logger.debug(
-                        "Successfully obtained auth token for maintenance API",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                    return token
+            jwt_manager = JWTManager(secret_key=secret_key, token_expiration_minutes=10)
 
-            logger.warning(
-                f"Failed to obtain auth token: {response.status_code}",
+            token: str = jwt_manager.create_token({
+                "username": "cidx-auto-updater",
+                "role": "admin",
+                "created_at": "2025-01-01T00:00:00Z",
+            })
+
+            self._auth_token = token
+            logger.debug(
+                "Generated JWT token for maintenance API",
                 extra={"correlation_id": get_correlation_id()},
             )
-            return None
+            return token
 
-        except requests.exceptions.ConnectionError:
+        except FileNotFoundError:
             logger.warning(
                 format_error_log(
                     "DEPLOY-GENERAL-080",
-                    "Could not connect to server for authentication",
+                    "JWT secret file not found - server may not be initialized",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
@@ -130,7 +123,7 @@ class DeploymentExecutor:
             logger.error(
                 format_error_log(
                     "DEPLOY-GENERAL-081",
-                    f"Error obtaining auth token: {e}",
+                    f"Error generating JWT token: {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
