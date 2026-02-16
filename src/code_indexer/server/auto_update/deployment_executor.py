@@ -1695,8 +1695,15 @@ class DeploymentExecutor:
             # Check if sudoers rule already exists with correct content
             expected_rule = f"{service_user} ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart {self.service_name}"
 
-            if sudoers_path.exists():
-                existing_content = sudoers_path.read_text().strip()
+            # Use sudo to check /etc/sudoers.d/ (not readable by non-root)
+            check_result = subprocess.run(
+                ["sudo", "cat", str(sudoers_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if check_result.returncode == 0:
+                existing_content = check_result.stdout.strip()
                 if existing_content == expected_rule:
                     logger.debug(
                         f"Sudoers restart rule already configured for {service_user}",
