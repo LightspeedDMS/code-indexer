@@ -27,6 +27,28 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# Negation indicators for filtering false-positive cross-domain edges
+# (e.g., isolation confirmation text listing repos with zero results)
+NEGATION_INDICATORS = [
+    "zero results",
+    "returned zero",
+    "none verified",
+    "not functional",
+    "no functional",
+    "not a functional",
+    "unrelated",
+    "does not constitute",
+    "not constitute",
+    "no dependencies",
+    "no cross-domain",
+    "none found",
+    "no references",
+    "standalone",
+    "fully isolated",
+    "completely isolated",
+    "no actual dependency",
+]
+
 
 class DependencyMapAnalyzer:
     """
@@ -994,6 +1016,22 @@ class DependencyMapAnalyzer:
             if not cross_domain_text:
                 continue
 
+            # Split into paragraphs and filter out negated paragraphs
+            paragraphs = cross_domain_text.split('\n\n')
+            non_negated_paragraphs = []
+            for paragraph in paragraphs:
+                paragraph_lower = paragraph.lower()
+                # Check if paragraph contains any negation indicators
+                has_negation = any(
+                    indicator in paragraph_lower
+                    for indicator in NEGATION_INDICATORS
+                )
+                if not has_negation:
+                    non_negated_paragraphs.append(paragraph)
+
+            # Recombine non-negated paragraphs
+            filtered_text = '\n\n'.join(non_negated_paragraphs)
+
             # Check for mentions of OTHER domains' repos (word-boundary match)
             for target_domain_dict in domain_list:
                 target_domain = target_domain_dict["name"]
@@ -1007,7 +1045,8 @@ class DependencyMapAnalyzer:
                     # Word-boundary regex to avoid false positives (e.g., "db" in "adobe")
                     pattern = r'(?<![a-zA-Z0-9_-])' + re.escape(repo_alias) + r'(?![a-zA-Z0-9_-])'
 
-                    if re.search(pattern, cross_domain_text):
+                    # Search only in non-negated paragraphs
+                    if re.search(pattern, filtered_text):
                         # Found edge: source_domain → target_domain via repo_alias
                         edge_key = (domain_name, target_domain)
                         if edge_key not in edges:

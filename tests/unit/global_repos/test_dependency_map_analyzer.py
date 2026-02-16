@@ -3515,3 +3515,77 @@ Depends on **repo-c** from domain-c.
 
         # Verify alphabetical order
         assert sources == sorted(sources), f"Sources not alphabetically sorted: {sources}"
+
+    def test_build_cross_domain_graph_negation_filter(self, tmp_path):
+        """Test that negation indicators filter out false positive repo mentions."""
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain_list = [
+            {"name": "domain-a", "participating_repos": ["repo1"]},
+            {"name": "domain-b", "participating_repos": ["repo2"]},
+            {"name": "domain-c", "participating_repos": ["repo3"]},
+        ]
+
+        # domain-a has a REAL connection to domain-b (repo2)
+        # but also mentions repo3 in an isolation paragraph
+        (staging_dir / "domain-a.md").write_text(
+            "## Cross-Domain Connections\n\n"
+            "### 1. Integration with domain-b\n\n"
+            "This domain uses repo2 for data processing via REST API.\n\n"
+            "**Isolation confirmation**: FTS searches across repo3 returned zero results. "
+            "No functional dependency exists.\n"
+        )
+        (staging_dir / "domain-b.md").write_text("## Cross-Domain Connections\n\nNone.\n")
+        (staging_dir / "domain-c.md").write_text("## Cross-Domain Connections\n\nNone.\n")
+
+        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+
+        # Should detect edge to domain-b but NOT to domain-c
+        assert "domain-b" in result
+        assert "repo2" in result
+
+        # domain-c/repo3 should be filtered out by negation
+        lines = [line for line in result.split('\n') if line.startswith('| domain-a')]
+        assert len(lines) == 1  # Only one edge from domain-a
+        assert "domain-c" not in lines[0]
+
+    def test_build_cross_domain_graph_negation_filter_standalone(self, tmp_path):
+        """Test fully standalone domain with only negation text produces zero edges."""
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain_list = [
+            {"name": "domain-a", "participating_repos": ["repo1"]},
+            {"name": "domain-b", "participating_repos": ["repo2"]},
+        ]
+
+        (staging_dir / "domain-a.md").write_text(
+            "## Cross-Domain Connections\n\n"
+            "**None verified.** FTS search for repo1 across repo2 returned zero results. "
+            "No functional dependency.\n"
+        )
+        (staging_dir / "domain-b.md").write_text("## Cross-Domain Connections\n\nNone.\n")
+
+        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        assert result == ""  # No edges
+
+    def test_build_cross_domain_graph_negation_unrelated(self, tmp_path):
+        """Test 'unrelated' keyword filters mentions."""
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain_list = [
+            {"name": "domain-a", "participating_repos": ["repo1"]},
+            {"name": "domain-b", "participating_repos": ["repo2"]},
+        ]
+
+        (staging_dir / "domain-a.md").write_text(
+            "## Cross-Domain Connections\n\n"
+            "Semantic search returned coincidentally similar but functionally unrelated "
+            "code from repo2. This is not a dependency.\n"
+        )
+        (staging_dir / "domain-b.md").write_text("## Cross-Domain Connections\n\nNone.\n")
+
+        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        assert result == ""
