@@ -20,13 +20,15 @@ from code_indexer.server.logging_utils import format_error_log
 logger = logging.getLogger(__name__)
 
 # Issue #154: Pending redeploy marker for self-healing Python environment
-# Note: Using /var/lib/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
-PENDING_REDEPLOY_MARKER = Path("/var/lib/cidx-pending-redeploy")
+# Note: Using ~/.cidx-server/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
+# and /var/lib/ is not writable by non-root service users
+PENDING_REDEPLOY_MARKER = Path.home() / ".cidx-server" / "pending-redeploy"
 AUTO_UPDATE_SERVICE_NAME = "cidx-auto-update"
 
 # Self-restart mechanism constants
-# Note: Using /var/lib/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
-AUTO_UPDATE_STATUS_FILE = Path("/var/lib/cidx-auto-update-status.json")
+# Note: Using ~/.cidx-server/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
+# and /var/lib/ is not writable by non-root service users
+AUTO_UPDATE_STATUS_FILE = Path.home() / ".cidx-server" / "auto-update-status.json"
 SYSTEMCTL_TIMEOUT_SECONDS = 30  # Timeout for systemctl restart operations
 
 # Hnswlib fallback constants (Bug #160)
@@ -1157,6 +1159,7 @@ class DeploymentExecutor:
                 return False
 
             # Create pending-redeploy marker
+            PENDING_REDEPLOY_MARKER.parent.mkdir(parents=True, exist_ok=True)
             PENDING_REDEPLOY_MARKER.touch()
             logger.info(
                 f"Created pending-redeploy marker: {PENDING_REDEPLOY_MARKER}",
@@ -1907,6 +1910,7 @@ class DeploymentExecutor:
                 "details": details,
             }
 
+            AUTO_UPDATE_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(AUTO_UPDATE_STATUS_FILE, "w") as f:
                 json.dump(status_data, f, indent=2)
 
@@ -2040,6 +2044,7 @@ class DeploymentExecutor:
             # Create redeploy marker so the restarted instance continues deployment
             # (git pull will be a no-op, but pip install + ensure steps + server restart will run)
             try:
+                PENDING_REDEPLOY_MARKER.parent.mkdir(parents=True, exist_ok=True)
                 PENDING_REDEPLOY_MARKER.touch()
                 logger.info(
                     "Created pending redeploy marker for post-restart deployment",

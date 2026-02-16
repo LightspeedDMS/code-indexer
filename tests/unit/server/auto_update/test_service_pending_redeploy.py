@@ -116,8 +116,9 @@ class TestPollOncePendingRedeploy:
     def test_marker_path_constant_verified(self, service):
         """Test that PENDING_REDEPLOY_MARKER constant is the path checked."""
         # Verify the constant has the expected value
-        # Note: Using /var/lib/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
-        assert PENDING_REDEPLOY_MARKER == Path("/var/lib/cidx-pending-redeploy")
+        # Note: Using ~/.cidx-server/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
+        # and /var/lib/ is not writable by non-root service users
+        assert PENDING_REDEPLOY_MARKER == Path.home() / ".cidx-server" / "pending-redeploy"
 
         # Verify poll_once uses the marker (functional test)
         mock_marker = MagicMock()

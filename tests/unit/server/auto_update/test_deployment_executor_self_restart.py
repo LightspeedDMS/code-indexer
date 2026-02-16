@@ -97,9 +97,10 @@ class TestAutoUpdateStatusFile:
             with patch("json.dump") as mock_json_dump:
                 executor._write_status_file("pending_restart", "Testing restart")
 
-                # Note: Using /var/lib/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
+                # Note: Using ~/.cidx-server/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
+                # and /var/lib/ is not writable by non-root service users
                 mock_file.assert_called_once_with(
-                    Path("/var/lib/cidx-auto-update-status.json"), "w"
+                    Path.home() / ".cidx-server" / "auto-update-status.json", "w"
                 )
                 # Check that json.dump was called with correct structure
                 call_args = mock_json_dump.call_args[0]

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.5] - 2026-02-16
+
+### Fixed
+
+- **Auto-updater marker/status files use non-writable /var/lib/ path** - The `PENDING_REDEPLOY_MARKER` and `AUTO_UPDATE_STATUS_FILE` were at `/var/lib/` which is not writable by the service user on production servers. Moved both to `~/.cidx-server/` (user-writable config directory). This was the root cause of the auto-updater failing to restart cidx-server after self-updating its own code.
+
+---
+
 ## [9.3.4] - 2026-02-16
 
 ### Fixed

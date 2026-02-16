@@ -413,8 +413,9 @@ class TestConstants:
 
     def test_pending_redeploy_marker_constant(self):
         """Test that PENDING_REDEPLOY_MARKER constant is defined."""
-        # Note: Using /var/lib/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
-        assert PENDING_REDEPLOY_MARKER == Path("/var/lib/cidx-pending-redeploy")
+        # Note: Using ~/.cidx-server/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
+        # and /var/lib/ is not writable by non-root service users
+        assert PENDING_REDEPLOY_MARKER == Path.home() / ".cidx-server" / "pending-redeploy"
 
     def test_auto_update_service_name_constant(self):
         """Test that AUTO_UPDATE_SERVICE_NAME constant is defined."""
