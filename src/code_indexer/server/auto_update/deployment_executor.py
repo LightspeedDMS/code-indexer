@@ -1,4 +1,7 @@
-"""DeploymentExecutor - deployment command execution for auto-update service."""
+"""DeploymentExecutor - deployment command execution for auto-update service.
+
+v9.3.7: Verified self-restart + marker + forced-redeploy cycle on staging.
+"""
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.utils.ripgrep_installer import RipgrepInstaller
