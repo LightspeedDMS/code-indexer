@@ -471,10 +471,11 @@ class TestDelayedRestartMechanism:
                 with patch("subprocess.run") as mock_subprocess:
                     _delayed_restart(delay=2)
 
-        # Should call subprocess.run with systemctl restart
+        # Should call subprocess.run with sudo systemctl restart
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args[0][0]
-        assert "systemctl" in call_args
+        assert call_args[0] == "sudo"
+        assert "/usr/bin/systemctl" in call_args
         assert "restart" in call_args
         assert "cidx-server" in call_args
 

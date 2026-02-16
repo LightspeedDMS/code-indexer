@@ -1654,6 +1654,147 @@ class DeploymentExecutor:
             )
             return False
 
+    def _ensure_sudoers_restart(self) -> bool:
+        """Ensure sudoers rule exists for service user to restart systemd service.
+
+        On production servers where the service runs as a non-root user (e.g., jsbattig),
+        the web diagnostics restart feature requires sudo privileges to run
+        'systemctl restart cidx-server'. This method creates a sudoers rule to allow
+        the service user to restart the service without a password prompt.
+
+        Returns:
+            True if rule exists or was created or not needed, False on error
+        """
+        service_path = Path(f"/etc/systemd/system/{self.service_name}.service")
+        sudoers_path = Path(f"/etc/sudoers.d/{self.service_name}")
+
+        try:
+            if not service_path.exists():
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-052",
+                        f"Service file not found: {service_path}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return True  # Not a fatal error if service doesn't exist yet
+
+            content = service_path.read_text()
+
+            # Extract User from service file
+            service_user = self._extract_service_user(content)
+
+            # If no User= line, skip (service runs as current user)
+            if not service_user:
+                logger.debug(
+                    "No User= line in service file, skipping sudoers restart config",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            # Check if sudoers rule already exists with correct content
+            expected_rule = f"{service_user} ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart {self.service_name}"
+
+            if sudoers_path.exists():
+                existing_content = sudoers_path.read_text().strip()
+                if existing_content == expected_rule:
+                    logger.debug(
+                        f"Sudoers restart rule already configured for {service_user}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return True
+
+            # Create sudoers rule via sudo tee
+            logger.info(
+                f"Creating sudoers restart rule for {service_user}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+            # Use sudo tee to write the sudoers file
+            tee_result = subprocess.run(
+                ["sudo", "tee", str(sudoers_path)],
+                input=expected_rule,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if tee_result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-053",
+                        f"Failed to create sudoers rule: {tee_result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            # Set correct permissions (0440)
+            chmod_result = subprocess.run(
+                ["sudo", "chmod", "0440", str(sudoers_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if chmod_result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-054",
+                        f"Failed to set sudoers permissions: {chmod_result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                # Remove file with wrong permissions
+                subprocess.run(
+                    ["sudo", "rm", "-f", str(sudoers_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                return False
+
+            # Validate with visudo
+            visudo_result = subprocess.run(
+                ["sudo", "visudo", "-c", "-f", str(sudoers_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if visudo_result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-055",
+                        f"Sudoers validation failed: {visudo_result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                # Remove invalid sudoers file
+                subprocess.run(
+                    ["sudo", "rm", "-f", str(sudoers_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                return False
+
+            logger.info(
+                f"Created sudoers restart rule for {service_user}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-056",
+                    f"Error configuring sudoers restart rule: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
     def _get_service_user_home(self) -> Optional[Path]:
         """Get home directory for the service user from systemd service file.
 
@@ -1948,6 +2089,9 @@ class DeploymentExecutor:
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
+
+        # Step 8: Ensure sudoers rule for server self-restart
+        self._ensure_sudoers_restart()
 
         logger.info(
             "Deployment execution completed successfully",

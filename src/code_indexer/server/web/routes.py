@@ -8637,7 +8637,7 @@ def _delayed_restart(delay: int = 2) -> None:
         # Systemd mode: use systemctl restart (Code Review Issue #3)
         logger.info("Restarting via systemctl (systemd mode)")
         result = subprocess.run(
-            ["systemctl", "restart", "cidx-server"],
+            ["sudo", "/usr/bin/systemctl", "restart", "cidx-server"],
             capture_output=True,
             text=True
         )

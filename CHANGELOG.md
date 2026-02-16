@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.1] - 2026-02-16
+
+### Fixed
+
+- **Server restart requires sudo on staging/production** - The diagnostics tab restart feature failed on deployed servers because `systemctl restart` requires root privileges. Fixed by adding `sudo` with full path (`/usr/bin/systemctl`) and a new idempotent `_ensure_sudoers_restart()` step in the deployment executor that creates a minimal NOPASSWD sudoers rule for the service user.
+
+---
+
 ## [9.3.0] - 2026-02-16
 
 ### Added
