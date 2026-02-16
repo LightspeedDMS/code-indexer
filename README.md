@@ -2,7 +2,7 @@
 
 AI-powered semantic code search for your codebase. Find code by meaning, not just keywords.
 
-**Version 9.1.0** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
+**Version 9.2.0** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
 
 ## Quick Navigation
 
@@ -224,12 +224,13 @@ Pre-computed semantic dependency map that analyzes source code across all regist
 3. **Incremental delta refresh**: Scheduled daemon detects changed/new/removed repos via commit hash comparison and updates only affected domain files
 4. **MCP discovery**: Quick reference automatically directs MCP clients to check the dependency map first for cross-repo tasks
 5. **Human corrections**: Power users can edit dependency map files directly via MCP file CRUD tools; changes are auto-reindexed
+6. **Cross-domain dependency graph**: Pass 3 automatically builds a directed graph of inter-domain connections by parsing each domain file, detecting which repos are mentioned across domain boundaries, and appending the graph to `_index.md` with edge list and standalone domain identification
 
 **Dependency map output structure:**
 ```
 cidx-meta/
   dependency-map/
-    _index.md                 # Domain catalog + repo-to-domain matrix
+    _index.md                 # Domain catalog + repo-to-domain matrix + cross-domain dependency graph
     authentication.md         # Per-domain: repo roles, subdomain deps, cross-domain connections
     data-pipeline.md          # Each domain file has YAML frontmatter with participating repos
     ...

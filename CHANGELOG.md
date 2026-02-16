@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.2.0] - 2026-02-15
+
+### Added
+
+- **Cross-Domain Dependency Graph (Iteration 16)** - Pass 3 index generation now parses all domain files to build a directed cross-domain dependency graph appended to `_index.md`. The graph shows which domains reference other domains' repositories in their Cross-Domain Connections sections, with a summary of edge count, standalone domains, and the specific repos that create each connection. Enables MCP clients to understand the full domain topology at a glance.
+
+### Fixed
+
+- **False positive elimination in cross-domain graph (Iteration 16b)** - Added paragraph-level negation filtering to prevent isolation confirmation text (e.g., "FTS searches across repo-x returned zero results") from being counted as real cross-domain connections. Uses 17 negation indicator phrases to distinguish genuine references from negative-result mentions.
+
+---
+
 ## [9.1.0] - 2026-02-14
 
 ### Added

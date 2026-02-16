@@ -432,7 +432,7 @@ CIDX can index and semantically search entire git commit history:
 
 **Initialize Handshake** (CRITICAL for Claude Code connection):
 - Method: `initialize` - MUST be first client-server interaction
-- Server Response: `{ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} }, "serverInfo": { "name": "Neo", "version": "9.0.0" } }`
+- Server Response: `{ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} }, "serverInfo": { "name": "Neo", "version": "9.2.0" } }`
 - Required for OAuth flow completion - Claude Code calls `initialize` after authentication
 
 **Version Notes**:
@@ -533,6 +533,42 @@ Optional observability integration for tracking MCP tool usage patterns via Lang
 **Storage:**
 - Configuration: `~/.cidx-server/config.json` (langfuse section)
 - Traces: Stored in Langfuse backend (cloud or self-hosted)
+
+## Inter-Repository Dependency Map (v9.0+)
+
+Multi-pass Claude CLI pipeline that analyzes source code across all registered golden repos to produce domain-level dependency documentation.
+
+**Pipeline Passes:**
+1. **Pass 1 (Synthesis)**: Single Claude CLI call clusters repos into semantic domains based on naming, README content, and shared patterns. Outputs JSON with domain names, descriptions, participating repos, and evidence.
+2. **Pass 2 (Per-Domain Analysis)**: One Claude CLI subprocess per domain. Each session has MCP tool access to CIDX for searching repos. Produces per-domain `.md` files with intra-domain dependencies, cross-domain connections, and file-level citations.
+3. **Pass 3 (Index Generation)**: Deterministic Python post-processing. Builds domain catalog, repo-to-domain matrix, and cross-domain dependency graph. No LLM involvement.
+
+**Cross-Domain Dependency Graph (v9.2+):**
+
+Pass 3 parses all domain `.md` files to construct a directed edge list showing which domains reference other domains' repositories. The algorithm:
+1. Builds a reverse mapping from repo aliases to their owning domains
+2. Extracts the "Cross-Domain Connections" section from each domain file
+3. Splits into paragraphs and filters out negation paragraphs (containing phrases like "zero results", "unrelated", "not functional")
+4. Searches non-negated text for other domains' repo aliases using word-boundary regex
+5. Produces a markdown table appended to `_index.md` with source domain, target domain, and connecting repos
+
+**Key Design Decisions:**
+- **Journal-based resumability**: `_journal.json` tracks pass completion for crash recovery
+- **Stage-then-swap atomicity**: Pipeline writes to staging directory, renamed to final on completion
+- **Inside-out analysis**: Pass 2 starts from the largest repo in each domain and works outward
+- **Conciseness enforcement**: PostToolUse hooks remind Claude CLI to stay within output size limits
+- **Paragraph-level negation filtering**: Prevents false positives from isolation confirmation text
+
+**Storage:**
+- Output: `~/.cidx-server/data/golden-repos/cidx-meta/dependency-map/`
+- Journal: `dependency-map/_journal.json`
+- Index: `dependency-map/_index.md`
+
+**Configuration** (Web UI: Admin > Configuration > Dependency Map):
+- `dependency_map_enabled`: Feature toggle (default: off)
+- `dependency_map_interval_hours`: Delta refresh interval (default: 168 hours / weekly)
+- `dependency_map_pass_timeout_seconds`: Per-pass timeout (default: 1800s)
+- `dependency_map_pass{1,2,3}_max_turns`: Claude CLI turn limits per pass
 
 ## Related Documentation
 
