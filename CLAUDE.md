@@ -52,6 +52,26 @@ sqlite3 ~/.cidx-server/data/cidx_server.db "UPDATE users SET password_hash='HASH
 
 ---
 
+## CRITICAL: STAGING SERVER ADMIN PASSWORD - ABSOLUTELY FORBIDDEN TO CHANGE
+
+**NEVER, UNDER ANY CIRCUMSTANCES**, change the admin password on the staging server (192.168.60.20).
+
+**Staging server credentials**: `admin` / `Calatrava123!`
+
+This password is used by:
+- MCPB (MCP Bridge) on the Mac laptop for auto-login
+- E2E test automation
+- All REST/MCP API testing
+- Encrypted credentials stored on client machines
+
+Changing this password breaks ALL of the above and requires manual recovery on every client.
+
+**ABSOLUTE PROHIBITION**: Do not reset, change, update, or modify this password via any method -- not through the Web UI, not through the database, not through any API call, not through any script. EVER.
+
+*Recorded 2026-02-15*
+
+---
+
 ## SSH SERVER RESTART - CRITICAL PROCEDURE
 
 **NEVER** use `kill -15 && nohup ...` for restarts. Causes SSH lockups.
