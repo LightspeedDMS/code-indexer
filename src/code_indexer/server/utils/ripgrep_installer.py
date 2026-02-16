@@ -43,9 +43,19 @@ class RipgrepInstaller:
         """
         Check if ripgrep is installed and accessible.
 
+        First checks using shutil.which() to detect system-installed ripgrep
+        at standard paths (/usr/bin/rg, /usr/local/bin/rg, etc.), then falls
+        back to subprocess if which() returns None.
+
         Returns:
             True if rg command is available, False otherwise
         """
+        # First check if rg is in PATH using shutil.which()
+        # This detects system-installed ripgrep even when subprocess PATH context differs
+        if shutil.which("rg") is not None:
+            return True
+
+        # Fallback to subprocess check
         try:
             result = subprocess.run(
                 ["rg", "--version"],
@@ -95,7 +105,8 @@ class RipgrepInstaller:
                 )
 
         # All members validated - safe to extract
-        tar.extractall(path)
+        # Use filter='data' to suppress Python 3.12+ RuntimeWarning about CVE-2007-4559
+        tar.extractall(path, filter='data')
 
     def _download_file(self, url: str, dest_path: Path) -> None:
         """

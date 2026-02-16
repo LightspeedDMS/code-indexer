@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.8] - 2026-02-16
+
+### Fixed
+
+- **Ripgrep installer fails verification when system rg already installed (#207)** - Added `shutil.which("rg")` pre-check to detect system-installed ripgrep before subprocess fallback. Also added `filter='data'` to tarfile extraction for Python 3.12+ compatibility.
+- **Maintenance mode API returns 401 unauthenticated (#208)** - Auto-updater maintenance mode API calls (enter, exit, drain-status, drain-timeout) now authenticate with JWT Bearer token. Added `_get_auth_token()` method with token caching and credential support via environment variables.
+- **Auto-updater can't read service file without sudo (#209)** - Changed `cat` to `sudo cat` in `_read_service_file()` and `_get_server_python()` for reading systemd service files with restricted permissions.
+
+---
+
 ## [9.3.7] - 2026-02-16
 
 ### Changed

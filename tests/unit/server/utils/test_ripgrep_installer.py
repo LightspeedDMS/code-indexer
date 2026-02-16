@@ -43,8 +43,9 @@ class TestIsInstalled:
         mock_result = Mock()
         mock_result.returncode = 0
 
-        with patch("subprocess.run", return_value=mock_result) as mock_run:
-            result = installer.is_installed()
+        with patch("shutil.which", return_value=None):
+            with patch("subprocess.run", return_value=mock_result) as mock_run:
+                result = installer.is_installed()
 
         assert result is True
         mock_run.assert_called_once_with(
@@ -53,8 +54,9 @@ class TestIsInstalled:
 
     def test_returns_false_when_rg_not_found(self, installer):
         """Test returns False when rg command not found."""
-        with patch("subprocess.run", side_effect=FileNotFoundError()):
-            result = installer.is_installed()
+        with patch("shutil.which", return_value=None):
+            with patch("subprocess.run", side_effect=FileNotFoundError()):
+                result = installer.is_installed()
 
         assert result is False
 
@@ -63,17 +65,41 @@ class TestIsInstalled:
         mock_result = Mock()
         mock_result.returncode = 1
 
-        with patch("subprocess.run", return_value=mock_result):
-            result = installer.is_installed()
+        with patch("shutil.which", return_value=None):
+            with patch("subprocess.run", return_value=mock_result):
+                result = installer.is_installed()
 
         assert result is False
 
     def test_returns_false_on_timeout(self, installer):
         """Test returns False when command times out."""
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("rg", 10)):
-            result = installer.is_installed()
+        with patch("shutil.which", return_value=None):
+            with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("rg", 10)):
+                result = installer.is_installed()
 
         assert result is False
+
+    def test_detects_via_shutil_which(self, installer):
+        """Test detects ripgrep via shutil.which() even if subprocess fails."""
+        with patch("shutil.which", return_value="/usr/bin/rg"):
+            with patch("subprocess.run", side_effect=FileNotFoundError()):
+                result = installer.is_installed()
+
+        assert result is True
+
+    def test_uses_subprocess_when_which_returns_none(self, installer):
+        """Test falls back to subprocess check when shutil.which() returns None."""
+        mock_result = Mock()
+        mock_result.returncode = 0
+
+        with patch("shutil.which", return_value=None):
+            with patch("subprocess.run", return_value=mock_result) as mock_run:
+                result = installer.is_installed()
+
+        assert result is True
+        mock_run.assert_called_once_with(
+            ["rg", "--version"], capture_output=True, text=True, timeout=10
+        )
 
 
 class TestGetInstallPath:
@@ -115,7 +141,7 @@ class TestSafeExtractTar:
 
         # Should not raise exception
         installer._safe_extract_tar(mock_tar, str(dest_path))
-        mock_tar.extractall.assert_called_once_with(str(dest_path))
+        mock_tar.extractall.assert_called_once_with(str(dest_path), filter='data')
 
     def test_blocks_absolute_path_traversal(self, installer, tmp_path):
         """Test blocks path traversal using absolute paths."""

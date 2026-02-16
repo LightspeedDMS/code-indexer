@@ -16,6 +16,7 @@ import time
 import sys
 import pwd
 import shutil
+import os
 
 import requests
 from code_indexer.server.logging_utils import format_error_log
@@ -71,6 +72,69 @@ class DeploymentExecutor:
         self.server_url = server_url
         self.drain_timeout = drain_timeout
         self.drain_poll_interval = drain_poll_interval
+        self._auth_token: Optional[str] = None  # Cached auth token for maintenance API
+
+    def _get_auth_token(self) -> Optional[str]:
+        """Get authentication token by logging in with admin credentials.
+
+        Reads credentials from environment variables with fallback to defaults:
+        - CODE_INDEXER_ADMIN_USER (default: admin)
+        - CODE_INDEXER_ADMIN_PASSWORD (default: admin)
+
+        Token is cached for reuse across multiple maintenance API calls.
+
+        Returns:
+            JWT token string if login successful, None on error
+        """
+        if self._auth_token:
+            return self._auth_token
+
+        try:
+            username = os.environ.get("CODE_INDEXER_ADMIN_USER", "admin")
+            password = os.environ.get("CODE_INDEXER_ADMIN_PASSWORD", "admin")
+
+            url = f"{self.server_url}/auth/login"
+            response = requests.post(
+                url,
+                json={"username": username, "password": password},
+                timeout=10,
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                token = data.get("access_token")
+                if token:
+                    self._auth_token = token
+                    logger.debug(
+                        "Successfully obtained auth token for maintenance API",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return token
+
+            logger.warning(
+                f"Failed to obtain auth token: {response.status_code}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return None
+
+        except requests.exceptions.ConnectionError:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-080",
+                    "Could not connect to server for authentication",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return None
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-081",
+                    f"Error obtaining auth token: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return None
 
     def _enter_maintenance_mode(self) -> bool:
         """Enter maintenance mode via server API.
@@ -79,8 +143,21 @@ class DeploymentExecutor:
             True if successful, False on error (e.g., connection refused)
         """
         try:
+            # Get authentication token
+            token = self._get_auth_token()
+            if not token:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-082",
+                        "Could not obtain auth token for maintenance mode",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
             url = f"{self.server_url}/api/admin/maintenance/enter"
-            response = requests.post(url, timeout=10)
+            headers = {"Authorization": f"Bearer {token}"}
+            response = requests.post(url, headers=headers, timeout=10)
 
             if response.status_code == 200:
                 logger.info(
@@ -128,8 +205,22 @@ class DeploymentExecutor:
             Drain timeout in seconds (from server or fallback value)
         """
         try:
+            # Get authentication token
+            token = self._get_auth_token()
+            if not token:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-083",
+                        "Could not obtain auth token for drain timeout - using fallback",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                fallback_timeout = 7200
+                return fallback_timeout
+
             url = f"{self.server_url}/api/admin/maintenance/drain-timeout"
-            response = requests.get(url, timeout=10)
+            headers = {"Authorization": f"Bearer {token}"}
+            response = requests.get(url, headers=headers, timeout=10)
 
             if response.status_code == 200:
                 data = response.json()
@@ -190,8 +281,22 @@ class DeploymentExecutor:
 
         while time.time() - start_time < drain_timeout:
             try:
+                # Get authentication token
+                token = self._get_auth_token()
+                if not token:
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-084",
+                            "Could not obtain auth token for drain status check",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+                    time.sleep(self.drain_poll_interval)
+                    continue
+
                 url = f"{self.server_url}/api/admin/maintenance/drain-status"
-                response = requests.get(url, timeout=10)
+                headers = {"Authorization": f"Bearer {token}"}
+                response = requests.get(url, headers=headers, timeout=10)
 
                 if response.status_code == 200:
                     data = response.json()
@@ -243,8 +348,21 @@ class DeploymentExecutor:
             True if successful, False on error
         """
         try:
+            # Get authentication token
+            token = self._get_auth_token()
+            if not token:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-085",
+                        "Could not obtain auth token to exit maintenance mode",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
             url = f"{self.server_url}/api/admin/maintenance/exit"
-            response = requests.post(url, timeout=10)
+            headers = {"Authorization": f"Bearer {token}"}
+            response = requests.post(url, headers=headers, timeout=10)
 
             if response.status_code == 200:
                 logger.info(
@@ -281,8 +399,21 @@ class DeploymentExecutor:
             List of job dicts with job_id, operation_type, started_at, progress
         """
         try:
+            # Get authentication token
+            token = self._get_auth_token()
+            if not token:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-086",
+                        "Could not obtain auth token to fetch running jobs for logging",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return []
+
             url = f"{self.server_url}/api/admin/maintenance/drain-status"
-            response = requests.get(url, timeout=10)
+            headers = {"Authorization": f"Bearer {token}"}
+            response = requests.get(url, headers=headers, timeout=10)
 
             if response.status_code == 200:
                 data = response.json()
@@ -971,7 +1102,7 @@ class DeploymentExecutor:
         service_path = Path(f"/etc/systemd/system/{self.service_name}.service")
         try:
             result = subprocess.run(
-                ["cat", str(service_path)],
+                ["sudo", "cat", str(service_path)],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -1021,7 +1152,7 @@ class DeploymentExecutor:
         """
         try:
             result = subprocess.run(
-                ["cat", str(service_path)],
+                ["sudo", "cat", str(service_path)],
                 capture_output=True,
                 text=True,
                 timeout=10,

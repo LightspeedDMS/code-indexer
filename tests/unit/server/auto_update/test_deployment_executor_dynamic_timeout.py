@@ -26,7 +26,10 @@ class TestDeploymentExecutorDynamicTimeout:
                 server_url="http://localhost:8000",
             )
 
-            with patch("requests.get") as mock_get:
+            with (
+                patch.object(executor, "_get_auth_token", return_value="fake-token"),
+                patch("requests.get") as mock_get,
+            ):
                 mock_response = MagicMock()
                 mock_response.status_code = 200
                 mock_response.json.return_value = {
@@ -58,7 +61,10 @@ class TestDeploymentExecutorDynamicTimeout:
                 server_url="http://localhost:8000",
             )
 
-            with patch("requests.get") as mock_get:
+            with (
+                patch.object(executor, "_get_auth_token", return_value="fake-token"),
+                patch("requests.get") as mock_get,
+            ):
                 mock_get.side_effect = requests.exceptions.ConnectionError()
 
                 timeout = executor._get_drain_timeout()
@@ -78,7 +84,10 @@ class TestDeploymentExecutorDynamicTimeout:
                 server_url="http://localhost:8000",
             )
 
-            with patch("requests.get") as mock_get:
+            with (
+                patch.object(executor, "_get_auth_token", return_value="fake-token"),
+                patch("requests.get") as mock_get,
+            ):
                 mock_response = MagicMock()
                 mock_response.status_code = 500
                 mock_get.return_value = mock_response
@@ -100,7 +109,10 @@ class TestDeploymentExecutorDynamicTimeout:
                 server_url="http://localhost:8000",
             )
 
-            with patch("requests.get") as mock_get:
+            with (
+                patch.object(executor, "_get_auth_token", return_value="fake-token"),
+                patch("requests.get") as mock_get,
+            ):
                 mock_response = MagicMock()
                 mock_response.status_code = 200
                 mock_response.json.return_value = {"invalid": "data"}
@@ -167,6 +179,7 @@ class TestDeploymentExecutorDynamicTimeout:
             with (
                 patch.object(executor, "_enter_maintenance_mode") as mock_enter,
                 patch.object(executor, "_get_drain_timeout") as mock_get_timeout,
+                patch.object(executor, "_get_auth_token", return_value="fake-token"),
                 patch("requests.get") as mock_get,
                 patch("subprocess.run") as mock_run,
             ):

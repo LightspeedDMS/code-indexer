@@ -95,7 +95,10 @@ class TestDeploymentExecutorMaintenanceMethods:
         with tempfile.TemporaryDirectory() as tmpdir:
             executor = DeploymentExecutor(repo_path=Path(tmpdir))
 
-            with patch("requests.post") as mock_post:
+            with (
+                patch.object(executor, "_get_auth_token", return_value="fake-token"),
+                patch("requests.post") as mock_post,
+            ):
                 mock_response = MagicMock()
                 mock_response.status_code = 200
                 mock_response.json.return_value = {"maintenance_mode": True}
@@ -117,7 +120,10 @@ class TestDeploymentExecutorMaintenanceMethods:
         with tempfile.TemporaryDirectory() as tmpdir:
             executor = DeploymentExecutor(repo_path=Path(tmpdir))
 
-            with patch("requests.get") as mock_get:
+            with (
+                patch.object(executor, "_get_auth_token", return_value="fake-token"),
+                patch("requests.get") as mock_get,
+            ):
                 mock_response = MagicMock()
                 mock_response.status_code = 200
                 mock_response.json.return_value = {"drained": True}
@@ -136,7 +142,10 @@ class TestDeploymentExecutorMaintenanceMethods:
         with tempfile.TemporaryDirectory() as tmpdir:
             executor = DeploymentExecutor(repo_path=Path(tmpdir))
 
-            with patch("requests.post") as mock_post:
+            with (
+                patch.object(executor, "_get_auth_token", return_value="fake-token"),
+                patch("requests.post") as mock_post,
+            ):
                 mock_response = MagicMock()
                 mock_response.status_code = 200
                 mock_response.json.return_value = {"maintenance_mode": False}
@@ -271,7 +280,10 @@ class TestDeploymentExecutorForceRestartLogging:
                 }
             ]
 
-            with patch("requests.get") as mock_get:
+            with (
+                patch.object(executor, "_get_auth_token", return_value="fake-token"),
+                patch("requests.get") as mock_get,
+            ):
                 mock_response = MagicMock()
                 mock_response.status_code = 200
                 mock_response.json.return_value = {
@@ -299,7 +311,10 @@ class TestDeploymentExecutorForceRestartLogging:
         with tempfile.TemporaryDirectory() as tmpdir:
             executor = DeploymentExecutor(repo_path=Path(tmpdir))
 
-            with patch("requests.get") as mock_get:
+            with (
+                patch.object(executor, "_get_auth_token", return_value="fake-token"),
+                patch("requests.get") as mock_get,
+            ):
                 mock_get.side_effect = requests.exceptions.ConnectionError()
 
                 result = executor._get_running_jobs_for_logging()
