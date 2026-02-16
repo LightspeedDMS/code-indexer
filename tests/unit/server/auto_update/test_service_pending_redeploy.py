@@ -150,3 +150,67 @@ class TestPollOncePendingRedeploy:
         mock_logger.info.assert_called()
         log_calls = [str(call) for call in mock_logger.info.call_args_list]
         assert any("pending" in str(call).lower() or "redeploy" in str(call).lower() for call in log_calls)
+
+    def test_pending_redeploy_marker_triggers_server_restart(self, service):
+        """Test that forced deployment via marker also calls restart_server()."""
+        mock_marker = MagicMock()
+        mock_marker.exists.return_value = True
+
+        with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
+            service.deployment_executor.execute.return_value = True
+
+            service.poll_once()
+
+        # Verify both execute() and restart_server() were called
+        service.deployment_executor.execute.assert_called_once()
+        service.deployment_executor.restart_server.assert_called_once()
+
+        # Verify final state is IDLE
+        assert service.current_state == ServiceState.IDLE
+
+    def test_pending_redeploy_marker_no_restart_on_deployment_failure(self, service):
+        """Test that restart_server() is NOT called when forced deployment fails."""
+        mock_marker = MagicMock()
+        mock_marker.exists.return_value = True
+
+        with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
+            service.deployment_executor.execute.return_value = False  # Deployment failed
+
+            service.poll_once()
+
+        # Verify execute() called but restart_server() NOT called
+        service.deployment_executor.execute.assert_called_once()
+        service.deployment_executor.restart_server.assert_not_called()
+
+        # Verify final state is IDLE
+        assert service.current_state == ServiceState.IDLE
+
+    def test_pending_redeploy_marker_state_transitions(self, service):
+        """Test proper state transitions during forced deployment."""
+        state_history = []
+
+        def record_state(new_state):
+            state_history.append(new_state)
+            service.current_state = new_state
+
+        service.transition_to = record_state
+
+        mock_marker = MagicMock()
+        mock_marker.exists.return_value = True
+
+        with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
+            service.deployment_executor.execute.return_value = True
+
+            service.poll_once()
+
+        # Verify state transitions: DEPLOYING -> RESTARTING -> IDLE
+        assert ServiceState.DEPLOYING in state_history
+        assert ServiceState.RESTARTING in state_history
+        assert ServiceState.IDLE in state_history
+
+        # Verify order
+        deploying_idx = state_history.index(ServiceState.DEPLOYING)
+        restarting_idx = state_history.index(ServiceState.RESTARTING)
+        idle_idx = state_history.index(ServiceState.IDLE)
+
+        assert deploying_idx < restarting_idx < idle_idx

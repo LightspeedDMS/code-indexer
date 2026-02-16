@@ -1935,19 +1935,6 @@ class DeploymentExecutor:
             )
             return None
 
-    def _should_retry_on_startup(self) -> bool:
-        """Check if deployment should be retried based on status file.
-
-        Returns:
-            True if status is pending_restart or failed, False otherwise
-        """
-        status_data = self._read_status_file()
-
-        if status_data is None:
-            return False
-
-        status = status_data.get("status")
-        return status in ("pending_restart", "failed")
 
     def _restart_auto_update_service(self) -> bool:
         """Restart the cidx-auto-update systemd service.
@@ -2027,6 +2014,19 @@ class DeploymentExecutor:
             self._write_status_file(
                 "pending_restart", "Auto-updater code updated, restarting service"
             )
+            # Create redeploy marker so the restarted instance continues deployment
+            # (git pull will be a no-op, but pip install + ensure steps + server restart will run)
+            try:
+                PENDING_REDEPLOY_MARKER.touch()
+                logger.info(
+                    "Created pending redeploy marker for post-restart deployment",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not create redeploy marker: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
             self._restart_auto_update_service()
             # Return True - deployment will continue after restart
             return True

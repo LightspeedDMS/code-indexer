@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.2] - 2026-02-16
+
+### Fixed
+
+- **Auto-updater self-restart doesn't restart cidx-server** - When the auto-updater detected its own code changed and self-restarted, the restarted instance found no new git changes and never called `execute()`, leaving cidx-server running old code. Fixed by creating a `PENDING_REDEPLOY_MARKER` before self-restart so the new instance forces a full deployment cycle including server restart. Also improved the forced deploy path with proper exception handling, restart validation, and marker cleanup.
+
+---
+
 ## [9.3.1] - 2026-02-16
 
 ### Fixed

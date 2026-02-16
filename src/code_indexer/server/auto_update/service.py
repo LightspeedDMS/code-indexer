@@ -97,16 +97,54 @@ class AutoUpdateService:
                 "Pending redeploy marker found, forcing deployment",
                 extra={"correlation_id": get_correlation_id()},
             )
+
             try:
-                PENDING_REDEPLOY_MARKER.unlink()
+                self.transition_to(ServiceState.DEPLOYING)
+                success = self.deployment_executor.execute()
+
+                if success:
+                    self.transition_to(ServiceState.RESTARTING)
+                    restart_ok = self.deployment_executor.restart_server()
+                    if restart_ok:
+                        logger.info(
+                            "Forced redeployment and restart completed successfully",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    else:
+                        logger.error(
+                            format_error_log(
+                                "AUTO-UPDATE-010",
+                                "Forced deployment succeeded but server restart FAILED",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
+                else:
+                    logger.error(
+                        format_error_log(
+                            "AUTO-UPDATE-011",
+                            "Forced redeployment failed",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+
             except Exception as e:
-                logger.warning(
-                    f"Could not remove marker: {e}",
+                logger.exception(
+                    f"Forced redeployment error: {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
+                self.last_error = e
 
-            # Force deployment without change detection
-            self.deployment_executor.execute()
+            finally:
+                # Always remove marker to prevent infinite retry loops
+                try:
+                    PENDING_REDEPLOY_MARKER.unlink(missing_ok=True)
+                except Exception as e:
+                    logger.warning(
+                        f"Could not remove redeploy marker: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                self.transition_to(ServiceState.IDLE)
+
             return
 
         # Skip if not in IDLE state

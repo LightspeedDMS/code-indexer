@@ -232,6 +232,46 @@ class TestAutoUpdateSelfRestartDetection:
                     call_args = mock_write.call_args[0]
                     assert call_args[0] == "pending_restart"
 
+    @patch("subprocess.run")
+    def test_self_restart_creates_redeploy_marker(self, mock_run):
+        """execute() should create PENDING_REDEPLOY_MARKER before self-restart."""
+        mock_run.return_value = Mock(returncode=0, stdout="Success")
+
+        executor = DeploymentExecutor(repo_path=Path("/tmp/test-repo"))
+
+        with patch.object(executor, "_calculate_auto_update_hash") as mock_hash:
+            mock_hash.side_effect = ["hash1", "hash2"]  # Different hashes
+
+            with patch("code_indexer.server.auto_update.deployment_executor.PENDING_REDEPLOY_MARKER") as mock_marker:
+                with patch.object(executor, "_write_status_file"):
+                    with patch.object(executor, "_restart_auto_update_service"):
+                        result = executor.execute()
+
+                        # Should create marker before restart
+                        mock_marker.touch.assert_called_once()
+                        assert result is True
+
+    @patch("subprocess.run")
+    def test_self_restart_handles_marker_creation_failure(self, mock_run):
+        """execute() should handle marker creation failure gracefully."""
+        mock_run.return_value = Mock(returncode=0, stdout="Success")
+
+        executor = DeploymentExecutor(repo_path=Path("/tmp/test-repo"))
+
+        with patch.object(executor, "_calculate_auto_update_hash") as mock_hash:
+            mock_hash.side_effect = ["hash1", "hash2"]
+
+            with patch("code_indexer.server.auto_update.deployment_executor.PENDING_REDEPLOY_MARKER") as mock_marker:
+                mock_marker.touch.side_effect = Exception("Permission denied")
+
+                with patch.object(executor, "_write_status_file"):
+                    with patch.object(executor, "_restart_auto_update_service") as mock_restart:
+                        result = executor.execute()
+
+                        # Should still restart even if marker creation fails
+                        mock_restart.assert_called_once()
+                        assert result is True
+
 
 class TestAutoUpdateServiceRestart:
     """Test _restart_auto_update_service method."""
@@ -268,62 +308,3 @@ class TestAutoUpdateServiceRestart:
         result = executor._restart_auto_update_service()
 
         assert result is False
-
-
-class TestAutoUpdateRetryOnStartup:
-    """Test _should_retry_on_startup method."""
-
-    def test_should_retry_when_status_is_pending_restart(self):
-        """_should_retry_on_startup should return True when status is pending_restart."""
-        executor = DeploymentExecutor(repo_path=Path("/tmp/test-repo"))
-
-        with patch.object(executor, "_read_status_file") as mock_read:
-            mock_read.return_value = {"status": "pending_restart"}
-
-            result = executor._should_retry_on_startup()
-
-            assert result is True
-
-    def test_should_retry_when_status_is_failed(self):
-        """_should_retry_on_startup should return True when status is failed."""
-        executor = DeploymentExecutor(repo_path=Path("/tmp/test-repo"))
-
-        with patch.object(executor, "_read_status_file") as mock_read:
-            mock_read.return_value = {"status": "failed"}
-
-            result = executor._should_retry_on_startup()
-
-            assert result is True
-
-    def test_should_not_retry_when_status_is_success(self):
-        """_should_retry_on_startup should return False when status is success."""
-        executor = DeploymentExecutor(repo_path=Path("/tmp/test-repo"))
-
-        with patch.object(executor, "_read_status_file") as mock_read:
-            mock_read.return_value = {"status": "success"}
-
-            result = executor._should_retry_on_startup()
-
-            assert result is False
-
-    def test_should_not_retry_when_no_status_file(self):
-        """_should_retry_on_startup should return False when no status file exists."""
-        executor = DeploymentExecutor(repo_path=Path("/tmp/test-repo"))
-
-        with patch.object(executor, "_read_status_file") as mock_read:
-            mock_read.return_value = None
-
-            result = executor._should_retry_on_startup()
-
-            assert result is False
-
-    def test_should_not_retry_when_status_file_corrupted(self):
-        """_should_retry_on_startup should return False when status file is corrupted."""
-        executor = DeploymentExecutor(repo_path=Path("/tmp/test-repo"))
-
-        with patch.object(executor, "_read_status_file") as mock_read:
-            mock_read.return_value = {"corrupted": "data"}  # Missing 'status' key
-
-            result = executor._should_retry_on_startup()
-
-            assert result is False
