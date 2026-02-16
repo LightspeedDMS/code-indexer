@@ -164,19 +164,8 @@
     </div>
 </div>
 
-<!-- Recent Activity Section -->
-<div style="display: flex; justify-content: space-between; align-items: center;">
-    <h2>Recent Activity</h2>
-    <!-- Story #69: Dropdown OUTSIDE refresh target to prevent disruption -->
-    <div>
-        <label for="recent-filter" style="margin-right: 0.5rem;">Time Range:</label>
-        <select id="recent-filter" onchange="updateRecentActivity()" style="padding: 0.25rem 0.5rem;">
-            <option value="24h" {{ 'selected' if recent_filter == '24h' else '' }}>Last 24 Hours</option>
-            <option value="7d" {{ 'selected' if recent_filter == '7d' else '' }}>Last 7 Days</option>
-            <option value="30d" {{ 'selected' if recent_filter == '30d' else '' }}>Last 30 Days</option>
-        </select>
-    </div>
-</div>
+<!-- Recent Activity Section (Story #201: Fixed to 24h, dropdown removed) -->
+<h2>Recent Activity</h2>
 
 <div class="recent-activity">
     {% if recent_jobs and recent_jobs|length > 0 %}
@@ -217,14 +206,6 @@ function updateJobStats() {
     const timeFilter = document.getElementById('time-filter').value;
     htmx.ajax('GET', `/admin/partials/dashboard-job-counts?time_filter=${timeFilter}`, {
         target: '#job-counts-data',
-        swap: 'innerHTML'
-    });
-}
-
-function updateRecentActivity() {
-    const recentFilter = document.getElementById('recent-filter').value;
-    htmx.ajax('GET', `/admin/partials/dashboard-recent-jobs?recent_filter=${recentFilter}`, {
-        target: '#recent-jobs-tbody',
         swap: 'innerHTML'
     });
 }

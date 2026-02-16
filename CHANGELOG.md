@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.0] - 2026-02-16
+
+### Added
+
+- **Server Restart from Diagnostics Tab (Story #205)** - Admin users can now restart the CIDX server directly from the Diagnostics tab without SSH access. Includes confirmation dialog, CSRF protection, rate limiting, and graceful delayed restart (systemd mode via systemctl, dev mode via os.execv).
+
+- **AJAX Toggle for Repository Access (Story #199)** - Grant/revoke repository access on the Groups page now uses AJAX with optimistic UI updates instead of full page reloads. Includes double-click guard, rollback on failure, and dual-mode support (AJAX + form POST fallback).
+
+- **GitHub Bug Report Integration (Story #202)** - Research Assistant handlers now pass GitHub tokens to enable automated bug report creation on GitHub. Includes 5-minute TTL caching for token retrieval.
+
+### Changed
+
+- **Recent Activity fixed to 24h (Story #201)** - Dashboard Recent Activity section now uses a fixed 24-hour window instead of a configurable dropdown, simplifying the UI and matching the most common use case.
+
+---
+
 ## [9.2.1] - 2026-02-15
 
 ### Changed

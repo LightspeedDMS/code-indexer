@@ -50,7 +50,6 @@ function refreshAll() {
     // Preserve current filter selections during auto-refresh
     // Use optional chaining because elements may not exist on first page load
     const timeFilter = document.getElementById('time-filter')?.value || '24h';
-    const recentFilter = document.getElementById('recent-filter')?.value || '24h';
     const apiFilter = document.getElementById('api-filter')?.value || '60';
 
     // Story #69: Granular refresh targets - dropdowns stay untouched
@@ -59,7 +58,8 @@ function refreshAll() {
         swap: 'innerHTML'
     });
 
-    htmx.ajax('GET', `/admin/partials/dashboard-recent-jobs?recent_filter=${recentFilter}`, {
+    // Story #201: Recent Activity hardcoded to 24h (no dropdown)
+    htmx.ajax('GET', '/admin/partials/dashboard-recent-jobs?recent_filter=24h', {
         target: '#recent-jobs-tbody',
         swap: 'innerHTML'
     });

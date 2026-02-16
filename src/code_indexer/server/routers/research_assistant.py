@@ -7,6 +7,8 @@ Provides admin endpoints for the Research Assistant chatbot interface.
 """
 
 import logging
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -22,6 +24,51 @@ from code_indexer.server.services.research_assistant_service import (
 from code_indexer.server.web.jinja_filters import relative_time
 
 logger = logging.getLogger(__name__)
+
+# Module-level cache for GitHub token (Story #202 optimization)
+_github_token_cache: Optional[str] = None
+_github_token_cache_time: float = 0
+_GITHUB_TOKEN_CACHE_TTL = 300  # 5 minutes
+
+
+# Helper function to retrieve GitHub token for RA sessions (Story #202)
+def _get_github_token() -> Optional[str]:
+    """
+    Retrieve GitHub token from CITokenManager for RA sessions.
+
+    Uses module-level cache with 5-minute TTL to avoid recreating
+    CITokenManager on every request.
+    """
+    global _github_token_cache, _github_token_cache_time
+
+    # Check cache validity
+    current_time = time.time()
+    if _github_token_cache is not None and (current_time - _github_token_cache_time) < _GITHUB_TOKEN_CACHE_TTL:
+        return _github_token_cache
+
+    # Cache miss or expired - fetch from CITokenManager
+    try:
+        from code_indexer.server.services.ci_token_manager import CITokenManager
+        server_data_dir = os.environ.get(
+            "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
+        )
+        db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")
+        token_manager = CITokenManager(
+            server_dir_path=server_data_dir,
+            use_sqlite=True,
+            db_path=db_path,
+        )
+        token_data = token_manager.get_token("github")
+        token = token_data.token if token_data else None
+
+        # Update cache
+        _github_token_cache = token
+        _github_token_cache_time = current_time
+
+        return token
+    except Exception as e:
+        logger.debug("Failed to retrieve GitHub token: %s", e)
+        return None
 
 
 # Helper function for server time in templates (Story #89)
@@ -66,7 +113,7 @@ async def get_research_assistant_page(
     Returns:
         HTML response with research assistant page
     """
-    service = ResearchAssistantService()
+    service = ResearchAssistantService(github_token=_get_github_token())
 
     # Get all sessions (Story #143 AC1)
     sessions = service.get_all_sessions()
@@ -114,7 +161,7 @@ async def send_message(
     Returns:
         Partial HTML with new user message and polling trigger
     """
-    service = ResearchAssistantService()
+    service = ResearchAssistantService(github_token=_get_github_token())
 
     # Use provided session_id or fall back to default
     if session_id:
@@ -173,7 +220,7 @@ async def poll_job(
     Returns:
         Partial HTML with status or final messages when complete
     """
-    service = ResearchAssistantService()
+    service = ResearchAssistantService(github_token=_get_github_token())
     status = service.poll_job(job_id, session_id=session_id)
 
     # Get session_id from job status (falls back to param if not in response)
@@ -237,7 +284,7 @@ async def create_session(
     Returns:
         Partial HTML with updated session list
     """
-    service = ResearchAssistantService()
+    service = ResearchAssistantService(github_token=_get_github_token())
     new_session = service.create_session()
 
     # Get all sessions for rendering
@@ -272,7 +319,7 @@ async def rename_session(
     Returns:
         Partial HTML with updated session list or error
     """
-    service = ResearchAssistantService()
+    service = ResearchAssistantService(github_token=_get_github_token())
     success = service.rename_session(session_id, new_name)
 
     if not success:
@@ -323,7 +370,7 @@ async def delete_session(
     Returns:
         Partial HTML with updated session list (and OOB swap for chat if active session deleted)
     """
-    service = ResearchAssistantService()
+    service = ResearchAssistantService(github_token=_get_github_token())
     success = service.delete_session(session_id)
 
     if not success:
@@ -404,7 +451,7 @@ async def load_session(
     Returns:
         Partial HTML with session's messages
     """
-    service = ResearchAssistantService()
+    service = ResearchAssistantService(github_token=_get_github_token())
     session = service.get_session(session_id)
 
     if not session:
@@ -455,7 +502,7 @@ async def upload_file(
     Returns:
         JSON with success/error/filename/size/uploaded_at
     """
-    service = ResearchAssistantService()
+    service = ResearchAssistantService(github_token=_get_github_token())
     result = service.upload_file(session_id, file)
 
     if result["success"]:
@@ -479,7 +526,7 @@ async def list_files(
     Returns:
         JSON array of file metadata
     """
-    service = ResearchAssistantService()
+    service = ResearchAssistantService(github_token=_get_github_token())
     files = service.list_files(session_id)
 
     return JSONResponse(content={"files": files}, status_code=200)
@@ -508,7 +555,7 @@ async def delete_file(
             content={"success": False, "error": "Invalid filename"}, status_code=400
         )
 
-    service = ResearchAssistantService()
+    service = ResearchAssistantService(github_token=_get_github_token())
     success = service.delete_file(session_id, filename)
 
     if success:
@@ -542,7 +589,7 @@ async def download_file(
             content={"success": False, "error": "Invalid filename"}, status_code=400
         )
 
-    service = ResearchAssistantService()
+    service = ResearchAssistantService(github_token=_get_github_token())
     file_path = service.get_file_path(session_id, filename)
 
     if file_path is None:

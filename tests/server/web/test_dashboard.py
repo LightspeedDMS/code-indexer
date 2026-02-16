@@ -276,6 +276,100 @@ class TestRecentActivity:
 
 
 # =============================================================================
+# Story #201: Recent Activity No Dropdown Tests
+# =============================================================================
+
+
+class TestRecentActivityNoDropdown:
+    """Tests for Story #201: Remove Recent Activity time range dropdown."""
+
+    def test_no_recent_filter_dropdown(self, authenticated_client: TestClient):
+        """
+        Story #201 AC1: No time range dropdown in Recent Activity section.
+
+        Given I am on the dashboard
+        When I view the Recent Activity section
+        Then I do NOT see a time range dropdown with id="recent-filter"
+        """
+        response = authenticated_client.get("/admin/")
+
+        assert response.status_code == 200
+        # Should NOT have recent-filter dropdown
+        assert (
+            'id="recent-filter"' not in response.text
+        ), "Recent Activity should not have a time range dropdown"
+
+    def test_recent_activity_plain_header(self, authenticated_client: TestClient):
+        """
+        Story #201 AC1: Recent Activity section shows plain header without dropdown.
+
+        Given I am on the dashboard
+        When I view the Recent Activity section
+        Then I see "Recent Activity" header without any filter controls
+        """
+        response = authenticated_client.get("/admin/")
+
+        assert response.status_code == 200
+        assert "Recent Activity" in response.text
+        # Should NOT have the dropdown structure
+        assert 'id="recent-filter"' not in response.text
+
+    def test_recent_jobs_defaults_to_24h(self, authenticated_client: TestClient):
+        """
+        Story #201 AC2: Recent Activity shows last 24 hours of data by default.
+
+        Given I am on the dashboard
+        When the page loads
+        Then Recent Activity displays jobs from the last 24 hours
+        """
+        # The partial endpoint should default to 24h
+        response = authenticated_client.get("/admin/partials/dashboard-recent-jobs")
+
+        assert response.status_code == 200
+        # Should succeed (implicit 24h default)
+
+    def test_no_update_recent_activity_function(self, authenticated_client: TestClient):
+        """
+        Story #201 AC3: updateRecentActivity() JS function removed.
+
+        Given I am on the dashboard
+        When I view the page source
+        Then I do NOT see updateRecentActivity() function
+        """
+        response = authenticated_client.get("/admin/")
+
+        assert response.status_code == 200
+        assert (
+            "updateRecentActivity" not in response.text
+        ), "updateRecentActivity() function should be removed"
+
+    def test_other_dropdowns_still_exist(self, authenticated_client: TestClient):
+        """
+        Story #201 AC4: Other dashboard dropdowns (Job Stats, API Activity) still function.
+
+        Given I am on the dashboard
+        When I view the page
+        Then I see time-filter dropdown (Job Statistics)
+        And I see api-filter dropdown (API Activity)
+        """
+        response = authenticated_client.get("/admin/")
+
+        assert response.status_code == 200
+        # Job Statistics dropdown should still exist
+        assert (
+            'id="time-filter"' in response.text
+        ), "Job Statistics time filter dropdown should still exist"
+        # API Activity dropdown should still exist
+        assert (
+            'id="api-filter"' in response.text
+        ), "API Activity time filter dropdown should still exist"
+        # Recent Activity dropdown should NOT exist
+        assert (
+            'id="recent-filter"' not in response.text
+        ), "Recent Activity dropdown should be removed"
+
+
+# =============================================================================
 # Partial Refresh Endpoint Tests
 # =============================================================================
 

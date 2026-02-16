@@ -11,6 +11,10 @@ import logging
 import os
 import secrets
 import sqlite3
+import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 from urllib.parse import quote
@@ -25,6 +29,7 @@ from ..auth import dependencies
 from .auth import (
     get_session_manager,
     SessionData,
+    require_admin_session,
 )
 from ..services.ci_token_manager import CITokenManager, TokenValidationError
 from ..services.config_service import get_config_service
@@ -350,7 +355,7 @@ def dashboard_health_partial(request: Request):
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     dashboard_service = _get_dashboard_service()
     # System metrics are always real-time (AC3)
@@ -380,7 +385,7 @@ def dashboard_health_partial(request: Request):
 def dashboard_stats_partial(
     request: Request,
     time_filter: str = "24h",
-    recent_filter: str = "30d",
+    recent_filter: str = "24h",
     api_filter: int = 60,
 ):
     """
@@ -400,7 +405,7 @@ def dashboard_stats_partial(
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     dashboard_service = _get_dashboard_service()
     # Story #712 AC6: Pass user_role to prevent activated repos count flash
@@ -447,7 +452,7 @@ def dashboard_job_counts_partial(
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     dashboard_service = _get_dashboard_service()
     stats_data = dashboard_service.get_stats_partial(
@@ -471,7 +476,7 @@ def dashboard_job_counts_partial(
 @web_router.get("/partials/dashboard-recent-jobs", response_class=HTMLResponse)
 def dashboard_recent_jobs_partial(
     request: Request,
-    recent_filter: str = "30d",
+    recent_filter: str = "24h",
 ):
     """
     Story #69: Granular partial endpoint for recent jobs table body ONLY.
@@ -487,7 +492,7 @@ def dashboard_recent_jobs_partial(
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     dashboard_service = _get_dashboard_service()
     stats_data = dashboard_service.get_stats_partial(
@@ -528,7 +533,7 @@ def dashboard_api_metrics_partial(
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     dashboard_service = _get_dashboard_service()
     stats_data = dashboard_service.get_stats_partial(
@@ -563,7 +568,7 @@ def dashboard_langfuse_partial(request: Request):
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     dashboard_service = _get_dashboard_service()
     langfuse_data = dashboard_service.get_langfuse_metrics()
@@ -736,7 +741,7 @@ def create_user(
     """Create a new user."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -819,7 +824,7 @@ def update_user_role(
     """Update a user's role."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -870,7 +875,7 @@ def change_user_password(
     """Change a user's password (admin only)."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -919,7 +924,7 @@ def update_user_email(
     """Update a user's email (admin only). Empty string clears the email."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -959,7 +964,7 @@ async def delete_user(
     """Delete a user."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -1027,7 +1032,7 @@ def users_list_partial(request: Request):
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Reuse existing CSRF token from cookie instead of generating new one
     csrf_token = get_csrf_token_from_cookie(request)
@@ -1247,7 +1252,7 @@ def create_group(
     """Create a new custom group."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     if not validate_login_csrf_token(request, csrf_token):
         return _create_groups_page_response(
@@ -1284,7 +1289,7 @@ def update_group(
     """Update a custom group's name and/or description."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     if not validate_login_csrf_token(request, csrf_token):
         return _create_groups_page_response(
@@ -1338,7 +1343,7 @@ def delete_group(
     """Delete a custom group."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     if not validate_login_csrf_token(request, csrf_token):
         return _create_groups_page_response(
@@ -1387,7 +1392,7 @@ def assign_user_to_group(
     """Assign a user to a different group."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     if not validate_login_csrf_token(request, csrf_token):
         return _create_groups_page_response(
@@ -1440,7 +1445,7 @@ def groups_list_partial(request: Request):
     """Partial refresh endpoint for groups list section."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
     groups_data = _get_groups_data()
@@ -1458,7 +1463,7 @@ def groups_users_list_partial(request: Request):
     """Partial refresh endpoint for users group assignments section."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
     group_manager = _get_group_manager()
@@ -1520,7 +1525,7 @@ def groups_audit_logs_partial(
     """Partial refresh endpoint for audit logs section with filtering."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     group_manager = _get_group_manager()
     audit_logs, total_count = group_manager.get_audit_logs(
@@ -1546,7 +1551,7 @@ def groups_repo_access_partial(request: Request):
     """Partial refresh endpoint for repository access section."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
     group_manager = _get_group_manager()
@@ -1590,23 +1595,117 @@ def groups_repo_access_partial(request: Request):
     return response
 
 
-@web_router.post("/groups/repo-access/grant", response_class=HTMLResponse)
-def grant_repo_access(
+# Story #199: Helper functions for AJAX/form dual-mode repo access endpoints
+async def _parse_repo_access_request(
     request: Request,
-    repo_name: str = Form(...),
-    group_id: int = Form(...),
+    is_ajax: bool,
+    form_repo_name: Optional[str],
+    form_group_id: Optional[int],
+) -> Tuple[Optional[str], Optional[int], Optional[str]]:
+    """Parse repo_name and group_id from AJAX JSON or form data.
+
+    Returns:
+        Tuple of (repo_name, group_id, error_message). Error message is None on success.
+    """
+    if is_ajax:
+        try:
+            body = await request.json()
+            repo_name = body.get("repo_name")
+            group_id = body.get("group_id")
+            return repo_name, group_id, None
+        except (json.JSONDecodeError, ValueError):
+            return None, None, "Invalid JSON body"
+    else:
+        return form_repo_name, form_group_id, None
+
+
+def _validate_repo_access_csrf(
+    request: Request,
+    is_ajax: bool,
+    form_csrf_token: Optional[str],
+) -> Tuple[bool, Optional[str]]:
+    """Validate CSRF token from header (AJAX) or form body.
+
+    Returns:
+        Tuple of (is_valid, error_message). Error message is None if valid.
+    """
+    cookie_token = get_csrf_token_from_cookie(request)
+
+    if is_ajax:
+        csrf_token = request.headers.get("X-CSRF-Token")
+    else:
+        csrf_token = form_csrf_token
+
+    if not cookie_token or cookie_token != csrf_token:
+        return False, "Invalid CSRF token"
+
+    return True, None
+
+
+def _repo_access_error_response(
+    is_ajax: bool,
+    request: Request,
+    session: SessionData,
+    error_msg: str,
+    status_code: int = 400,
+):
+    """Return appropriate error response based on request type."""
+    if is_ajax:
+        return JSONResponse(
+            {"success": False, "error": error_msg},
+            status_code=status_code
+        )
+    return _create_groups_page_response(
+        request, session, active_tab="repos", error_message=error_msg
+    )
+
+
+def _repo_access_success_response(
+    is_ajax: bool,
+    request: Request,
+    session: SessionData,
+    success_message: str,
+):
+    """Return appropriate success response based on request type."""
+    if is_ajax:
+        return JSONResponse({"success": True})
+    return _create_groups_page_response(
+        request, session, active_tab="repos", success_message=success_message
+    )
+
+
+@web_router.post("/groups/repo-access/grant")
+async def grant_repo_access(
+    request: Request,
+    repo_name: Optional[str] = Form(None),
+    group_id: Optional[int] = Form(None),
     csrf_token: Optional[str] = Form(None),
 ):
-    """Grant repository access to a group."""
+    """Grant repository access to a group.
+
+    Supports both AJAX (JSON) and form POST requests (Story #199).
+    """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
+
+    is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
 
     # Validate CSRF
-    cookie_token = get_csrf_token_from_cookie(request)
-    if not cookie_token or cookie_token != csrf_token:
-        return _create_groups_page_response(
-            request, session, active_tab="repos", error_message="Invalid CSRF token"
+    is_valid, error_msg = _validate_repo_access_csrf(request, is_ajax, csrf_token)
+    if not is_valid:
+        return _repo_access_error_response(is_ajax, request, session, error_msg, 403)
+
+    # Parse request
+    repo_name, group_id, error_msg = await _parse_repo_access_request(
+        request, is_ajax, repo_name, group_id
+    )
+    if error_msg:
+        return _repo_access_error_response(is_ajax, request, session, error_msg, 400)
+
+    if not repo_name or group_id is None:
+        return _repo_access_error_response(
+            is_ajax, request, session, "Missing required parameters: repo_name and group_id", 400
         )
 
     group_manager = _get_group_manager()
@@ -1614,9 +1713,7 @@ def grant_repo_access(
     try:
         group = group_manager.get_group(group_id)
         if not group:
-            return _create_groups_page_response(
-                request, session, active_tab="repos", error_message="Group not found"
-            )
+            return _repo_access_error_response(is_ajax, request, session, "Group not found", 404)
 
         success = group_manager.grant_repo_access(
             repo_name=repo_name,
@@ -1625,7 +1722,6 @@ def grant_repo_access(
         )
 
         if success:
-            # Log audit
             group_manager.log_audit(
                 admin_id=session.username,
                 action_type="repo_access_grant",
@@ -1633,45 +1729,57 @@ def grant_repo_access(
                 target_id=repo_name,
                 details=f"Granted access to group '{group.name}'",
             )
-            return _create_groups_page_response(
-                request,
-                session,
-                active_tab="repos",
-                success_message=f"Granted '{repo_name}' access to '{group.name}'",
-            )
-        else:
-            return _create_groups_page_response(
-                request,
-                session,
-                active_tab="repos",
-                success_message=f"'{group.name}' already has access to '{repo_name}'",
-            )
+
+        message = (
+            f"Granted '{repo_name}' access to '{group.name}'" if success
+            else f"'{group.name}' already has access to '{repo_name}'"
+        )
+        return _repo_access_success_response(is_ajax, request, session, message)
+
     except Exception as e:
         logger.error(
             format_error_log("SCIP-GENERAL-042", "Failed to grant repo access: %s", e)
         )
-        return _create_groups_page_response(
-            request, session, active_tab="repos", error_message=str(e)
-        )
+        return _repo_access_error_response(is_ajax, request, session, str(e), 500)
 
 
-@web_router.post("/groups/repo-access/revoke", response_class=HTMLResponse)
-def revoke_repo_access(
+@web_router.post("/groups/repo-access/revoke")
+async def revoke_repo_access(
     request: Request,
-    repo_name: str = Form(...),
-    group_id: int = Form(...),
+    repo_name: Optional[str] = Form(None),
+    group_id: Optional[int] = Form(None),
     csrf_token: Optional[str] = Form(None),
 ):
-    """Revoke repository access from a group."""
+    """Revoke repository access from a group.
+
+    Supports both AJAX (JSON) and form POST requests (Story #199).
+    """
+    # H1 fix: Import exception class before try block (not inside it)
+    from code_indexer.server.services.group_access_manager import (
+        CidxMetaCannotBeRevokedError,
+    )
+
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
+
+    is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
 
     # Validate CSRF
-    cookie_token = get_csrf_token_from_cookie(request)
-    if not cookie_token or cookie_token != csrf_token:
-        return _create_groups_page_response(
-            request, session, active_tab="repos", error_message="Invalid CSRF token"
+    is_valid, error_msg = _validate_repo_access_csrf(request, is_ajax, csrf_token)
+    if not is_valid:
+        return _repo_access_error_response(is_ajax, request, session, error_msg, 403)
+
+    # Parse request
+    repo_name, group_id, error_msg = await _parse_repo_access_request(
+        request, is_ajax, repo_name, group_id
+    )
+    if error_msg:
+        return _repo_access_error_response(is_ajax, request, session, error_msg, 400)
+
+    if not repo_name or group_id is None:
+        return _repo_access_error_response(
+            is_ajax, request, session, "Missing required parameters: repo_name and group_id", 400
         )
 
     group_manager = _get_group_manager()
@@ -1679,13 +1787,7 @@ def revoke_repo_access(
     try:
         group = group_manager.get_group(group_id)
         if not group:
-            return _create_groups_page_response(
-                request, session, active_tab="repos", error_message="Group not found"
-            )
-
-        from code_indexer.server.services.group_access_manager import (
-            CidxMetaCannotBeRevokedError,
-        )
+            return _repo_access_error_response(is_ajax, request, session, "Group not found", 404)
 
         success = group_manager.revoke_repo_access(
             repo_name=repo_name,
@@ -1693,7 +1795,6 @@ def revoke_repo_access(
         )
 
         if success:
-            # Log audit
             group_manager.log_audit(
                 admin_id=session.username,
                 action_type="repo_access_revoke",
@@ -1701,33 +1802,22 @@ def revoke_repo_access(
                 target_id=repo_name,
                 details=f"Revoked access from group '{group.name}'",
             )
-            return _create_groups_page_response(
-                request,
-                session,
-                active_tab="repos",
-                success_message=f"Revoked '{repo_name}' access from '{group.name}'",
-            )
-        else:
-            return _create_groups_page_response(
-                request,
-                session,
-                active_tab="repos",
-                success_message=f"'{group.name}' did not have access to '{repo_name}'",
-            )
+
+        message = (
+            f"Revoked '{repo_name}' access from '{group.name}'" if success
+            else f"'{group.name}' did not have access to '{repo_name}'"
+        )
+        return _repo_access_success_response(is_ajax, request, session, message)
+
     except CidxMetaCannotBeRevokedError:
-        return _create_groups_page_response(
-            request,
-            session,
-            active_tab="repos",
-            error_message="cidx-meta access cannot be revoked",
+        return _repo_access_error_response(
+            is_ajax, request, session, "cidx-meta access cannot be revoked", 400
         )
     except Exception as e:
         logger.error(
             format_error_log("SCIP-GENERAL-043", "Failed to revoke repo access: %s", e)
         )
-        return _create_groups_page_response(
-            request, session, active_tab="repos", error_message=str(e)
-        )
+        return _repo_access_error_response(is_ajax, request, session, str(e), 500)
 
 
 def _get_golden_repo_manager():
@@ -2136,7 +2226,7 @@ def add_golden_repo(
     """Add a new golden repository."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -2243,7 +2333,7 @@ def delete_golden_repo(
     """Delete a golden repository."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -2281,7 +2371,7 @@ def refresh_golden_repo(
     """Refresh (re-index) a golden repository."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -2321,7 +2411,7 @@ def activate_golden_repo(
     """Activate a golden repository for a user."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -2428,7 +2518,7 @@ def golden_repos_list_partial(request: Request):
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Reuse existing CSRF token from cookie instead of generating new one
     csrf_token = get_csrf_token_from_cookie(request)
@@ -2756,7 +2846,7 @@ def repos_list_partial(
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Reuse existing CSRF token from cookie instead of generating new one
     csrf_token = get_csrf_token_from_cookie(request)
@@ -2860,7 +2950,7 @@ def deactivate_repo(
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -3138,7 +3228,7 @@ def jobs_list_partial(
     """Partial endpoint for jobs list - used by htmx for dynamic updates."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Reuse existing CSRF token from cookie instead of generating new one
     csrf_token = get_csrf_token_from_cookie(request)
@@ -3187,7 +3277,7 @@ def cancel_job(
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Get job manager
     job_manager = _get_background_job_manager()
@@ -3440,7 +3530,7 @@ def query_submit(
     """Process query form submission."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -3918,7 +4008,7 @@ def query_results_partial(request: Request):
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     csrf_token = generate_csrf_token()
 
@@ -4178,7 +4268,7 @@ def query_results_partial_post(
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Note: csrf_token parameter is accepted but not validated for HTMX partials
     # See docstring above for security rationale
@@ -5818,7 +5908,7 @@ def gitlab_repos_partial(
     """HTMX partial for GitLab repository discovery."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     from ..services.repository_providers.gitlab_provider import GitLabProviderError
 
@@ -5881,7 +5971,7 @@ def github_repos_partial(
     """HTMX partial for GitHub repository discovery."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     from ..services.repository_providers.github_provider import GitHubProviderError
 
@@ -6085,7 +6175,7 @@ async def update_claude_delegation_config(
 
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     if not validate_login_csrf_token(request, csrf_token):
         return _create_config_page_response(
@@ -6163,7 +6253,7 @@ def reset_config(
 
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -6212,7 +6302,7 @@ async def update_langfuse_pull_config(
 
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     if not validate_login_csrf_token(request, csrf_token):
         return _create_config_page_response(
@@ -6286,7 +6376,7 @@ async def update_config_section(
 
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -6448,7 +6538,7 @@ def reset_config(
 
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -6497,7 +6587,7 @@ def config_section_partial(
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Reuse existing CSRF token from cookie instead of generating new one
     csrf_token = get_csrf_token_from_cookie(request)
@@ -6765,7 +6855,7 @@ def update_file_content_limits(
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -7250,7 +7340,7 @@ def create_ssh_key(
     """Create a new SSH key."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -7307,7 +7397,7 @@ def delete_ssh_key(
     """Delete an SSH key."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -7347,7 +7437,7 @@ def assign_host_to_key(
     """Assign a host to an SSH key."""
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
@@ -7482,7 +7572,7 @@ def logs_list_partial(
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Reuse existing CSRF token from cookie
     csrf_token = get_csrf_token_from_cookie(request)
@@ -7555,7 +7645,7 @@ def export_logs_web(
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     # Validate format parameter
     if format not in ["json", "csv"]:
@@ -8234,7 +8324,7 @@ async def save_self_monitoring_config(
     """
     session = _require_admin_session(request)
     if not session:
-        return _create_login_redirect(request)
+        return HTMLResponse(content="", status_code=401)
 
     config_service = get_config_service()
     config = config_service.get_config()
@@ -8511,6 +8601,157 @@ def redirect_user_login(redirect_to: Optional[str] = None):
 
 # Create API router for public API endpoints (no auth required)
 api_router = APIRouter()
+
+
+# Rate limiting for restart endpoint (Code Review Issue #6)
+_restart_in_progress = False
+_restart_lock = threading.Lock()
+
+
+def _delayed_restart(delay: int = 2) -> None:
+    """
+    Execute server restart after a delay.
+
+    Story #205: Server Restart from Diagnostics Tab
+
+    This function sleeps for the specified delay to allow the HTTP response
+    to complete, then restarts the server using the appropriate method:
+    - Systemd mode: Uses systemctl restart cidx-server
+    - Dev mode: Uses os.execv to re-exec the current process
+
+    Args:
+        delay: Seconds to wait before restarting (default: 2)
+    """
+    global _restart_in_progress
+
+    # Sleep to allow HTTP response to complete
+    time.sleep(delay)
+
+    # Log before restarting
+    logger.info("Executing server restart now")
+
+    # Detect if running under systemd
+    is_systemd = os.environ.get("INVOCATION_ID") is not None
+
+    if is_systemd:
+        # Systemd mode: use systemctl restart (Code Review Issue #3)
+        logger.info("Restarting via systemctl (systemd mode)")
+        result = subprocess.run(
+            ["systemctl", "restart", "cidx-server"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            logger.error(
+                "systemctl restart failed (rc=%d): %s",
+                result.returncode,
+                result.stderr
+            )
+            # Reset flag on failure (Code Review Finding #1)
+            with _restart_lock:
+                _restart_in_progress = False
+    else:
+        # Dev mode: re-exec the current process (Code Review Issue #4)
+        logger.info("Restarting via os.execv (dev mode)")
+        try:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except OSError as e:
+            logger.error("os.execv failed: %s", e)
+            # Reset flag on failure (Code Review Finding #1)
+            with _restart_lock:
+                _restart_in_progress = False
+
+
+def _schedule_delayed_restart(delay: int = 2) -> None:
+    """
+    Schedule a delayed restart on a background daemon thread.
+
+    Story #205: Server Restart from Diagnostics Tab
+
+    Creates a daemon thread that will execute the restart after a delay.
+    The daemon thread ensures the restart doesn't block the HTTP response.
+
+    Args:
+        delay: Seconds to wait before restarting (default: 2)
+    """
+    restart_thread = threading.Thread(
+        target=_delayed_restart,
+        args=(delay,),
+        daemon=True
+    )
+    restart_thread.start()
+
+
+@web_router.post("/restart", response_class=JSONResponse)
+def restart_server(request: Request) -> JSONResponse:
+    """
+    Restart the CIDX server (admin only).
+
+    Story #205: Server Restart from Diagnostics Tab
+
+    This endpoint allows admin users to restart the CIDX server from the
+    Diagnostics tab without requiring SSH access. The restart is delayed
+    by 2 seconds to allow the HTTP 202 response to complete.
+
+    Authentication:
+        Requires admin session (checked via _require_admin_session)
+
+    Security:
+        Requires valid CSRF token in X-CSRF-Token header
+
+    Rate Limiting:
+        Only one restart can be in progress at a time (returns 409 if concurrent)
+
+    Returns:
+        202 Accepted with message about restart in progress
+        409 Conflict if restart already in progress
+
+    Raises:
+        HTTPException 403: If user is not admin or CSRF token is invalid
+    """
+    global _restart_in_progress
+
+    # Check for admin session
+    session = _require_admin_session(request)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
+
+    # Validate CSRF token (Code Review Issues #1 and #2)
+    csrf_from_header = request.headers.get("X-CSRF-Token")
+    if not validate_login_csrf_token(request, csrf_from_header):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid CSRF token"
+        )
+
+    # Rate limiting: Check if restart already in progress (Code Review Issue #6)
+    with _restart_lock:
+        if _restart_in_progress:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "message": "Restart already in progress"
+                }
+            )
+        _restart_in_progress = True
+
+    # Log restart request with username
+    username = session.username
+    logger.info(f"Server restart requested by {username}")
+
+    # Schedule delayed restart on background thread
+    _schedule_delayed_restart(delay=2)
+
+    # Return 202 Accepted immediately
+    return JSONResponse(
+        status_code=202,
+        content={
+            "message": "Server is restarting in 2 seconds..."
+        }
+    )
 
 
 @api_router.get("/server-time")

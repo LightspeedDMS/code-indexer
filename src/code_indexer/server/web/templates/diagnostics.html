@@ -3,6 +3,9 @@
 {% block title %}Diagnostics - CIDX Admin{% endblock %}
 
 {% block content %}
+<!-- Hidden CSRF token for JavaScript access (Story #205) -->
+<div id="csrf-data" data-csrf-token="{{ csrf_token }}" style="display:none;"></div>
+
 <div class="diagnostics-header">
     <h1>Diagnostics</h1>
     <div class="diagnostics-actions">
@@ -18,6 +21,21 @@
 </div>
 
 <p>Run comprehensive diagnostic checks across five categories to verify system health and configuration.</p>
+
+<!-- Story #205: Server Restart Button -->
+<div class="restart-section" style="margin-bottom: 2rem;">
+    <button
+        id="restart-server-btn"
+        class="restart-button"
+        onclick="restartServer()"
+    >
+        Restart Server
+    </button>
+    <p style="color: var(--muted-color); font-size: 0.875rem; margin-top: 0.5rem;">
+        Restart the CIDX server process. Use this after configuration changes that require a restart.
+    </p>
+    <div id="restart-status" style="margin-top: 0.5rem;"></div>
+</div>
 
 <!-- Diagnostics Results Section with HTMX Polling -->
 <section id="diagnostics-results" class="diagnostics-section">
@@ -124,6 +142,21 @@
 </section>
 
 <style>
+/* Story #205: Restart button styles (Code Review Issue #10) */
+.restart-button {
+    background-color: #d32f2f;
+    color: white;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    border-radius: 0.25rem;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.restart-button:hover {
+    background-color: #b71c1c;
+}
+
 .diagnostics-header {
     display: flex;
     justify-content: space-between;
@@ -285,4 +318,67 @@
     content: "ℹ";
 }
 </style>
+
+<script>
+// Story #205: Server Restart from Diagnostics Tab
+function restartServer() {
+    // Show confirmation dialog (AC2)
+    if (!window.confirm("Are you sure you want to restart the server? This will temporarily interrupt service.")) {
+        return; // User cancelled
+    }
+
+    // Get CSRF token from data attribute
+    const csrfData = document.getElementById('csrf-data');
+    const csrfToken = csrfData ? csrfData.getAttribute('data-csrf-token') : '';
+
+    // Disable restart button
+    const restartBtn = document.getElementById('restart-server-btn');
+    const statusDiv = document.getElementById('restart-status');
+    restartBtn.disabled = true;
+    restartBtn.textContent = 'Restarting...';
+
+    // Call POST /admin/restart
+    fetch('/admin/restart', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': csrfToken
+        }
+    })
+    .then(response => {
+        if (response.status === 202) {
+            return response.json();
+        } else if (response.status === 403) {
+            throw new Error('Insufficient permissions. Admin access required.');
+        } else {
+            throw new Error('Failed to restart server. Status: ' + response.status);
+        }
+    })
+    .then(data => {
+        // Show success message (AC1) - Code Review Issue #5: Use textContent to prevent XSS
+        const successMsg = document.createElement('p');
+        successMsg.style.color = '#4caf50';
+        successMsg.style.fontWeight = '600';
+        successMsg.textContent = data.message + ' Page will reload shortly.';
+        statusDiv.innerHTML = '';
+        statusDiv.appendChild(successMsg);
+
+        // Reload page after 5 seconds (AC1)
+        setTimeout(function() {
+            window.location.reload();
+        }, 5000);
+    })
+    .catch(error => {
+        // Show error message - Code Review Issue #5: Use textContent to prevent XSS
+        const errorMsg = document.createElement('p');
+        errorMsg.style.color = '#d32f2f';
+        errorMsg.style.fontWeight = '600';
+        errorMsg.textContent = 'Error: ' + error.message;
+        statusDiv.innerHTML = '';
+        statusDiv.appendChild(errorMsg);
+        restartBtn.disabled = false;
+        restartBtn.textContent = 'Restart Server';
+    });
+}
+</script>
 {% endblock %}

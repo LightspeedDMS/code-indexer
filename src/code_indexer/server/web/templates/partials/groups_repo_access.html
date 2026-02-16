@@ -28,23 +28,23 @@
                 {% else %}
                 {% set has_access = repo.name in repo_access_map.get(group.id, []) %}
                 {% if has_access %}
-                <form method="post" action="/admin/groups/repo-access/revoke" class="inline-form">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                    <input type="hidden" name="repo_name" value="{{ repo.name }}">
-                    <input type="hidden" name="group_id" value="{{ group.id }}">
-                    <button type="submit" class="access-btn access-granted" title="Click to revoke access">
-                        Yes
-                    </button>
-                </form>
+                <button class="access-btn access-granted"
+                        data-repo="{{ repo.name }}"
+                        data-group="{{ group.id }}"
+                        data-state="granted"
+                        onclick="toggleAccess(this)"
+                        title="Click to revoke access">
+                    Yes
+                </button>
                 {% else %}
-                <form method="post" action="/admin/groups/repo-access/grant" class="inline-form">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                    <input type="hidden" name="repo_name" value="{{ repo.name }}">
-                    <input type="hidden" name="group_id" value="{{ group.id }}">
-                    <button type="submit" class="access-btn access-denied" title="Click to grant access">
-                        No
-                    </button>
-                </form>
+                <button class="access-btn access-denied"
+                        data-repo="{{ repo.name }}"
+                        data-group="{{ group.id }}"
+                        data-state="denied"
+                        onclick="toggleAccess(this)"
+                        title="Click to grant access">
+                    No
+                </button>
                 {% endif %}
                 {% endif %}
             </td>
@@ -127,12 +127,6 @@
 .access-btn.access-denied:hover {
     background-color: rgba(122, 45, 45, 0.1);
     border-color: #7a2d2d;
-}
-
-.inline-form {
-    display: inline;
-    margin: 0;
-    padding: 0;
 }
 
 .badge {

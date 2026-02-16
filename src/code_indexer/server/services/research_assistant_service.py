@@ -88,12 +88,13 @@ class ResearchAssistantService:
     _jobs: Dict[str, Dict[str, Any]] = {}
     _jobs_lock = threading.Lock()
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: Optional[str] = None, github_token: Optional[str] = None):
         """
         Initialize ResearchAssistantService.
 
         Args:
             db_path: Path to SQLite database. If None, uses default location.
+            github_token: GitHub token for bug report creation (Story #202). If None, no token is set.
         """
         if db_path is not None:
             self.db_path = db_path
@@ -102,6 +103,9 @@ class ResearchAssistantService:
                 "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
             )
             self.db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")
+
+        # Store GitHub token for subprocess environment (Story #202 AC3)
+        self._github_token = github_token
 
     def _detect_repo_root(self) -> Optional[str]:
         """
@@ -743,6 +747,17 @@ class ResearchAssistantService:
                     "CIDX_REPO_ROOT not set and could not auto-detect repo root"
                 )
 
+        # Create symlink to issue_manager.py for GitHub bug report creation (Story #202 AC4)
+        issue_manager_source = Path.home() / ".claude" / "scripts" / "utils" / "issue_manager.py"
+        issue_manager_link = folder / "issue_manager.py"
+
+        if not issue_manager_link.exists():
+            if issue_manager_source.exists():
+                issue_manager_link.symlink_to(issue_manager_source)
+                logger.info(f"Created issue_manager.py symlink: {issue_manager_link} -> {issue_manager_source}")
+            else:
+                logger.warning(f"issue_manager.py not found at {issue_manager_source}, skipping symlink")
+
     def add_message(self, session_id: str, role: str, content: str) -> Dict[str, Any]:
         """
         Add a message to a research session (AC6).
@@ -971,6 +986,12 @@ class ResearchAssistantService:
             # Get the stored Claude session ID from database
             claude_session_id = self._get_or_create_claude_session_id(session_id)
 
+            # Prepare environment with GitHub token if available (Story #202 AC3)
+            env = os.environ.copy()
+            if self._github_token:
+                env["GITHUB_TOKEN"] = self._github_token
+                env["GH_TOKEN"] = self._github_token
+
             # Build base command
             base_cmd = ["claude", "--dangerously-skip-permissions", "--model", analysis_model]
 
@@ -984,6 +1005,7 @@ class ResearchAssistantService:
                     capture_output=True,
                     text=True,
                     timeout=timeout_seconds,
+                    env=env,
                 )
             else:
                 # Subsequent message - try resume first
@@ -994,6 +1016,7 @@ class ResearchAssistantService:
                     capture_output=True,
                     text=True,
                     timeout=timeout_seconds,
+                    env=env,
                 )
 
                 # If resume failed due to missing session, retry with --session-id
@@ -1011,6 +1034,7 @@ class ResearchAssistantService:
                         capture_output=True,
                         text=True,
                         timeout=timeout_seconds,
+                        env=env,
                     )
 
             if result.returncode == 0:

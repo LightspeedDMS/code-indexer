@@ -27,6 +27,11 @@ from code_indexer.server.services.diagnostics_service import (
     DiagnosticCategory,
     DiagnosticsService,
 )
+from code_indexer.server.web.routes import (
+    get_csrf_token_from_cookie,
+    generate_csrf_token,
+    set_csrf_cookie,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +84,14 @@ async def get_diagnostics_page(
         status = diagnostics_service.get_status()
         is_running = diagnostics_service.is_running()
 
-        return templates.TemplateResponse(
+        # Get CSRF token from session cookie, or generate new if none exists (Story #205, Code Review Issues #1 and #2)
+        csrf_token = get_csrf_token_from_cookie(request)
+        new_token_generated = False
+        if not csrf_token:
+            csrf_token = generate_csrf_token()
+            new_token_generated = True
+
+        response = templates.TemplateResponse(
             request=request,
             name="diagnostics.html",
             context={
@@ -89,8 +101,15 @@ async def get_diagnostics_page(
                 "status": status,
                 "is_running": is_running,
                 "categories": DiagnosticCategory,
+                "csrf_token": csrf_token,
             },
         )
+
+        # Set CSRF cookie if we generated a new token (Code Review Finding #2)
+        if new_token_generated:
+            set_csrf_cookie(response, csrf_token)
+
+        return response
     except Exception as e:
         logger.error(f"Error rendering diagnostics page: {e}")
         raise HTTPException(status_code=500, detail="Failed to render diagnostics page")

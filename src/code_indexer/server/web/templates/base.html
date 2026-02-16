@@ -8,6 +8,22 @@
     <link rel="stylesheet" href="/admin/static/pico.min.css">
     <link rel="stylesheet" href="/admin/static/admin.css">
     <script src="/admin/static/htmx.min.js"></script>
+    <script>
+        // Bug #206: Redirect to login on session expiry instead of injecting 401 HTML into dashboard
+        document.addEventListener('htmx:beforeSwap', function(evt) {
+            var xhr = evt.detail.xhr;
+            if (xhr.status === 401 ||
+                (xhr.responseURL && xhr.responseURL.indexOf('/login') !== -1)) {
+                evt.detail.shouldSwap = false;
+                if (!window._cidxRedirecting) {
+                    window._cidxRedirecting = true;
+                    window.location.href = '/login';
+                    // Reset flag after timeout to prevent permanent blocking
+                    setTimeout(function() { window._cidxRedirecting = false; }, 3000);
+                }
+            }
+        });
+    </script>
     <script src="/admin/static/js/server_clock.js" defer></script>
 </head>
 <body>

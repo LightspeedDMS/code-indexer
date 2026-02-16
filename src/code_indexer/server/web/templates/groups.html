@@ -3,6 +3,9 @@
 {% block title %}Groups - CIDX Admin{% endblock %}
 
 {% block content %}
+<!-- Hidden CSRF token for JavaScript access (C1 fix: httponly cookies cannot be read by JS) -->
+<div id="csrf-data" data-csrf-token="{{ csrf_token }}" style="display:none;"></div>
+
 <div class="groups-header">
     <h1>Group Management</h1>
 </div>
@@ -458,6 +461,78 @@ function clearAuditFilters() {
     document.getElementById('audit_action_type').value = '';
 
     htmx.ajax('GET', '/admin/partials/groups-audit-logs', {target: '#audit-logs-section', swap: 'innerHTML'});
+}
+
+// Story #199: In-place toggle for group-repo access grid
+async function toggleAccess(button) {
+    // M1 fix: Prevent double-click race condition - disable FIRST
+    if (button.disabled) return;
+    button.disabled = true;
+
+    const repo = button.dataset.repo;
+    const group = button.dataset.group;
+    const currentState = button.dataset.state;
+    const newState = currentState === 'granted' ? 'denied' : 'granted';
+
+    // Save original state for rollback
+    const origText = button.textContent;
+    const origClass = button.className;
+    const origState = button.dataset.state;
+    const origTitle = button.title;
+
+    // Optimistic UI update
+    button.dataset.state = newState;
+    button.textContent = newState === 'granted' ? 'Yes' : 'No';
+    button.className = newState === 'granted' ? 'access-btn access-granted' : 'access-btn access-denied';
+    button.title = newState === 'granted' ? 'Click to revoke access' : 'Click to grant access';
+
+    const action = newState === 'granted' ? 'grant' : 'revoke';
+    // C1 fix: Read CSRF token from data attribute (not httponly cookie)
+    const csrfToken = document.getElementById('csrf-data').dataset.csrfToken;
+
+    // M3 fix: parseInt with radix parameter and NaN guard
+    const groupId = parseInt(group, 10);
+    if (isNaN(groupId)) {
+        console.error('Invalid group ID:', group);
+        button.disabled = false;
+        return;
+    }
+
+    try {
+        const response = await fetch(`/admin/groups/repo-access/${action}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-CSRF-Token': csrfToken
+            },
+            body: JSON.stringify({ repo_name: repo, group_id: groupId })
+        });
+
+        if (!response.ok) {
+            // M2 fix: Check content-type before parsing JSON
+            const contentType = response.headers.get('content-type') || '';
+            if (contentType.includes('application/json')) {
+                const data = await response.json();
+                throw new Error(data.error || 'Server error');
+            }
+            throw new Error(`Server error (${response.status})`);
+        }
+    } catch (err) {
+        // Rollback on error
+        button.dataset.state = origState;
+        button.textContent = origText;
+        button.className = origClass;
+        button.title = origTitle;
+
+        // Show brief error feedback
+        button.style.outline = '2px solid red';
+        setTimeout(() => { button.style.outline = ''; }, 2000);
+
+        console.error('Toggle access failed:', err);
+    } finally {
+        button.disabled = false;
+    }
 }
 </script>
 {% endblock %}

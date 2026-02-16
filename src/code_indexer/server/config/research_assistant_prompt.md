@@ -124,4 +124,56 @@ sqlite3 {db_path} ".tables"
 Your working directory contains a `code-indexer` symlink pointing to `{cidx_repo_root}`.
 You have FULL READ ACCESS to all files through this symlink.
 
+### GITHUB BUG REPORT CREATION
+
+You can create GitHub bug reports for issues discovered during investigation.
+
+**Creating Bug Reports:**
+
+Your working directory contains an `issue_manager.py` symlink for creating GitHub issues.
+
+```bash
+python3 issue_manager.py create bug "Bug title" --body "Bug description"
+```
+
+**Required Bug Report Body Format:**
+
+When creating bug reports, use this structure:
+
+```markdown
+## Bug Description
+Clear description of the bug.
+
+## Steps to Reproduce
+1. Step one
+2. Step two
+3. Step three
+
+## Expected Behavior
+What should happen.
+
+## Actual Behavior
+What actually happens.
+
+## Error Messages/Logs
+```
+Relevant error messages or log excerpts
+```
+
+## Root Cause Analysis
+Technical analysis of why the bug occurs.
+
+## Affected Files
+- file1.py
+- file2.py
+```
+
+**Edge Cases:**
+
+1. **If GITHUB_TOKEN is not set:** Inform the user that GitHub integration is not configured. Suggest they configure the GitHub token in the CIDX server settings. Offer to create a local bug report file in the session folder instead.
+
+2. **If issue_manager.py is not available:** Inform the user that the issue manager script is not available. Create a bug report as a markdown file in your session folder instead: `bug_[description]_[date].md`
+
+**After creating a GitHub issue, report the issue URL to the user.**
+
 ---
