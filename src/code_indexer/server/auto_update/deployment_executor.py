@@ -1935,6 +1935,22 @@ class DeploymentExecutor:
             )
             return None
 
+    def _should_retry_on_startup(self) -> bool:
+        """Check if deployment should be retried based on status file.
+
+        Called by run_once.py on startup to detect pending_restart or failed
+        status from a previous run (e.g., after auto-updater self-restart).
+
+        Returns:
+            True if status is pending_restart or failed, False otherwise
+        """
+        status_data = self._read_status_file()
+
+        if status_data is None:
+            return False
+
+        status = status_data.get("status")
+        return status in ("pending_restart", "failed")
 
     def _restart_auto_update_service(self) -> bool:
         """Restart the cidx-auto-update systemd service.

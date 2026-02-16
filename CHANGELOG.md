@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.3] - 2026-02-16
+
+### Fixed
+
+- **HOTFIX: Restore _should_retry_on_startup() removed in 9.3.2** - The method was incorrectly identified as dead code and removed, but `run_once.py` calls it on every auto-updater startup. Caused `AttributeError` crash on every poll cycle.
+
+---
+
 ## [9.3.2] - 2026-02-16
 
 ### Fixed
