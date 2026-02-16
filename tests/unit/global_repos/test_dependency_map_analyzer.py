@@ -3010,3 +3010,508 @@ class TestIteration15InsideOutAndConciseness:
 
             # Verify character budget mentioned in hook messages
             assert "3,000" in bash_script or "3000" in bash_script or "10,000" in bash_script or "10000" in bash_script
+
+
+class TestIteration16CrossDomainGraph:
+    """Test Iteration 16: Cross-domain dependency graph in Pass 3."""
+
+    def test_extract_cross_domain_section_basic(self):
+        """Test standard heading extraction from domain file."""
+        content = """# Domain Analysis: test-domain
+
+## Overview
+Domain overview here.
+
+## Cross-Domain Connections
+
+This domain connects to **other-domain** via repo1 and repo2.
+
+## Dependencies
+More content."""
+
+        result = DependencyMapAnalyzer._extract_cross_domain_section(content)
+
+        assert "This domain connects to" in result
+        assert "repo1 and repo2" in result
+        assert "## Dependencies" not in result  # Should stop at next heading
+        assert "## Overview" not in result
+
+    def test_extract_cross_domain_section_missing(self):
+        """Test returns empty string when no Cross-Domain heading."""
+        content = """# Domain Analysis: test-domain
+
+## Overview
+No cross-domain section here.
+
+## Dependencies
+Some deps."""
+
+        result = DependencyMapAnalyzer._extract_cross_domain_section(content)
+        assert result == ""
+
+    def test_extract_cross_domain_section_last_section(self):
+        """Test section extraction when Cross-Domain is the last section (no following ##)."""
+        content = """# Domain Analysis: test-domain
+
+## Overview
+Overview content.
+
+## Cross-Domain Connections
+
+This is the last section with cross-domain info.
+No more headings after this."""
+
+        result = DependencyMapAnalyzer._extract_cross_domain_section(content)
+
+        assert "This is the last section" in result
+        assert "No more headings after this" in result
+
+    def test_extract_cross_domain_section_variant_heading(self):
+        """Test works with 'Cross-Domain' heading without 'Connections'."""
+        content = """# Domain Analysis: test-domain
+
+## Overview
+Overview.
+
+## Cross-Domain
+
+Content with variant heading.
+
+## Other Section
+Should not be included."""
+
+        result = DependencyMapAnalyzer._extract_cross_domain_section(content)
+
+        assert "Content with variant heading" in result
+        assert "Should not be included" not in result
+
+    def test_build_cross_domain_graph_detects_edges(self, tmp_path):
+        """Test that edges are detected from repo mentions in Cross-Domain sections."""
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        # Create domain files with cross-domain connections
+        domain_a = staging_dir / "domain-a.md"
+        domain_a.write_text("""---
+domain: domain-a
+---
+
+# Domain Analysis: domain-a
+
+## Cross-Domain Connections
+
+This domain uses **repo-b-alpha** and **repo-b-beta** from domain-b.
+""")
+
+        domain_b = staging_dir / "domain-b.md"
+        domain_b.write_text("""---
+domain: domain-b
+---
+
+# Domain Analysis: domain-b
+
+## Cross-Domain Connections
+
+Connects back to **repo-a-one** in domain-a.
+""")
+
+        domain_list = [
+            {"name": "domain-a", "participating_repos": ["repo-a-one"]},
+            {"name": "domain-b", "participating_repos": ["repo-b-alpha", "repo-b-beta"]},
+        ]
+
+        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+
+        assert "## Cross-Domain Dependency Graph" in graph_section
+        assert "domain-a" in graph_section
+        assert "domain-b" in graph_section
+        assert "repo-b-alpha" in graph_section or "repo-b-beta" in graph_section
+        assert "repo-a-one" in graph_section
+
+    def test_build_cross_domain_graph_no_self_edges(self, tmp_path):
+        """Test that mentioning own repos does not create self-edges."""
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain_a = staging_dir / "domain-a.md"
+        domain_a.write_text("""---
+domain: domain-a
+---
+
+# Domain Analysis: domain-a
+
+## Cross-Domain Connections
+
+Within domain-a, **repo-a-one** calls **repo-a-two**.
+No external connections.
+""")
+
+        domain_list = [
+            {"name": "domain-a", "participating_repos": ["repo-a-one", "repo-a-two"]},
+        ]
+
+        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+
+        # Should return empty string (no cross-domain edges)
+        assert graph_section == ""
+
+    def test_build_cross_domain_graph_empty_for_standalone(self, tmp_path):
+        """Test no output for isolated domains with no cross-domain connections."""
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain_a = staging_dir / "domain-a.md"
+        domain_a.write_text("""---
+domain: domain-a
+---
+
+# Domain Analysis: domain-a
+
+## Overview
+Standalone domain.
+""")
+
+        domain_b = staging_dir / "domain-b.md"
+        domain_b.write_text("""---
+domain: domain-b
+---
+
+# Domain Analysis: domain-b
+
+## Overview
+Another standalone domain.
+""")
+
+        domain_list = [
+            {"name": "domain-a", "participating_repos": ["repo-a"]},
+            {"name": "domain-b", "participating_repos": ["repo-b"]},
+        ]
+
+        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+
+        # No edges, should return empty string
+        assert graph_section == ""
+
+    def test_build_cross_domain_graph_word_boundary(self, tmp_path):
+        """Test that short aliases like 'db' don't match 'adobe'."""
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain_a = staging_dir / "domain-a.md"
+        domain_a.write_text("""---
+domain: domain-a
+---
+
+# Domain Analysis: domain-a
+
+## Cross-Domain Connections
+
+We use adobe for graphics processing.
+""")
+
+        domain_list = [
+            {"name": "domain-a", "participating_repos": ["repo-a"]},
+            {"name": "domain-b", "participating_repos": ["db"]},
+        ]
+
+        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+
+        # "db" should NOT match "adobe", so no edges
+        assert graph_section == ""
+
+    def test_build_cross_domain_graph_bidirectional(self, tmp_path):
+        """Test that A→B and B→A edges are both detected."""
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        domain_a = staging_dir / "domain-a.md"
+        domain_a.write_text("""---
+domain: domain-a
+---
+
+# Domain Analysis: domain-a
+
+## Cross-Domain Connections
+
+Depends on **repo-b** from domain-b.
+""")
+
+        domain_b = staging_dir / "domain-b.md"
+        domain_b.write_text("""---
+domain: domain-b
+---
+
+# Domain Analysis: domain-b
+
+## Cross-Domain Connections
+
+Calls **repo-a** in domain-a.
+""")
+
+        domain_list = [
+            {"name": "domain-a", "participating_repos": ["repo-a"]},
+            {"name": "domain-b", "participating_repos": ["repo-b"]},
+        ]
+
+        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+
+        # Should have both edges
+        assert "domain-a" in graph_section
+        assert "domain-b" in graph_section
+        # Should have table with both directions
+        lines = graph_section.split("\n")
+        table_rows = [l for l in lines if l.startswith("| ") and "Source Domain" not in l and "---|" not in l]
+        assert len(table_rows) == 2, f"Expected 2 table rows for bidirectional edges, got {len(table_rows)}"
+
+    def test_build_cross_domain_graph_summary(self, tmp_path):
+        """Test that summary shows correct edge count and standalone list."""
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        # Domain A → B
+        domain_a = staging_dir / "domain-a.md"
+        domain_a.write_text("""---
+domain: domain-a
+---
+
+# Domain Analysis: domain-a
+
+## Cross-Domain Connections
+
+Uses **repo-b** from domain-b.
+""")
+
+        # Domain B (no cross-domain connections)
+        domain_b = staging_dir / "domain-b.md"
+        domain_b.write_text("""---
+domain: domain-b
+---
+
+# Domain Analysis: domain-b
+
+## Overview
+No cross-domain connections.
+""")
+
+        # Domain C (standalone, no file)
+        # Domain D → A
+        domain_d = staging_dir / "domain-d.md"
+        domain_d.write_text("""---
+domain: domain-d
+---
+
+# Domain Analysis: domain-d
+
+## Cross-Domain Connections
+
+Integrates with **repo-a** from domain-a.
+""")
+
+        domain_list = [
+            {"name": "domain-a", "participating_repos": ["repo-a"]},
+            {"name": "domain-b", "participating_repos": ["repo-b"]},
+            {"name": "domain-c", "participating_repos": ["repo-c"]},
+            {"name": "domain-d", "participating_repos": ["repo-d"]},
+        ]
+
+        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+
+        # Should have summary at the end
+        assert "**Summary**" in graph_section or "Summary:" in graph_section
+        assert "2 cross-domain edges" in graph_section or "2 edges" in graph_section
+        # Standalone domains: domain-b and domain-c (A and D have edges)
+        assert "domain-b" in graph_section
+        assert "domain-c" in graph_section
+
+    def test_build_cross_domain_graph_missing_file(self, tmp_path):
+        """Test graceful skip when domain file is missing."""
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        # Only create domain-a file, domain-b file is missing
+        domain_a = staging_dir / "domain-a.md"
+        domain_a.write_text("""---
+domain: domain-a
+---
+
+# Domain Analysis: domain-a
+
+## Cross-Domain Connections
+
+Uses **repo-b** from domain-b.
+""")
+
+        domain_list = [
+            {"name": "domain-a", "participating_repos": ["repo-a"]},
+            {"name": "domain-b", "participating_repos": ["repo-b"]},
+        ]
+
+        # Should not raise exception
+        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+
+        # May have partial edge from domain-a, or empty if logic requires both files
+        # At minimum, should not crash
+        assert isinstance(graph_section, str)
+
+    def test_cross_domain_graph_appended_to_index(self, tmp_path):
+        """Test that graph section appears in _index.md after Pass 3."""
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        # Create domain files with cross-domain connections
+        domain_a = staging_dir / "domain-a.md"
+        domain_a.write_text("""---
+domain: domain-a
+---
+
+# Domain Analysis: domain-a
+
+## Cross-Domain Connections
+
+Connects to **repo-b** from domain-b.
+""")
+
+        domain_b = staging_dir / "domain-b.md"
+        domain_b.write_text("""---
+domain: domain-b
+---
+
+# Domain Analysis: domain-b
+
+## Cross-Domain Connections
+
+Uses **repo-a** from domain-a.
+""")
+
+        domain_list = [
+            {"name": "domain-a", "participating_repos": ["repo-a"]},
+            {"name": "domain-b", "participating_repos": ["repo-b"]},
+        ]
+
+        repo_list = [
+            {"alias": "repo-a", "description_summary": "Repo A"},
+            {"alias": "repo-b", "description_summary": "Repo B"},
+        ]
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        with patch.object(analyzer, "_invoke_claude_cli") as mock_invoke:
+            mock_invoke.return_value = "# Index Content\n\nGenerated index."
+
+            analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=10)
+
+        # Check that _index.md contains cross-domain graph section
+        index_file = staging_dir / "_index.md"
+        assert index_file.exists()
+        content = index_file.read_text()
+
+        assert "## Cross-Domain Dependency Graph" in content
+        assert "domain-a" in content
+        assert "domain-b" in content
+
+    def test_cross_domain_graph_not_appended_when_no_edges(self, tmp_path):
+        """Test no graph section when no edges exist."""
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        # Create domain files with NO cross-domain connections
+        domain_a = staging_dir / "domain-a.md"
+        domain_a.write_text("""---
+domain: domain-a
+---
+
+# Domain Analysis: domain-a
+
+## Overview
+Standalone domain.
+""")
+
+        domain_list = [
+            {"name": "domain-a", "participating_repos": ["repo-a"]},
+        ]
+
+        repo_list = [
+            {"alias": "repo-a", "description_summary": "Repo A"},
+        ]
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+
+        with patch.object(analyzer, "_invoke_claude_cli") as mock_invoke:
+            mock_invoke.return_value = "# Index Content\n\nGenerated index."
+
+            analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=10)
+
+        index_file = staging_dir / "_index.md"
+        content = index_file.read_text()
+
+        # Should NOT contain cross-domain graph section
+        assert "## Cross-Domain Dependency Graph" not in content
+
+    def test_build_cross_domain_graph_deterministic(self, tmp_path):
+        """Test same input produces same output, alphabetical sort."""
+        staging_dir = tmp_path / "staging"
+        staging_dir.mkdir()
+
+        # Create domain files
+        domain_c = staging_dir / "domain-c.md"
+        domain_c.write_text("""# Domain Analysis: domain-c
+
+## Cross-Domain Connections
+
+Uses **repo-a** from domain-a.
+""")
+
+        domain_a = staging_dir / "domain-a.md"
+        domain_a.write_text("""# Domain Analysis: domain-a
+
+## Cross-Domain Connections
+
+Calls **repo-b** from domain-b.
+""")
+
+        domain_b = staging_dir / "domain-b.md"
+        domain_b.write_text("""# Domain Analysis: domain-b
+
+## Cross-Domain Connections
+
+Depends on **repo-c** from domain-c.
+""")
+
+        # Domain list in arbitrary order
+        domain_list = [
+            {"name": "domain-b", "participating_repos": ["repo-b"]},
+            {"name": "domain-a", "participating_repos": ["repo-a"]},
+            {"name": "domain-c", "participating_repos": ["repo-c"]},
+        ]
+
+        # Build graph twice
+        result1 = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        result2 = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+
+        # Should be identical
+        assert result1 == result2
+
+        # Extract table rows and verify alphabetical order
+        lines = result1.split("\n")
+        table_rows = [l for l in lines if l.startswith("| ") and "Source Domain" not in l and "---|" not in l]
+
+        # Should have 3 edges (a→b, b→c, c→a)
+        assert len(table_rows) == 3
+
+        # Extract source domains from table rows
+        sources = []
+        for row in table_rows:
+            parts = [p.strip() for p in row.split("|") if p.strip()]
+            if parts:
+                sources.append(parts[0])
+
+        # Verify alphabetical order
+        assert sources == sorted(sources), f"Sources not alphabetically sorted: {sources}"

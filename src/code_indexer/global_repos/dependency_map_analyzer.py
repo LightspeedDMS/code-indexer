@@ -889,6 +889,9 @@ class DependencyMapAnalyzer:
         # Strip meta-commentary from output (Fix 3: same as Pass 2)
         result = self._strip_meta_commentary(result)
 
+        # Build cross-domain graph (Iteration 16)
+        graph_section = self._build_cross_domain_graph(staging_dir, domain_list)
+
         # Build YAML frontmatter
         now = datetime.now(timezone.utc).isoformat()
         frontmatter = "---\n"
@@ -902,10 +905,151 @@ class DependencyMapAnalyzer:
             frontmatter += f"  - {alias}\n"
         frontmatter += "---\n\n"
 
-        # Write index file
+        # Write index file (with graph section appended if edges exist)
         index_file = staging_dir / "_index.md"
-        index_file.write_text(frontmatter + result)
+        index_file.write_text(frontmatter + result + graph_section)
         logger.info(f"Pass 3 complete: wrote {index_file}")
+
+    @staticmethod
+    def _extract_cross_domain_section(content: str) -> str:
+        """
+        Extract Cross-Domain section from domain markdown file.
+
+        Finds the ## Cross-Domain heading (with or without "Connections")
+        and returns all text until the next ## heading or EOF.
+
+        Args:
+            content: Domain markdown file content
+
+        Returns:
+            Cross-Domain section text, or empty string if not found
+        """
+        if not content:
+            return ""
+
+        lines = content.split("\n")
+
+        # Find ## Cross-Domain heading (case-insensitive, flexible wording)
+        heading_pattern = re.compile(r'^##\s+Cross[- ]Domain\b', re.IGNORECASE)
+
+        start_idx = None
+        for i, line in enumerate(lines):
+            if heading_pattern.match(line.strip()):
+                start_idx = i + 1  # Start collecting from next line
+                break
+
+        if start_idx is None:
+            return ""
+
+        # Collect lines until next ## heading or EOF
+        result_lines = []
+        for i in range(start_idx, len(lines)):
+            line = lines[i]
+            # Stop at next level-2 heading
+            if line.strip().startswith("## "):
+                break
+            result_lines.append(line)
+
+        return "\n".join(result_lines)
+
+    @staticmethod
+    def _build_cross_domain_graph(staging_dir: Path, domain_list: List[Dict]) -> str:
+        """
+        Build cross-domain dependency graph from domain files.
+
+        Parses each domain's Cross-Domain section, detects repo name mentions,
+        and builds a directed graph showing which domains connect to which.
+
+        Args:
+            staging_dir: Directory containing domain .md files
+            domain_list: List of domain dicts with 'name' and 'participating_repos'
+
+        Returns:
+            Markdown section with cross-domain graph table and summary,
+            or empty string if no cross-domain edges found
+        """
+        # Build reverse mapping: repo alias → domain name
+        repo_to_domain = {}
+        for domain in domain_list:
+            domain_name = domain["name"]
+            for repo in domain.get("participating_repos", []):
+                repo_to_domain[repo] = domain_name
+
+        # Track edges: (source_domain, target_domain) → set of via_repos
+        edges = {}
+
+        # Process each domain file
+        for domain in domain_list:
+            domain_name = domain["name"]
+            domain_file = staging_dir / f"{domain_name}.md"
+
+            # Skip if file doesn't exist
+            if not domain_file.exists():
+                continue
+
+            # Read and extract Cross-Domain section
+            content = domain_file.read_text()
+            cross_domain_text = DependencyMapAnalyzer._extract_cross_domain_section(content)
+
+            if not cross_domain_text:
+                continue
+
+            # Check for mentions of OTHER domains' repos (word-boundary match)
+            for target_domain_dict in domain_list:
+                target_domain = target_domain_dict["name"]
+
+                # Don't create self-edges
+                if target_domain == domain_name:
+                    continue
+
+                # Check each repo in target domain
+                for repo_alias in target_domain_dict.get("participating_repos", []):
+                    # Word-boundary regex to avoid false positives (e.g., "db" in "adobe")
+                    pattern = r'(?<![a-zA-Z0-9_-])' + re.escape(repo_alias) + r'(?![a-zA-Z0-9_-])'
+
+                    if re.search(pattern, cross_domain_text):
+                        # Found edge: source_domain → target_domain via repo_alias
+                        edge_key = (domain_name, target_domain)
+                        if edge_key not in edges:
+                            edges[edge_key] = set()
+                        edges[edge_key].add(repo_alias)
+
+        # Return empty string if no edges
+        if not edges:
+            return ""
+
+        # Sort edges alphabetically by (source, target)
+        sorted_edges = sorted(edges.items(), key=lambda x: (x[0][0], x[0][1]))
+
+        # Build markdown table
+        output = "\n\n## Cross-Domain Dependency Graph\n\n"
+        output += "Directed connections between domains (source mentions target's repos in its Cross-Domain Connections section).\n\n"
+        output += "| Source Domain | Target Domain | Via Repos |\n"
+        output += "|---|---|---|\n"
+
+        for (source, target), via_repos in sorted_edges:
+            via_repos_str = ", ".join(sorted(via_repos))
+            output += f"| {source} | {target} | {via_repos_str} |\n"
+
+        # Calculate summary
+        edge_count = len(sorted_edges)
+        total_domains = len(domain_list)
+
+        # Determine standalone domains (domains with no outgoing OR incoming edges)
+        domains_with_edges = set()
+        for (source, target), _ in sorted_edges:
+            domains_with_edges.add(source)
+            domains_with_edges.add(target)
+
+        all_domain_names = {d["name"] for d in domain_list}
+        standalone_domains = sorted(all_domain_names - domains_with_edges)
+
+        output += f"\n**Summary**: {edge_count} cross-domain edges across {total_domains} domains."
+        if standalone_domains:
+            standalone_str = ", ".join(standalone_domains)
+            output += f" {len(standalone_domains)} standalone domains: {standalone_str}."
+
+        return output
 
     @staticmethod
     def _strip_code_fences(text: str) -> str:
