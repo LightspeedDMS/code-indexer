@@ -74,7 +74,9 @@ class TestIsInstalled:
     def test_returns_false_on_timeout(self, installer):
         """Test returns False when command times out."""
         with patch("shutil.which", return_value=None):
-            with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("rg", 10)):
+            with patch(
+                "subprocess.run", side_effect=subprocess.TimeoutExpired("rg", 10)
+            ):
                 result = installer.is_installed()
 
         assert result is False
@@ -100,6 +102,33 @@ class TestIsInstalled:
         mock_run.assert_called_once_with(
             ["rg", "--version"], capture_output=True, text=True, timeout=10
         )
+
+    def test_detects_via_install_path(self, installer, tmp_path):
+        """Test detects ripgrep via install path when not in PATH or shutil.which."""
+        # Create a fake rg binary at the install path
+        install_path = installer.get_install_path()
+        install_path.parent.mkdir(parents=True, exist_ok=True)
+        install_path.write_text("fake rg binary")
+        install_path.chmod(0o755)  # Make executable
+
+        with patch("shutil.which", return_value=None):
+            with patch("subprocess.run", side_effect=FileNotFoundError()):
+                result = installer.is_installed()
+
+        assert result is True
+
+    def test_skips_non_executable_install_path(self, installer, tmp_path):
+        """Test returns False when install path exists but is not executable."""
+        install_path = installer.get_install_path()
+        install_path.parent.mkdir(parents=True, exist_ok=True)
+        install_path.write_text("fake rg binary")
+        install_path.chmod(0o644)  # NOT executable
+
+        with patch("shutil.which", return_value=None):
+            with patch("subprocess.run", side_effect=FileNotFoundError()):
+                result = installer.is_installed()
+
+        assert result is False
 
 
 class TestGetInstallPath:
@@ -141,7 +170,7 @@ class TestSafeExtractTar:
 
         # Should not raise exception
         installer._safe_extract_tar(mock_tar, str(dest_path))
-        mock_tar.extractall.assert_called_once_with(str(dest_path), filter='data')
+        mock_tar.extractall.assert_called_once_with(str(dest_path), filter="data")
 
     def test_blocks_absolute_path_traversal(self, installer, tmp_path):
         """Test blocks path traversal using absolute paths."""
