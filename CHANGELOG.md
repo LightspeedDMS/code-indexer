@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.13] - 2026-02-16
+
+### Improved
+
+- **MCP discovery documentation for cidx-meta-global (#210)** - Expanded tool descriptions and handler responses so MCP clients understand what cidx-meta-global is, how to interpret its search results (file_path-to-alias mapping), and what to do when it is unavailable. Changes across 5 files:
+  - `cidx_quick_reference.md` - Expanded from 6 lines to comprehensive discovery workflow documentation
+  - `handlers.py` quick_reference - Added `discovery` section with meta_repo, workflow, result_mapping, and fallback fields
+  - `handlers.py` first_time_user_guide - Inserted step 3 "Discover which repository has your topic", renumbered to 9 steps, added cidx-meta-global fallback error
+  - `search_code.md` - Expanded MANDATORY REPOSITORY DISCOVERY from 4 to 6 steps with result interpretation guidance
+  - `list_global_repos.md` - Added ABOUT cidx-meta-global paragraph explaining it is a synthetic discovery repository
+
+---
+
 ## [9.3.12] - 2026-02-16
 
 ### Changed

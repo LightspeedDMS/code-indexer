@@ -76,10 +76,24 @@ outputSchema:
 
 Quick reference card for CIDX tools with decision guidance. Returns dynamic content based on optional category filter.
 
-CRITICAL: If you don't know which repo to search, search cidx-meta-global FIRST.
+REPOSITORY DISCOVERY (cidx-meta-global):
+cidx-meta-global is a synthetic repository that contains AI-generated markdown descriptions of every other repository registered on this server. Each file in cidx-meta-global is named after a repository (e.g., 'auth-service.md' describes the auth-service-global repository). It also contains a dependency-map/ subdirectory with cross-repository architectural analysis organized by domain.
+
+WHEN TO USE: Before searching for code when you don't know which repository contains the topic. Skip only when the user explicitly names a repository.
+
+DISCOVERY WORKFLOW:
+1. search_code(query_text='your topic', repository_alias='cidx-meta-global', limit=5) -- find relevant repos
+2. Results will have file_path like 'auth-service.md' or 'dependency-map/authentication.md'
+3. For repo description files: strip '.md' from file_path and append '-global' to get the repository alias (e.g., 'auth-service.md' -> 'auth-service-global')
+4. For dependency-map files: read the content to find which repos participate in that domain
+5. search_code(query_text='your topic', repository_alias='auth-service-global', limit=10) -- search the identified repo
+
+IF cidx-meta-global IS NOT AVAILABLE: Fall back to list_global_repos() to see all repos, then search the most likely candidates.
 
 CATEGORIES: search, scip, git_exploration, git_operations, files, repo_management, golden_repos, system, user_management, ssh_keys, meta, tracing
 
 MULTI-REPO: Pass array to repository_alias. aggregation_mode='global' for best matches, 'per_repo' for balanced representation. limit=10 with 3 repos returns 10 TOTAL (not 30).
+
+SEARCH MODE: 'authentication logic' (concept) -> semantic | 'def authenticate_user' (exact) -> fts | unsure -> hybrid
 
 EXAMPLE: cidx_quick_reference(category='search') for search-specific guidance.

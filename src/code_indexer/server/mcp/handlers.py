@@ -5827,6 +5827,19 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             "total_tools": len(tools_summary),
             "category_filter": category_filter,
             "tools": tools_summary,
+            "discovery": {
+                "meta_repo": "cidx-meta-global",
+                "what_it_contains": "Synthetic repository of AI-generated markdown descriptions, one .md file per registered repository, plus dependency-map/ for cross-repo relationships.",
+                "workflow": [
+                    "1. list_global_repos() - see all available repositories",
+                    "2. search_code('your topic', repository_alias='cidx-meta-global') - find which repo covers it",
+                    "3. Interpret results: file_path='auth-service.md' means search 'auth-service-global' next",
+                    "4. search_code('your topic', repository_alias='auth-service-global') - get actual code",
+                    "5. dependency-map/ results show cross-repo relationships, not code locations",
+                ],
+                "result_mapping": "Strip .md extension from file_path, append '-global' to get repository alias. Example: 'backend.md' -> 'backend-global'.",
+                "fallback": "If cidx-meta-global not found: use list_global_repos() to see all repos, then search with repository_alias='*-global' or search individual repos.",
+            },
         }
 
         # Story #194: Add dependency map section when available (prominent positioning)
@@ -7052,41 +7065,48 @@ def first_time_user_guide(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             },
             {
                 "step_number": 3,
+                "title": "Discover which repository has your topic",
+                "description": "Search cidx-meta-global to find which repository covers your topic. Results are .md files -- the filename (without .md) plus '-global' gives you the repository alias to search next.",
+                "example_call": "search_code(query_text='authentication', repository_alias='cidx-meta-global', limit=5)",
+                "expected_result": "Results like file_path='auth-service.md' mean search 'auth-service-global' for actual code. dependency-map/ results show cross-repo relationships.",
+            },
+            {
+                "step_number": 4,
                 "title": "Check repository capabilities",
                 "description": "Use global_repo_status() to see what indexes exist for a repository.",
                 "example_call": "global_repo_status('backend-global')",
                 "expected_result": "Index status showing semantic, FTS, temporal, and SCIP availability",
             },
             {
-                "step_number": 4,
+                "step_number": 5,
                 "title": "Run your first search",
                 "description": "Use search_code() with a conceptual query. Start with small limit to conserve tokens.",
                 "example_call": "search_code(query_text='authentication', repository_alias='backend-global', limit=5)",
                 "expected_result": "Code snippets with similarity scores, file paths, and line numbers",
             },
             {
-                "step_number": 5,
+                "step_number": 6,
                 "title": "Explore repository structure",
                 "description": "Use browse_directory() to see files and folders in a repository.",
                 "example_call": "browse_directory(repository_alias='backend-global', path='src')",
                 "expected_result": "List of files and directories with metadata",
             },
             {
-                "step_number": 6,
+                "step_number": 7,
                 "title": "Use code intelligence (if SCIP available)",
                 "description": "Use scip_definition() to find where functions/classes are defined.",
                 "example_call": "scip_definition(symbol='authenticate_user', repository_alias='backend-global')",
                 "expected_result": "Definition location with file path, line number, and context",
             },
             {
-                "step_number": 7,
+                "step_number": 8,
                 "title": "Activate repository for editing",
                 "description": "Use activate_repository() to create your personal writable workspace.",
                 "example_call": "activate_repository(golden_repo_alias='backend-global', user_alias='my-backend')",
                 "expected_result": "Confirmation with your new workspace alias",
             },
             {
-                "step_number": 8,
+                "step_number": 9,
                 "title": "Make changes with git workflow",
                 "description": "Use file CRUD and git tools: create_file/edit_file -> git_stage -> git_commit -> git_push",
                 "example_call": "git_stage(repository_alias='my-backend', file_paths=['src/new_file.py'])",
@@ -7096,12 +7116,13 @@ def first_time_user_guide(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         "quick_start_summary": [
             "1. whoami() - Check your permissions",
             "2. list_global_repos() - Find available repositories",
-            "3. global_repo_status('repo-global') - Check index capabilities",
-            "4. search_code('query', 'repo-global', limit=5) - Search code",
-            "5. browse_directory('repo-global', 'src') - Explore structure",
-            "6. scip_definition('symbol', 'repo-global') - Find definitions",
-            "7. activate_repository('repo-global', 'my-repo') - Enable editing",
-            "8. edit_file -> git_stage -> git_commit -> git_push - Make changes",
+            "3. search_code('topic', 'cidx-meta-global') - Discover which repo has your topic",
+            "4. global_repo_status('repo-global') - Check index capabilities",
+            "5. search_code('query', 'repo-global', limit=5) - Search code",
+            "6. browse_directory('repo-global', 'src') - Explore structure",
+            "7. scip_definition('symbol', 'repo-global') - Find definitions",
+            "8. activate_repository('repo-global', 'my-repo') - Enable editing",
+            "9. edit_file -> git_stage -> git_commit -> git_push - Make changes",
         ],
         "common_errors": [
             {
@@ -7123,6 +7144,10 @@ def first_time_user_guide(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {
                 "error": "SCIP definition/references returns no results",
                 "solution": "SCIP indexes may not exist for this repository. Check global_repo_status() for SCIP availability.",
+            },
+            {
+                "error": "Repository 'cidx-meta-global' not found",
+                "solution": "cidx-meta-global may not be configured on this server. Use list_global_repos() to see available repos, then search with repository_alias='*-global' or search individual repos by name.",
             },
         ],
     }

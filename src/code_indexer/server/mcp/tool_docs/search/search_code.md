@@ -263,10 +263,12 @@ outputSchema:
 
 MANDATORY REPOSITORY DISCOVERY - READ THIS FIRST:
 If user does NOT explicitly specify a repository, you MUST:
-1. ALWAYS search cidx-meta-global FIRST: search_code('topic', repository_alias='cidx-meta-global')
-2. This returns .md files describing what each repository contains
-3. Read the relevant .md to understand which repo handles the topic
-4. THEN search the identified repo(s) for actual code
+1. ALWAYS search cidx-meta-global FIRST: search_code('topic', repository_alias='cidx-meta-global', limit=5)
+2. cidx-meta-global contains AI-generated descriptions of every other repository on this server
+3. INTERPRETING RESULTS: file_path='auth-service.md' means auth-service-global is relevant. Rule: strip '.md', append '-global' to get the searchable alias
+4. DEPENDENCY MAP RESULTS: file_path='dependency-map/authentication.md' describes cross-repo relationships in that domain. Read the snippet to find participating repos
+5. THEN search the identified repo(s) for actual code: search_code('topic', repository_alias='auth-service-global', limit=10)
+6. IF cidx-meta-global NOT FOUND: fall back to list_global_repos() and search candidates directly
 
 Skip discovery ONLY when user explicitly names a repository (e.g., "search in backend-global").
 
