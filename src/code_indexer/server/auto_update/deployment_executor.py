@@ -98,7 +98,7 @@ class DeploymentExecutor:
             jwt_manager = JWTManager(secret_key=secret_key, token_expiration_minutes=10)
 
             token: str = jwt_manager.create_token({
-                "username": "cidx-auto-updater",
+                "username": "admin",
                 "role": "admin",
                 "created_at": "2025-01-01T00:00:00Z",
             })

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.10] - 2026-02-16
+
+### Fixed
+
+- **Auto-updater JWT token uses non-existent username (#208)** - Changed JWT username from "cidx-auto-updater" to "admin" since the server's auth middleware looks up the user in the database after validating the token signature. The "cidx-auto-updater" user doesn't exist, causing 401 "User not found" errors on maintenance mode API calls.
+
+---
+
 ## [9.3.9] - 2026-02-16
 
 ### Changed
