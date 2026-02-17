@@ -1547,7 +1547,7 @@ class DependencyMapAnalyzer:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                env={**os.environ},  # Inherit environment including ANTHROPIC_API_KEY
+                env={k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")},
                 stdin=subprocess.DEVNULL,  # Prevent Claude CLI from hanging on stdin
             )
         finally:

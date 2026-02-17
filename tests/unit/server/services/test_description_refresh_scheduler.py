@@ -513,3 +513,78 @@ def test_invoke_cli_preserves_output_without_frontmatter(
     assert success is True
     assert output.startswith("# test-repo")
     assert "comprehensive description" in output
+
+
+def test_invoke_cli_strips_session_vars_from_env(
+    scheduler: DescriptionRefreshScheduler, tmp_path: Path
+):
+    """Test _invoke_claude_cli strips CLAUDECODE and ANTHROPIC_API_KEY from subprocess env.
+
+    CLAUDECODE is stripped to prevent 'nested session' error when server runs inside a
+    Claude Code terminal. ANTHROPIC_API_KEY is stripped so the Claude CLI uses its own
+    stored auth from ~/.claude.json (OAuth/subscription) rather than the session token.
+    """
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = (
+        "---\nlast_analyzed: \"2026-01-01T00:00:00Z\"\n---\n"
+        "# test-repo\n\nA comprehensive description that is long enough to be "
+        "considered valid and not an error message by the validator."
+    )
+    mock_result.stderr = ""
+
+    captured_env = {}
+
+    def capture_env(*args, **kwargs):
+        captured_env.update(kwargs.get("env", {}))
+        return mock_result
+
+    with patch.dict("os.environ", {"CLAUDECODE": "1", "ANTHROPIC_API_KEY": "test-key"}):
+        with patch("subprocess.run", side_effect=capture_env):
+            scheduler._claude_cli_manager = None
+            scheduler._invoke_claude_cli(str(tmp_path), "test prompt")
+
+    assert "CLAUDECODE" not in captured_env, (
+        "CLAUDECODE must be stripped from subprocess env to prevent nested-session error"
+    )
+    assert "ANTHROPIC_API_KEY" not in captured_env, (
+        "ANTHROPIC_API_KEY must be stripped so Claude CLI uses its own stored auth"
+    )
+
+
+def test_invoke_cli_preserves_non_session_env_vars(
+    scheduler: DescriptionRefreshScheduler, tmp_path: Path
+):
+    """Test _invoke_claude_cli strips session vars but preserves non-session env vars.
+
+    CLAUDECODE and ANTHROPIC_API_KEY are session-specific vars that must be stripped.
+    HOME and other standard env vars must be preserved for the subprocess to work correctly.
+    """
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = (
+        "---\nlast_analyzed: \"2026-01-01T00:00:00Z\"\n---\n"
+        "# test-repo\n\nA comprehensive description that is long enough to be "
+        "considered valid and not an error message by the validator."
+    )
+    mock_result.stderr = ""
+
+    captured_env = {}
+
+    def capture_env(*args, **kwargs):
+        captured_env.update(kwargs.get("env", {}))
+        return mock_result
+
+    with patch.dict(
+        "os.environ",
+        {"CLAUDECODE": "1", "ANTHROPIC_API_KEY": "my-api-key", "HOME": "/home/user"},
+        clear=False,
+    ):
+        with patch("subprocess.run", side_effect=capture_env):
+            scheduler._claude_cli_manager = None
+            scheduler._invoke_claude_cli(str(tmp_path), "test prompt")
+
+    assert "ANTHROPIC_API_KEY" not in captured_env, (
+        "ANTHROPIC_API_KEY must be stripped so Claude CLI uses its own stored auth"
+    )
+    assert "HOME" in captured_env, "HOME and other non-session env vars must be preserved"

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block content %}
+<!-- D3.js v7 for dependency graph visualization (Story #215) -->
+<script defer src="/admin/static/js/d3.v7.min.js"></script>
+<script defer src="/admin/static/js/dependency_map.js"></script>
+
+<h1>Dependency Map</h1>
+
+{% if is_admin %}
+<!-- AC2: Job Status section - admin only -->
+<!-- AC5: HTMX lazy loads the partial on page load; auto-refresh driven by partial itself -->
+<section id="depmap-job-status"
+         hx-get="/admin/partials/depmap-job-status"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+    <p aria-busy="true">Loading job status...</p>
+</section>
+{% endif %}
+
+<!-- AC1: Repository Coverage section - HTMX lazy loads partial for all authenticated users -->
+<section id="depmap-repo-coverage"
+         hx-get="/admin/partials/depmap-repo-coverage"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+    <p aria-busy="true">Loading repository coverage...</p>
+</section>
+
+<section id="depmap-domains"
+         hx-get="/admin/partials/depmap-domain-explorer"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+    <p aria-busy="true">Loading domain explorer...</p>
+</section>
+{% endblock %}

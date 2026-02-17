@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.14] - 2026-02-17
+
+### Added
+
+- **Dependency Map admin page (Epic #211)** - New admin dashboard for visualizing cross-repository domain dependencies:
+  - D3.js interactive force-directed graph with zoom, pan, drag, and BFS depth control (Story #215)
+  - Two-panel domain explorer with searchable/filterable domain list and detail panel (Story #214)
+  - Job status dashboard with health badge, schedule card, and repo coverage table (Stories #212-#213)
+  - Graph viewport vertical resize via drag bar below SVG container
+
+### Fixed
+
+- **Claude CLI subprocess auth failures** - Strip `CLAUDECODE` and `ANTHROPIC_API_KEY` environment variables from subprocess calls to prevent nested session errors and session token overriding valid subscription auth. Affects `dependency_map_analyzer.py`, `description_refresh_scheduler.py`, and `repo_analyzer.py`.
+- **Repo coverage showing CHANGED after fresh analysis** - Dashboard `_get_current_commit()` used different fallback values (`None`) than the pipeline `_get_commit_hashes()` (`"local"`/`"unknown"`) for repos without metadata.json, causing perpetual status mismatch.
+
+### Improved
+
+- Domain selection highlight in left panel uses four visual cues: left accent bar, background wash, accent text color, and bold name
+- Graph node labels positioned below bubbles for better contrast, full domain names without truncation
+- Schedule card datetime formatting: `white-space: nowrap` prevents wrapping, shortened to HH:MM
+- Actions card: replaced dropdown with two explicit side-by-side buttons (Full Analysis / Delta Refresh)
+
+---
+
 ## [9.3.13] - 2026-02-16
 
 ### Improved

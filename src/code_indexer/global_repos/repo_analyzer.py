@@ -315,7 +315,7 @@ Output ONLY a JSON object (no markdown, no explanation) with these exact fields:
                 capture_output=True,
                 text=True,
                 timeout=120,
-                env={**os.environ},  # Inherit environment including ANTHROPIC_API_KEY
+                env={k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")},
             )
 
             if result.returncode != 0:

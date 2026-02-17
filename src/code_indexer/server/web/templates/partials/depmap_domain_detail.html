@@ -1,0 +1,156 @@
+<!-- Story #214: Domain Detail Partial -->
+<!-- AC3: Domain detail card showing name, description, last_analyzed, repos, deps -->
+<!-- AC4: "View Full Documentation" expand/collapse with rendered markdown -->
+{% if domain %}
+<div id="domain-detail-card"
+     style="border: 1px solid var(--pico-muted-border-color);
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            background: var(--pico-card-background-color);">
+
+    <!-- AC3: Domain name -->
+    <h3 style="margin: 0 0 0.5rem 0;">{{ domain.name }}</h3>
+
+    <!-- AC3: Description -->
+    {% if domain.description %}
+    <p style="color: var(--pico-muted-color); margin: 0 0 1rem 0;">
+        {{ domain.description }}
+    </p>
+    {% endif %}
+
+    <!-- AC3: Last analyzed timestamp -->
+    {% if domain.last_analyzed %}
+    <p style="font-size: 0.85rem; color: var(--pico-muted-color); margin: 0 0 1.25rem 0;">
+        Last analyzed: <time>{{ domain.last_analyzed }}</time>
+    </p>
+    {% else %}
+    <p style="font-size: 0.85rem; color: var(--pico-muted-color); margin: 0 0 1.25rem 0;">
+        Last analyzed: <em>Unknown</em>
+    </p>
+    {% endif %}
+
+    <!-- AC3: Contributing repositories -->
+    <section style="margin-bottom: 1.25rem;">
+        <h4 style="margin: 0 0 0.5rem 0; font-size: 1rem;">Contributing Repositories</h4>
+        {% if domain.repos %}
+        <ul style="list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 0.4rem;">
+            {% for repo in domain.repos %}
+            <li>
+                <span style="background: var(--pico-color-jade-100, #d1fae5);
+                             color: var(--pico-color-jade-700, #065f46);
+                             padding: 0.15rem 0.55rem;
+                             border-radius: 0.25rem;
+                             font-size: 0.85rem;
+                             font-weight: 500;">
+                    {{ repo }}
+                </span>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p style="color: var(--pico-muted-color); font-style: italic; margin: 0;">
+            No repositories assigned.
+        </p>
+        {% endif %}
+    </section>
+
+    <!-- AC3: Outgoing dependencies -->
+    <section style="margin-bottom: 1.25rem;">
+        <h4 style="margin: 0 0 0.5rem 0; font-size: 1rem;">
+            Outgoing Dependencies
+            <span style="font-weight: normal; color: var(--pico-muted-color); font-size: 0.85rem;">
+                (this domain depends on)
+            </span>
+        </h4>
+        {% if domain.outgoing_deps %}
+        <ul style="list-style: none; padding: 0; margin: 0;">
+            {% for dep in domain.outgoing_deps %}
+            <li style="border: 1px solid var(--pico-muted-border-color);
+                        border-radius: 0.375rem;
+                        padding: 0.5rem 0.75rem;
+                        margin-bottom: 0.4rem;
+                        font-size: 0.9rem;">
+                <span style="font-weight: 600;">{{ dep.target }}</span>
+                {% if dep.relationship %}
+                <span style="color: var(--pico-muted-color);"> - {{ dep.relationship }}</span>
+                {% endif %}
+                {% if dep.via_repos %}
+                <div style="font-size: 0.8rem; color: var(--pico-muted-color); margin-top: 0.2rem;">
+                    via: {{ dep.via_repos | join(", ") }}
+                </div>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p style="color: var(--pico-muted-color); font-style: italic; margin: 0;">None</p>
+        {% endif %}
+    </section>
+
+    <!-- AC3: Incoming dependencies -->
+    <section style="margin-bottom: 1.25rem;">
+        <h4 style="margin: 0 0 0.5rem 0; font-size: 1rem;">
+            Incoming Dependencies
+            <span style="font-weight: normal; color: var(--pico-muted-color); font-size: 0.85rem;">
+                (depends on this domain)
+            </span>
+        </h4>
+        {% if domain.incoming_deps %}
+        <ul style="list-style: none; padding: 0; margin: 0;">
+            {% for dep in domain.incoming_deps %}
+            <li style="border: 1px solid var(--pico-muted-border-color);
+                        border-radius: 0.375rem;
+                        padding: 0.5rem 0.75rem;
+                        margin-bottom: 0.4rem;
+                        font-size: 0.9rem;">
+                <span style="font-weight: 600;">{{ dep.source }}</span>
+                {% if dep.relationship %}
+                <span style="color: var(--pico-muted-color);"> - {{ dep.relationship }}</span>
+                {% endif %}
+                {% if dep.via_repos %}
+                <div style="font-size: 0.8rem; color: var(--pico-muted-color); margin-top: 0.2rem;">
+                    via: {{ dep.via_repos | join(", ") }}
+                </div>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p style="color: var(--pico-muted-color); font-style: italic; margin: 0;">None</p>
+        {% endif %}
+    </section>
+
+    <!-- AC4: "View Full Documentation" expand/collapse -->
+    {% if domain.full_documentation_html %}
+    <section>
+        <details>
+            <summary style="cursor: pointer;
+                            font-weight: 600;
+                            font-size: 1rem;
+                            padding: 0.5rem 0;
+                            user-select: none;">
+                View Full Documentation
+            </summary>
+            <div style="margin-top: 1rem;
+                        padding: 1rem;
+                        border: 1px solid var(--pico-muted-border-color);
+                        border-radius: 0.375rem;
+                        background: var(--pico-background-color);"
+                 class="domain-documentation">
+                {{ domain.full_documentation_html | safe }}
+            </div>
+        </details>
+    </section>
+    {% endif %}
+
+</div>
+{% else %}
+<!-- Fallback when domain not found -->
+<div style="border: 1px solid var(--pico-muted-border-color);
+            border-radius: 0.5rem;
+            padding: 2rem;
+            text-align: center;
+            color: var(--pico-muted-color);">
+    <p style="margin: 0;">Domain not found.</p>
+</div>
+{% endif %}

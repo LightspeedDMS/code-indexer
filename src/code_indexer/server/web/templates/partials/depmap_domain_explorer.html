@@ -1,0 +1,223 @@
+<!-- Story #214: Domain Explorer Two-Panel Layout -->
+<!-- AC1: Two-panel layout with domain list (left ~30%) and detail panel (right ~70%) -->
+<!-- AC2: Searchable/filterable domain list, sort toggle, repo count badges -->
+<!-- AC6: Layout toggle between "Graph + Detail" and "Detail Only" modes -->
+<div id="depmap-domain-explorer-content">
+
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+    <h2 style="margin: 0;">Domain Explorer</h2>
+    <!-- AC6: Layout toggle button -->
+    <button id="layout-toggle-btn"
+            onclick="toggleLayout()"
+            class="outline secondary"
+            style="font-size: 0.85rem; padding: 0.3rem 0.8rem;"
+            data-mode="detail-only">
+        Graph + Detail
+    </button>
+</div>
+
+<!-- AC6: Graph area (hidden by default in detail-only mode) — Story #215 -->
+<div id="graph-placeholder-area" style="display: none; margin-bottom: 1rem;">
+    <!-- Depth controls -->
+    <div id="graph-depth-controls" style="display: flex; gap: 0.3rem; justify-content: flex-end; margin-bottom: 0.5rem;">
+        <span style="font-size: 0.8rem; color: var(--pico-muted-color); align-self: center;">Depth:</span>
+        <button class="depth-btn outline secondary" data-depth="1" onclick="setDepth(1)" style="font-size: 0.8rem; padding: 0.15rem 0.5rem;">1</button>
+        <button class="depth-btn outline secondary" data-depth="2" onclick="setDepth(2)" style="font-size: 0.8rem; padding: 0.15rem 0.5rem;" aria-current="true">2</button>
+        <button class="depth-btn outline secondary" data-depth="3" onclick="setDepth(3)" style="font-size: 0.8rem; padding: 0.15rem 0.5rem;">3</button>
+    </div>
+    <!-- D3.js graph container -->
+    <div id="dependency-graph-container" style="width: 100%; height: 450px; min-height: 200px; position: relative; overflow: hidden;">
+        <svg id="dependency-graph-svg" style="width: 100%; height: 100%;"></svg>
+    </div>
+    <!-- Drag bar for vertical resize (outside SVG so D3 doesn't capture it) -->
+    <div id="graph-resize-handle"
+         style="width: 100%; height: 8px; cursor: ns-resize; background: var(--pico-muted-border-color); border-radius: 0 0 4px 4px; display: flex; align-items: center; justify-content: center; user-select: none;"
+         title="Drag to resize graph">
+        <span style="width: 40px; height: 3px; background: var(--pico-color); border-radius: 2px; opacity: 0.4;"></span>
+    </div>
+</div>
+<script>
+(function() {
+    var handle = document.getElementById('graph-resize-handle');
+    var container = document.getElementById('dependency-graph-container');
+    if (!handle || !container) return;
+    var startY, startH;
+    handle.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+        startY = e.clientY;
+        startH = container.offsetHeight;
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    });
+    function onMove(e) {
+        var newH = startH + (e.clientY - startY);
+        if (newH < 200) newH = 200;
+        container.style.height = newH + 'px';
+    }
+    function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+    }
+})();
+</script>
+
+<!-- AC1: Two-panel flexbox layout -->
+<div style="display: flex; gap: 1.5rem; align-items: flex-start; min-height: 400px;">
+
+    <!-- Left panel: domain list (~30%) -->
+    <div id="domain-list-panel"
+         style="flex: 0 0 30%; min-width: 220px; max-width: 320px;">
+
+        <!-- AC2: Search input -->
+        <input type="search"
+               id="domain-search"
+               placeholder="Search domains..."
+               oninput="filterDomains(this.value)"
+               style="margin-bottom: 0.75rem; width: 100%;">
+
+        <!-- AC2: Sort toggle button -->
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+            <span style="font-size: 0.85rem; color: var(--pico-muted-color);">
+                {{ domains.total_count }} domain{% if domains.total_count != 1 %}s{% endif %}
+            </span>
+            <button id="sort-toggle-btn"
+                    onclick="toggleSort()"
+                    class="outline secondary"
+                    data-sort="alpha"
+                    style="font-size: 0.8rem; padding: 0.2rem 0.6rem;">
+                A-Z
+            </button>
+        </div>
+
+        <!-- AC2: Scrollable domain list -->
+        <ul id="domain-list"
+            style="list-style: none;
+                   padding: 0;
+                   margin: 0;
+                   max-height: 500px;
+                   overflow-y: auto;
+                   border: 1px solid var(--pico-muted-border-color);
+                   border-radius: 0.375rem;">
+            {% for domain in domains.domains %}
+            <li class="domain-item"
+                data-name="{{ domain.name | lower }}"
+                data-repo-count="{{ domain.repo_count }}"
+                style="border-bottom: 1px solid var(--pico-muted-border-color); border-left: 3px solid transparent;">
+                <button class="domain-list-btn"
+                        hx-get="/admin/partials/depmap-domain-detail/{{ domain.name | urlencode }}"
+                        hx-target="#domain-detail-panel"
+                        hx-swap="innerHTML"
+                        onclick="selectDomain({{ domain.name | tojson }})"
+                        style="width: 100%;
+                               text-align: left;
+                               background: none;
+                               border: none;
+                               padding: 0.6rem 0.75rem;
+                               cursor: pointer;
+                               display: flex;
+                               justify-content: space-between;
+                               align-items: center;
+                               border-radius: 0;
+                               color: var(--pico-color);">
+                    <span class="domain-name"
+                          style="font-weight: 500; font-size: 0.9rem;">
+                        {{ domain.name }}
+                    </span>
+                    <!-- AC2: Repo count badge -->
+                    <span style="background: var(--pico-color-blue-100, #dbeafe);
+                                 color: var(--pico-color-blue-700, #1d4ed8);
+                                 padding: 0.1rem 0.45rem;
+                                 border-radius: 9999px;
+                                 font-size: 0.75rem;
+                                 font-weight: 600;
+                                 white-space: nowrap;">
+                        {{ domain.repo_count }}
+                    </span>
+                </button>
+            </li>
+            {% else %}
+            <li style="padding: 1rem; text-align: center; color: var(--pico-muted-color); font-style: italic;">
+                No domains available.
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+
+    <!-- Right panel: domain detail (~70%) -->
+    <div id="domain-detail-panel"
+         style="flex: 1; min-width: 0;">
+        <!-- AC1: Placeholder until selection -->
+        <div style="border: 1px solid var(--pico-muted-border-color);
+                    border-radius: 0.5rem;
+                    padding: 2rem;
+                    text-align: center;
+                    color: var(--pico-muted-color);
+                    background: var(--pico-card-background-color);
+                    min-height: 200px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;">
+            <p style="margin: 0; font-style: italic;">Select a domain to view details</p>
+        </div>
+    </div>
+
+</div><!-- end two-panel flex -->
+
+<!-- AC2: Client-side JS for search, sort, layout toggle -->
+<script>
+(function() {
+    // AC2: Client-side search filtering
+    window.filterDomains = function(query) {
+        var q = query.toLowerCase().trim();
+        var items = document.querySelectorAll('#domain-list .domain-item');
+        items.forEach(function(item) {
+            var name = item.getAttribute('data-name') || '';
+            item.style.display = (q === '' || name.indexOf(q) !== -1) ? '' : 'none';
+        });
+    };
+
+    // AC2: Sort toggle (alpha / repo count desc)
+    window.toggleSort = function() {
+        var btn = document.getElementById('sort-toggle-btn');
+        var current = btn.getAttribute('data-sort');
+        var next = current === 'alpha' ? 'repo_count' : 'alpha';
+        btn.setAttribute('data-sort', next);
+        btn.textContent = next === 'alpha' ? 'A-Z' : '# Repos';
+
+        var list = document.getElementById('domain-list');
+        var items = Array.from(list.querySelectorAll('.domain-item'));
+        items.sort(function(a, b) {
+            if (next === 'alpha') {
+                return (a.getAttribute('data-name') || '').localeCompare(b.getAttribute('data-name') || '');
+            } else {
+                return parseInt(b.getAttribute('data-repo-count') || '0', 10)
+                     - parseInt(a.getAttribute('data-repo-count') || '0', 10);
+            }
+        });
+        items.forEach(function(item) { list.appendChild(item); });
+    };
+
+    // AC6: Layout toggle between "Graph + Detail" and "Detail Only"
+    // Story #215: initializes D3 graph on first switch to graph mode.
+    window.toggleLayout = function() {
+        var btn = document.getElementById('layout-toggle-btn');
+        var graphArea = document.getElementById('graph-placeholder-area');
+        var current = btn.getAttribute('data-mode');
+        if (current === 'detail-only') {
+            btn.setAttribute('data-mode', 'graph-detail');
+            btn.textContent = 'Detail Only';
+            graphArea.style.display = '';
+            // Initialize graph on first expand (idempotent — no-op if already done)
+            if (window.initDependencyGraph) {
+                initDependencyGraph('dependency-graph-container', '/admin/dependency-map/graph-data');
+            }
+        } else {
+            btn.setAttribute('data-mode', 'detail-only');
+            btn.textContent = 'Graph + Detail';
+            graphArea.style.display = 'none';
+        }
+    };
+})();
+</script>
+
+</div><!-- end depmap-domain-explorer-content -->

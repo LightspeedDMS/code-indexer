@@ -1,0 +1,130 @@
+<!-- Story #212: Dependency Map Job Status Partial -->
+<!-- AC5: HTMX auto-refresh every 5s when status=running -->
+<div id="depmap-job-status-content"
+     {% if job_status.status == "running" %}
+     hx-get="/admin/partials/depmap-job-status"
+     hx-trigger="every 5s"
+     hx-swap="outerHTML"
+     hx-target="#depmap-job-status-content"
+     {% endif %}>
+
+<h2>Job Status</h2>
+
+<!-- AC3: Health badge with color -->
+{% set color_class_map = {
+    'GREEN':  'status-healthy',
+    'YELLOW': 'status-degraded',
+    'RED':    'status-unhealthy',
+    'BLUE':   'status-running',
+    'GRAY':   'status-disabled'
+} %}
+<div class="health-grid">
+    <article class="health-card">
+        <header>
+            <h3>Health</h3>
+        </header>
+        <div class="status-content">
+            <span class="status-indicator {{ color_class_map.get(job_status.color, 'status-disabled') }}"></span>
+            <span class="status-text">{{ job_status.health }}</span>
+        </div>
+        <footer>
+            <small>Status: {{ job_status.status or "unknown" }}</small>
+        </footer>
+    </article>
+
+    <!-- AC2: Timestamps -->
+    <article class="health-card">
+        <header>
+            <h3>Schedule</h3>
+        </header>
+        <div class="system-metrics">
+            <div class="metric">
+                <span class="metric-label">Last Run</span>
+                <span class="metric-value" style="white-space: nowrap;">
+                    {% if job_status.last_run %}
+                        {{ job_status.last_run[:16] | replace("T", " ") }}
+                    {% else %}
+                        Never
+                    {% endif %}
+                </span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">Next Run</span>
+                <span class="metric-value" style="white-space: nowrap;">
+                    {% if job_status.next_run %}
+                        {{ job_status.next_run[:16] | replace("T", " ") }}
+                    {% else %}
+                        Not scheduled
+                    {% endif %}
+                </span>
+            </div>
+        </div>
+    </article>
+
+    <!-- AC6: Run Now dropdown (admin context - this partial is admin-only) -->
+    <article class="health-card">
+        <header>
+            <h3>Actions</h3>
+        </header>
+        <div style="padding: 0.75rem; display: flex; flex-direction: column; gap: 0.5rem;">
+            <div style="display: flex; gap: 0.5rem;">
+                <button hx-post="/admin/dependency-map/trigger"
+                        hx-vals='{"mode": "full"}'
+                        hx-swap="none"
+                        style="flex: 1; font-size: 0.85rem; padding: 0.4rem 0.6rem;">
+                    Full Analysis
+                </button>
+                <button class="secondary"
+                        hx-post="/admin/dependency-map/trigger"
+                        hx-vals='{"mode": "delta"}'
+                        hx-swap="none"
+                        style="flex: 1; font-size: 0.85rem; padding: 0.4rem 0.6rem;">
+                    Delta Refresh
+                </button>
+            </div>
+            <div id="depmap-trigger-status" style="font-size: 0.9rem;"></div>
+        </div>
+    </article>
+</div>
+
+<!-- AC4: Error banner - only shown when status=failed and error_message non-empty -->
+{% if job_status.status == "failed" and job_status.error_message %}
+<article style="border-left: 4px solid var(--pico-color-red-550); margin-top: 1rem; padding: 1rem;">
+    <header>
+        <strong style="color: var(--pico-color-red-550);">Analysis Error</strong>
+    </header>
+    <!-- Jinja2 auto-escaping prevents XSS (AC4) -->
+    <p>{{ job_status.error_message }}</p>
+</article>
+{% endif %}
+
+</div>
+
+<script>
+// Handle Run Now trigger response
+document.body.addEventListener('htmx:afterRequest', function(evt) {
+    if (evt.detail.elt.hasAttribute('hx-post') &&
+        evt.detail.elt.getAttribute('hx-post') === '/admin/dependency-map/trigger') {
+        const statusDiv = document.getElementById('depmap-trigger-status');
+        if (!statusDiv) return;
+
+        if (evt.detail.successful) {
+            statusDiv.innerHTML = '<span style="color: var(--pico-color-green-550);">Analysis triggered</span>';
+            // Refresh job status after 3 seconds
+            setTimeout(function() {
+                htmx.ajax('GET', '/admin/partials/depmap-job-status', {
+                    target: '#depmap-job-status',
+                    swap: 'innerHTML'
+                });
+            }, 3000);
+        } else {
+            statusDiv.innerHTML = '<span style="color: var(--pico-color-red-550);">Failed to trigger analysis</span>';
+        }
+
+        // Clear status after 8 seconds
+        setTimeout(function() {
+            statusDiv.innerHTML = '';
+        }, 8000);
+    }
+});
+</script>

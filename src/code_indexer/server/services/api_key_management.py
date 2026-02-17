@@ -360,7 +360,7 @@ class ApiKeyConnectivityTester:
                 "claude",
                 "--print",
                 "Say hello in exactly one word",
-                env={**os.environ, "ANTHROPIC_API_KEY": api_key},
+                env={**{k: v for k, v in os.environ.items() if k != "CLAUDECODE"}, "ANTHROPIC_API_KEY": api_key},
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

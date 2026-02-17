@@ -442,6 +442,25 @@ class DependencyMapService:
             descriptions[alias] = md_file.read_text()
         return descriptions
 
+    def get_activated_repos(self) -> List[Dict[str, Any]]:
+        """
+        Public accessor: get list of activated golden repos with metadata.
+
+        Returns:
+            List of dicts with alias, clone_path, description_summary
+        """
+        return self._get_activated_repos()
+
+    @property
+    def golden_repos_dir(self) -> str:
+        """
+        Public accessor: return the golden repos directory path.
+
+        Returns:
+            Absolute path string to the golden repos directory
+        """
+        return self._golden_repos_manager.golden_repos_dir
+
     def _get_activated_repos(self) -> List[Dict[str, Any]]:
         """
         Get list of activated golden repos with metadata.
