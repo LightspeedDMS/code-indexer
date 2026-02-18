@@ -821,6 +821,10 @@ class DependencyMapService:
 
         # Get current repos
         current_repos = self._get_activated_repos()
+        # Apply same empty-repo filter as analysis pipeline (_enrich_repo_sizes).
+        # Empty repos never get tracked in commit_hashes, so without this filter
+        # they perpetually appear as "new" repos triggering degraded health.
+        current_repos = self._enrich_repo_sizes(current_repos)
 
         changed_repos = []
         new_repos = []

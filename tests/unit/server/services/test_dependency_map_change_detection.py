@@ -43,6 +43,11 @@ def tmp_golden_repos_root(tmp_path: Path) -> Path:
         }
         (code_indexer_dir / "metadata.json").write_text(json.dumps(metadata))
 
+        # Add a source file so _enrich_repo_sizes() does not filter out this repo.
+        # detect_changes() now applies the same empty-repo filter as the analysis
+        # pipeline: repos with 0 non-.git/.code-indexer files are excluded.
+        (repo_dir / "main.py").write_text(f"# {alias} source\n")
+
     # Create sample repo description files in cidx-meta
     (cidx_meta / "repo1.md").write_text("# Repo 1\n\nDescription of repo 1")
     (cidx_meta / "repo2.md").write_text("# Repo 2\n\nDescription of repo 2")
@@ -177,6 +182,8 @@ class TestChangeDetection:
             "indexed_at": datetime.now(timezone.utc).isoformat(),
         }
         (code_indexer_dir / "metadata.json").write_text(json.dumps(metadata))
+        # Add a source file so _enrich_repo_sizes() does not filter out repo4.
+        (new_repo_dir / "main.py").write_text("# repo4 source\n")
 
         # Update mock to include new repo
         mock_golden_repos_manager.list_golden_repos.return_value.append({

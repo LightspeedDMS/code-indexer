@@ -40,6 +40,12 @@ def tmp_golden_repos_root(tmp_path: Path) -> Path:
         }
         (code_indexer_dir / "metadata.json").write_text(json.dumps(metadata))
 
+        # Add a source file so _enrich_repo_sizes() does not filter out this repo.
+        # detect_changes() and run_full_analysis() now apply the same empty-repo
+        # filter as the analysis pipeline: repos with 0 non-.git/.code-indexer
+        # files are excluded. Without a source file these repos appear empty.
+        (repo_dir / "main.py").write_text(f"# {alias} source\n")
+
     # Create sample repo description files in cidx-meta
     (cidx_meta / "repo1.md").write_text("# Repo 1\n\nDescription of repo 1")
     (cidx_meta / "repo2.md").write_text("# Repo 2\n\nDescription of repo 2")
