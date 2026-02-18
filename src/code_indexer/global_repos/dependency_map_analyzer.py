@@ -1,5 +1,5 @@
 """
-Dependency Map Analyzer for Story #192 (Epic #191).
+Dependency Map Analyzer for Story #192 (Epic #191), updated Story #216.
 
 Implements multi-pass Claude CLI pipeline to analyze source code across
 all golden repositories and produce domain-clustered dependency documents.
@@ -7,7 +7,9 @@ all golden repositories and produce domain-clustered dependency documents.
 Architecture:
 - Pass 1 (Synthesis): Reads cidx-meta descriptions to identify domain clusters
 - Pass 2 (Per-domain): Analyzes source code for each domain
-- Pass 3 (Index): Generates catalog and repo-to-domain matrix
+- Index generation: Programmatic _generate_index_md() replaces the former Claude-based
+  Pass 3. Produces _index.md with Domain Catalog, Repo-to-Domain Matrix, and
+  Cross-Domain Dependencies deterministically from domain_list and repo_list.
 
 Output:
 - Domain-clustered markdown files with YAML frontmatter
@@ -932,6 +934,203 @@ class DependencyMapAnalyzer:
         index_file.write_text(frontmatter + result + graph_section)
         logger.info(f"Pass 3 complete: wrote {index_file}")
 
+    def _generate_index_md(
+        self,
+        staging_dir: Path,
+        domain_list: List[Dict[str, Any]],
+        repo_list: List[Dict[str, Any]],
+    ) -> None:
+        """
+        Programmatically generate _index.md from domain_list and repo_list (AC2, Story #216).
+
+        Replaces the Claude-based Pass 3 with a deterministic, fast implementation.
+        Generates YAML frontmatter, Domain Catalog, Repo-to-Domain Matrix, and
+        Cross-Domain Dependencies sections.
+
+        Args:
+            staging_dir: Staging directory where _index.md will be written
+            domain_list: List of domain dicts with name, description, participating_repos
+            repo_list: List of repo dicts with alias, description_summary
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        frontmatter = self._build_index_frontmatter(now, repo_list, domain_list)
+        body = self._build_index_body(staging_dir, domain_list, repo_list)
+        index_file = staging_dir / "_index.md"
+        index_file.write_text(frontmatter + body)
+        logger.info(f"Generated _index.md programmatically at {index_file}")
+
+    def _build_index_frontmatter(
+        self,
+        now: str,
+        repo_list: List[Dict[str, Any]],
+        domain_list: List[Dict[str, Any]],
+    ) -> str:
+        """Build YAML frontmatter block for _index.md."""
+        fm = "---\n"
+        fm += "schema_version: 1.0\n"
+        fm += f"last_analyzed: {now}\n"
+        fm += f"repos_analyzed_count: {len(repo_list)}\n"
+        fm += f"domains_count: {len(domain_list)}\n"
+        fm += "repos_analyzed:\n"
+        for repo in repo_list:
+            alias = repo.get("alias", repo.get("name", "unknown"))
+            fm += f"  - {alias}\n"
+        fm += "---\n\n"
+        return fm
+
+    def _build_index_body(
+        self,
+        staging_dir: Path,
+        domain_list: List[Dict[str, Any]],
+        repo_list: List[Dict[str, Any]],
+    ) -> str:
+        """Build the markdown body for _index.md (catalog, matrix, cross-domain deps)."""
+        content = "# Dependency Map Index\n\n"
+
+        # Domain Catalog
+        content += "## Domain Catalog\n\n"
+        content += "| Domain | Description | Repo Count |\n"
+        content += "|---|---|---|\n"
+        for domain in sorted(domain_list, key=lambda d: d.get("name", "")):
+            name = domain.get("name", "")
+            desc = domain.get("description", "")
+            repo_count = len(domain.get("participating_repos", []))
+            content += f"| {name} | {desc} | {repo_count} |\n"
+
+        # Repo-to-Domain Matrix
+        content += "\n## Repo-to-Domain Matrix\n\n"
+        content += "| Repository | Domain |\n"
+        content += "|---|---|\n"
+        repo_domain_map: Dict[str, str] = {}
+        for domain in domain_list:
+            for alias in domain.get("participating_repos", []):
+                repo_domain_map[alias] = domain.get("name", "")
+        for repo in sorted(repo_list, key=lambda r: r.get("alias", "")):
+            alias = repo.get("alias", "")
+            domain_name = repo_domain_map.get(alias, "(unassigned)")
+            content += f"| {alias} | {domain_name} |\n"
+
+        # Cross-Domain Dependencies
+        graph_section = self._build_cross_domain_graph(staging_dir, domain_list)
+        if graph_section:
+            graph_section = graph_section.replace(
+                "## Cross-Domain Dependency Graph",
+                "## Cross-Domain Dependencies",
+            )
+            content += graph_section
+        else:
+            content += "\n## Cross-Domain Dependencies\n\n"
+            content += "_No cross-domain dependencies detected._\n"
+
+        return content
+
+    def build_pass1_prompt(
+        self,
+        repo_descriptions: Dict[str, str],
+        repo_list: List[Dict[str, Any]],
+        previous_domains_dir: Optional[Path] = None,
+    ) -> str:
+        """
+        Build the Pass 1 synthesis prompt string (AC5, Story #216).
+
+        Extracts prompt-building from run_pass_1_synthesis for testability.
+        When previous_domains_dir is provided and _domains.json exists there,
+        includes the previous domain structure as a stability anchor.
+
+        Args:
+            repo_descriptions: Dict mapping repo alias to description text
+            repo_list: List of repo dicts with alias, clone_path, file_count, total_bytes
+            previous_domains_dir: Optional directory containing a previous _domains.json
+
+        Returns:
+            Prompt string ready to send to Claude CLI
+        """
+        repo_count = len(repo_list)
+        domain_guidance = "3-7" if repo_count <= 20 else ("5-15" if repo_count <= 50 else ("10-30" if repo_count <= 100 else "15-50"))
+
+        prompt = "# Domain Synthesis Task\n\n"
+        prompt += "Analyze the following repository descriptions and identify domain clusters.\n\n"
+        prompt += self._build_previous_domains_section(previous_domains_dir)
+        prompt += "## Repository Descriptions\n\n"
+        for alias, content in repo_descriptions.items():
+            prompt += f"### {alias}\n\n{content}\n\n"
+        prompt += "## Repository Filesystem Locations\n\n"
+        for repo in repo_list:
+            alias = repo.get("alias", "unknown")
+            clone_path = repo.get("clone_path", "unknown")
+            file_count = repo.get("file_count", "?")
+            total_mb = round(repo.get("total_bytes", 0) / (1024 * 1024), 1)
+            prompt += f"- **{alias}**: `{clone_path}` ({file_count} files, {total_mb} MB)\n"
+        prompt += f"\n## Instructions\n\nAIM for {domain_guidance} domains for {repo_count} repositories.\n"
+        prompt += f"Assign ALL {repo_count} repositories. Missing repos = failed analysis.\n\n"
+        prompt += "## Output Format\n\nYour ENTIRE response must be ONLY a valid JSON array.\n"
+        prompt += '[\n  {"name": "domain-name", "description": "scope", "participating_repos": ["alias1"]}\n]\n'
+        return prompt
+
+    def _build_previous_domains_section(self, previous_domains_dir: Optional[Path]) -> str:
+        """Return previous domain structure section for Pass 1 stability, or empty string."""
+        if previous_domains_dir is None:
+            return ""
+        prev_file = previous_domains_dir / "_domains.json"
+        if not prev_file.exists():
+            return ""
+        try:
+            prev_domains = json.loads(prev_file.read_text())
+        except Exception as e:
+            logger.warning(f"build_pass1_prompt: failed to read previous _domains.json: {e}")
+            return ""
+        if not isinstance(prev_domains, list) or not prev_domains:
+            return ""
+        section = "## Previous Domain Structure (Stability Reference)\n\n"
+        section += "For stability, prefer keeping the same domain names unless evidence contradicts them.\n\n"
+        for domain in prev_domains:
+            name = domain.get("name", "")
+            desc = domain.get("description", "")
+            repos = domain.get("participating_repos", [])
+            section += f"- **{name}**: {desc}\n"
+            if repos:
+                section += f"  - Repos: {', '.join(repos)}\n"
+        return section + "\n"
+
+    def _reconcile_domains_json(
+        self,
+        staging_dir: Path,
+        domain_list: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Remove ghost domains (domains without a .md file) from domain_list (AC4, Story #216).
+
+        A ghost domain is one where Pass 2 did not produce a corresponding .md file —
+        typically because Claude's output was unparseable or the domain was skipped.
+
+        Logs a warning for each ghost removed, then overwrites _domains.json in
+        staging_dir with the reconciled list.
+
+        Args:
+            staging_dir: Staging directory containing domain .md files
+            domain_list: List of domain dicts from Pass 1
+
+        Returns:
+            Filtered domain list containing only domains with matching .md files
+        """
+        reconciled = []
+        for domain in domain_list:
+            name = domain.get("name", "")
+            md_file = staging_dir / f"{name}.md"
+            if md_file.exists():
+                reconciled.append(domain)
+            else:
+                logger.warning(
+                    f"_reconcile_domains_json: ghost domain '{name}' has no .md file — removing"
+                )
+
+        domains_file = staging_dir / "_domains.json"
+        domains_file.write_text(json.dumps(reconciled, indent=2))
+        logger.info(
+            f"_reconcile_domains_json: kept {len(reconciled)}/{len(domain_list)} domains"
+        )
+        return reconciled
+
     @staticmethod
     def _extract_cross_domain_section(content: str) -> str:
         """
@@ -1621,8 +1820,16 @@ class DependencyMapAnalyzer:
         prompt += "## Changed Repositories\n\n"
         if changed_repos:
             prompt += "Re-verify ALL dependencies for these repos (commit changes detected):\n"
-            for alias in changed_repos:
-                prompt += f"- {alias}\n"
+            for repo in changed_repos:
+                if isinstance(repo, dict):
+                    alias = repo.get("alias", "unknown")
+                    clone_path = repo.get("clone_path")
+                    prompt += f"- **{alias}**"
+                    if clone_path:
+                        prompt += f": `{clone_path}`"
+                    prompt += "\n"
+                else:
+                    prompt += f"- {repo}\n"
             prompt += "\n"
         else:
             prompt += "None\n\n"
@@ -1630,8 +1837,16 @@ class DependencyMapAnalyzer:
         prompt += "## New Repositories\n\n"
         if new_repos:
             prompt += "Incorporate these newly registered repos:\n"
-            for alias in new_repos:
-                prompt += f"- {alias}\n"
+            for repo in new_repos:
+                if isinstance(repo, dict):
+                    alias = repo.get("alias", "unknown")
+                    clone_path = repo.get("clone_path")
+                    prompt += f"- **{alias}**"
+                    if clone_path:
+                        prompt += f": `{clone_path}`"
+                    prompt += "\n"
+                else:
+                    prompt += f"- {repo}\n"
             prompt += "\n"
         else:
             prompt += "None\n\n"
@@ -1650,6 +1865,14 @@ class DependencyMapAnalyzer:
         for domain in domain_list:
             prompt += f"- {domain}\n"
         prompt += "\n"
+
+        prompt += "## Source Code Exploration (MCP Tool)\n\n"
+        prompt += "You MUST use the `cidx-local` MCP server's `search_code` tool to verify changes.\n"
+        prompt += "For each CHANGED or NEW repository, use `search_code` to find:\n"
+        prompt += "- Cross-repository references (who calls this repo)\n"
+        prompt += "- Integration patterns that may have changed\n"
+        prompt += "- New dependencies introduced by the code changes\n\n"
+        prompt += "Call `search_code` with the repo name, class names, or API endpoints to discover connections.\n\n"
 
         prompt += "## Dependency Types to Identify\n\n"
         prompt += "**CRITICAL**: ABSENCE of code imports does NOT mean absence of dependency.\n\n"
@@ -1820,4 +2043,28 @@ class DependencyMapAnalyzer:
             subprocess.CalledProcessError: If Claude CLI fails
             subprocess.TimeoutExpired: If timeout is exceeded
         """
-        return self._invoke_claude_cli(prompt, timeout, max_turns)
+        return self._invoke_claude_cli(
+            prompt, timeout, max_turns, allowed_tools="mcp__cidx-local__search_code"
+        )
+
+    def invoke_domain_discovery(self, prompt: str, timeout: int, max_turns: int) -> str:
+        """
+        Invoke Claude CLI for domain discovery of new repositories (Story #216, H1 fix).
+
+        Public method for domain discovery invocations that maintains encapsulation
+        by wrapping the private _invoke_claude_cli method. Domain discovery does not
+        need MCP search tools since it only processes repo metadata.
+
+        Args:
+            prompt: Domain discovery prompt to send to Claude
+            timeout: Timeout in seconds
+            max_turns: Maximum number of agentic turns
+
+        Returns:
+            Claude CLI stdout output (JSON list of repo-to-domain assignments)
+
+        Raises:
+            subprocess.CalledProcessError: If Claude CLI fails
+            subprocess.TimeoutExpired: If timeout is exceeded
+        """
+        return self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None)

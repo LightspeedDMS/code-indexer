@@ -245,8 +245,12 @@ class DependencyMapDomainService:
         """
         Parse cross-domain dependency table from _index.md.
 
-        Looks for rows in a markdown table with 4 columns:
-          Source Domain | Target Domain | Via Repos | Relationship
+        Supports two table formats:
+          3-column: Source Domain | Target Domain | Via Repos
+          4-column: Source Domain | Target Domain | Via Repos | Relationship
+
+        Uses line-by-line pipe splitting instead of regex to avoid the ambiguity
+        where a 3-column pattern also matches subsets of 4-column rows.
 
         Returns:
             List of dicts: {source, target, via_repos, relationship}
@@ -268,25 +272,40 @@ class DependencyMapDomainService:
             return []
 
         deps: List[Dict[str, Any]] = []
-        pattern = r'\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|'
 
-        for match in re.finditer(pattern, content):
-            source = match.group(1).strip()
-            target = match.group(2).strip()
-            via = match.group(3).strip()
-            rel = match.group(4).strip()
-
-            # Skip header row and separator rows
-            if source in ("Source Domain", "") or set(source) <= {"-", " "}:
+        for line in content.splitlines():
+            line = line.strip()
+            # Must start and end with a pipe to be a table row
+            if not line.startswith("|") or not line.endswith("|"):
                 continue
-            if source == "---":
+
+            # Split by pipe and strip whitespace from each cell
+            cells = [c.strip() for c in line.split("|")]
+            # Remove empty strings from leading/trailing pipe split
+            cells = [c for c in cells if c != ""]
+
+            # Need exactly 3 or 4 cells
+            if len(cells) not in (3, 4):
+                continue
+
+            source = cells[0]
+            target = cells[1]
+            via = cells[2]
+            relationship = cells[3] if len(cells) == 4 else ""
+
+            # Skip header rows
+            if source in ("Source Domain", ""):
+                continue
+
+            # Skip separator rows (contain only dashes and spaces)
+            if set(source) <= {"-", " "}:
                 continue
 
             deps.append({
                 "source": source,
                 "target": target,
                 "via_repos": [r.strip() for r in via.split(",") if r.strip()],
-                "relationship": rel,
+                "relationship": relationship,
             })
 
         return deps

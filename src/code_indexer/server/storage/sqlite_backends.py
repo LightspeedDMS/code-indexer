@@ -1699,11 +1699,13 @@ class DependencyMapTrackingBackend:
         Get the singleton tracking record.
 
         Initializes the singleton row if it doesn't exist.
+        Also ensures run_history table exists for AC9 compatibility.
 
         Returns:
             Dictionary with tracking data (id, last_run, next_run, status,
             commit_hashes, error_message)
         """
+        self._ensure_run_history_table()
         conn = self._conn_manager.get_connection()
 
         # Try to fetch existing singleton row
@@ -1796,6 +1798,113 @@ class DependencyMapTrackingBackend:
 
         self._conn_manager.execute_atomic(operation)
         logger.debug("Updated dependency map tracking record")
+
+    def _ensure_run_history_table(self) -> None:
+        """Ensure dependency_map_run_history table exists (idempotent).
+
+        Also ensures the parent dependency_map_tracking table exists
+        so this backend works in test databases created without initialize_database().
+        """
+        def operation(conn):
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS dependency_map_tracking (
+                    id INTEGER PRIMARY KEY,
+                    last_run TEXT,
+                    next_run TEXT,
+                    status TEXT DEFAULT 'pending',
+                    commit_hashes TEXT,
+                    error_message TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS dependency_map_run_history (
+                    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    domain_count INTEGER,
+                    total_chars INTEGER,
+                    edge_count INTEGER,
+                    zero_char_domains INTEGER,
+                    repos_analyzed INTEGER,
+                    repos_skipped INTEGER,
+                    pass1_duration_s REAL,
+                    pass2_duration_s REAL
+                )
+            """)
+            return None
+
+        self._conn_manager.execute_atomic(operation)
+
+    def record_run_metrics(self, metrics: Dict[str, Any]) -> None:
+        """
+        Store run metrics to dependency_map_run_history (AC9, Story #216).
+
+        Args:
+            metrics: Dict with keys: timestamp, domain_count, total_chars, edge_count,
+                     zero_char_domains, repos_analyzed, repos_skipped,
+                     pass1_duration_s, pass2_duration_s
+        """
+        self._ensure_run_history_table()
+
+        def operation(conn):
+            conn.execute(
+                """INSERT INTO dependency_map_run_history
+                   (timestamp, domain_count, total_chars, edge_count, zero_char_domains,
+                    repos_analyzed, repos_skipped, pass1_duration_s, pass2_duration_s)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    metrics.get("timestamp"),
+                    metrics.get("domain_count"),
+                    metrics.get("total_chars"),
+                    metrics.get("edge_count"),
+                    metrics.get("zero_char_domains"),
+                    metrics.get("repos_analyzed"),
+                    metrics.get("repos_skipped"),
+                    metrics.get("pass1_duration_s"),
+                    metrics.get("pass2_duration_s"),
+                ),
+            )
+            return None
+
+        self._conn_manager.execute_atomic(operation)
+        logger.debug("Recorded dependency map run metrics")
+
+    def get_run_history(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        Retrieve recent run metrics ordered most-recent-first (AC9, Story #216).
+
+        Args:
+            limit: Maximum number of records to return (default 5)
+
+        Returns:
+            List of metric dicts ordered by run_id descending (most recent first)
+        """
+        self._ensure_run_history_table()
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            """SELECT run_id, timestamp, domain_count, total_chars, edge_count,
+                      zero_char_domains, repos_analyzed, repos_skipped,
+                      pass1_duration_s, pass2_duration_s
+               FROM dependency_map_run_history
+               ORDER BY run_id DESC
+               LIMIT ?""",
+            (limit,),
+        )
+        rows = cursor.fetchall()
+        return [
+            {
+                "run_id": row[0],
+                "timestamp": row[1],
+                "domain_count": row[2],
+                "total_chars": row[3],
+                "edge_count": row[4],
+                "zero_char_domains": row[5],
+                "repos_analyzed": row[6],
+                "repos_skipped": row[7],
+                "pass1_duration_s": row[8],
+                "pass2_duration_s": row[9],
+            }
+            for row in rows
+        ]
 
     def close(self) -> None:
         """Close database connections."""

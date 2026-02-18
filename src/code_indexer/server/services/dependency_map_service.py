@@ -311,21 +311,15 @@ class DependencyMapService:
 
             self._save_journal(staging_dir, journal)  # Save after each domain
 
-        # Pass 3: Index generation (skip if already completed)
-        if journal.get("pass3", {}).get("status") != "completed":
-            self._analyzer.run_pass_3_index(
-                staging_dir=staging_dir,
-                domain_list=domain_list,
-                repo_list=repo_list,
-                max_turns=config.dependency_map_pass3_max_turns,
-            )
-            journal["pass3"] = {
-                "status": "completed",
-                "completed_at": datetime.now(timezone.utc).isoformat(),
-            }
-            self._save_journal(staging_dir, journal)
-        else:
-            logger.info("Pass 3 already completed, skipping")
+        # AC2 (Story #216): Pass 3 (Index generation) is replaced by programmatic
+        # _generate_index_md() called in _finalize_analysis(). No Claude CLI call needed.
+        # Update journal to reflect pass3 is handled programmatically.
+        journal["pass3"] = {
+            "status": "completed",
+            "method": "programmatic",
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._save_journal(staging_dir, journal)
 
         return domain_list, errors
 
@@ -350,6 +344,12 @@ class DependencyMapService:
         cidx_meta_path = paths["cidx_meta_path"]
         golden_repos_root = paths["golden_repos_root"]
 
+        # AC4 (Story #216): Reconcile ghost domains before generating index
+        domain_list = self._analyzer._reconcile_domains_json(staging_dir, domain_list)
+
+        # AC2 (Story #216): Generate _index.md programmatically (replaces Claude Pass 3)
+        self._analyzer._generate_index_md(staging_dir, domain_list, repo_list)
+
         # Stage-then-swap (AC4: Stage-then-Swap Atomic Writes)
         try:
             self._stage_then_swap(staging_dir, final_dir)
@@ -372,6 +372,9 @@ class DependencyMapService:
             next_run=next_run,
             error_message=None,
         )
+
+        # AC9 (Story #216): Record run metrics to run_history table
+        self._record_run_metrics(staging_dir, domain_list, repo_list)
 
     def _stage_then_swap(self, staging_dir: Path, final_dir: Path) -> None:
         """
@@ -416,6 +419,68 @@ class DependencyMapService:
             logger.info("Re-indexed cidx-meta after dependency map update")
         except Exception as e:
             logger.warning(f"cidx index re-indexing failed: {e}")
+
+    def _record_run_metrics(
+        self,
+        staging_dir: Path,
+        domain_list: List[Dict[str, Any]],
+        repo_list: List[Dict[str, Any]],
+    ) -> None:
+        """
+        Compute and record run metrics to tracking backend (AC9, Story #216).
+
+        Reads domain file sizes from staging_dir to compute total_chars and
+        zero_char_domains, counts edge_count from cross-domain graph section
+        of _index.md if present, then calls tracking_backend.record_run_metrics().
+
+        Args:
+            staging_dir: Staging directory where domain .md files were written
+            domain_list: List of domain dicts from analysis
+            repo_list: List of repo dicts that were analyzed
+        """
+        try:
+            total_chars = 0
+            zero_char_domains = 0
+            for domain in domain_list:
+                domain_file = staging_dir / f"{domain['name']}.md"
+                if domain_file.exists():
+                    chars = len(domain_file.read_text())
+                    total_chars += chars
+                    if chars == 0:
+                        zero_char_domains += 1
+                else:
+                    zero_char_domains += 1
+
+            # Count edges from _index.md cross-domain graph section
+            edge_count = 0
+            index_file = staging_dir / "_index.md"
+            if index_file.exists():
+                content = index_file.read_text()
+                import re as _re
+                # Count edge lines in mermaid graph (lines like "  A --> B")
+                edge_count = len(_re.findall(r"^\s+\S+ *--> *\S+", content, _re.MULTILINE))
+
+            metrics = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "domain_count": len(domain_list),
+                "total_chars": total_chars,
+                "edge_count": edge_count,
+                "zero_char_domains": zero_char_domains,
+                "repos_analyzed": len(repo_list),
+                "repos_skipped": 0,  # Full analysis always processes all repos
+            }
+
+            if hasattr(self._tracking_backend, "record_run_metrics"):
+                self._tracking_backend.record_run_metrics(metrics)
+                logger.info(
+                    f"Recorded run metrics: {len(domain_list)} domains, "
+                    f"{len(repo_list)} repos, {total_chars} chars"
+                )
+            else:
+                logger.debug("Tracking backend does not support record_run_metrics, skipping")
+
+        except Exception as e:
+            logger.warning(f"Failed to record run metrics: {e}")
 
     def _read_repo_descriptions(
         self, cidx_meta_path: Path, active_aliases: Optional[Set[str]] = None
@@ -593,9 +658,20 @@ class DependencyMapService:
                 repo["file_count"] = 0
                 repo["total_bytes"] = 0
 
+        # Filter out empty repos (AC8: exclude repos with 0 files — they contribute nothing to analysis)
+        non_empty = []
+        for repo in repo_list:
+            if repo.get("file_count", 0) > 0:
+                non_empty.append(repo)
+            else:
+                logger.warning(
+                    "_enrich_repo_sizes: excluding empty repo '%s' (0 files) from analysis",
+                    repo.get("alias", "unknown"),
+                )
+
         # Sort descending by total_bytes
-        repo_list.sort(key=lambda r: r.get("total_bytes", 0), reverse=True)
-        return repo_list
+        non_empty.sort(key=lambda r: r.get("total_bytes", 0), reverse=True)
+        return non_empty
 
     def _get_commit_hashes(self, repo_list: List[Dict[str, Any]]) -> Dict[str, str]:
         """
@@ -1046,6 +1122,98 @@ class DependencyMapService:
 
         return errors
 
+    def _discover_and_assign_new_repos(
+        self,
+        new_repos: List[Dict[str, Any]],
+        existing_domains: List[str],
+        dependency_map_dir: Path,
+        config,
+    ) -> Set[str]:
+        """
+        Discover which domains new repos belong to and update _domains.json (AC6, Story #216).
+
+        Invokes Claude CLI with a domain discovery prompt to determine which existing
+        domain(s) each new repo belongs to, then updates _domains.json accordingly.
+
+        Args:
+            new_repos: List of new repo dicts with alias and clone_path
+            existing_domains: List of existing domain names
+            dependency_map_dir: Path to dependency-map directory containing _domains.json
+            config: Claude integration config
+
+        Returns:
+            Set of affected domain names that need re-analysis
+        """
+        affected: Set[str] = set()
+
+        prompt = self._analyzer.build_domain_discovery_prompt(new_repos, existing_domains)
+
+        try:
+            result = self._analyzer.invoke_domain_discovery(
+                prompt,
+                config.dependency_map_pass_timeout_seconds,
+                config.dependency_map_delta_max_turns,
+            )
+            from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+            assignments = DependencyMapAnalyzer._extract_json(result)
+        except Exception as e:
+            logger.warning(f"Domain discovery failed for new repos: {e}")
+            return affected
+
+        if not isinstance(assignments, list):
+            logger.warning("Domain discovery returned non-list JSON, skipping assignment")
+            return affected
+
+        # Load current _domains.json
+        domains_file = dependency_map_dir / "_domains.json"
+        if not domains_file.exists():
+            logger.warning("_domains.json not found, cannot assign new repos")
+            return affected
+
+        try:
+            domain_list = json.loads(domains_file.read_text())
+        except Exception as e:
+            logger.warning(f"Failed to read _domains.json for new repo assignment: {e}")
+            return affected
+
+        # Build alias-to-domain index for fast lookup
+        domain_by_name = {d["name"]: d for d in domain_list}
+
+        # Apply assignments from Claude's response
+        for assignment in assignments:
+            repo_alias = assignment.get("repo")
+            assigned_domains = assignment.get("domains", [])
+
+            if not repo_alias or not assigned_domains:
+                continue
+
+            for domain_name in assigned_domains:
+                if domain_name in domain_by_name:
+                    domain = domain_by_name[domain_name]
+                    repos = domain.setdefault("participating_repos", [])
+                    if repo_alias not in repos:
+                        repos.append(repo_alias)
+                    affected.add(domain_name)
+                    logger.info(
+                        f"Assigned new repo '{repo_alias}' to existing domain '{domain_name}'"
+                    )
+                else:
+                    logger.warning(
+                        f"Discovery assigned '{repo_alias}' to unknown domain '{domain_name}' - skipping"
+                    )
+
+        # Write updated _domains.json
+        try:
+            domains_file.write_text(json.dumps(domain_list, indent=2))
+            logger.info(
+                f"Updated _domains.json with {len(new_repos)} new repo(s): "
+                f"affected domains: {affected}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write updated _domains.json: {e}")
+
+        return affected
+
     def _finalize_delta_tracking(
         self, config, all_repos: List[Dict[str, Any]]
     ) -> None:
@@ -1126,19 +1294,20 @@ class DependencyMapService:
             all_repos = self._get_activated_repos()
             self._analyzer.generate_claude_md(all_repos)
 
-            # Handle new repo domain discovery
-            # Code Review M2: Known limitation - new repos not in _index.md are skipped
-            # The build_domain_discovery_prompt() and build_new_domain_prompt() methods
-            # exist but the full discovery flow is not yet implemented.
-            # WORKAROUND: Users should trigger a full dependency map re-analysis to
-            # incorporate new repos into the domain structure.
+            # Handle new repo domain discovery (AC6, Story #216)
             if "__NEW_REPO_DISCOVERY__" in affected_domains:
                 affected_domains.remove("__NEW_REPO_DISCOVERY__")
-                logger.warning(
-                    "New repo domain discovery not yet implemented - "
-                    "new repos not in _index.md are skipped. "
-                    "Trigger a full re-analysis to incorporate new repos."
+                existing_domains = [
+                    f.stem for f in dependency_map_dir.glob("*.md")
+                    if not f.name.startswith("_")
+                ]
+                discovered = self._discover_and_assign_new_repos(
+                    new_repos=new_repos,
+                    existing_domains=existing_domains,
+                    dependency_map_dir=dependency_map_dir,
+                    config=config,
                 )
+                affected_domains.update(discovered)
 
             # Update affected domains (AC5: In-Place Updates)
             errors = self._update_affected_domains(

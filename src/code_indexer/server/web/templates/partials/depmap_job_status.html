@@ -98,6 +98,45 @@
 </article>
 {% endif %}
 
+<!-- AC9 (Story #216): Run history metrics table -->
+{% if job_status.run_history %}
+<article style="margin-top: 1rem;">
+    <header>
+        <h3>Recent Run Metrics</h3>
+    </header>
+    <div style="overflow-x: auto;">
+        <table style="font-size: 0.85rem; margin-bottom: 0;">
+            <thead>
+                <tr>
+                    <th>Timestamp</th>
+                    <th>Domains</th>
+                    <th>Chars</th>
+                    <th>Edges</th>
+                    <th>Repos</th>
+                    <th>P1 (s)</th>
+                    <th>P2 (s)</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for run in job_status.run_history %}
+                <tr>
+                    <td style="white-space: nowrap;">
+                        {% if run.timestamp %}{{ run.timestamp[:16] | replace("T", " ") }}{% else %}-{% endif %}
+                    </td>
+                    <td>{{ run.domain_count or 0 }}</td>
+                    <td>{{ run.total_chars or 0 }}</td>
+                    <td>{{ run.edge_count or 0 }}</td>
+                    <td>{{ run.repos_analyzed or 0 }}</td>
+                    <td>{{ "%.1f"|format(run.pass1_duration_s or 0) }}</td>
+                    <td>{{ "%.1f"|format(run.pass2_duration_s or 0) }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</article>
+{% endif %}
+
 </div>
 
 <script>

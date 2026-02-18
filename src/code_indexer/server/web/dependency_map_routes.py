@@ -104,6 +104,7 @@ def _get_job_status_data() -> dict:
             "last_run": None,
             "next_run": None,
             "error_message": None,
+            "run_history": [],
         }
 
     try:
@@ -117,6 +118,7 @@ def _get_job_status_data() -> dict:
             "last_run": None,
             "next_run": None,
             "error_message": str(e),
+            "run_history": [],
         }
 
 

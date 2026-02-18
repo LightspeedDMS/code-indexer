@@ -263,5 +263,5 @@ class TestInvokeDeltaMerge:
         )
 
         # Verify internal method was called with correct parameters
-        mock_invoke.assert_called_once_with(prompt, timeout, max_turns)
+        mock_invoke.assert_called_once_with(prompt, timeout, max_turns, allowed_tools="mcp__cidx-local__search_code")
         assert result == "Claude CLI result"

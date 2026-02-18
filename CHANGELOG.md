@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.15] - 2026-02-18
+
+### Added
+
+- **Dependency map pipeline hardening (Story #216)** - Fix critical bugs and establish self-improvement loop:
+  - Programmatic `_index.md` generation replaces Claude-based Pass 3, eliminating heading instability and saving an expensive CLI call (AC2)
+  - Domain stability anchor feeds previous `_domains.json` to Pass 1 for consistent domain assignments across runs (AC5)
+  - New repo discovery in delta refresh replaces `__NEW_REPO_DISCOVERY__` stub with real Claude-based domain assignment (AC6)
+  - Delta merge prompts include `clone_path` and MCP `search_code` tool access for source-verified updates (AC7)
+  - Quality metrics tracking with SQLite `dependency_map_run_history` table and dashboard display (AC9)
+
+### Fixed
+
+- **Cross-domain graph edges not rendering** - Rewrote `_parse_cross_domain_deps` with pipe-splitting to handle both 3-column and 4-column markdown tables (AC1)
+- **Delta refresh heading mismatch** - Programmatic headings are now deterministic, fixing `_parse_repo_to_domain_mapping` regex match (AC3)
+- **Ghost domains in `_domains.json`** - Added `_reconcile_domains_json` to remove entries without corresponding `.md` analysis files (AC4)
+- **Empty repos wasting analysis time** - `_enrich_repo_sizes` now filters repos with `file_count=0` before analysis (AC8)
+
 ## [9.3.14] - 2026-02-17
 
 ### Added

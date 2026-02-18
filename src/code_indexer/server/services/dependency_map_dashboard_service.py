@@ -65,6 +65,14 @@ class DependencyMapDashboardService:
 
         health, color = self._compute_health(tracking, config, changes)
 
+        # AC9 (Story #216): Include run history for quality metrics tracking
+        run_history = []
+        try:
+            if hasattr(self._tracking_backend, "get_run_history"):
+                run_history = self._tracking_backend.get_run_history(limit=5)
+        except Exception as e:
+            logger.warning("dependency_map_dashboard: failed to get run_history: %s", e)
+
         return {
             "health": health,
             "color": color,
@@ -72,6 +80,7 @@ class DependencyMapDashboardService:
             "last_run": tracking.get("last_run"),
             "next_run": tracking.get("next_run"),
             "error_message": tracking.get("error_message"),
+            "run_history": run_history,
         }
 
     def _safe_detect_changes(self) -> Tuple[list, list, list]:
