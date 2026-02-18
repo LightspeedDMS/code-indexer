@@ -466,7 +466,7 @@ class DependencyMapService:
                     if in_cross_domain:
                         if line.startswith("| ") and not line.startswith("|---") and not line.startswith("| Source"):
                             edge_count += 1
-                        elif line.startswith("#") or (line.strip() and not line.startswith("|") and not line.startswith("*")):
+                        elif line.startswith("#"):
                             break
 
             metrics = {

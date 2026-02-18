@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.18] - 2026-02-18
+
+### Fixed
+
+- **AC9 edge count still zero** - Edge counting parser broke out of the loop too early when encountering descriptive text between the "Cross-Domain Dependencies" heading and the actual table. Now only breaks on new section headers (`#`).
+
 ## [9.3.17] - 2026-02-18
 
 ### Fixed
