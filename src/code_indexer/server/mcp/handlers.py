@@ -86,6 +86,26 @@ def _parse_json_string_array(value: Any) -> Any:
     return value
 
 
+def _coerce_int(value: Any, default: int) -> int:
+    """Coerce MCP parameter to int, returning default on failure."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def _coerce_float(value: Any, default: float) -> float:
+    """Coerce MCP parameter to float, returning default on failure."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+
 def _mcp_response(data: Dict[str, Any]) -> Dict[str, Any]:
     """Wrap response data in MCP-compliant content array format.
 
@@ -825,7 +845,7 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     repo_aliases = params.get("repository_alias", [])
     repo_aliases = _expand_wildcard_patterns(repo_aliases)
-    limit = params.get("limit", 10)
+    limit = _coerce_int(params.get("limit"), 10)
 
     # Smart context-aware defaults: multi-repo (2+) uses per_repo, single repo uses global
     if len(repo_aliases) > 1:
@@ -880,7 +900,7 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         query=params.get("query_text", ""),
         search_type=search_type,
         limit=limit,
-        min_score=params.get("min_score"),
+        min_score=_coerce_float(params.get("min_score"), 0.0) if params.get("min_score") is not None else None,
         language=params.get("language"),
         path_filter=params.get("path_filter"),
     )
@@ -1114,12 +1134,14 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 if query_tracker is not None:
                     query_tracker.increment_ref(index_path)
 
+                # Coerce numeric parameters from MCP string types (MCP protocol sends all values as strings)
+                _evolution_limit_raw = params.get("evolution_limit")
                 results = app_module.semantic_query_manager._perform_search(
                     username=user.username,
                     user_repos=mock_user_repos,
                     query_text=params["query_text"],
-                    limit=params.get("limit", 10),
-                    min_score=params.get("min_score", 0.5),
+                    limit=_coerce_int(params.get("limit"), 10),
+                    min_score=_coerce_float(params.get("min_score"), 0.5),
                     file_extensions=params.get("file_extensions"),
                     language=params.get("language"),
                     exclude_language=params.get("exclude_language"),
@@ -1134,12 +1156,12 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     at_commit=params.get("at_commit"),
                     include_removed=params.get("include_removed", False),
                     show_evolution=params.get("show_evolution", False),
-                    evolution_limit=params.get("evolution_limit"),
+                    evolution_limit=_coerce_int(_evolution_limit_raw, 0) if _evolution_limit_raw is not None else None,
                     # FTS-specific parameters (Story #503 Phase 2)
                     case_sensitive=params.get("case_sensitive", False),
                     fuzzy=params.get("fuzzy", False),
-                    edit_distance=params.get("edit_distance", 0),
-                    snippet_lines=params.get("snippet_lines", 5),
+                    edit_distance=_coerce_int(params.get("edit_distance"), 0),
+                    snippet_lines=_coerce_int(params.get("snippet_lines"), 5),
                     regex=params.get("regex", False),
                     # Temporal filtering parameters (Story #503 Phase 3)
                     diff_type=params.get("diff_type"),
@@ -1225,12 +1247,14 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             return _mcp_response({"success": True, "results": result})
 
         # Activated repository: use semantic_query_manager for activated repositories (matches REST endpoint pattern)
+        # Coerce numeric parameters from MCP string types (MCP protocol sends all values as strings)
+        _evolution_limit_activated = params.get("evolution_limit")
         result = app_module.semantic_query_manager.query_user_repositories(
             username=user.username,
             query_text=params["query_text"],
             repository_alias=params.get("repository_alias"),
-            limit=params.get("limit", 10),
-            min_score=params.get("min_score", 0.5),
+            limit=_coerce_int(params.get("limit"), 10),
+            min_score=_coerce_float(params.get("min_score"), 0.5),
             file_extensions=params.get("file_extensions"),
             language=params.get("language"),
             exclude_language=params.get("exclude_language"),
@@ -1245,12 +1269,12 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             at_commit=params.get("at_commit"),
             include_removed=params.get("include_removed", False),
             show_evolution=params.get("show_evolution", False),
-            evolution_limit=params.get("evolution_limit"),
+            evolution_limit=_coerce_int(_evolution_limit_activated, 0) if _evolution_limit_activated is not None else None,
             # FTS-specific parameters (Story #503 Phase 2)
             case_sensitive=params.get("case_sensitive", False),
             fuzzy=params.get("fuzzy", False),
-            edit_distance=params.get("edit_distance", 0),
-            snippet_lines=params.get("snippet_lines", 5),
+            edit_distance=_coerce_int(params.get("edit_distance"), 0),
+            snippet_lines=_coerce_int(params.get("snippet_lines"), 5),
             regex=params.get("regex", False),
             # Temporal filtering parameters (Story #503 Phase 3)
             diff_type=params.get("diff_type"),
@@ -1914,12 +1938,18 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         file_path = params["file_path"]
 
         # Extract optional pagination parameters
-        offset = params.get("offset")
-        limit = params.get("limit")
+        # Coerce from MCP string types (MCP protocol sends all values as strings)
+        # Non-integer floats (e.g. 3.14) are treated as invalid (coerced to 0, fails >= 1 check)
+        _offset_raw = params.get("offset")
+        _limit_raw = params.get("limit")
+        _offset_invalid = isinstance(_offset_raw, float) and not float(_offset_raw).is_integer()
+        _limit_invalid = isinstance(_limit_raw, float) and not float(_limit_raw).is_integer()
+        offset = 0 if _offset_invalid else (_coerce_int(_offset_raw, 0) if _offset_raw is not None else None)
+        limit = 0 if _limit_invalid else (_coerce_int(_limit_raw, 0) if _limit_raw is not None else None)
 
         # Validate offset if provided
         if offset is not None:
-            if not isinstance(offset, int) or offset < 1:
+            if offset < 1:
                 return _mcp_response(
                     {
                         "success": False,
@@ -1931,7 +1961,7 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Validate limit if provided
         if limit is not None:
-            if not isinstance(limit, int) or limit < 1:
+            if limit < 1:
                 return _mcp_response(
                     {
                         "success": False,
@@ -2091,7 +2121,7 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         recursive = params.get("recursive", True)
         user_path_pattern = params.get("path_pattern")
         language = params.get("language")
-        limit = params.get("limit", 500)
+        limit = _coerce_int(params.get("limit"), 500)
         sort_by = params.get("sort_by", "path")
 
         # Validate limit range
@@ -3583,7 +3613,7 @@ def _omni_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     repo_aliases = args.get("repository_alias", [])
     repo_aliases = _expand_wildcard_patterns(repo_aliases)
-    limit = args.get("limit", 20)
+    limit = _coerce_int(args.get("limit"), 20)
 
     if not repo_aliases:
         return _mcp_response(
@@ -3691,7 +3721,7 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         # Create service and execute query
         service = GitOperationsService(Path(repo_path))
         result = service.get_log(
-            limit=args.get("limit", 50),
+            limit=_coerce_int(args.get("limit"), 50),
             path=args.get("path"),
             author=args.get("author"),
             since=args.get("since"),
@@ -4265,7 +4295,7 @@ def handle_git_file_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         service = GitOperationsService(Path(repo_path))
         result = service.get_file_history(
             path=path,
-            limit=args.get("limit", 50),
+            limit=_coerce_int(args.get("limit"), 50),
             follow_renames=args.get("follow_renames", True),
         )
 
@@ -4435,7 +4465,7 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
             author=args.get("author"),
             since=args.get("since"),
             until=args.get("until"),
-            limit=args.get("limit", 50),
+            limit=_coerce_int(args.get("limit"), 50),
         )
 
         # Convert dataclasses to dicts for JSON serialization
@@ -4522,7 +4552,7 @@ def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 path=args.get("path"),
                 since=args.get("since"),
                 until=args.get("until"),
-                limit=args.get("limit", 50),
+                limit=_coerce_int(args.get("limit"), 50),
             )
         else:
             result = service.search_diffs(
@@ -4531,7 +4561,7 @@ def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 path=args.get("path"),
                 since=args.get("since"),
                 until=args.get("until"),
-                limit=args.get("limit", 50),
+                limit=_coerce_int(args.get("limit"), 50),
             )
 
         # Convert dataclasses to dicts for JSON serialization
@@ -4593,18 +4623,51 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         golden_repos_dir = _get_golden_repos_dir()
 
         # Resolve repository_alias to actual path
-        repo_path = _resolve_repo_path(repository_alias, golden_repos_dir)
-        if repo_path is None:
-            return _mcp_response(
-                {"success": False, "error": "Repository '.*' not found"}
+        if repository_alias.endswith("-global"):
+            # Use AliasManager for global repos (same as browse_directory does),
+            # because _resolve_repo_path is git-centric and fails for non-git repos
+            # like cidx-meta which is a generated folder with .md files.
+            registry = get_server_global_registry(golden_repos_dir)
+            global_repos = registry.list_global_repos()
+            repo_entry = next(
+                (r for r in global_repos if r["alias_name"] == repository_alias), None
             )
+            if not repo_entry:
+                available_repos = _get_available_repos()
+                error_envelope = _error_with_suggestions(
+                    error_msg=f"Global repository '{repository_alias}' not found",
+                    attempted_value=repository_alias,
+                    available_values=available_repos,
+                )
+                return _mcp_response(error_envelope)
+            from code_indexer.global_repos.alias_manager import AliasManager
+
+            alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
+            repo_path = alias_manager.read_alias(repository_alias)
+            if not repo_path:
+                available_repos = _get_available_repos()
+                error_envelope = _error_with_suggestions(
+                    error_msg=f"Alias for '{repository_alias}' not found",
+                    attempted_value=repository_alias,
+                    available_values=available_repos,
+                )
+                return _mcp_response(error_envelope)
+        else:
+            repo_path = _resolve_repo_path(repository_alias, golden_repos_dir)
+            if repo_path is None:
+                return _mcp_response(
+                    {
+                        "success": False,
+                        "error": f"Repository '{repository_alias}' not found",
+                    }
+                )
 
         # Create service and generate tree
         service = DirectoryExplorerService(Path(repo_path))
         result = service.generate_tree(
             path=args.get("path"),
-            max_depth=args.get("max_depth", 3),
-            max_files_per_dir=args.get("max_files_per_dir", 50),
+            max_depth=_coerce_int(args.get("max_depth"), 3),
+            max_files_per_dir=_coerce_int(args.get("max_files_per_dir"), 50),
             include_patterns=args.get("include_patterns"),
             exclude_patterns=args.get("exclude_patterns"),
             show_stats=args.get("show_stats", False),
@@ -5091,7 +5154,7 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     try:
         symbol = params.get("symbol")
-        limit = params.get("limit", 100)
+        limit = _coerce_int(params.get("limit"), 100)
         exact = params.get("exact", False)
         project = params.get("project")
         repository_alias = params.get("repository_alias")
@@ -5154,7 +5217,7 @@ def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     try:
         symbol = params.get("symbol")
-        depth = params.get("depth", 1)
+        depth = _coerce_int(params.get("depth"), 1)
         exact = params.get("exact", False)
         project = params.get("project")
         repository_alias = params.get("repository_alias")
@@ -5217,7 +5280,7 @@ def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     try:
         symbol = params.get("symbol")
-        depth = params.get("depth", 1)
+        depth = _coerce_int(params.get("depth"), 1)
         exact = params.get("exact", False)
         project = params.get("project")
         repository_alias = params.get("repository_alias")
@@ -5278,7 +5341,7 @@ def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     try:
         symbol = params.get("symbol")
-        depth = params.get("depth", 3)
+        depth = _coerce_int(params.get("depth"), 3)
         repository_alias = params.get("repository_alias")
 
         if not symbol:
@@ -5444,8 +5507,8 @@ def scip_context(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     try:
         symbol = params.get("symbol")
-        limit = params.get("limit", 20)
-        min_score = params.get("min_score", 0.0)
+        limit = _coerce_int(params.get("limit"), 20)
+        min_score = _coerce_float(params.get("min_score"), 0.0)
         repository_alias = params.get("repository_alias")
 
         if not symbol:
@@ -6947,8 +7010,8 @@ def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #686: Extract pagination parameters
         file_paths = args.get("file_paths")
-        offset = args.get("offset", 0)
-        limit = args.get("limit")  # None means use default (500)
+        offset = _coerce_int(args.get("offset"), 0)
+        limit = _coerce_int(args.get("limit"), 500) if args.get("limit") is not None else None  # None means use default (500)
 
         result = git_operations_service.git_diff(
             Path(repo_path), file_paths=file_paths, offset=offset, limit=limit
@@ -7001,8 +7064,8 @@ def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
         # Story #686: Updated default limit to 50, added offset parameter
-        limit = args.get("limit", 50)
-        offset = args.get("offset", 0)
+        limit = _coerce_int(args.get("limit"), 50)
+        offset = _coerce_int(args.get("offset"), 0)
         since_date = args.get("since_date")
         result = git_operations_service.git_log(
             Path(repo_path), limit=limit, offset=offset, since_date=since_date
@@ -7499,7 +7562,7 @@ async def handle_gh_actions_list_runs(
         # Extract optional parameters
         branch = args.get("branch")
         status = args.get("status")
-        limit = args.get("limit", 10)
+        limit = _coerce_int(args.get("limit"), 10)
 
         # Create client and list runs
         client = GitHubActionsClient(token)
@@ -8136,7 +8199,7 @@ async def handle_gitlab_ci_list_pipelines(
         # Extract optional parameters
         ref = args.get("ref")
         status = args.get("status")
-        limit = args.get("limit", 10)
+        limit = _coerce_int(args.get("limit"), 10)
 
         # Create client and list pipelines (CRITICAL: keyword)
         client = GitLabCIClient(token)
@@ -8795,7 +8858,7 @@ async def handle_github_actions_list_runs(
         workflow_id = args.get("workflow_id")
         status = args.get("status")
         branch = args.get("branch")
-        limit = args.get("limit", 20)
+        limit = _coerce_int(args.get("limit"), 20)
 
         # Combine owner and repo into repository format
         repository = f"{owner}/{repo}"
@@ -11048,7 +11111,7 @@ def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         from code_indexer.server.auth.audit_logger import password_audit_logger
 
-        limit = args.get("limit", DEFAULT_AUDIT_LOG_LIMIT)
+        limit = _coerce_int(args.get("limit"), DEFAULT_AUDIT_LOG_LIMIT)
         pr_logs = password_audit_logger.get_pr_logs(limit=limit)
         cleanup_logs = password_audit_logger.get_cleanup_logs(limit=limit)
 
@@ -11203,7 +11266,7 @@ def handle_scip_pr_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         from code_indexer.server.auth.audit_logger import password_audit_logger
 
-        limit = args.get("limit", DEFAULT_AUDIT_LOG_LIMIT)
+        limit = _coerce_int(args.get("limit"), DEFAULT_AUDIT_LOG_LIMIT)
         pr_logs = password_audit_logger.get_pr_logs(limit=limit)
 
         history = [
@@ -11252,7 +11315,7 @@ def handle_scip_cleanup_history(args: Dict[str, Any], user: User) -> Dict[str, A
 
         from code_indexer.server.auth.audit_logger import password_audit_logger
 
-        limit = args.get("limit", DEFAULT_AUDIT_LOG_LIMIT)
+        limit = _coerce_int(args.get("limit"), DEFAULT_AUDIT_LOG_LIMIT)
         cleanup_logs = password_audit_logger.get_cleanup_logs(limit=limit)
 
         history = [

@@ -360,10 +360,11 @@ class FileListingService:
 
     def _is_file_indexed(self, file_path: Path) -> bool:
         """
-        Check if file is currently indexed.
+        Check if file is likely indexed based on its extension.
 
-        This is a placeholder - in real implementation, this would
-        check against the vector database or index status.
+        Uses an extension-based check to determine if CIDX would index
+        this file type. This covers the known set of file types that
+        CIDX indexes via VoyageAI embeddings.
 
         Args:
             file_path: Path to file
@@ -371,10 +372,9 @@ class FileListingService:
         Returns:
             Whether file is indexed
         """
-        # For now, consider text files as potentially indexed
-        # In real implementation, query vector store or index database
         extension = file_path.suffix.lower()
         indexable_extensions = {
+            # Programming languages
             ".py",
             ".js",
             ".ts",
@@ -397,6 +397,18 @@ class FileListingService:
             ".vue",
             ".jsx",
             ".tsx",
+            # Documentation and markup
+            ".md",
+            ".txt",
+            # Configuration files
+            ".json",
+            ".yaml",
+            ".yml",
+            ".toml",
+            ".xml",
+            # Shell scripts
+            ".sh",
+            ".bash",
         }
         return extension in indexable_extensions
 
