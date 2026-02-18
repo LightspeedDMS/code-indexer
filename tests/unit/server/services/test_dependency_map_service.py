@@ -386,7 +386,7 @@ def test_run_full_analysis_invokes_cidx_index_reindex(
     # Verify subprocess.run was called with cidx index
     mock_run.assert_called_once()
     call_args = mock_run.call_args
-    assert call_args[0][0] == ["cidx", "index"]
+    assert call_args[0][0] == ["cidx", "index", "--detect-deletions"]
     assert call_args[1]["cwd"] == str(cidx_meta)
     assert call_args[1]["timeout"] == 120
 

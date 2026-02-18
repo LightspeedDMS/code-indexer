@@ -412,7 +412,7 @@ class DependencyMapService:
         """
         try:
             subprocess.run(
-                ["cidx", "index"],
+                ["cidx", "index", "--detect-deletions"],
                 cwd=str(cidx_meta_path),
                 capture_output=True,
                 text=True,

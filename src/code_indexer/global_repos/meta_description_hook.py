@@ -363,7 +363,7 @@ def reindex_cidx_meta(cidx_meta_path: Path) -> None:
     with _cidx_meta_index_lock:
         try:
             result = subprocess.run(
-                ["cidx", "index"],
+                ["cidx", "index", "--detect-deletions"],
                 cwd=str(cidx_meta_path),
                 capture_output=True,
                 text=True,

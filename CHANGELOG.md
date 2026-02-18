@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.22] - 2026-02-18
+
+### Fixed
+
+- **cidx-meta stale vector cleanup** - Added `--detect-deletions` flag to all cidx-meta reindex calls in `dependency_map_service.py` and `meta_description_hook.py`. Previously, when dependency map domain files were renamed or removed during stage-then-swap, old vectors remained as ghost entries in the HNSW index. The `--detect-deletions` flag triggers `SmartIndexer._detect_and_handle_deletions()` which reconciles disk state against the index and removes vectors for files that no longer exist.
+
 ## [9.3.21] - 2026-02-18
 
 ### Fixed

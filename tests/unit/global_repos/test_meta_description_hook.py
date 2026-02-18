@@ -75,9 +75,9 @@ class TestOnRepoAdded:
         # Verify: cidx index was called in cidx-meta directory
         # Find the cidx index call among all subprocess calls
         cidx_index_calls = [
-            call for call in mock_run.call_args_list if call[0][0] == ["cidx", "index"]
+            call for call in mock_run.call_args_list if call[0][0] == ["cidx", "index", "--detect-deletions"]
         ]
-        assert len(cidx_index_calls) == 1, "Expected exactly one 'cidx index' call"
+        assert len(cidx_index_calls) == 1, "Expected exactly one 'cidx index --detect-deletions' call"
         call_args = cidx_index_calls[0]
         assert call_args[1]["cwd"] == str(cidx_meta_path)
 
@@ -151,7 +151,7 @@ class TestOnRepoRemoved:
         # Verify: cidx index was called to re-index cidx-meta
         mock_run.assert_called_once()
         call_args = mock_run.call_args
-        assert call_args[0][0] == ["cidx", "index"]
+        assert call_args[0][0] == ["cidx", "index", "--detect-deletions"]
         assert call_args[1]["cwd"] == str(cidx_meta_path)
 
     def test_handles_nonexistent_md_file_gracefully(
