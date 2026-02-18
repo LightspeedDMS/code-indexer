@@ -26,6 +26,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
+from .constants import CIDX_META_REPO  # noqa: E402
+
 # Constants
 CIDX_REINDEX_TIMEOUT_SECONDS = 120
 SCHEDULER_POLL_INTERVAL_SECONDS = 60  # Story #193: Delta refresh polling interval
@@ -551,6 +553,11 @@ class DependencyMapService:
 
             # Skip if missing required fields
             if not alias or not clone_path:
+                continue
+
+            # Skip cidx-meta: it's the output target for dependency map results,
+            # not a source repository to be analyzed
+            if alias == CIDX_META_REPO:
                 continue
 
             # Extract description summary (first line of description)

@@ -193,6 +193,9 @@ class DependencyMapAnalyzer:
         prompt += (
             "Identify domain clusters and list participating repos per domain.\n\n"
         )
+        prompt += "**IMPORTANT**: The `cidx-meta` repository is the system metadata registry where dependency map output is stored. "
+        prompt += "It must NOT be included as a participating repository in any domain. "
+        prompt += "If you see references to cidx-meta in other repos, that is a system-level integration, not a domain dependency.\n\n"
 
         prompt += "### Source-Code-First Exploration (MANDATORY)\n\n"
         prompt += "ALWAYS examine source code, not just descriptions. Documentation may be incomplete or misleading. Source code is the ground truth.\n\n"
@@ -406,6 +409,7 @@ class DependencyMapAnalyzer:
         prompt += "You MUST write your complete domain analysis output BEFORE doing any MCP searches.\n"
         prompt += "Your primary source material is the Pass 1 evidence and repository descriptions below.\n"
         prompt += "MCP searches are OPTIONAL and limited to AT MOST 5 calls for verification only.\n\n"
+        prompt += "**NOTE**: The `cidx-meta` directory is the system metadata registry, not a source code repository. Ignore it during analysis.\n\n"
 
         prompt += f"**Domain Description**: {domain.get('description', 'N/A')}\n\n"
 
@@ -602,6 +606,8 @@ class DependencyMapAnalyzer:
         prompt += "- Build and deployment scripts\n\n"
         prompt += "Assess each repo's documentation depth relative to its codebase size.\n"
         prompt += "A repo with 100+ source files and a 5-line README has unreliable documentation - explore its source code thoroughly.\n\n"
+        prompt += "**NOTE**: The `cidx-meta` directory in the golden-repos root is the system metadata registry. "
+        prompt += "It stores dependency map output and repo descriptions. Ignore it during analysis — it is not a source code repository.\n\n"
         prompt += "## Dependency Types to Identify\n\n"
         prompt += "**CRITICAL**: ABSENCE of code imports does NOT mean absence of dependency.\n\n"
         prompt += "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
