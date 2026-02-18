@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.17] - 2026-02-18
+
+### Fixed
+
+- **AC9 metrics recording zero values** - `_record_run_metrics` was reading from the staging directory after stage-then-swap had already moved files to the final directory. Now reads from `final_dir` (the live output directory).
+- **AC9 edge count always zero** - Edge counting regex matched mermaid-style arrows (`A --> B`) but `_index.md` now uses markdown table format. Replaced with markdown table row parser for the Cross-Domain Dependencies section.
+
 ## [9.3.16] - 2026-02-18
 
 ### Fixed

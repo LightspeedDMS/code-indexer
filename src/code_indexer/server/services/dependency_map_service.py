@@ -374,7 +374,7 @@ class DependencyMapService:
         )
 
         # AC9 (Story #216): Record run metrics to run_history table
-        self._record_run_metrics(staging_dir, domain_list, repo_list)
+        self._record_run_metrics(final_dir, domain_list, repo_list)
 
     def _stage_then_swap(self, staging_dir: Path, final_dir: Path) -> None:
         """
@@ -422,19 +422,19 @@ class DependencyMapService:
 
     def _record_run_metrics(
         self,
-        staging_dir: Path,
+        output_dir: Path,
         domain_list: List[Dict[str, Any]],
         repo_list: List[Dict[str, Any]],
     ) -> None:
         """
         Compute and record run metrics to tracking backend (AC9, Story #216).
 
-        Reads domain file sizes from staging_dir to compute total_chars and
+        Reads domain file sizes from the output directory to compute total_chars and
         zero_char_domains, counts edge_count from cross-domain graph section
         of _index.md if present, then calls tracking_backend.record_run_metrics().
 
         Args:
-            staging_dir: Staging directory where domain .md files were written
+            output_dir: Output directory where domain .md files were written
             domain_list: List of domain dicts from analysis
             repo_list: List of repo dicts that were analyzed
         """
@@ -442,7 +442,7 @@ class DependencyMapService:
             total_chars = 0
             zero_char_domains = 0
             for domain in domain_list:
-                domain_file = staging_dir / f"{domain['name']}.md"
+                domain_file = output_dir / f"{domain['name']}.md"
                 if domain_file.exists():
                     chars = len(domain_file.read_text())
                     total_chars += chars
@@ -451,14 +451,23 @@ class DependencyMapService:
                 else:
                     zero_char_domains += 1
 
-            # Count edges from _index.md cross-domain graph section
+            # Count edges from _index.md cross-domain dependencies table
             edge_count = 0
-            index_file = staging_dir / "_index.md"
+            index_file = output_dir / "_index.md"
             if index_file.exists():
                 content = index_file.read_text()
-                import re as _re
-                # Count edge lines in mermaid graph (lines like "  A --> B")
-                edge_count = len(_re.findall(r"^\s+\S+ *--> *\S+", content, _re.MULTILINE))
+                # Count data rows in cross-domain dependencies table
+                # (pipe-delimited rows that aren't headers or separators)
+                in_cross_domain = False
+                for line in content.splitlines():
+                    if "Cross-Domain Dependencies" in line:
+                        in_cross_domain = True
+                        continue
+                    if in_cross_domain:
+                        if line.startswith("| ") and not line.startswith("|---") and not line.startswith("| Source"):
+                            edge_count += 1
+                        elif line.startswith("#") or (line.strip() and not line.startswith("|") and not line.startswith("*")):
+                            break
 
             metrics = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
