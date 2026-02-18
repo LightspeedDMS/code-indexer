@@ -116,6 +116,12 @@ def mock_golden_repos_manager(tmp_golden_repos_root: Path):
             "repo_url": "git@github.com:org/repo2.git",
         },
     ]
+    # get_actual_repo_path resolves stale clone_path to actual filesystem path;
+    # in test fixtures the flat paths are valid, so return them directly
+    def _resolve_path(alias: str) -> str:
+        return str(tmp_golden_repos_root / alias)
+
+    manager.get_actual_repo_path.side_effect = _resolve_path
     return manager
 
 
@@ -447,6 +453,100 @@ def test_get_activated_repos_skips_markdown_headings(
     assert repo2["description_summary"] == "No description"
 
 
+def test_get_activated_repos_resolves_versioned_path(
+    tmp_golden_repos_root: Path,
+    mock_golden_repos_manager,
+    mock_config_manager,
+    mock_tracking_backend,
+    mock_analyzer,
+):
+    """Test _get_activated_repos resolves actual path via get_actual_repo_path().
+
+    After RefreshScheduler runs, clone_path in metadata becomes stale (pointing to
+    golden-repos/{alias}) while the actual repo lives at
+    golden-repos/.versioned/{alias}/v_{timestamp}/.
+    _get_activated_repos() must call get_actual_repo_path() and use the resolved
+    path rather than the stale metadata path.
+    """
+    # Create the versioned path structure that RefreshScheduler would produce
+    versioned_path = tmp_golden_repos_root / ".versioned" / "repo1" / "v_1234567890"
+    versioned_path.mkdir(parents=True)
+    (versioned_path / "main.py").write_text("# repo1 versioned source\n")
+
+    # mock_golden_repos_manager returns the STALE flat path for repo1
+    stale_path = str(tmp_golden_repos_root / "repo1")
+
+    # get_actual_repo_path() resolves to the versioned path for repo1,
+    # and returns the flat path unchanged for repo2
+    def fake_get_actual_repo_path(alias: str) -> str:
+        if alias == "repo1":
+            return str(versioned_path)
+        return str(tmp_golden_repos_root / alias)
+
+    mock_golden_repos_manager.get_actual_repo_path.side_effect = fake_get_actual_repo_path
+
+    service = DependencyMapService(
+        golden_repos_manager=mock_golden_repos_manager,
+        config_manager=mock_config_manager,
+        tracking_backend=mock_tracking_backend,
+        analyzer=mock_analyzer,
+    )
+
+    repos = service._get_activated_repos()
+
+    # repo1 must appear with the RESOLVED (versioned) path, not the stale flat path
+    repo1 = next((r for r in repos if r["alias"] == "repo1"), None)
+    assert repo1 is not None, "repo1 should be included in activated repos"
+    assert repo1["clone_path"] == str(versioned_path), (
+        f"Expected versioned path {versioned_path!s}, got {repo1['clone_path']!r}"
+    )
+    assert repo1["clone_path"] != stale_path, (
+        "clone_path must not be the stale metadata path"
+    )
+
+    # repo2 should also appear (using its flat path)
+    repo2 = next((r for r in repos if r["alias"] == "repo2"), None)
+    assert repo2 is not None, "repo2 should be included in activated repos"
+    assert repo2["clone_path"] == str(tmp_golden_repos_root / "repo2")
+
+
+def test_get_activated_repos_skips_repo_when_path_resolution_fails(
+    tmp_golden_repos_root: Path,
+    mock_golden_repos_manager,
+    mock_config_manager,
+    mock_tracking_backend,
+    mock_analyzer,
+):
+    """Test _get_activated_repos skips repos where get_actual_repo_path() raises.
+
+    If get_actual_repo_path() raises (e.g. GoldenRepoNotFoundError or ValueError),
+    the repo must be skipped with a warning rather than propagating the exception.
+    """
+    def fake_get_actual_repo_path(alias: str) -> str:
+        if alias == "repo1":
+            raise Exception("GoldenRepoNotFoundError: repo1 not found on filesystem")
+        return str(tmp_golden_repos_root / alias)
+
+    mock_golden_repos_manager.get_actual_repo_path.side_effect = fake_get_actual_repo_path
+
+    service = DependencyMapService(
+        golden_repos_manager=mock_golden_repos_manager,
+        config_manager=mock_config_manager,
+        tracking_backend=mock_tracking_backend,
+        analyzer=mock_analyzer,
+    )
+
+    repos = service._get_activated_repos()
+
+    # repo1 must be absent because path resolution failed
+    repo1 = next((r for r in repos if r["alias"] == "repo1"), None)
+    assert repo1 is None, "repo1 should be skipped when get_actual_repo_path() raises"
+
+    # repo2 must still be present (its resolution succeeded)
+    repo2 = next((r for r in repos if r["alias"] == "repo2"), None)
+    assert repo2 is not None, "repo2 should still be included when only repo1 fails"
+
+
 def test_read_repo_descriptions_filters_stale_repos(
     tmp_golden_repos_root: Path,
     mock_golden_repos_manager,
@@ -685,6 +785,9 @@ class TestIteration15Journal:
             {"alias": "repo2", "clone_path": str(tmp_golden_repos_root / "repo2")},
             {"alias": "repo3", "clone_path": str(tmp_golden_repos_root / "repo3")},  # NEW
         ]
+        mock_golden_repos_manager.get_actual_repo_path.side_effect = (
+            lambda alias: str(tmp_golden_repos_root / alias)
+        )
 
         # Create repo3 directory
         repo3_dir = tmp_golden_repos_root / "repo3"

@@ -24,9 +24,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-logger = logging.getLogger(__name__)
+from .constants import CIDX_META_REPO
 
-from .constants import CIDX_META_REPO  # noqa: E402
+logger = logging.getLogger(__name__)
 
 # Constants
 CIDX_REINDEX_TIMEOUT_SECONDS = 120
@@ -558,6 +558,19 @@ class DependencyMapService:
             # Skip cidx-meta: it's the output target for dependency map results,
             # not a source repository to be analyzed
             if alias == CIDX_META_REPO:
+                continue
+
+            # Resolve actual filesystem path — clone_path from metadata may be stale
+            # after RefreshScheduler creates .versioned/{alias}/v_*/ structure
+            try:
+                resolved_path = self._golden_repos_manager.get_actual_repo_path(alias)
+                clone_path = resolved_path
+            except Exception as e:
+                logger.warning(
+                    "Skipping repo '%s': could not resolve actual path: %s",
+                    alias,
+                    e,
+                )
                 continue
 
             # Extract description summary (first line of description)

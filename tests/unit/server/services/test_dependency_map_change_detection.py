@@ -130,6 +130,12 @@ def mock_golden_repos_manager(tmp_golden_repos_root: Path):
             "clone_path": str(tmp_golden_repos_root / "repo3"),
         },
     ]
+    # get_actual_repo_path resolves stale clone_path to actual filesystem path;
+    # in test fixtures the flat paths are valid, so return them directly
+    def _resolve_path(alias: str) -> str:
+        return str(tmp_golden_repos_root / alias)
+
+    manager.get_actual_repo_path.side_effect = _resolve_path
     return manager
 
 
