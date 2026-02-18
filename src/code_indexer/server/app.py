@@ -1920,44 +1920,21 @@ def _reindex_cidx_meta_background(cidx_meta_path_str: str) -> None:
     .md files (e.g. repo descriptions created during golden-repo registration)
     are picked up without blocking server startup.
     """
-    import subprocess
     from code_indexer.server.middleware.error_formatters import generate_correlation_id
+    from code_indexer.global_repos.meta_description_hook import reindex_cidx_meta
 
     # contextvars are not inherited by threading.Thread — generate a fresh ID
     set_correlation_id(generate_correlation_id())
 
-    try:
-        logger.info(
-            "Re-indexing cidx-meta content (background)",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        subprocess.run(
-            ["cidx", "index"],
-            cwd=cidx_meta_path_str,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        logger.info(
-            "Successfully re-indexed cidx-meta content (background)",
-            extra={"correlation_id": get_correlation_id()},
-        )
-    except subprocess.CalledProcessError as e:
-        logger.error(
-            format_error_log(
-                "APP-GENERAL-006",
-                f"Failed to index cidx-meta: {e.stderr if e.stderr else str(e)}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "APP-GENERAL-007",
-                f"Unexpected error during cidx-meta indexing: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
+    logger.info(
+        "Re-indexing cidx-meta content (background)",
+        extra={"correlation_id": get_correlation_id()},
+    )
+    reindex_cidx_meta(Path(cidx_meta_path_str))
+    logger.info(
+        "Background cidx-meta re-indexing completed",
+        extra={"correlation_id": get_correlation_id()},
+    )
 
 
 def bootstrap_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None:

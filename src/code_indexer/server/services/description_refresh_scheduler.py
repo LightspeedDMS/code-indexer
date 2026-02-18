@@ -604,15 +604,9 @@ class DescriptionRefreshScheduler:
             md_file.write_text(content)
             logger.info(f"Updated description file: {md_file}")
 
-            # Re-index cidx-meta
-            import subprocess
-            subprocess.run(
-                ["cidx", "index"],
-                cwd=str(self._meta_dir),
-                capture_output=True,
-                check=False,
-                timeout=300,
-            )
+            # Re-index cidx-meta (uses shared lock to prevent concurrent index corruption)
+            from code_indexer.global_repos.meta_description_hook import reindex_cidx_meta
+            reindex_cidx_meta(self._meta_dir)
             logger.info(f"Re-indexed cidx-meta after updating {repo_alias}")
 
         except Exception as e:

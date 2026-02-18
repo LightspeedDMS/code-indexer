@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.21] - 2026-02-18
+
+### Fixed
+
+- **cidx-meta reindex race condition** - Centralized all `cidx index` calls for cidx-meta through a single `reindex_cidx_meta()` function with `threading.Lock`. Prevents concurrent indexing corruption when background startup reindex overlaps with golden repo registration or periodic description refresh. Three callers (app.py startup, meta_description_hook, description_refresh_scheduler) now serialize through one lock.
+
 ## [9.3.20] - 2026-02-18
 
 ### Changed
