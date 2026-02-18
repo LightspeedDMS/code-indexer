@@ -239,43 +239,43 @@ class TestBootstrapCidxMeta:
         mock_manager = Mock()
         mock_manager.golden_repo_exists = Mock(return_value=False)
 
-        # Mock subprocess.run to verify cidx init/index calls
+        # Mock subprocess.run for cidx init, threading.Thread for background index
         with patch("subprocess.run") as mock_subprocess:
-            # Execute bootstrap
-            from code_indexer.server.app import bootstrap_cidx_meta
+            with patch("threading.Thread") as mock_thread_cls:
+                mock_thread = Mock()
+                mock_thread_cls.return_value = mock_thread
 
-            bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
+                # Execute bootstrap
+                from code_indexer.server.app import bootstrap_cidx_meta
 
-            # Verify: register_local_repo was called with correct parameters
-            cidx_meta_path = Path(str(golden_repos_dir)) / "cidx-meta"
-            mock_manager.register_local_repo.assert_called_once_with(
-                alias="cidx-meta",
-                folder_path=cidx_meta_path,
-                fire_lifecycle_hooks=False,
-            )
+                bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
 
-            # Verify: cidx init was called
-            init_call = [
-                call
-                for call in mock_subprocess.call_args_list
-                if call[0][0] == ["cidx", "init"]
-            ]
-            assert len(init_call) == 1
-            assert init_call[0][1]["cwd"] == str(cidx_meta_path)
-            assert init_call[0][1]["check"] is True
+                # Verify: register_local_repo was called with correct parameters
+                cidx_meta_path = Path(str(golden_repos_dir)) / "cidx-meta"
+                mock_manager.register_local_repo.assert_called_once_with(
+                    alias="cidx-meta",
+                    folder_path=cidx_meta_path,
+                    fire_lifecycle_hooks=False,
+                )
 
-            # Verify: cidx index was called
-            index_call = [
-                call
-                for call in mock_subprocess.call_args_list
-                if call[0][0] == ["cidx", "index"]
-            ]
-            assert len(index_call) == 1
-            assert index_call[0][1]["cwd"] == str(cidx_meta_path)
-            assert index_call[0][1]["check"] is True
+                # Verify: cidx init was called synchronously
+                init_call = [
+                    call
+                    for call in mock_subprocess.call_args_list
+                    if call[0][0] == ["cidx", "init"]
+                ]
+                assert len(init_call) == 1
+                assert init_call[0][1]["cwd"] == str(cidx_meta_path)
+                assert init_call[0][1]["check"] is True
+
+                # Verify: cidx index spawned in background thread (not synchronous)
+                mock_thread_cls.assert_called_once()
+                assert mock_thread_cls.call_args[1]["daemon"] is True
+                assert mock_thread_cls.call_args[1]["name"] == "cidx-meta-reindex"
+                mock_thread.start.assert_called_once()
 
     def test_no_op_when_cidx_meta_already_exists(self, golden_repos_dir):
-        """Test that bootstrap runs indexing even when cidx-meta already exists."""
+        """Test that bootstrap spawns background re-indexing when cidx-meta already exists."""
         # Setup: cidx-meta already exists
 
         # Create mock manager
@@ -283,18 +283,20 @@ class TestBootstrapCidxMeta:
         mock_manager.golden_repo_exists = Mock(return_value=True)
         mock_manager.golden_repos = {}
 
-        # Mock subprocess to verify cidx index is called
-        with patch("subprocess.run") as mock_subprocess:
+        # Mock threading.Thread to verify background re-index is spawned
+        with patch("threading.Thread") as mock_thread_cls:
+            mock_thread = Mock()
+            mock_thread_cls.return_value = mock_thread
+
             # Execute bootstrap
             from code_indexer.server.app import bootstrap_cidx_meta
 
             bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
 
-            # Verify: cidx index was called once to ensure index is up to date
-            mock_subprocess.assert_called_once()
-            call_args = mock_subprocess.call_args
-            assert call_args[0][0] == ["cidx", "index"]
-            assert "cidx-meta" in call_args[1]["cwd"]
+            # Verify: background re-index thread was spawned
+            mock_thread_cls.assert_called_once()
+            assert mock_thread_cls.call_args[1]["daemon"] is True
+            mock_thread.start.assert_called_once()
 
     def test_creates_directory_structure(self, golden_repos_dir):
         """Test that bootstrap creates the cidx-meta directory."""
@@ -318,17 +320,18 @@ class TestBootstrapCidxMeta:
             mock_activator = Mock()
             mock_activator_class.return_value = mock_activator
 
-            # Mock subprocess to avoid actual cidx calls
+            # Mock subprocess and threading to avoid actual cidx calls
             with patch("subprocess.run"):
-                # Execute bootstrap
-                from code_indexer.server.app import bootstrap_cidx_meta
+                with patch("threading.Thread"):
+                    # Execute bootstrap
+                    from code_indexer.server.app import bootstrap_cidx_meta
 
-                bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
+                    bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
 
-                # Verify: Directory was created
-                cidx_meta_path = golden_repos_dir / "cidx-meta"
-                assert cidx_meta_path.exists()
-                assert cidx_meta_path.is_dir()
+                    # Verify: Directory was created
+                    cidx_meta_path = golden_repos_dir / "cidx-meta"
+                    assert cidx_meta_path.exists()
+                    assert cidx_meta_path.is_dir()
 
     def test_init_skipped_when_code_indexer_exists(self, golden_repos_dir):
         """Test that cidx init is skipped when .code-indexer directory already exists."""
@@ -355,28 +358,28 @@ class TestBootstrapCidxMeta:
             mock_activator = Mock()
             mock_activator_class.return_value = mock_activator
 
-            # Mock subprocess
+            # Mock subprocess and threading
             with patch("subprocess.run") as mock_subprocess:
-                # Execute bootstrap
-                from code_indexer.server.app import bootstrap_cidx_meta
+                with patch("threading.Thread") as mock_thread_cls:
+                    mock_thread = Mock()
+                    mock_thread_cls.return_value = mock_thread
 
-                bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
+                    # Execute bootstrap
+                    from code_indexer.server.app import bootstrap_cidx_meta
 
-                # Verify: cidx init was NOT called
-                init_calls = [
-                    call
-                    for call in mock_subprocess.call_args_list
-                    if call[0][0] == ["cidx", "init"]
-                ]
-                assert len(init_calls) == 0
+                    bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
 
-                # Verify: cidx index WAS still called
-                index_calls = [
-                    call
-                    for call in mock_subprocess.call_args_list
-                    if call[0][0] == ["cidx", "index"]
-                ]
-                assert len(index_calls) == 1
+                    # Verify: cidx init was NOT called (already has .code-indexer)
+                    init_calls = [
+                        call
+                        for call in mock_subprocess.call_args_list
+                        if call[0][0] == ["cidx", "init"]
+                    ]
+                    assert len(init_calls) == 0
+
+                    # Verify: cidx index spawned in background thread
+                    mock_thread_cls.assert_called_once()
+                    mock_thread.start.assert_called_once()
 
     def test_subprocess_error_handling(self, golden_repos_dir):
         """Test that bootstrap handles subprocess errors gracefully."""
@@ -384,29 +387,30 @@ class TestBootstrapCidxMeta:
         mock_manager = Mock()
         mock_manager.golden_repo_exists = Mock(return_value=False)
 
-        # Mock subprocess to raise an error
+        # Mock subprocess to raise an error on cidx init
         with patch("subprocess.run") as mock_subprocess:
-            import subprocess
+            with patch("threading.Thread"):
+                import subprocess
 
-            mock_subprocess.side_effect = subprocess.CalledProcessError(
-                1, ["cidx", "init"], stderr="Error running cidx init"
-            )
+                mock_subprocess.side_effect = subprocess.CalledProcessError(
+                    1, ["cidx", "init"], stderr="Error running cidx init"
+                )
 
-            # Execute bootstrap - should not raise exception
-            from code_indexer.server.app import bootstrap_cidx_meta
+                # Execute bootstrap - should not raise exception
+                from code_indexer.server.app import bootstrap_cidx_meta
 
-            # Should complete without raising exception
-            bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
+                # Should complete without raising exception
+                bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
 
-            # Verify: Directory and registration still happened
-            cidx_meta_path = golden_repos_dir / "cidx-meta"
-            assert cidx_meta_path.exists()
-            # Verify register_local_repo was called
-            mock_manager.register_local_repo.assert_called_once_with(
-                alias="cidx-meta",
-                folder_path=Path(str(golden_repos_dir)) / "cidx-meta",
-                fire_lifecycle_hooks=False,
-            )
+                # Verify: Directory and registration still happened
+                cidx_meta_path = golden_repos_dir / "cidx-meta"
+                assert cidx_meta_path.exists()
+                # Verify register_local_repo was called
+                mock_manager.register_local_repo.assert_called_once_with(
+                    alias="cidx-meta",
+                    folder_path=Path(str(golden_repos_dir)) / "cidx-meta",
+                    fire_lifecycle_hooks=False,
+                )
 
     def test_bootstrap_persists_with_sqlite_backend(self, golden_repos_dir):
         """
@@ -420,20 +424,21 @@ class TestBootstrapCidxMeta:
         mock_manager = Mock()
         mock_manager.golden_repo_exists = Mock(return_value=False)
 
-        # Mock subprocess to avoid actual cidx calls
+        # Mock subprocess and threading to avoid actual cidx calls
         with patch("subprocess.run"):
-            # Execute bootstrap
-            from code_indexer.server.app import bootstrap_cidx_meta
+            with patch("threading.Thread"):
+                # Execute bootstrap
+                from code_indexer.server.app import bootstrap_cidx_meta
 
-            bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
+                bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
 
-            # Verify: register_local_repo was called with correct parameters
-            cidx_meta_path = Path(str(golden_repos_dir)) / "cidx-meta"
-            mock_manager.register_local_repo.assert_called_once_with(
-                alias="cidx-meta",
-                folder_path=cidx_meta_path,
-                fire_lifecycle_hooks=False,
-            )
+                # Verify: register_local_repo was called with correct parameters
+                cidx_meta_path = Path(str(golden_repos_dir)) / "cidx-meta"
+                mock_manager.register_local_repo.assert_called_once_with(
+                    alias="cidx-meta",
+                    folder_path=cidx_meta_path,
+                    fire_lifecycle_hooks=False,
+                )
 
     def test_bootstrap_persists_with_json_fallback(self, golden_repos_dir):
         """
@@ -447,20 +452,21 @@ class TestBootstrapCidxMeta:
         mock_manager = Mock()
         mock_manager.golden_repo_exists = Mock(return_value=False)
 
-        # Mock subprocess to avoid actual cidx calls
+        # Mock subprocess and threading to avoid actual cidx calls
         with patch("subprocess.run"):
-            # Execute bootstrap
-            from code_indexer.server.app import bootstrap_cidx_meta
+            with patch("threading.Thread"):
+                # Execute bootstrap
+                from code_indexer.server.app import bootstrap_cidx_meta
 
-            bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
+                bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
 
-            # Verify: register_local_repo was called with correct parameters
-            cidx_meta_path = Path(str(golden_repos_dir)) / "cidx-meta"
-            mock_manager.register_local_repo.assert_called_once_with(
-                alias="cidx-meta",
-                folder_path=cidx_meta_path,
-                fire_lifecycle_hooks=False,
-            )
+                # Verify: register_local_repo was called with correct parameters
+                cidx_meta_path = Path(str(golden_repos_dir)) / "cidx-meta"
+                mock_manager.register_local_repo.assert_called_once_with(
+                    alias="cidx-meta",
+                    folder_path=cidx_meta_path,
+                    fire_lifecycle_hooks=False,
+                )
 
     def test_idempotent_multiple_calls(self, golden_repos_dir):
         """Test that multiple bootstrap calls are safe (idempotent)."""
@@ -484,20 +490,66 @@ class TestBootstrapCidxMeta:
             mock_activator = Mock()
             mock_activator_class.return_value = mock_activator
 
-            # Mock subprocess
-            with patch("subprocess.run") as mock_subprocess:
-                # Execute bootstrap first time
-                from code_indexer.server.app import bootstrap_cidx_meta
+            # Mock subprocess and threading
+            with patch("subprocess.run"):
+                with patch("threading.Thread") as mock_thread_cls:
+                    mock_thread = Mock()
+                    mock_thread_cls.return_value = mock_thread
 
-                bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
+                    # Execute bootstrap first time
+                    from code_indexer.server.app import bootstrap_cidx_meta
 
-                # Second call: golden_repo_exists returns True (already exists)
-                mock_manager.golden_repo_exists = Mock(return_value=True)
-                mock_subprocess.reset_mock()
+                    bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
 
-                bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
+                    # Second call: golden_repo_exists returns True (already exists)
+                    mock_manager.golden_repo_exists = Mock(return_value=True)
+                    mock_thread_cls.reset_mock()
+                    mock_thread.reset_mock()
 
-                # Verify: Second call executes cidx index to ensure index is up to date
-                assert mock_subprocess.call_count == 1
-                call_args = mock_subprocess.call_args
-                assert call_args[0][0] == ["cidx", "index"]
+                    bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
+
+                    # Verify: Second call spawned background re-index thread
+                    mock_thread_cls.assert_called_once()
+                    assert mock_thread_cls.call_args[1]["daemon"] is True
+                    mock_thread.start.assert_called_once()
+
+
+class TestReindexCidxMetaBackground:
+    """Test the _reindex_cidx_meta_background helper function directly."""
+
+    def test_calls_subprocess_with_correct_args(self, tmp_path):
+        """Test that helper calls subprocess.run with correct arguments."""
+        with patch("subprocess.run") as mock_subprocess:
+            from code_indexer.server.app import _reindex_cidx_meta_background
+
+            _reindex_cidx_meta_background(str(tmp_path))
+
+            mock_subprocess.assert_called_once_with(
+                ["cidx", "index"],
+                cwd=str(tmp_path),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+    def test_handles_subprocess_error_gracefully(self, tmp_path):
+        """Test that helper handles CalledProcessError without raising."""
+        import subprocess
+
+        with patch("subprocess.run") as mock_subprocess:
+            mock_subprocess.side_effect = subprocess.CalledProcessError(
+                1, ["cidx", "index"], stderr="Index failed"
+            )
+            from code_indexer.server.app import _reindex_cidx_meta_background
+
+            # Should not raise
+            _reindex_cidx_meta_background(str(tmp_path))
+
+    def test_handles_unexpected_error_gracefully(self, tmp_path):
+        """Test that helper handles unexpected exceptions without raising."""
+        with patch("subprocess.run") as mock_subprocess:
+            mock_subprocess.side_effect = OSError("Unexpected error")
+            from code_indexer.server.app import _reindex_cidx_meta_background
+
+            # Should not raise
+            _reindex_cidx_meta_background(str(tmp_path))

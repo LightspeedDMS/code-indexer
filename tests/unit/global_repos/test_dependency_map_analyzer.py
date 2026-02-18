@@ -67,7 +67,6 @@ class TestClaudeMdGeneration:
 class TestPass1Synthesis:
     """Test Pass 1: Domain synthesis (AC1)."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_run_pass_1_invokes_claude_cli(
         self, mock_subprocess, tmp_path
@@ -130,7 +129,6 @@ class TestPass1Synthesis:
         assert len(result) == 1
         assert result[0]["name"] == "authentication"
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     def test_run_pass_1_writes_domains_json(self, tmp_path):
         """Test that run_pass_1_synthesis writes _domains.json to staging directory."""
         with patch("subprocess.run") as mock_subprocess:
@@ -175,7 +173,6 @@ class TestPass1Synthesis:
 class TestPass2PerDomain:
     """Test Pass 2: Per-domain analysis (AC1)."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_run_pass_2_invokes_claude_cli(
         self, mock_subprocess, tmp_path
@@ -216,7 +213,6 @@ class TestPass2PerDomain:
         assert "60" in call_args[0][0]
         assert call_args[1]["timeout"] == 600  # full pass_timeout
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     def test_run_pass_2_writes_domain_file_with_frontmatter(self, tmp_path):
         """Test that run_pass_2_per_domain writes domain file with YAML frontmatter and strips meta-commentary."""
         with patch("subprocess.run") as mock_subprocess:
@@ -261,7 +257,6 @@ class TestPass2PerDomain:
             # Verify meta-commentary was stripped
             assert "Based on my analysis" not in content
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_run_pass_2_prompt_includes_tech_stack_verification(
         self, mock_subprocess, tmp_path
@@ -309,7 +304,6 @@ class TestPass2PerDomain:
 class TestPass3Index:
     """Test Pass 3: Index generation (AC1)."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_run_pass_3_invokes_claude_cli(
         self, mock_subprocess, tmp_path
@@ -349,7 +343,6 @@ class TestPass3Index:
         assert "30" in call_args[0][0]
         assert call_args[1]["timeout"] == 300  # half of pass_timeout
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     def test_run_pass_3_writes_index_with_frontmatter(self, tmp_path):
         """Test that run_pass_3_index writes _index.md with YAML frontmatter."""
         with patch("subprocess.run") as mock_subprocess:
@@ -387,7 +380,6 @@ class TestPass3Index:
 class TestPassOneValidation:
     """Test Pass 1 post-processing validation logic."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_strips_markdown_headings_from_auto_created_description(self, mock_subprocess, tmp_path):
         """Unassigned repos with heading-prefixed descriptions get cleaned up."""
@@ -411,7 +403,6 @@ class TestPassOneValidation:
         assert result[0]["description"] == "My Repo Description"
         assert "##" not in result[0]["description"]
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_alias_only_description_gets_standalone_suffix(self, mock_subprocess, tmp_path):
         """When description equals alias name, use '(standalone repository)' suffix."""
@@ -432,7 +423,6 @@ class TestPassOneValidation:
         result = analyzer.run_pass_1_synthesis(staging, {}, repo_list=repo_list, max_turns=50)
         assert result[0]["description"] == "my-repo (standalone repository)"
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_accepts_versioned_directory_paths(self, mock_subprocess, tmp_path):
         """Repos with .versioned/ paths should not be filtered out."""
@@ -460,7 +450,6 @@ class TestPassOneValidation:
         domain_repos = result[0]["participating_repos"]
         assert "flask-large" in domain_repos
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_filters_repos_with_wrong_paths(self, mock_subprocess, tmp_path):
         """Repos with paths not containing the alias should be filtered out."""
@@ -491,7 +480,6 @@ class TestPassOneValidation:
         assert len(standalone) == 1
         assert "Auto-assigned" in standalone[0]["evidence"]
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_short_alias_not_false_positive_in_path(self, mock_subprocess, tmp_path):
         """Short alias like 'db' should not match path containing 'adobe'."""
@@ -567,7 +555,6 @@ class TestStripMetaCommentary:
 class TestPass1PromptGuardrails:
     """Test Pass 1 prompt contains guardrails against non-JSON output."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_prompt_contains_internal_verification_instruction(self, mock_subprocess, tmp_path):
         """Test that Pass 1 prompt instructs Claude to verify internally without outputting verification text."""
@@ -618,7 +605,6 @@ class TestPass1PromptGuardrails:
 class TestPass1JsonParseFailure:
     """Test Pass 1 JSON parse failure raises RuntimeError (FIX 3)."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_run_pass_1_raises_on_bad_json(
         self, mock_subprocess, tmp_path
@@ -642,7 +628,6 @@ class TestPass1JsonParseFailure:
         with pytest.raises(RuntimeError, match="Pass 1 \\(Synthesis\\) returned unparseable output"):
             analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=[], max_turns=50)
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_pass_1_single_shot_retry_succeeds(self, mock_subprocess, tmp_path):
         """Test Pass 1 single-shot retry succeeds when agentic attempt returns commentary."""
@@ -708,7 +693,6 @@ class TestPass1JsonParseFailure:
         assert len(result) == 1
         assert result[0]["name"] == "test-domain"
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_pass_1_both_attempts_fail(self, mock_subprocess, tmp_path):
         """Test Pass 1 raises RuntimeError when both agentic and single-shot attempts fail."""
@@ -738,7 +722,6 @@ class TestPass1JsonParseFailure:
         # Verify subprocess was called twice
         assert mock_subprocess.call_count == 2
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_pass_1_first_attempt_succeeds_no_retry(self, mock_subprocess, tmp_path):
         """Test Pass 1 does not retry when first agentic attempt returns valid JSON."""
@@ -778,36 +761,9 @@ class TestPass1JsonParseFailure:
         assert result[0]["name"] == "test-domain"
 
 
-class TestApiKeyValidation:
-    """Test API key validation (FIX 2)."""
-
-    @patch.dict("os.environ", {}, clear=True)
-    @patch("subprocess.run")
-    def test_invoke_claude_cli_raises_if_no_api_key(
-        self, mock_subprocess, tmp_path
-    ):
-        """Test that _invoke_claude_cli raises RuntimeError if ANTHROPIC_API_KEY missing."""
-        analyzer = DependencyMapAnalyzer(
-            golden_repos_root=tmp_path,
-            cidx_meta_path=tmp_path / "cidx-meta",
-            pass_timeout=600,
-        )
-
-        staging_dir = tmp_path / "staging"
-        staging_dir.mkdir()
-
-        # Try to run Pass 1 - should raise before subprocess.run is called
-        with pytest.raises(RuntimeError, match="Claude API key not available"):
-            analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=[], max_turns=50)
-
-        # Verify subprocess was never called
-        mock_subprocess.assert_not_called()
-
-
 class TestIncrementalPass2:
     """Test incremental Pass 2 with previous_domain_dir (FIX 9)."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_run_pass_2_uses_previous_domain_content(
         self, mock_subprocess, tmp_path
@@ -859,7 +815,6 @@ class TestIncrementalPass2:
 class TestAllowedToolsPerPass:
     """Test Fix 1: Make --allowedTools per-pass configurable."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_pass_1_no_allowed_tools(self, mock_subprocess, tmp_path):
         """Test that Pass 1 is called with allowed_tools=None (no --allowedTools flag) and max_turns=0 (single-shot)."""
@@ -898,7 +853,6 @@ class TestAllowedToolsPerPass:
         assert "--allowedTools" not in cmd
         assert "--max-turns" not in cmd
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_pass_2_has_allowed_tools(self, mock_subprocess, tmp_path):
         """Test that Pass 2 is called with --allowedTools mcp__cidx-local__search_code."""
@@ -934,7 +888,6 @@ class TestAllowedToolsPerPass:
         tools_idx = cmd.index("--allowedTools")
         assert cmd[tools_idx + 1] == "mcp__cidx-local__search_code"
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_pass_3_no_allowed_tools(self, mock_subprocess, tmp_path):
         """Test that Pass 3 is called with allowed_tools=None (no --allowedTools flag) and max_turns=0 (single-shot)."""
@@ -969,7 +922,6 @@ class TestAllowedToolsPerPass:
 class TestSingleShotVsAgenticMode:
     """Test that max_turns=0 enables single-shot mode (no --max-turns flag)."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_single_shot_mode_omits_max_turns(self, mock_subprocess, tmp_path):
         """Test that max_turns=0 omits --max-turns flag (single-shot print mode)."""
@@ -1013,7 +965,6 @@ class TestSingleShotVsAgenticMode:
         assert "--max-turns" not in cmd
         assert "-p" in cmd
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_agentic_mode_includes_max_turns(self, mock_subprocess, tmp_path):
         """Test that max_turns>0 includes --max-turns flag (agentic mode)."""
@@ -1062,7 +1013,6 @@ class TestSingleShotVsAgenticMode:
 class TestEmptyOutputDetection:
     """Test Fix 2: Add empty output detection + retry for Pass 2."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_pass_2_retries_on_empty_output(self, mock_subprocess, tmp_path):
         """Test that Pass 2 retries with reduced turns when output is empty."""
@@ -1112,7 +1062,6 @@ class TestEmptyOutputDetection:
         content = domain_file.read_text()
         assert "Retry succeeded" in content
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_pass_2_retries_on_very_short_output(self, mock_subprocess, tmp_path):
         """Test that Pass 2 retries when output is very short (<1000 chars)."""
@@ -1251,7 +1200,6 @@ Actual analysis content here."""
 class TestInsufficientOutputThreshold:
     """Test Fix 1: Raise Pass 2 insufficient output threshold to 1000 chars."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_pass_2_retries_on_insufficient_output_1000_chars(self, mock_subprocess, tmp_path):
         """Test that Pass 2 retries when output is <1000 chars (not just <50)."""
@@ -1356,7 +1304,6 @@ Content."""
 class TestPass3MetaCommentaryStripping:
     """Test Fix 3: Add _strip_meta_commentary to Pass 3 output."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_pass_3_strips_meta_commentary(self, mock_subprocess, tmp_path):
         """Test that Pass 3 strips meta-commentary from output."""
@@ -1476,7 +1423,6 @@ Analysis text."""
 class TestPass2PromptGuardrails:
     """Test Fix 2 (Iteration 9): Prompt guardrails against YAML output and speculative content."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_prompt_prohibits_yaml_frontmatter_output(self, mock_subprocess, tmp_path):
         """Test that Pass 2 prompt explicitly prohibits YAML frontmatter output."""
@@ -1508,7 +1454,6 @@ class TestPass2PromptGuardrails:
         assert "## PROHIBITED Content" in prompt
         assert "YAML frontmatter blocks (the system adds these automatically)" in prompt
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_prompt_prohibits_speculative_content(self, mock_subprocess, tmp_path):
         """Test that Pass 2 prompt prohibits speculative/advisory content."""
@@ -1691,7 +1636,6 @@ More text."""
 class TestIteration10QualityGate:
     """Test Iteration 10 Fix 2: Quality gate for missing headings in Pass 2."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_quality_gate_no_headings_triggers_retry(self, mock_subprocess, tmp_path):
         """Test that run_pass_2_per_domain detects and retries when output has no headings."""
@@ -1754,7 +1698,6 @@ class TestIteration10QualityGate:
 class TestIteration10PromptReinforcement:
     """Test Iteration 10 Fix 3: Prompt reinforcement for heading requirement."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_pass2_prompt_contains_heading_requirement(self, mock_subprocess, tmp_path):
         """Test that Pass 2 prompt includes heading requirement instruction."""
@@ -1790,7 +1733,6 @@ class TestIteration10PromptReinforcement:
 class TestIteration11Fix2QualityCheckPrevious:
     """Test Iteration 11 Fix 2: Quality-check previous analysis before feeding it back."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_skips_low_quality_previous_analysis(self, mock_subprocess, tmp_path):
         """Test that low-quality previous analysis (no headings or <1000 chars) is NOT fed into prompt."""
@@ -1833,7 +1775,6 @@ class TestIteration11Fix2QualityCheckPrevious:
         assert "Previous Analysis (refine and improve)" not in prompt
         assert "Please approve my write" not in prompt
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_includes_high_quality_previous_analysis(self, mock_subprocess, tmp_path):
         """Test that high-quality previous analysis (has headings AND >1000 chars) IS fed into prompt."""
@@ -1957,7 +1898,6 @@ Let me know if you'd like me to expand on anything."""
 class TestIteration11Fix3SkipGarbageWrite:
     """Test Iteration 11 Fix 3: Skip writing file when both attempts produce garbage."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_skips_file_write_when_both_attempts_fail(self, mock_subprocess, tmp_path):
         """Test that domain file is NOT written when both attempts return garbage (no headings)."""
@@ -1999,7 +1939,6 @@ class TestIteration11Fix3SkipGarbageWrite:
         domain_file = staging_dir / "test-domain.md"
         assert not domain_file.exists(), "Domain file should NOT be written when both attempts fail quality checks"
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_writes_file_when_retry_succeeds(self, mock_subprocess, tmp_path):
         """Test that domain file IS written when retry succeeds (has headings, >1000 chars)."""
@@ -2040,7 +1979,6 @@ class TestIteration11Fix3SkipGarbageWrite:
         assert "# Domain Analysis" in content
         assert "Valid content" in content
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_short_output_still_retries(self, mock_subprocess, tmp_path):
         """Short non-max-turns output should still trigger retry (existing behavior preserved)."""
@@ -2079,7 +2017,6 @@ class TestIteration11Fix3SkipGarbageWrite:
 class TestIteration13HookThresholdFix:
     """Test hook threshold calculation fixes (Iteration 13)."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_hook_thresholds_fixed_default(self, mock_subprocess, tmp_path):
         """Verify early=max(5, int(50*0.3))=15 and late=max(10, int(50*0.6))=30 for max_turns=50."""
@@ -2121,7 +2058,6 @@ class TestIteration13HookThresholdFix:
         assert "[ \"$C\" -gt 30 ]" in bash_script, "Late threshold should be 30"
         assert "[ \"$C\" -gt 15 ]" in bash_script, "Early threshold should be 15"
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_hook_thresholds_custom_override(self, mock_subprocess, tmp_path):
         """Verify hook_thresholds=(7,17) overrides default calculation."""
@@ -2161,7 +2097,6 @@ class TestIteration13HookThresholdFix:
         assert "[ \"$C\" -gt 17 ]" in bash_script, "Late threshold should be 17 for large domain"
         assert "[ \"$C\" -gt 7 ]" in bash_script, "Early threshold should be 7 for large domain"
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_hook_thresholds_small_max_turns(self, mock_subprocess, tmp_path):
         """Verify max_turns=10 gives early=max(5,3)=5 and late=max(10,6)=10."""
@@ -2205,7 +2140,6 @@ class TestIteration13HookThresholdFix:
 class TestIteration13LargeDomainDetection:
     """Test large domain detection and output-first prompt selection (Iteration 13)."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_large_domain_uses_output_first_prompt(self, mock_subprocess, tmp_path):
         """With 4+ repos, verify prompt starts with WRITE YOUR ANALYSIS FIRST."""
@@ -2243,7 +2177,6 @@ class TestIteration13LargeDomainDetection:
         assert "AT MOST 5" in prompt  # Limited searches
         assert "OPTIONAL" in prompt  # Searches are optional
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_small_domain_uses_standard_prompt(self, mock_subprocess, tmp_path):
         """With 3 or fewer repos, verify prompt DOES contain Source Code Exploration Mandate."""
@@ -2277,7 +2210,6 @@ class TestIteration13LargeDomainDetection:
         assert "Source Code Exploration Mandate" in prompt
         assert "Required Searches" in prompt
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_large_domain_earlier_hook_thresholds(self, mock_subprocess, tmp_path):
         """Verify 5-repo domain with max_turns=50 uses hook thresholds (7,17) not default (15,30)."""
@@ -2320,7 +2252,6 @@ class TestIteration13LargeDomainDetection:
 class TestIteration13LargeDomainRetry:
     """Test large domain max-turns retry uses write-only mode (Iteration 13)."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_large_domain_max_turns_retry_uses_write_only(self, mock_subprocess, tmp_path):
         """Verify max-turns exhaustion for large domain retries with max_turns=8 and no MCP tools."""
@@ -2369,7 +2300,6 @@ class TestIteration13LargeDomainRetry:
         allowed_tools_idx = retry_call_args.index("--allowedTools")
         assert retry_call_args[allowed_tools_idx + 1] == ""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_small_domain_max_turns_retry_uses_budget_search(self, mock_subprocess, tmp_path):
         """Verify max-turns exhaustion for small domain uses max_turns=15 with search tools (existing behavior)."""
@@ -2667,7 +2597,6 @@ class TestIteration14PurposeDrivenHooks:
             assert "no code snippets" in prompt.lower() or "not full code snippets" in prompt.lower()
             assert "3-8 sentences" in prompt or "shorter is better" in prompt.lower()
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_insufficient_output_retry_is_write_only(self, mock_subprocess, tmp_path):
         """Test that insufficient-output retry uses allowed_tools='' (write-only) and includes write-focused prompt."""
@@ -2716,7 +2645,6 @@ class TestIteration14PurposeDrivenHooks:
 class TestIteration15InsideOutAndConciseness:
     """Test Iteration 15: Inside-out mapping with repo sizes, conciseness template, and journal resumability."""
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_repo_sizes_in_pass1_prompt(self, mock_subprocess, tmp_path):
         """Test that Pass 1 prompt includes file_count and MB size for each repo."""
@@ -2762,7 +2690,6 @@ class TestIteration15InsideOutAndConciseness:
         assert "150 files" in prompt
         assert "5.0 MB" in prompt or "5 MB" in prompt
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_pass2_inside_out_instruction_present(self, mock_subprocess, tmp_path):
         """Test that Pass 2 prompt includes INSIDE-OUT ANALYSIS STRATEGY section."""
@@ -2802,7 +2729,6 @@ class TestIteration15InsideOutAndConciseness:
         assert "INSIDE-OUT ANALYSIS STRATEGY" in prompt
         assert "largest repository" in prompt
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_participating_repos_sorted_by_size(self, mock_subprocess, tmp_path):
         """Test that participating repos are sorted by size (largest first) in Pass 2 prompt."""
@@ -2858,7 +2784,6 @@ class TestIteration15InsideOutAndConciseness:
             f"Repos not sorted by size in Repository Filesystem Locations section: large@{large_idx}, medium@{medium_idx}, small@{small_idx}"
         )
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_standard_prompt_has_output_template(self, mock_subprocess, tmp_path):
         """Test that standard prompt (<=3 repos) includes OUTPUT TEMPLATE section with headings."""
@@ -2897,7 +2822,6 @@ class TestIteration15InsideOutAndConciseness:
         assert "## Intra-Domain Dependencies" in prompt
         assert "## Cross-Domain Connections" in prompt
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_standard_prompt_has_output_budget(self, mock_subprocess, tmp_path):
         """Test that standard prompt includes Output Budget section with 3,000-10,000 character limit."""
@@ -2933,7 +2857,6 @@ class TestIteration15InsideOutAndConciseness:
         assert "3,000" in prompt or "3000" in prompt
         assert "10,000" in prompt or "10000" in prompt
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_prohibited_content_includes_search_audit(self, mock_subprocess, tmp_path):
         """Test that PROHIBITED Content section explicitly forbids 'MCP Searches Performed' sections."""
@@ -2968,7 +2891,6 @@ class TestIteration15InsideOutAndConciseness:
         assert "PROHIBITED" in prompt
         assert "MCP Searches Performed" in prompt or "search audit trail" in prompt
 
-    @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"})
     @patch("subprocess.run")
     def test_hook_reminder_includes_budget(self, mock_subprocess, tmp_path):
         """Test that hook_reminder includes character budget guidance (3,000-10,000 chars)."""

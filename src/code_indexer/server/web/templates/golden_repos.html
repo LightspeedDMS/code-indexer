@@ -164,6 +164,10 @@ function toggleDetails(alias) {
         if (isHidden) {
             openDetailsSet.add(alias);
             console.log('[CIDX] Opened details for:', alias);
+            // Load description from cidx-meta (Story #218)
+            if (typeof loadRepoDescription === 'function') {
+                loadRepoDescription(alias);
+            }
         } else {
             openDetailsSet.delete(alias);
             console.log('[CIDX] Closed details for:', alias);
@@ -188,6 +192,10 @@ function restoreOpenDetails() {
                 details.style.display = 'table-row';
                 console.log('[CIDX] New display style:', details.style.display);
                 console.log('[CIDX] ✅ Restored details for:', alias);
+                // Re-fetch description after HTMX content swap (Story #218)
+                if (typeof loadRepoDescription === 'function') {
+                    loadRepoDescription(alias);
+                }
             } else {
                 console.error('[CIDX] ❌ Could not find details element for:', alias);
             }
@@ -212,6 +220,20 @@ function restoreOpenAddIndexForms() {
         });
     }
 }
+
+// Load marked.js for markdown rendering (Story #218) - pinned version
+(function() {
+    var script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js';
+    document.head.appendChild(script);
+})();
+
+// Load DOMPurify for XSS sanitization of marked.js output (Story #218)
+(function() {
+    var purifyScript = document.createElement('script');
+    purifyScript.src = 'https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js';
+    document.head.appendChild(purifyScript);
+})();
 
 // Load index management functions
 (function() {

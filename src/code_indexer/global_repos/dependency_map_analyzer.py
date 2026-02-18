@@ -1724,8 +1724,8 @@ class DependencyMapAnalyzer:
         """
         Invoke Claude CLI with direct subprocess (AC1).
 
-        Verifies ANTHROPIC_API_KEY environment variable is available, then invokes
-        Claude CLI as a subprocess from golden-repos root.
+        Invokes Claude CLI as a subprocess from golden-repos root.
+        Works with both API key and Claude subscription authentication.
 
         Args:
             prompt: Prompt to send to Claude
@@ -1750,12 +1750,6 @@ class DependencyMapAnalyzer:
             subprocess.CalledProcessError: If Claude CLI fails
             subprocess.TimeoutExpired: If timeout is exceeded
         """
-        # Verify API key is available
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            raise RuntimeError(
-                "Claude API key not available -- configure Claude integration first"
-            )
-
         # Auto-register CIDX as MCP server (Story #203)
         if self._mcp_registration_service:
             self._mcp_registration_service.ensure_registered()

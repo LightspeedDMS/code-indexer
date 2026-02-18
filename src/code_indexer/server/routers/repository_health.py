@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user_hybrid
@@ -59,11 +59,116 @@ class IndexesStatusResponse(BaseModel):
     has_scip: bool = Field(description="SCIP code intelligence index available")
 
 
+class DescriptionResponse(BaseModel):
+    """cidx-meta description for a repository (Story #218)."""
+
+    repo_alias: str = Field(description="Repository alias")
+    description: str = Field(
+        description="Markdown body of the cidx-meta file with frontmatter stripped"
+    )
+
+
 # Create router with prefix and tags
 router = APIRouter(prefix="/api/repositories", tags=["repository-health"])
 
 # Service instance (singleton pattern)
 _health_service = HNSWHealthService(cache_ttl_seconds=300)  # 5 minute cache
+
+
+def _strip_yaml_frontmatter(content: str) -> str:
+    """Strip YAML frontmatter delimited by --- from markdown content.
+
+    If the file begins with '---', everything up to and including the closing
+    '---' line is removed.  The remaining body is returned.
+
+    Args:
+        content: Raw markdown file content.
+
+    Returns:
+        Markdown body with frontmatter removed, or the original content if no
+        frontmatter is present.
+    """
+    lines = content.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return content
+
+    # Find the closing ---
+    for i, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            body = "".join(lines[i + 1:])
+            # Strip a single leading newline separating frontmatter from body
+            if body.startswith("\n"):
+                body = body[1:]
+            return body
+
+    # No closing --- found - no valid frontmatter, return original content
+    return content
+
+
+@router.get(
+    "/{repo_alias}/description",
+    response_model=DescriptionResponse,
+    responses={
+        200: {"description": "Description retrieved successfully"},
+        404: {"description": "cidx-meta file not found for this repository"},
+    },
+)
+async def get_repository_description(
+    repo_alias: str,
+    request: Request,
+    current_user: User = Depends(get_current_user_hybrid),
+) -> DescriptionResponse:
+    """Get the cidx-meta generated description for a golden repository.
+
+    Reads the cidx-meta markdown file for the given repository alias, strips
+    YAML frontmatter, and returns the body.  Returns 404 when the file does
+    not exist - there is no fallback content.
+
+    Args:
+        repo_alias: Repository alias (e.g., 'code-indexer-python')
+        request: FastAPI request used to access app.state.golden_repos_dir
+        current_user: Authenticated user (injected by auth dependency)
+
+    Returns:
+        DescriptionResponse with repo_alias and markdown description body
+
+    Raises:
+        HTTPException 404: cidx-meta file not found or golden_repos_dir not set
+    """
+    golden_repos_dir = getattr(request.app.state, "golden_repos_dir", None)
+    if not golden_repos_dir:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No cidx-meta description found for repository '{repo_alias}'",
+        )
+
+    cidx_meta_path = Path(golden_repos_dir) / "cidx-meta" / f"{repo_alias}.md"
+    # Prevent path traversal: reject any alias that escapes the cidx-meta dir (Story #218)
+    expected_parent = (Path(golden_repos_dir) / "cidx-meta").resolve()
+    if not cidx_meta_path.resolve().is_relative_to(expected_parent):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No cidx-meta description found for repository '{repo_alias}'",
+        )
+    if not cidx_meta_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No cidx-meta description found for repository '{repo_alias}'",
+        )
+
+    try:
+        content = cidx_meta_path.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.error(
+            f"Failed to read cidx-meta file for {repo_alias}: {e}", exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No cidx-meta description found for repository '{repo_alias}'",
+        )
+
+    description = _strip_yaml_frontmatter(content)
+    return DescriptionResponse(repo_alias=repo_alias, description=description)
 
 
 def _get_golden_repo_manager():

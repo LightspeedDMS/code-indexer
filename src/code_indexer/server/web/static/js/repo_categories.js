@@ -73,7 +73,15 @@ function groupRows(table) {
         header.onclick = function() { collapseSection(this); };
         header.innerHTML = `<td colspan="${colCount}" style="background: var(--pico-primary-background); font-weight: bold; padding: 0.5rem 1rem;">${escapeHtml(name)} (${group.rows.length})</td>`;
         tbody.appendChild(header);
-        group.rows.forEach(r => tbody.appendChild(r));
+        group.rows.forEach(r => {
+            tbody.appendChild(r);
+            // Move the corresponding details row to stay adjacent (Story #218 fix)
+            var alias = r.dataset.repoAlias;
+            if (alias) {
+                var detailsRow = document.getElementById('details-' + alias);
+                if (detailsRow) tbody.appendChild(detailsRow);
+            }
+        });
     });
 }
 
@@ -90,7 +98,14 @@ function ungroupRows(table) {
     // Sort alphabetically by alias
     const rows = Array.from(tbody.querySelectorAll('tr[data-category-name]'));
     rows.sort((a, b) => (a.dataset.repoAlias || '').localeCompare(b.dataset.repoAlias || ''));
-    rows.forEach(r => tbody.appendChild(r));
+    rows.forEach(r => {
+        tbody.appendChild(r);
+        var alias = r.dataset.repoAlias;
+        if (alias) {
+            var detailsRow = document.getElementById('details-' + alias);
+            if (detailsRow) tbody.appendChild(detailsRow);
+        }
+    });
 }
 
 /**
@@ -101,7 +116,16 @@ function collapseSection(header) {
     let next = header.nextElementSibling;
     const isCollapsing = next && next.style.display !== 'none';
     while (next && !next.classList.contains('category-group-header')) {
-        next.style.display = isCollapsing ? 'none' : '';
+        if (isCollapsing) {
+            next.style.display = 'none';
+        } else {
+            // When expanding, keep details rows hidden unless explicitly opened
+            if (next.classList.contains('details-row')) {
+                next.style.display = 'none';
+            } else {
+                next.style.display = '';
+            }
+        }
         next = next.nextElementSibling;
     }
     // Toggle indicator
@@ -114,6 +138,20 @@ function collapseSection(header) {
             td.textContent = text.replace('[+] ', '');
         }
     }
+}
+
+/**
+ * Show or hide OK/Cancel buttons based on whether the select value differs from original.
+ * Called by the onchange handler on the category select element.
+ * @param {HTMLSelectElement} select - The category select element
+ */
+function onCategoryChange(select) {
+    const cell = select.closest('.category-cell');
+    const okBtn = cell.querySelector('.category-ok');
+    const cancelBtn = cell.querySelector('.category-cancel');
+    const changed = select.value !== select.dataset.original;
+    if (okBtn) okBtn.style.display = changed ? 'inline-block' : 'none';
+    if (cancelBtn) cancelBtn.style.display = changed ? 'inline-block' : 'none';
 }
 
 /**
@@ -153,7 +191,13 @@ function saveCategory(alias, button) {
         const option = select.options[select.selectedIndex];
         row.dataset.categoryId = categoryId;
         row.dataset.categoryName = option.text;
-        // Show brief success
+        // Hide OK/Cancel buttons since value is now saved
+        const cell = select.closest('.category-cell');
+        const okBtn = cell.querySelector('.category-ok');
+        const cancelBtn = cell.querySelector('.category-cancel');
+        if (okBtn) okBtn.style.display = 'none';
+        if (cancelBtn) cancelBtn.style.display = 'none';
+        // Show brief success then restore button text
         button.textContent = 'Saved!';
         setTimeout(() => { button.textContent = 'OK'; }, 1500);
         // Re-group if grouped view is active
@@ -177,6 +221,12 @@ function cancelCategory(button) {
     const row = button.closest('tr');
     const select = row.querySelector('.category-select');
     select.value = select.dataset.original;
+    // Hide OK/Cancel buttons since value is now reverted
+    const cell = select.closest('.category-cell');
+    const okBtn = cell.querySelector('.category-ok');
+    const cancelBtn = cell.querySelector('.category-cancel');
+    if (okBtn) okBtn.style.display = 'none';
+    if (cancelBtn) cancelBtn.style.display = 'none';
 }
 
 /**

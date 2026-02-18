@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.20] - 2026-02-18
+
+### Changed
+
+- **cidx-meta background reindex** - Extracted `_reindex_cidx_meta_background()` helper and runs `cidx index` in a daemon thread instead of blocking server startup. Newly-added repo descriptions are picked up without delaying bootstrap.
+- **Correlation ID for background thread** - Background reindex thread now generates a fresh correlation ID since Python `contextvars` are not inherited by `threading.Thread`.
+
+### Fixed
+
+- **Removed ANTHROPIC_API_KEY gate from dependency map analyzer** - `_invoke_claude_cli()` no longer requires `ANTHROPIC_API_KEY` env var. Claude CLI works with both API keys and Claude subscriptions. The hard gate was blocking subscription users.
+
 ## [9.3.19] - 2026-02-18
 
 ### Changed

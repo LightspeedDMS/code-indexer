@@ -21,14 +21,14 @@
         <tr data-repo-alias="{{ repo.alias }}" data-category-id="{{ repo.category_id or '' }}" data-category-name="{{ repo.category_name or 'Unassigned' }}" data-category-priority="{{ repo.category_priority if repo.category_priority is not none else 999999 }}">
             <td>{{ repo.alias }}</td>
             <td class="category-cell">
-                <select class="category-select" data-repo-alias="{{ repo.alias }}" data-original="{{ repo.category_id or '' }}">
+                <select class="category-select" data-repo-alias="{{ repo.alias }}" data-original="{{ repo.category_id or '' }}" onchange="onCategoryChange(this)">
                     <option value="" {% if not repo.category_id %}selected{% endif %}>Unassigned</option>
                     {% for cat in categories %}
                     <option value="{{ cat.id }}" {% if repo.category_id == cat.id %}selected{% endif %}>{{ cat.name }}</option>
                     {% endfor %}
                 </select>
-                <button class="outline small category-ok" onclick="saveCategory('{{ repo.alias }}', this)" title="Save">OK</button>
-                <button class="outline small category-cancel" onclick="cancelCategory(this)" title="Cancel">Cancel</button>
+                <button class="outline small category-ok" onclick="saveCategory('{{ repo.alias }}', this)" title="Save" style="display: none;">OK</button>
+                <button class="outline small category-cancel" onclick="cancelCategory(this)" title="Cancel" style="display: none;">Cancel</button>
             </td>
             <td>
                 {% if repo.global_alias %}
@@ -51,7 +51,7 @@
                 {% if repo.has_scip %}<span class="index-badge scip" title="SCIP code intelligence available">SCIP</span>{% endif %}
                 {% if not repo.has_semantic and not repo.has_fts and not repo.has_temporal and not repo.has_scip %}<span class="no-indexes">None</span>{% endif %}
             </td>
-            <td class="repo-url" title="{{ repo.repo_url }}">{{ repo.repo_url | truncate(40) }}</td>
+            <td class="repo-url" title="{{ repo.repo_url }}">{{ repo.repo_url }}</td>
             <td class="status-cell" style="white-space: nowrap;">
                 {% if repo.status == 'indexing' %}
                 <span class="status-indicator status-indexing" title="Indexing in progress">
@@ -143,6 +143,14 @@
                             <span class="error-text">{{ repo.error_message }}</span>
                         </div>
                         {% endif %}
+                    </div>
+
+                    <!-- Repository Description Section (Story #218) -->
+                    <div class="repo-description-section" style="margin: 16px 0;">
+                        <h4>Repository Description</h4>
+                        <div id="desc-{{ repo.alias }}" class="repo-description-box">
+                            <em>Loading description...</em>
+                        </div>
                     </div>
 
                     <!-- Indexes Management Section -->
@@ -407,14 +415,24 @@
     font-size: 0.7rem;
     vertical-align: middle;
 }
-/* Truncate long text in text-only columns (not interactive cells) */
+/* Truncate name and version columns - but NOT Path/URL or Global Alias */
 .golden-repos-table td:nth-child(1),
-.golden-repos-table td:nth-child(3),
-.golden-repos-table td:nth-child(4),
-.golden-repos-table td:nth-child(6) {
+.golden-repos-table td:nth-child(4) {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+/* Global Alias column: wrap on word boundary instead of truncating */
+.golden-repos-table td:nth-child(3) {
+    overflow-wrap: break-word;
+    word-break: break-all;
+    white-space: normal;
+}
+/* Path/URL column: wrap on character boundary instead of truncating */
+.golden-repos-table td:nth-child(6) {
+    overflow-wrap: break-word;
+    word-break: break-all;
+    white-space: normal;
 }
 /* Actions cell needs to show all buttons */
 .golden-repos-table .actions-cell {
@@ -431,11 +449,17 @@
 /* Prevent detail item text overflow in expanded cards */
 .details-grid .detail-item {
     min-width: 0;
-    overflow: hidden;
+    overflow: visible;
 }
 .details-grid .detail-item span {
     overflow-wrap: break-word;
-    word-break: break-word;
+    word-break: break-all;
+    white-space: normal;
+}
+/* Ensure code elements inside detail items also wrap */
+.details-grid .detail-item span code {
+    word-break: break-all;
+    white-space: normal;
 }
 /* Group header bar must span full row width including overflow */
 .category-group-header td {
@@ -511,6 +535,57 @@
     font-style: italic;
 }
 
+/* Repository Description Section Styles (Story #218) */
+.repo-description-section h4 {
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+}
+.repo-description-box {
+    overflow-y: auto;
+    resize: vertical;
+    min-height: 80px;
+    max-height: 400px;
+    height: 200px;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: 4px;
+    padding: 0.75rem 1rem;
+    background-color: var(--pico-card-background-color);
+    font-size: 0.9rem;
+    line-height: 1.6;
+}
+.repo-description-box h1,
+.repo-description-box h2,
+.repo-description-box h3,
+.repo-description-box h4 {
+    margin-top: 0.75rem;
+    margin-bottom: 0.25rem;
+    font-size: 1rem;
+}
+.repo-description-box h1 { font-size: 1.2rem; }
+.repo-description-box h2 { font-size: 1.1rem; }
+.repo-description-box ul,
+.repo-description-box ol {
+    margin: 0.25rem 0;
+    padding-left: 1.5rem;
+}
+.repo-description-box p {
+    margin: 0.25rem 0;
+}
+.repo-description-box code {
+    background-color: rgba(128, 128, 128, 0.15);
+    padding: 0 3px;
+    border-radius: 3px;
+    font-size: 0.85rem;
+}
+.repo-description-box a {
+    color: var(--pico-primary);
+}
+.description-error {
+    color: var(--pico-color-red-550);
+    font-style: italic;
+    font-size: 0.9rem;
+}
+
 /* Global Activated Section Styles (Story #161) */
 .global-activated-section {
     padding: 1rem;
@@ -543,6 +618,67 @@
  * Provides functionality for loading and displaying global activated repository data
  * within golden repository cards.
  */
+
+/**
+ * Load cidx-meta description for a golden repo (Story #218).
+ *
+ * Fetches GET /api/repositories/{alias}/description, renders the markdown body
+ * using marked.js, and injects it into the description box.  On 404 displays
+ * the canonical "no description found" message.  On other errors displays a
+ * generic failure message.  The box is always visible.
+ *
+ * @param {string} repoAlias - Golden repo alias
+ */
+async function loadRepoDescription(repoAlias) {
+    const box = document.getElementById('desc-' + repoAlias);
+    if (!box) return;
+
+    try {
+        const response = await fetch(
+            '/api/repositories/' + encodeURIComponent(repoAlias) + '/description',
+            { credentials: 'same-origin' }
+        );
+
+        if (response.status === 404) {
+            box.innerHTML = '<div class="description-error">No cidx-meta description found for this repository.</div>';
+            return;
+        }
+
+        if (!response.ok) {
+            box.innerHTML = '<div class="description-error">Failed to load description (HTTP ' + response.status + ').</div>';
+            return;
+        }
+
+        const data = await response.json();
+        const markdownBody = data.description || '';
+
+        if (markdownBody.trim() === '') {
+            box.innerHTML = '<div class="description-error">No cidx-meta description found for this repository.</div>';
+            return;
+        }
+
+        // Render markdown - use marked.js if available, else plain text fallback
+        // DOMPurify sanitization prevents XSS from untrusted markdown content (Story #218)
+        if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
+            if (typeof DOMPurify !== 'undefined') {
+                box.innerHTML = DOMPurify.sanitize(marked.parse(markdownBody));
+            } else {
+                box.innerHTML = marked.parse(markdownBody);
+            }
+        } else {
+            // Plain-text fallback when marked.js is not loaded yet
+            const pre = document.createElement('pre');
+            pre.style.whiteSpace = 'pre-wrap';
+            pre.style.fontFamily = 'inherit';
+            pre.textContent = markdownBody;
+            box.innerHTML = '';
+            box.appendChild(pre);
+        }
+    } catch (error) {
+        console.error('[CIDX] Failed to load description for ' + repoAlias + ':', error);
+        box.innerHTML = '<div class="description-error">Failed to load description.</div>';
+    }
+}
 
 // Load global activated data when details are expanded
 document.addEventListener('DOMContentLoaded', function() {

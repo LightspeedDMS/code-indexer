@@ -1,4 +1,4 @@
-from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.middleware.correlation import get_correlation_id, set_correlation_id
 
 """
 FastAPI application for CIDX Server.
@@ -1913,6 +1913,53 @@ def migrate_legacy_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None
             )
 
 
+def _reindex_cidx_meta_background(cidx_meta_path_str: str) -> None:
+    """Re-index cidx-meta content in a background thread.
+
+    Runs ``cidx index`` against the cidx-meta folder so that newly-added
+    .md files (e.g. repo descriptions created during golden-repo registration)
+    are picked up without blocking server startup.
+    """
+    import subprocess
+    from code_indexer.server.middleware.error_formatters import generate_correlation_id
+
+    # contextvars are not inherited by threading.Thread — generate a fresh ID
+    set_correlation_id(generate_correlation_id())
+
+    try:
+        logger.info(
+            "Re-indexing cidx-meta content (background)",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        subprocess.run(
+            ["cidx", "index"],
+            cwd=cidx_meta_path_str,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        logger.info(
+            "Successfully re-indexed cidx-meta content (background)",
+            extra={"correlation_id": get_correlation_id()},
+        )
+    except subprocess.CalledProcessError as e:
+        logger.error(
+            format_error_log(
+                "APP-GENERAL-006",
+                f"Failed to index cidx-meta: {e.stderr if e.stderr else str(e)}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "APP-GENERAL-007",
+                f"Unexpected error during cidx-meta indexing: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+
+
 def bootstrap_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None:
     """
     Bootstrap cidx-meta as a regular golden repo on fresh installations.
@@ -1922,7 +1969,7 @@ def bootstrap_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None:
     This is idempotent - safe to call multiple times.
 
     ALWAYS re-indexes cidx-meta on each server startup to pick up new files
-    added during golden repo registration.
+    added during golden repo registration (in a background thread).
 
     Args:
         golden_repo_manager: GoldenRepoManager instance
@@ -1994,43 +2041,22 @@ def bootstrap_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None:
             extra={"correlation_id": get_correlation_id()},
         )
 
-    # ALWAYS re-index cidx-meta to pick up new files (even if already registered)
-    # This ensures .md files added during golden repo registration are indexed
+    # ALWAYS re-index cidx-meta to pick up new files (even if already registered).
+    # Runs in a background thread so server startup is not blocked.
     if cidx_meta_path.exists():
-        try:
-            logger.info(
-                "Re-indexing cidx-meta content",
-                extra={"correlation_id": get_correlation_id()},
-            )
-            subprocess.run(
-                ["cidx", "index"],
-                cwd=str(cidx_meta_path),
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            logger.info(
-                "Successfully re-indexed cidx-meta content",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        except subprocess.CalledProcessError as e:
-            logger.error(
-                format_error_log(
-                    "APP-GENERAL-006",
-                    f"Failed to index cidx-meta: {e.stderr if e.stderr else str(e)}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-            )
-            # Don't break server startup if indexing fails - cidx-meta can be indexed later
-        except Exception as e:
-            logger.error(
-                format_error_log(
-                    "APP-GENERAL-007",
-                    f"Unexpected error during cidx-meta indexing: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-            )
-            # Don't break server startup if indexing fails - cidx-meta can be indexed later
+        import threading
+
+        thread = threading.Thread(
+            target=_reindex_cidx_meta_background,
+            args=(str(cidx_meta_path),),
+            daemon=True,
+            name="cidx-meta-reindex",
+        )
+        thread.start()
+        logger.info(
+            "Started background cidx-meta re-indexing",
+            extra={"correlation_id": get_correlation_id()},
+        )
 
 
 def register_langfuse_golden_repos(golden_repo_manager: "GoldenRepoManager", golden_repos_dir: str) -> None:
