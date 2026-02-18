@@ -810,3 +810,139 @@ class TestIteration15Journal:
         assert enriched[0]["file_count"] == 2  # large has 2 files
         assert enriched[1]["file_count"] == 1  # medium has 1 file
         assert enriched[2]["file_count"] == 1  # small has 1 file
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Story #217 AC9: _record_run_metrics edge counting with new heading
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestRecordRunMetricsAC217:
+    """AC9 (Story #217): _record_run_metrics() edge counting works with new heading.
+
+    The new _build_cross_domain_graph() writes the heading as
+    '## Cross-Domain Dependency Graph' (not 'Cross-Domain Dependencies').
+    _record_run_metrics() must detect BOTH variants so that edge_count is
+    correct for both old and new _index.md files.
+    """
+
+    def _build_service(self, mock_golden_repos_manager, mock_config_manager, mock_tracking_backend, mock_analyzer):
+        return DependencyMapService(
+            golden_repos_manager=mock_golden_repos_manager,
+            config_manager=mock_config_manager,
+            tracking_backend=mock_tracking_backend,
+            analyzer=mock_analyzer,
+        )
+
+    def test_record_run_metrics_counts_edges_with_old_heading(
+        self,
+        tmp_path,
+        mock_golden_repos_manager,
+        mock_config_manager,
+        mock_tracking_backend,
+        mock_analyzer,
+    ):
+        """AC9: Old heading 'Cross-Domain Dependencies' is still counted correctly."""
+        output_dir = tmp_path / "dep-map"
+        output_dir.mkdir()
+
+        # Old-format _index.md with old heading
+        (output_dir / "_index.md").write_text(
+            "# Dependency Map Index\n\n"
+            "## Cross-Domain Dependencies\n\n"
+            "| Source Domain | Target Domain | Via Repos |\n"
+            "|---|---|---|\n"
+            "| domain-a | domain-b | repo-a |\n"
+            "| domain-b | domain-c | repo-b |\n\n"
+            "## Another Section\n"
+        )
+        # Create domain files so total_chars is computed
+        domain_list = [{"name": "domain-a"}, {"name": "domain-b"}]
+        for d in domain_list:
+            (output_dir / f"{d['name']}.md").write_text("some content")
+
+        repo_list = [{"alias": "repo-a"}, {"alias": "repo-b"}]
+
+        service = self._build_service(
+            mock_golden_repos_manager, mock_config_manager, mock_tracking_backend, mock_analyzer
+        )
+        service._record_run_metrics(output_dir, domain_list, repo_list)
+
+        # Verify record_run_metrics was called with edge_count=2
+        mock_tracking_backend.record_run_metrics.assert_called_once()
+        recorded = mock_tracking_backend.record_run_metrics.call_args[0][0]
+        assert recorded["edge_count"] == 2, (
+            f"Expected edge_count=2 with old heading, got {recorded['edge_count']}"
+        )
+
+    def test_record_run_metrics_counts_edges_with_new_heading(
+        self,
+        tmp_path,
+        mock_golden_repos_manager,
+        mock_config_manager,
+        mock_tracking_backend,
+        mock_analyzer,
+    ):
+        """AC9: New heading '## Cross-Domain Dependency Graph' is detected and counted.
+
+        This test will FAIL until line 463 of dependency_map_service.py is updated
+        to check for BOTH heading variants.
+        """
+        output_dir = tmp_path / "dep-map"
+        output_dir.mkdir()
+
+        # New-format _index.md with new heading (5-column table)
+        (output_dir / "_index.md").write_text(
+            "---\nschema_version: 1.0\n---\n\n"
+            "## Cross-Domain Dependency Graph\n\n"
+            "| Source Domain | Target Domain | Via Repos | Type | Why |\n"
+            "|---|---|---|---|---|\n"
+            "| domain-a | domain-b | repo-a | Service integration | domain-a calls domain-b API |\n"
+            "| domain-b | domain-c | repo-b | Code-level | shared library |\n\n"
+            "## Another Section\n"
+        )
+        domain_list = [{"name": "domain-a"}, {"name": "domain-b"}]
+        for d in domain_list:
+            (output_dir / f"{d['name']}.md").write_text("some content")
+
+        repo_list = [{"alias": "repo-a"}, {"alias": "repo-b"}]
+
+        service = self._build_service(
+            mock_golden_repos_manager, mock_config_manager, mock_tracking_backend, mock_analyzer
+        )
+        service._record_run_metrics(output_dir, domain_list, repo_list)
+
+        # Verify record_run_metrics was called with edge_count=2
+        mock_tracking_backend.record_run_metrics.assert_called_once()
+        recorded = mock_tracking_backend.record_run_metrics.call_args[0][0]
+        assert recorded["edge_count"] == 2, (
+            f"Expected edge_count=2 with new '## Cross-Domain Dependency Graph' heading, "
+            f"got {recorded['edge_count']}. "
+            f"Fix: line 463 of dependency_map_service.py must check for BOTH headings."
+        )
+
+    def test_record_run_metrics_edge_count_zero_no_index_file(
+        self,
+        tmp_path,
+        mock_golden_repos_manager,
+        mock_config_manager,
+        mock_tracking_backend,
+        mock_analyzer,
+    ):
+        """AC9: If _index.md does not exist, edge_count is 0 (no crash)."""
+        output_dir = tmp_path / "dep-map"
+        output_dir.mkdir()
+        # No _index.md created
+
+        domain_list = [{"name": "domain-a"}]
+        (output_dir / "domain-a.md").write_text("some content")
+        repo_list = [{"alias": "repo-a"}]
+
+        service = self._build_service(
+            mock_golden_repos_manager, mock_config_manager, mock_tracking_backend, mock_analyzer
+        )
+        service._record_run_metrics(output_dir, domain_list, repo_list)
+
+        mock_tracking_backend.record_run_metrics.assert_called_once()
+        recorded = mock_tracking_backend.record_run_metrics.call_args[0][0]
+        assert recorded["edge_count"] == 0

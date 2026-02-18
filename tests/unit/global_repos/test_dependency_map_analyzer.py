@@ -3086,34 +3086,29 @@ Should not be included."""
         assert "Should not be included" not in result
 
     def test_build_cross_domain_graph_detects_edges(self, tmp_path):
-        """Test that edges are detected from repo mentions in Cross-Domain sections."""
+        """Test that edges are detected from structured Outgoing Dependencies tables."""
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
-        # Create domain files with cross-domain connections
+        # Create domain files with structured cross-domain tables
         domain_a = staging_dir / "domain-a.md"
-        domain_a.write_text("""---
-domain: domain-a
----
-
-# Domain Analysis: domain-a
-
-## Cross-Domain Connections
-
-This domain uses **repo-b-alpha** and **repo-b-beta** from domain-b.
-""")
+        domain_a.write_text(
+            "---\ndomain: domain-a\n---\n\n"
+            "# Domain Analysis: domain-a\n\n"
+            "## Cross-Domain Connections\n\n"
+            "### Outgoing Dependencies\n\n"
+            "| This Repo | Depends On | Target Domain | Type | Why | Evidence |\n"
+            "|---|---|---|---|---|---|\n"
+            "| repo-a-one | repo-b-alpha | domain-b | Service integration | A calls B API | client.py |\n"
+        )
 
         domain_b = staging_dir / "domain-b.md"
-        domain_b.write_text("""---
-domain: domain-b
----
-
-# Domain Analysis: domain-b
-
-## Cross-Domain Connections
-
-Connects back to **repo-a-one** in domain-a.
-""")
+        domain_b.write_text(
+            "---\ndomain: domain-b\n---\n\n"
+            "# Domain Analysis: domain-b\n\n"
+            "## Cross-Domain Connections\n\n"
+            "No verified cross-domain dependencies.\n"
+        )
 
         domain_list = [
             {"name": "domain-a", "participating_repos": ["repo-a-one"]},
@@ -3125,7 +3120,6 @@ Connects back to **repo-a-one** in domain-a.
         assert "## Cross-Domain Dependency Graph" in graph_section
         assert "domain-a" in graph_section
         assert "domain-b" in graph_section
-        assert "repo-b-alpha" in graph_section or "repo-b-beta" in graph_section
         assert "repo-a-one" in graph_section
 
     def test_build_cross_domain_graph_no_self_edges(self, tmp_path):
@@ -3220,33 +3214,31 @@ We use adobe for graphics processing.
         assert graph_section == ""
 
     def test_build_cross_domain_graph_bidirectional(self, tmp_path):
-        """Test that A→B and B→A edges are both detected."""
+        """Test that A→B and B→A edges are both detected from structured tables."""
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
         domain_a = staging_dir / "domain-a.md"
-        domain_a.write_text("""---
-domain: domain-a
----
-
-# Domain Analysis: domain-a
-
-## Cross-Domain Connections
-
-Depends on **repo-b** from domain-b.
-""")
+        domain_a.write_text(
+            "---\ndomain: domain-a\n---\n\n"
+            "# Domain Analysis: domain-a\n\n"
+            "## Cross-Domain Connections\n\n"
+            "### Outgoing Dependencies\n\n"
+            "| This Repo | Depends On | Target Domain | Type | Why | Evidence |\n"
+            "|---|---|---|---|---|---|\n"
+            "| repo-a | repo-b | domain-b | Code-level | A uses B | import.py |\n"
+        )
 
         domain_b = staging_dir / "domain-b.md"
-        domain_b.write_text("""---
-domain: domain-b
----
-
-# Domain Analysis: domain-b
-
-## Cross-Domain Connections
-
-Calls **repo-a** in domain-a.
-""")
+        domain_b.write_text(
+            "---\ndomain: domain-b\n---\n\n"
+            "# Domain Analysis: domain-b\n\n"
+            "## Cross-Domain Connections\n\n"
+            "### Outgoing Dependencies\n\n"
+            "| This Repo | Depends On | Target Domain | Type | Why | Evidence |\n"
+            "|---|---|---|---|---|---|\n"
+            "| repo-b | repo-a | domain-a | Service integration | B calls A API | client.py |\n"
+        )
 
         domain_list = [
             {"name": "domain-a", "participating_repos": ["repo-a"]},
@@ -3268,44 +3260,38 @@ Calls **repo-a** in domain-a.
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
-        # Domain A → B
+        # Domain A → B (via structured table)
         domain_a = staging_dir / "domain-a.md"
-        domain_a.write_text("""---
-domain: domain-a
----
-
-# Domain Analysis: domain-a
-
-## Cross-Domain Connections
-
-Uses **repo-b** from domain-b.
-""")
+        domain_a.write_text(
+            "---\ndomain: domain-a\n---\n\n"
+            "# Domain Analysis: domain-a\n\n"
+            "## Cross-Domain Connections\n\n"
+            "### Outgoing Dependencies\n\n"
+            "| This Repo | Depends On | Target Domain | Type | Why | Evidence |\n"
+            "|---|---|---|---|---|---|\n"
+            "| repo-a | repo-b | domain-b | Code-level | A uses B | import.py |\n"
+        )
 
         # Domain B (no cross-domain connections)
         domain_b = staging_dir / "domain-b.md"
-        domain_b.write_text("""---
-domain: domain-b
----
-
-# Domain Analysis: domain-b
-
-## Overview
-No cross-domain connections.
-""")
+        domain_b.write_text(
+            "---\ndomain: domain-b\n---\n\n"
+            "# Domain Analysis: domain-b\n\n"
+            "## Overview\nNo cross-domain connections.\n"
+        )
 
         # Domain C (standalone, no file)
-        # Domain D → A
+        # Domain D → A (via structured table)
         domain_d = staging_dir / "domain-d.md"
-        domain_d.write_text("""---
-domain: domain-d
----
-
-# Domain Analysis: domain-d
-
-## Cross-Domain Connections
-
-Integrates with **repo-a** from domain-a.
-""")
+        domain_d.write_text(
+            "---\ndomain: domain-d\n---\n\n"
+            "# Domain Analysis: domain-d\n\n"
+            "## Cross-Domain Connections\n\n"
+            "### Outgoing Dependencies\n\n"
+            "| This Repo | Depends On | Target Domain | Type | Why | Evidence |\n"
+            "|---|---|---|---|---|---|\n"
+            "| repo-d | repo-a | domain-a | Service integration | D calls A | client.py |\n"
+        )
 
         domain_list = [
             {"name": "domain-a", "participating_repos": ["repo-a"]},
@@ -3358,30 +3344,25 @@ Uses **repo-b** from domain-b.
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
-        # Create domain files with cross-domain connections
+        # Create domain files with structured cross-domain tables
         domain_a = staging_dir / "domain-a.md"
-        domain_a.write_text("""---
-domain: domain-a
----
-
-# Domain Analysis: domain-a
-
-## Cross-Domain Connections
-
-Connects to **repo-b** from domain-b.
-""")
+        domain_a.write_text(
+            "---\ndomain: domain-a\n---\n\n"
+            "# Domain Analysis: domain-a\n\n"
+            "## Cross-Domain Connections\n\n"
+            "### Outgoing Dependencies\n\n"
+            "| This Repo | Depends On | Target Domain | Type | Why | Evidence |\n"
+            "|---|---|---|---|---|---|\n"
+            "| repo-a | repo-b | domain-b | Code-level | A uses B | import.py |\n"
+        )
 
         domain_b = staging_dir / "domain-b.md"
-        domain_b.write_text("""---
-domain: domain-b
----
-
-# Domain Analysis: domain-b
-
-## Cross-Domain Connections
-
-Uses **repo-a** from domain-a.
-""")
+        domain_b.write_text(
+            "---\ndomain: domain-b\n---\n\n"
+            "# Domain Analysis: domain-b\n\n"
+            "## Cross-Domain Connections\n\n"
+            "No verified cross-domain dependencies.\n"
+        )
 
         domain_list = [
             {"name": "domain-a", "participating_repos": ["repo-a"]},
@@ -3460,30 +3441,25 @@ Standalone domain.
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
-        # Create domain files
-        domain_c = staging_dir / "domain-c.md"
-        domain_c.write_text("""# Domain Analysis: domain-c
+        def _outgoing_table(source_repo, depends_on, target_domain):
+            return (
+                "## Cross-Domain Connections\n\n"
+                "### Outgoing Dependencies\n\n"
+                "| This Repo | Depends On | Target Domain | Type | Why | Evidence |\n"
+                "|---|---|---|---|---|---|\n"
+                f"| {source_repo} | {depends_on} | {target_domain} | Code-level | uses | src.py |\n"
+            )
 
-## Cross-Domain Connections
-
-Uses **repo-a** from domain-a.
-""")
-
-        domain_a = staging_dir / "domain-a.md"
-        domain_a.write_text("""# Domain Analysis: domain-a
-
-## Cross-Domain Connections
-
-Calls **repo-b** from domain-b.
-""")
-
-        domain_b = staging_dir / "domain-b.md"
-        domain_b.write_text("""# Domain Analysis: domain-b
-
-## Cross-Domain Connections
-
-Depends on **repo-c** from domain-c.
-""")
+        # Create domain files using structured tables
+        (staging_dir / "domain-c.md").write_text(
+            "# Domain Analysis: domain-c\n\n" + _outgoing_table("repo-c", "repo-a", "domain-a")
+        )
+        (staging_dir / "domain-a.md").write_text(
+            "# Domain Analysis: domain-a\n\n" + _outgoing_table("repo-a", "repo-b", "domain-b")
+        )
+        (staging_dir / "domain-b.md").write_text(
+            "# Domain Analysis: domain-b\n\n" + _outgoing_table("repo-b", "repo-c", "domain-c")
+        )
 
         # Domain list in arbitrary order
         domain_list = [
@@ -3517,7 +3493,7 @@ Depends on **repo-c** from domain-c.
         assert sources == sorted(sources), f"Sources not alphabetically sorted: {sources}"
 
     def test_build_cross_domain_graph_negation_filter(self, tmp_path):
-        """Test that negation indicators filter out false positive repo mentions."""
+        """Test that structured table edges are detected; prose negation does not suppress them."""
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
@@ -3527,25 +3503,33 @@ Depends on **repo-c** from domain-c.
             {"name": "domain-c", "participating_repos": ["repo3"]},
         ]
 
-        # domain-a has a REAL connection to domain-b (repo2)
-        # but also mentions repo3 in an isolation paragraph
+        # domain-a has a structured outgoing table to domain-b only
+        # Prose negation about repo3 is present but does NOT affect structured parsing
         (staging_dir / "domain-a.md").write_text(
             "## Cross-Domain Connections\n\n"
-            "### 1. Integration with domain-b\n\n"
-            "This domain uses repo2 for data processing via REST API.\n\n"
-            "**Isolation confirmation**: FTS searches across repo3 returned zero results. "
-            "No functional dependency exists.\n"
+            "Note: FTS searches across repo3 returned zero results. "
+            "No functional dependency exists.\n\n"
+            "### Outgoing Dependencies\n\n"
+            "| This Repo | Depends On | Target Domain | Type | Why | Evidence |\n"
+            "|---|---|---|---|---|---|\n"
+            "| repo1 | repo2 | domain-b | Service integration | A calls B | client.py |\n\n"
+            "### Incoming Dependencies\n\n"
+            "No verified cross-domain dependencies.\n"
         )
-        (staging_dir / "domain-b.md").write_text("## Cross-Domain Connections\n\nNone.\n")
-        (staging_dir / "domain-c.md").write_text("## Cross-Domain Connections\n\nNone.\n")
+        (staging_dir / "domain-b.md").write_text(
+            "## Cross-Domain Connections\n\nNo verified cross-domain dependencies.\n"
+        )
+        (staging_dir / "domain-c.md").write_text(
+            "## Cross-Domain Connections\n\nNo verified cross-domain dependencies.\n"
+        )
 
         result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
 
-        # Should detect edge to domain-b but NOT to domain-c
+        # Should detect edge to domain-b (from structured table)
         assert "domain-b" in result
-        assert "repo2" in result
+        assert "repo1" in result
 
-        # domain-c/repo3 should be filtered out by negation
+        # domain-c should NOT appear (not in any outgoing table)
         lines = [line for line in result.split('\n') if line.startswith('| domain-a')]
         assert len(lines) == 1  # Only one edge from domain-a
         assert "domain-c" not in lines[0]

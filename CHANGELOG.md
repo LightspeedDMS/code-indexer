@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.19] - 2026-02-18
+
+### Changed
+
+- **Structured Cross-Domain Dependency Schema (Story #217)** - Replaced regex-based cross-domain dependency inference with deterministic structured table parsing. All 4 prompt templates (output-first, standard, delta merge, new domain) now use a structured table schema with columns: This Repo, Depends On, Target Domain, Type, Why, Evidence. Eliminates phantom edges from text-matching heuristics.
+- **NEGATION_INDICATORS removed** - Deleted the 17-phrase negation filter constant entirely. No longer needed with structured table input.
+- **_index.md enriched** - Cross-Domain Dependency Graph table now includes Type and Why columns from structured declarations.
+- **Web UI dependency evidence** - Domain detail panel shows dependency Type badge and Why description for each outgoing and incoming connection.
+- **Graph data dep_type** - Graph data endpoint includes dependency type in edge data for D3 visualization tooltips.
+
 ## [9.3.18] - 2026-02-18
 
 ### Fixed

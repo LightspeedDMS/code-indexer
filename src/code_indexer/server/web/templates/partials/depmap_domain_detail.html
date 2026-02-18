@@ -71,11 +71,26 @@
                         margin-bottom: 0.4rem;
                         font-size: 0.9rem;">
                 <span style="font-weight: 600;">{{ dep.target }}</span>
-                {% if dep.relationship %}
-                <span style="color: var(--pico-muted-color);"> - {{ dep.relationship }}</span>
+                {% if dep.dep_type %}
+                <span style="background: var(--pico-color-blue-100, #dbeafe);
+                             color: var(--pico-color-blue-700, #1d4ed8);
+                             padding: 0.1rem 0.4rem;
+                             border-radius: 0.2rem;
+                             font-size: 0.75rem;
+                             font-weight: 500;
+                             margin-left: 0.4rem;">{{ dep.dep_type }}</span>
+                {% endif %}
+                {% if dep.why %}
+                <div style="font-size: 0.8rem; color: var(--pico-muted-color); margin-top: 0.2rem;">
+                    {{ dep.why }}
+                </div>
+                {% elif dep.relationship %}
+                <div style="font-size: 0.8rem; color: var(--pico-muted-color); margin-top: 0.2rem;">
+                    {{ dep.relationship }}
+                </div>
                 {% endif %}
                 {% if dep.via_repos %}
-                <div style="font-size: 0.8rem; color: var(--pico-muted-color); margin-top: 0.2rem;">
+                <div style="font-size: 0.75rem; color: var(--pico-muted-color); margin-top: 0.15rem;">
                     via: {{ dep.via_repos | join(", ") }}
                 </div>
                 {% endif %}
@@ -104,11 +119,26 @@
                         margin-bottom: 0.4rem;
                         font-size: 0.9rem;">
                 <span style="font-weight: 600;">{{ dep.source }}</span>
-                {% if dep.relationship %}
-                <span style="color: var(--pico-muted-color);"> - {{ dep.relationship }}</span>
+                {% if dep.dep_type %}
+                <span style="background: var(--pico-color-blue-100, #dbeafe);
+                             color: var(--pico-color-blue-700, #1d4ed8);
+                             padding: 0.1rem 0.4rem;
+                             border-radius: 0.2rem;
+                             font-size: 0.75rem;
+                             font-weight: 500;
+                             margin-left: 0.4rem;">{{ dep.dep_type }}</span>
+                {% endif %}
+                {% if dep.why %}
+                <div style="font-size: 0.8rem; color: var(--pico-muted-color); margin-top: 0.2rem;">
+                    {{ dep.why }}
+                </div>
+                {% elif dep.relationship %}
+                <div style="font-size: 0.8rem; color: var(--pico-muted-color); margin-top: 0.2rem;">
+                    {{ dep.relationship }}
+                </div>
                 {% endif %}
                 {% if dep.via_repos %}
-                <div style="font-size: 0.8rem; color: var(--pico-muted-color); margin-top: 0.2rem;">
+                <div style="font-size: 0.75rem; color: var(--pico-muted-color); margin-top: 0.15rem;">
                     via: {{ dep.via_repos | join(", ") }}
                 </div>
                 {% endif %}

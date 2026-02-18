@@ -203,6 +203,7 @@ class DependencyMapDomainService:
                     "source": dep["source"],
                     "target": dep["target"],
                     "relationship": dep.get("relationship", ""),
+                    "dep_type": dep.get("dep_type", ""),
                 })
 
         return {"nodes": nodes, "edges": edges}
@@ -245,15 +246,16 @@ class DependencyMapDomainService:
         """
         Parse cross-domain dependency table from _index.md.
 
-        Supports two table formats:
+        Supports three table formats:
           3-column: Source Domain | Target Domain | Via Repos
           4-column: Source Domain | Target Domain | Via Repos | Relationship
+          5-column: Source Domain | Target Domain | Via Repos | Type | Why
 
         Uses line-by-line pipe splitting instead of regex to avoid the ambiguity
         where a 3-column pattern also matches subsets of 4-column rows.
 
         Returns:
-            List of dicts: {source, target, via_repos, relationship}
+            List of dicts: {source, target, via_repos, relationship, dep_type, why}
             Empty list if file missing or no table found.
         """
         try:
@@ -284,14 +286,22 @@ class DependencyMapDomainService:
             # Remove empty strings from leading/trailing pipe split
             cells = [c for c in cells if c != ""]
 
-            # Need exactly 3 or 4 cells
-            if len(cells) not in (3, 4):
+            # Need 3, 4, or 5 cells
+            if len(cells) not in (3, 4, 5):
                 continue
 
             source = cells[0]
             target = cells[1]
             via = cells[2]
-            relationship = cells[3] if len(cells) == 4 else ""
+            relationship = cells[3] if len(cells) >= 4 else ""
+            dep_type = ""
+            why = ""
+
+            # 5-column format: Source | Target | Via | Type | Why
+            if len(cells) == 5:
+                dep_type = cells[3]
+                why = cells[4]
+                relationship = ""
 
             # Skip header rows
             if source in ("Source Domain", ""):
@@ -306,6 +316,8 @@ class DependencyMapDomainService:
                 "target": target,
                 "via_repos": [r.strip() for r in via.split(",") if r.strip()],
                 "relationship": relationship,
+                "dep_type": dep_type,
+                "why": why,
             })
 
         return deps

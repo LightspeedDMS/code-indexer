@@ -460,7 +460,7 @@ class DependencyMapService:
                 # (pipe-delimited rows that aren't headers or separators)
                 in_cross_domain = False
                 for line in content.splitlines():
-                    if "Cross-Domain Dependencies" in line:
+                    if "Cross-Domain Dependencies" in line or "Cross-Domain Dependency Graph" in line:
                         in_cross_domain = True
                         continue
                     if in_cross_domain:

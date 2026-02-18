@@ -606,6 +606,7 @@ button.danger, .button.danger {
 .detail-item {
     display: flex;
     flex-direction: column;
+    min-width: 0;
 }
 
 .detail-item label {

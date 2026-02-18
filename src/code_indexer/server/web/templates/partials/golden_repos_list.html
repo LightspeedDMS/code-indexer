@@ -44,7 +44,7 @@
                 <span class="no-version">-</span>
                 {% endif %}
             </td>
-            <td class="indexes-cell" style="white-space: nowrap;">
+            <td class="indexes-cell">
                 {% if repo.has_semantic %}<span class="index-badge semantic" title="Semantic search available">Semantic</span>{% endif %}
                 {% if repo.has_fts %}<span class="index-badge fts" title="Full-text search available">FTS</span>{% endif %}
                 {% if repo.has_temporal %}<span class="index-badge temporal" title="Git history search available">Temporal</span>{% endif %}
@@ -387,7 +387,7 @@
 /* Category column layout */
 .category-cell {
     white-space: nowrap;
-    overflow: visible;
+    overflow: hidden;
 }
 .category-cell .category-select {
     display: inline-block;
@@ -420,6 +420,22 @@
 .golden-repos-table .actions-cell {
     white-space: nowrap;
     overflow: visible;
+}
+/* Allow index badges to wrap when column is narrow */
+.golden-repos-table .indexes-cell {
+    white-space: normal;
+}
+.indexes-cell .index-badge {
+    margin-bottom: 2px;
+}
+/* Prevent detail item text overflow in expanded cards */
+.details-grid .detail-item {
+    min-width: 0;
+    overflow: hidden;
+}
+.details-grid .detail-item span {
+    overflow-wrap: break-word;
+    word-break: break-word;
 }
 /* Group header bar must span full row width including overflow */
 .category-group-header td {
