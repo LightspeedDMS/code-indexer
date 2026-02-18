@@ -2,7 +2,7 @@
 name: get_job_details
 category: admin
 required_permission: query_repos
-tl_dr: Get detailed status and progress information for specific background job using job_id.
+tl_dr: Get detailed status and progress for a specific background job using job_id.
 inputSchema:
   type: object
   properties:

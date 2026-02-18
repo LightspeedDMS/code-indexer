@@ -9,8 +9,8 @@ class TestToolRegistryStructure:
     def test_registry_contains_expected_tools(self):
         """Test that TOOL_REGISTRY contains the expected number of tools."""
         assert (
-            len(TOOL_REGISTRY) == 128
-        ), f"Registry must contain exactly 128 tools, got {len(TOOL_REGISTRY)}"
+            len(TOOL_REGISTRY) == 127
+        ), f"Registry must contain exactly 127 tools, got {len(TOOL_REGISTRY)}"
 
     def test_all_tools_have_required_fields(self):
         """Test that all tools have required fields."""

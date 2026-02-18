@@ -2,7 +2,7 @@
 name: refresh_golden_repo
 category: repos
 required_permission: manage_golden_repos
-tl_dr: Update global repository by pulling latest changes from git remote and re-indexing.
+tl_dr: Update global repo by pulling latest changes from git remote and re-indexing.
 inputSchema:
   type: object
   properties:

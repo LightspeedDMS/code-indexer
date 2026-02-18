@@ -2,7 +2,7 @@
 name: scip_definition
 category: scip
 required_permission: query_repos
-tl_dr: '[SCIP Code Intelligence] Find where a symbol is defined (class, function, method).'
+tl_dr: '[SCIP] Find where a symbol is defined (class, function, method, variable).'
 inputSchema:
   type: object
   properties:

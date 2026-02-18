@@ -2,7 +2,7 @@
 name: scip_callchain
 category: scip
 required_permission: query_repos
-tl_dr: '[SCIP Code Intelligence] Trace all execution paths from entry point (from_symbol) to target function (to_symbol).'
+tl_dr: '[SCIP] Trace execution paths from entry point to target symbol.'
 inputSchema:
   type: object
   properties:

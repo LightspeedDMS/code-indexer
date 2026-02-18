@@ -1,7 +1,7 @@
 ---
 name: first_time_user_guide
 category: guides
-required_permission: null
+required_permission: query_repos
 tl_dr: Get step-by-step quick start guide for new CIDX MCP server users.
 inputSchema:
   type: object

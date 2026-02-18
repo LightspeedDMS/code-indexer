@@ -2,7 +2,7 @@
 name: get_file_content
 category: search
 required_permission: query_repos
-tl_dr: Read file content from repository with metadata and token-based pagination to prevent LLM context exhaustion.
+tl_dr: Read file content with metadata and token-based pagination to avoid exhaustion.
 inputSchema:
   type: object
   properties:

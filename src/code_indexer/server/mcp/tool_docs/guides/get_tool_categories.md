@@ -1,7 +1,7 @@
 ---
 name: get_tool_categories
 category: guides
-required_permission: null
+required_permission: query_repos
 tl_dr: Get organized list of all available MCP tools grouped by category.
 inputSchema:
   type: object

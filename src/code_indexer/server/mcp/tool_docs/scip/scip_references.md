@@ -2,7 +2,7 @@
 name: scip_references
 category: scip
 required_permission: query_repos
-tl_dr: '[SCIP Code Intelligence] Find all places where a symbol is used/referenced (imports, calls, instantiations).'
+tl_dr: '[SCIP] Find all places where a symbol is used (imports, calls, instances).'
 inputSchema:
   type: object
   properties:

@@ -46,11 +46,29 @@ class ToolDoc:
     required_permission: str
     tl_dr: str
     description: str
-    quick_reference: bool = False
     parameters: Optional[Dict[str, str]] = None
     inputSchema: Optional[Dict[str, Any]] = None
     outputSchema: Optional[Dict[str, Any]] = None
     requires_config: Optional[str] = None  # Story #185: Conditional tool visibility
+
+
+# Module-level singleton for ToolDocLoader to avoid per-request disk I/O
+# (Story #222 code review Finding 1: ~650ms latency regression from per-call instantiation)
+_singleton_loader: "Optional[ToolDocLoader]" = None
+
+
+def _get_tool_doc_loader() -> "ToolDocLoader":
+    """Return the module-level ToolDocLoader singleton, creating it on first call.
+
+    Tool docs are static files that only change on deployment, not at runtime.
+    Caching avoids parsing 127 YAML files from disk on every quick_reference() call.
+    """
+    global _singleton_loader
+    if _singleton_loader is None:
+        docs_dir = Path(__file__).parent / "tool_docs"
+        _singleton_loader = ToolDocLoader(docs_dir)
+        _singleton_loader.load_all_docs()
+    return _singleton_loader
 
 
 class ToolDocLoader:
@@ -164,7 +182,6 @@ class ToolDocLoader:
             required_permission=frontmatter["required_permission"],
             tl_dr=frontmatter["tl_dr"],
             description=body,
-            quick_reference=frontmatter.get("quick_reference", False),
             parameters=frontmatter.get("parameters"),
             inputSchema=frontmatter.get("inputSchema"),
             outputSchema=frontmatter.get("outputSchema"),
@@ -200,28 +217,6 @@ class ToolDocLoader:
             if tool_name not in self._cache:
                 missing.append(tool_name)
         return missing
-
-    def generate_quick_reference(self) -> str:
-        """Generate quick reference from tools with quick_reference: true."""
-        # Group tools by category
-        by_category: Dict[str, List[ToolDoc]] = {}
-        for tool_doc in self._cache.values():
-            if tool_doc.quick_reference:
-                if tool_doc.category not in by_category:
-                    by_category[tool_doc.category] = []
-                by_category[tool_doc.category].append(tool_doc)
-
-        if not by_category:
-            return "No tools marked for quick reference."
-
-        # Build output grouped by category
-        lines = []
-        for category in sorted(by_category.keys()):
-            lines.append(f"\n{category.upper()}:")
-            for tool in sorted(by_category[category], key=lambda t: t.name):
-                lines.append(f"  {tool.name} - {tool.tl_dr}")
-
-        return "\n".join(lines)
 
     def build_tool_registry(self) -> Dict[str, Dict[str, Any]]:
         """Build TOOL_REGISTRY from loaded tool docs.
@@ -316,13 +311,9 @@ class ToolDocLoader:
             meta = self._load_category_meta(category_dir)
             description = meta.description if meta else ""
 
-            # Get key tools: prefer quick_reference tools, fallback to first 3 alphabetically
+            # Get key tools: first 3 alphabetically
             tools = tools_by_category[category_name]
-            quick_ref_tools = [t for t in tools if t.quick_reference]
-            if quick_ref_tools:
-                key_tools = sorted([t.name for t in quick_ref_tools])
-            else:
-                key_tools = sorted([t.name for t in tools])[:3]
+            key_tools = sorted([t.name for t in tools])[:3]
 
             overview.append(
                 {

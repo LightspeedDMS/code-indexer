@@ -2,7 +2,7 @@
 name: admin_logs_export
 category: admin
 required_permission: manage_users
-tl_dr: Export operational logs in JSON or CSV format for offline analysis or external tool import.
+tl_dr: Export operational logs in JSON or CSV format for offline analysis or import.
 inputSchema:
   type: object
   properties:

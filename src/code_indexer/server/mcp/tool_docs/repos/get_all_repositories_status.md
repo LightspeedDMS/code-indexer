@@ -2,7 +2,7 @@
 name: get_all_repositories_status
 category: repos
 required_permission: query_repos
-tl_dr: Get high-level status summary of ALL repositories (both global and user-activated) in one call.
+tl_dr: Get status summary of ALL repositories (global and user-activated) in one call.
 inputSchema:
   type: object
   properties: {}

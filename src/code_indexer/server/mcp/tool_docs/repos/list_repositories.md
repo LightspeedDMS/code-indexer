@@ -2,7 +2,7 @@
 name: list_repositories
 category: repos
 required_permission: query_repos
-tl_dr: List repositories YOU have activated (user-specific workspaces), distinct from global shared repositories.
+tl_dr: List YOUR activated repositories (user workspaces), distinct from global repos.
 inputSchema:
   type: object
   properties:

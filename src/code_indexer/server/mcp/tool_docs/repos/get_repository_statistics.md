@@ -2,8 +2,7 @@
 name: get_repository_statistics
 category: repos
 required_permission: query_repos
-tl_dr: Get comprehensive statistics for repository including file counts, storage usage, language breakdown, indexing progress,
-  and health score.
+tl_dr: 'Get repository stats: file counts, storage, language breakdown, health score.'
 inputSchema:
   type: object
   properties:

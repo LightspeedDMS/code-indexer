@@ -43,7 +43,6 @@ class TestConvertToolDocs:
         assert categorize_tool("create_file") == "files"
         assert categorize_tool("cidx_ssh_key_create") == "ssh"
         assert categorize_tool("first_time_user_guide") == "guides"
-        assert categorize_tool("gh_actions_list_runs") == "cicd"
         assert categorize_tool("github_actions_list_runs") == "cicd"
         assert categorize_tool("gitlab_ci_list_pipelines") == "cicd"
 
@@ -78,7 +77,7 @@ class TestConvertToolDocs:
         assert "required_permission: query_repos" in content
         assert "tl_dr: Test tool." in content
 
-    def test_convert_all_tools_creates_128_files(self, temp_output_dir):
+    def test_convert_all_tools_creates_files_for_every_registry_entry(self, temp_output_dir):
         """convert_all_tools should create .md files for all tools in registry."""
         from tools.convert_tool_docs import convert_all_tools
         from code_indexer.server.mcp.tools import TOOL_REGISTRY

@@ -2,7 +2,7 @@
 name: set_session_impersonation
 category: admin
 required_permission: query_repos
-tl_dr: '[ADMIN ONLY] Set or clear session impersonation to execute queries on behalf of another user.'
+tl_dr: '[ADMIN ONLY] Set or clear session impersonation to act as another user.'
 inputSchema:
   type: object
   properties:

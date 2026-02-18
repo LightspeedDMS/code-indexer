@@ -2,7 +2,7 @@
 name: list_files
 category: search
 required_permission: query_repos
-tl_dr: List all files in repository with metadata (size, modified_at, language, is_indexed).
+tl_dr: List all files in a repository with metadata (size, date, language, indexed).
 inputSchema:
   type: object
   properties:

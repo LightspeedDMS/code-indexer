@@ -2,7 +2,7 @@
 name: browse_directory
 category: search
 required_permission: query_repos
-tl_dr: List files with metadata (size, language, modified date) - flat list for filtering/sorting.
+tl_dr: List files with metadata (size, language, date) - flat list for filtering.
 inputSchema:
   type: object
   properties:

@@ -2,8 +2,7 @@
 name: activate_repository
 category: repos
 required_permission: activate_repos
-tl_dr: Create a user-specific repository workspace for editing files, working on non-default branches, or combining multiple
-  repos into a composite.
+tl_dr: Create user workspace for editing files, non-default branches, or composites.
 inputSchema:
   type: object
   properties:

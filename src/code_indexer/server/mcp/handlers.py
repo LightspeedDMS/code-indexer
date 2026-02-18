@@ -5577,90 +5577,12 @@ def _build_langfuse_section(
     pull_projects = getattr(langfuse, "pull_projects", [])
     project_count = len(pull_projects) if pull_projects else 0
 
-    # Build section
+    # Build compact 4-field section (Story #222 TODO 10)
     return {
-        "what_are_langfuse_repos": (
-            "Langfuse repositories contain AI conversation traces synced from a Langfuse observability server. "
-            "Each trace captures a complete AI interaction including user prompts, model responses, tool calls, "
-            "and performance metrics. Traces are organized by project, user, and session, enabling semantic search "
-            "across historical AI conversations."
-        ),
-        "description": "Langfuse AI conversation traces are indexed for semantic search.",
-        "folder_naming": {
-            "pattern": "langfuse_<project>_<userId>",
-            "full_path": "langfuse_<project>_<userId>/<sessionId>/{seq}_{type}_{short_id}.json",
-        },
-        "file_naming": {
-            "pattern": "{seq:03d}_{type}_{short_id}.json",
-            "seq": "Zero-padded sequence number (minimum 3 digits: 001, 002, ..., 999, 1000, ...) in chronological order within the session",
-            "type": "Either 'turn' (user conversation turn) or 'subagent-{name}' (subagent invocation)",
-            "short_id": "Last 8 characters of the Langfuse trace ID",
-            "example": "001_turn_5544ab00.json, 002_subagent-code-reviewer_7e3f91c2.json",
-            "ordering": "Files are numbered in chronological order (001=oldest, ascending)",
-        },
-        "trace_file_structure": {
-            "format": "JSON with two top-level keys: 'trace' and 'observations'",
-            "trace": {
-                "description": "Trace metadata from Langfuse API",
-                "key_fields": [
-                    "id - Unique trace identifier",
-                    "name - Trace name ('subagent:*' for subagents, or user turn description)",
-                    "timestamp - ISO 8601 creation timestamp",
-                    "userId - User who initiated the trace",
-                    "sessionId - Session grouping identifier",
-                    "metadata - Contains intel fields and git context",
-                    "input - User input/prompt content",
-                    "output - Model response content",
-                    "totalCost - Total API cost in USD",
-                    "latency - Response time in seconds",
-                ],
-            },
-            "observations": {
-                "description": "List of spans and generations within the trace, sorted chronologically by startTime",
-                "key_fields": [
-                    "type - SPAN (tool call) or GENERATION (model invocation)",
-                    "name - Tool or model name",
-                    "startTime/endTime - Timing information",
-                    "usage - Token counts (input, output, total)",
-                    "calculatedTotalCost - Cost for this observation",
-                ],
-            },
-        },
-        "intel_metadata": {
-            "description": "Prompt intelligence fields found in trace.metadata (subagent traces only, not user turns)",
-            "fields": {
-                "intel_frustration": "Float 0.0-1.0 indicating user frustration level",
-                "intel_specificity": "Code: surg (surgical), const (constructive), outc (outcome-focused), expl (exploratory)",
-                "intel_task_type": "Code: bug, feat, refac, research, test, docs, debug, conf, other",
-                "intel_quality": "Float 0.0-1.0 indicating prompt quality score",
-                "intel_iteration": "Integer 1-9 indicating iteration count for the task",
-            },
-            "other_metadata": [
-                "git_branch - Active git branch during the trace",
-                "git_remote - Git remote URL",
-                "model - AI model used (e.g., claude-sonnet-4-5-20250929)",
-                "project_name - Project name from workspace",
-                "project_path - Filesystem path to the project",
-                "cache_read_tokens, input_tokens, output_tokens - Token usage metrics",
-            ],
-        },
-        "search_instructions": [
-            "Search across all Langfuse traces: search_code('query', repository_alias='langfuse_*')",
-            "Search specific project: search_code('query', repository_alias='langfuse_<project>_*')",
-            "Search specific user: search_code('query', repository_alias='langfuse_<project>_<user>')",
-        ],
+        "description": "Langfuse AI traces indexed for semantic search.",
+        "search_pattern": "search_code('query', repository_alias='langfuse_<project>_<userId>')",
         "available_repositories": langfuse_repos,
         "configured_projects_count": project_count,
-        "example_queries": [
-            "search_code('authentication error handling', repository_alias='langfuse_*')",
-            "search_code('SQL query generation', repository_alias='langfuse_*')",
-            "search_code('API rate limiting', repository_alias='langfuse_*')",
-        ],
-        "tips": [
-            "Use wildcards to search across all users: langfuse_myproject_*",
-            "Search specific user: langfuse_myproject_user123",
-            "Traces are synced periodically - check dashboard for sync status",
-        ],
     }
 
 
@@ -5675,8 +5597,6 @@ def _build_dependency_map_section(cidx_meta_path: Path) -> str:
         String with dependency map documentation when conditions met,
         empty string otherwise
     """
-    from pathlib import Path
-
     # Check if dependency-map directory exists
     dependency_map_dir = cidx_meta_path / "dependency-map"
     if not dependency_map_dir.is_dir():
@@ -5694,34 +5614,11 @@ def _build_dependency_map_section(cidx_meta_path: Path) -> str:
     ]
     domain_count = len(domain_files)
 
-    # Build section content
-    section = f"""
-CROSS-REPOSITORY DEPENDENCY MAP
-
-The dependency map in cidx-meta/dependency-map/ provides a curated overview of cross-repository dependencies and architectural relationships. This map is MORE EFFICIENT than searching each repository individually.
-
-CHECK THE DEPENDENCY MAP FIRST before doing exploratory searches across repositories.
-
-Location: cidx-meta/dependency-map/ directory
-Available domain files: {domain_count}
-
-Recommended workflow for cross-repository tasks:
-1. Read cidx-meta/dependency-map/_index.md to understand the map structure
-2. Identify relevant domain files from the index
-3. Read the specific domain file(s) to understand dependencies
-4. Use the map's guidance to explore specific repositories efficiently
-
-This approach is more efficient than searching each repository individually because the dependency map provides curated architectural knowledge and relationship context.
-
-Correcting Inaccuracies:
-If you discover an inaccuracy in the dependency map, you can correct it directly:
-1. Use `edit_file` with repository_alias `cidx-meta-global` to edit the domain file
-2. Preserve the YAML frontmatter structure
-3. The correction takes effect immediately (auto-reindexed via watch)
-4. Next scheduled refresh will re-verify your correction against source code
-""".strip()
-
-    return section
+    # Return compact single-line string (Story #222 TODO 11)
+    return (
+        f"Dependency map: cidx-meta/dependency-map/ ({domain_count} domains). "
+        "Read _index.md first for structure."
+    )
 
 
 def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -5737,112 +5634,17 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     try:
         from .tools import TOOL_REGISTRY
+        from .tool_doc_loader import _get_tool_doc_loader
 
         category_filter = params.get("category")
 
-        # Category mapping for tool names (ALL 53 TOOLS)
-        categories = {
-            "search": [
-                "search_code",
-                "list_global_repos",
-                "global_repo_status",
-                "regex_search",
-            ],
-            "scip": [
-                "scip_definition",
-                "scip_references",
-                "scip_dependencies",
-                "scip_dependents",
-                "scip_impact",
-                "scip_callchain",
-                "scip_context",
-            ],
-            "git_exploration": [
-                "git_log",
-                "git_show_commit",
-                "git_search_commits",
-                "git_search_diffs",
-                "git_diff",
-                "git_blame",
-                "git_file_history",
-                "git_file_at_revision",
-            ],
-            "git_operations": [
-                "git_status",
-                "git_stage",
-                "git_unstage",
-                "git_commit",
-                "git_push",
-                "git_pull",
-                "git_fetch",
-                "git_reset",
-                "git_clean",
-                "git_checkout_file",
-                "git_merge_abort",
-                "git_branch_list",
-                "git_branch_create",
-                "git_branch_switch",
-                "git_branch_delete",
-            ],
-            "files": [
-                "list_files",
-                "get_file_content",
-                "browse_directory",
-                "directory_tree",
-                "create_file",
-                "edit_file",
-                "delete_file",
-            ],
-            "repo_management": [
-                "discover_repositories",
-                "list_repositories",
-                "activate_repository",
-                "deactivate_repository",
-                "get_repository_status",
-                "switch_branch",
-                "get_branches",
-                "sync_repository",
-                "manage_composite_repository",
-            ],
-            "golden_repos": [
-                "add_golden_repo",
-                "remove_golden_repo",
-                "refresh_golden_repo",
-                "add_golden_repo_index",
-                "get_golden_repo_indexes",
-                "get_global_config",
-                "set_global_config",
-            ],
-            "system": [
-                "check_health",
-                "get_job_details",
-                "get_job_statistics",
-                "get_repository_statistics",
-                "get_all_repositories_status",
-                "trigger_reindex",
-                "get_index_status",
-            ],
-            "user_management": [
-                "authenticate",
-                "create_user",
-                "list_users",
-            ],
-            "ssh_keys": [
-                "cidx_ssh_key_create",
-                "cidx_ssh_key_list",
-                "cidx_ssh_key_delete",
-                "cidx_ssh_key_show_public",
-                "cidx_ssh_key_assign_host",
-            ],
-            "meta": [
-                "cidx_quick_reference",
-                "get_tool_categories",
-                "first_time_user_guide",
-            ],
-        }
+        # Load tool docs from singleton (Story #222 code review Finding 1: avoid per-call disk I/O)
+        loader = _get_tool_doc_loader()
+        all_docs = loader._cache
 
-        # Collect tools user has permission for
-        tools_summary = []
+        # Build grouped tools_by_category dict (Story #222 TODO 9)
+        tools_by_category: Dict[str, list] = {}
+        total_tools = 0
 
         for tool_name, tool_def in TOOL_REGISTRY.items():
             # Check permission
@@ -5850,64 +5652,55 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             if not user.has_permission(required_permission):
                 continue
 
-            # Determine category
-            tool_category = "other"
-            for cat, tool_list in categories.items():
-                if tool_name in tool_list:
-                    tool_category = cat
-                    break
+            # Get category and tl_dr from frontmatter; fallback for undocumented tools
+            if tool_name in all_docs:
+                doc = all_docs[tool_name]
+                tool_category = doc.category
+                tl_dr = doc.tl_dr
+            else:
+                tool_category = "other"
+                tl_dr = tool_def.get("description", "")[:60]
 
             # Apply category filter
             if category_filter and tool_category != category_filter:
                 continue
 
-            # Extract TL;DR from description
-            description = tool_def.get("description", "")
-            tldr = (
-                description.split("TL;DR:")[1].split("\n")[0].strip()
-                if "TL;DR:" in description
-                else description[:200]
-            )
+            # Truncate tl_dr to 30 chars for token budget (Story #222 AC2: standard user <= 2000 tokens
+            # even when Langfuse repos with long names are configured)
+            if len(tl_dr) > 30:
+                tl_dr = tl_dr[:27] + "..."
 
-            tools_summary.append(
-                {
-                    "name": tool_name,
-                    "category": tool_category,
-                    "summary": tldr,
-                    "required_permission": required_permission,
-                }
-            )
+            if tool_category not in tools_by_category:
+                tools_by_category[tool_category] = []
+            tools_by_category[tool_category].append({"name": tool_name, "tl_dr": tl_dr})
+            total_tools += 1
 
         # Story #22: Add server identity with a.k.a. line
         config = get_config_service().get_config()
         display_name = config.service_display_name or "Neo"
         server_identity = f"This server is CIDX (a.k.a. {display_name})."
 
+        # Compact discovery string (Story #222 TODO 12)
+        discovery = (
+            "Use cidx-meta-global for cross-repo discovery: "
+            "search_code('topic', repository_alias='cidx-meta-global'). "
+            "Strip .md from file_path, append '-global' for repo alias."
+        )
+
         # Story #169: Add Langfuse trace search section when pull is enabled
-        response = {
+        # Omit category_filter key when null (Story #222 code review Finding 2: saves tokens)
+        response: Dict[str, Any] = {
             "success": True,
             "server_identity": server_identity,
-            "total_tools": len(tools_summary),
-            "category_filter": category_filter,
-            "tools": tools_summary,
-            "discovery": {
-                "meta_repo": "cidx-meta-global",
-                "what_it_contains": "Synthetic repository of AI-generated markdown descriptions, one .md file per registered repository, plus dependency-map/ for cross-repo relationships.",
-                "workflow": [
-                    "1. list_global_repos() - see all available repositories",
-                    "2. search_code('your topic', repository_alias='cidx-meta-global') - find which repo covers it",
-                    "3. Interpret results: file_path='auth-service.md' means search 'auth-service-global' next",
-                    "4. search_code('your topic', repository_alias='auth-service-global') - get actual code",
-                    "5. dependency-map/ results show cross-repo relationships, not code locations",
-                ],
-                "result_mapping": "Strip .md extension from file_path, append '-global' to get repository alias. Example: 'backend.md' -> 'backend-global'.",
-                "fallback": "If cidx-meta-global not found: use list_global_repos() to see all repos, then search with repository_alias='*-global' or search individual repos.",
-            },
+            "total_tools": total_tools,
+            "tools_by_category": tools_by_category,
+            "discovery": discovery,
         }
+        if category_filter is not None:
+            response["category_filter"] = category_filter
 
         # Story #194: Add dependency map section when available (prominent positioning)
         if app_module.golden_repo_manager:
-            from pathlib import Path
             cidx_meta_path = Path(app_module.golden_repo_manager.golden_repos_dir) / "cidx-meta"
             dependency_map_section = _build_dependency_map_section(cidx_meta_path)
             if dependency_map_section:
@@ -5932,7 +5725,7 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "success": False,
                 "total_tools": 0,
                 "category_filter": category_filter,
-                "tools": [],
+                "tools_by_category": {},
                 "error": str(e),
             }
         )
@@ -7224,15 +7017,13 @@ HANDLER_REGISTRY["first_time_user_guide"] = first_time_user_guide
 def get_tool_categories(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for get_tool_categories tool - returns tools organized by category.
 
-    Uses ToolDocLoader to dynamically build categories from markdown documentation
-    files, ensuring all tools are included (not just a hardcoded subset).
+    Uses ToolDocLoader singleton to build categories from markdown documentation
+    files without per-call disk I/O (Story #222 code review Finding 1).
     """
-    from pathlib import Path
-    from .tool_doc_loader import ToolDocLoader
+    from .tool_doc_loader import _get_tool_doc_loader
 
-    # Load tool categories dynamically from markdown files
-    docs_dir = Path(__file__).parent / "tool_docs"
-    loader = ToolDocLoader(docs_dir)
+    # Use singleton to avoid per-call disk I/O
+    loader = _get_tool_doc_loader()
     tool_categories = loader.get_tools_by_category()
 
     # Build categorized response with formatted output
@@ -8137,13 +7928,8 @@ async def handle_gh_actions_cancel_run(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-# Register GitHub Actions handlers
-HANDLER_REGISTRY["gh_actions_list_runs"] = handle_gh_actions_list_runs
-HANDLER_REGISTRY["gh_actions_get_run"] = handle_gh_actions_get_run
-HANDLER_REGISTRY["gh_actions_search_logs"] = handle_gh_actions_search_logs
-HANDLER_REGISTRY["gh_actions_get_job_logs"] = handle_gh_actions_get_job_logs
-HANDLER_REGISTRY["gh_actions_retry_run"] = handle_gh_actions_retry_run
-HANDLER_REGISTRY["gh_actions_cancel_run"] = handle_gh_actions_cancel_run
+# gh_actions_* HANDLER_REGISTRY entries removed (Story #222 TODO 5).
+# Handler functions preserved below for REST routes in cicd.py.
 
 
 # ============================================================================

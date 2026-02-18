@@ -2,7 +2,7 @@
 name: scip_context
 category: scip
 required_permission: query_repos
-tl_dr: '[SCIP Code Intelligence] Get smart, curated file list for understanding a symbol.'
+tl_dr: '[SCIP] Get smart, curated file list for understanding a symbol in context.'
 inputSchema:
   type: object
   properties:

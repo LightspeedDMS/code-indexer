@@ -2,8 +2,7 @@
 name: get_branches
 category: repos
 required_permission: query_repos
-tl_dr: List all git branches for repository with detailed metadata (current branch, last commit info, index status, remote
-  tracking).
+tl_dr: List all git branches with metadata (current, last commit, index, remote).
 inputSchema:
   type: object
   properties:

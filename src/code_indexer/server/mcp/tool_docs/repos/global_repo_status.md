@@ -2,8 +2,7 @@
 name: global_repo_status
 category: repos
 required_permission: query_repos
-tl_dr: Get detailed status of specific GLOBAL repository (shared, read-only) including refresh timestamps and temporal indexing
-  capabilities.
+tl_dr: 'Get GLOBAL (shared, read-only) repo status: refresh time and temporal info.'
 inputSchema:
   type: object
   properties:

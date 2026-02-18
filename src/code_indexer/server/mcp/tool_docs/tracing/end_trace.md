@@ -3,7 +3,7 @@ name: end_trace
 category: tracing
 required_permission: query_repos
 requires_config: langfuse_enabled
-tl_dr: End the active Langfuse trace with optional scoring and feedback - captures research session outcome.
+tl_dr: End the active Langfuse trace with optional scoring and session outcome capture.
 inputSchema:
   type: object
   properties:

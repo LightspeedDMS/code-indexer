@@ -3,7 +3,7 @@ name: start_trace
 category: tracing
 required_permission: query_repos
 requires_config: langfuse_enabled
-tl_dr: Start a Langfuse trace for research session - enables automatic span logging for all subsequent tool calls.
+tl_dr: Start a Langfuse trace for a research session with automatic span logging.
 inputSchema:
   type: object
   properties:

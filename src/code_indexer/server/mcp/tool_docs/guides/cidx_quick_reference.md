@@ -3,7 +3,6 @@ name: cidx_quick_reference
 category: guides
 required_permission: query_repos
 tl_dr: Get quick reference for CIDX MCP tools with decision guidance.
-quick_reference: true
 inputSchema:
   type: object
   properties:

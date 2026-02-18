@@ -2,7 +2,7 @@
 name: scip_impact
 category: scip
 required_permission: query_repos
-tl_dr: '[SCIP Code Intelligence] Recursive impact analysis - find ALL symbols and files affected by changing a symbol.'
+tl_dr: '[SCIP] Recursive impact analysis - find symbols and files affected by change.'
 inputSchema:
   type: object
   properties:

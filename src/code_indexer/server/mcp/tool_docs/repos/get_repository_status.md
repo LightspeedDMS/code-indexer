@@ -2,8 +2,7 @@
 name: get_repository_status
 category: repos
 required_permission: query_repos
-tl_dr: Get comprehensive status of YOUR activated repository including indexing state, file counts, git branch info, and temporal
-  capabilities.
+tl_dr: 'YOUR activated repo status: indexing state, file counts, branch, temporal.'
 inputSchema:
   type: object
   properties:

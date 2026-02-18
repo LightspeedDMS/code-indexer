@@ -2,8 +2,7 @@
 name: discover_repositories
 category: repos
 required_permission: query_repos
-tl_dr: List repositories available from external source configurations like GitHub organizations or local paths that are NOT
-  yet indexed.
+tl_dr: List repos from external sources (GitHub orgs, local paths) not yet indexed.
 inputSchema:
   type: object
   properties:

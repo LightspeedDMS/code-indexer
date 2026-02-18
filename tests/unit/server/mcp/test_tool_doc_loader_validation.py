@@ -63,35 +63,6 @@ class TestFrontmatterRequiredFields:
         loader.load_all_docs()
         assert loader._cache["public_tool"].required_permission == ""
 
-    def test_optional_quick_reference_defaults_false(self, temp_docs_dir):
-        """quick_reference should default to False when not specified."""
-        from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
-
-        search_dir = temp_docs_dir / "search"
-        (search_dir / "no_quick_ref.md").write_text(
-            "---\nname: no_quick_ref\ncategory: search\n"
-            "required_permission: query_repos\ntl_dr: Test.\n---\n\nDescription."
-        )
-
-        loader = ToolDocLoader(temp_docs_dir)
-        loader.load_all_docs()
-        assert loader._cache["no_quick_ref"].quick_reference is False
-
-    def test_optional_quick_reference_true(self, temp_docs_dir):
-        """quick_reference: true should be parsed correctly."""
-        from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
-
-        search_dir = temp_docs_dir / "search"
-        (search_dir / "with_quick_ref.md").write_text(
-            "---\nname: with_quick_ref\ncategory: search\n"
-            "required_permission: query_repos\ntl_dr: Test.\nquick_reference: true\n---\n\nDesc."
-        )
-
-        loader = ToolDocLoader(temp_docs_dir)
-        loader.load_all_docs()
-        assert loader._cache["with_quick_ref"].quick_reference is True
-
-
 class TestFrontmatterFormatErrors:
     """Tests for frontmatter format error handling."""
 
