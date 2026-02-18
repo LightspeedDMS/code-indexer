@@ -130,9 +130,25 @@ function toggleDetails(username, userAlias) {
         if (isHidden) {
             openDetailsSet.add(key);
             console.log('[CIDX] Opened details for:', key);
+            // Load index status grid in the details card
+            loadDetailsIndexStatus(userAlias, username);
         } else {
             openDetailsSet.delete(key);
             console.log('[CIDX] Closed details for:', key);
+        }
+    }
+}
+
+async function loadDetailsIndexStatus(userAlias, owner) {
+    try {
+        const indexData = await fetchActivatedRepoIndexes(userAlias, owner);
+        if (typeof updateIndexStatusGrid === 'function') {
+            updateIndexStatusGrid(userAlias, indexData);
+        }
+    } catch (error) {
+        console.error('[CIDX] Failed to load details index status for ' + userAlias + ':', error);
+        if (typeof updateIndexStatusGridError === 'function') {
+            updateIndexStatusGridError(userAlias);
         }
     }
 }

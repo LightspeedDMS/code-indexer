@@ -52,6 +52,17 @@ function groupRows(table) {
     // Remove existing group headers
     tbody.querySelectorAll('.category-group-header').forEach(h => h.remove());
 
+    // Build a map from each data row to its adjacent details row (if any)
+    // In both Golden Repos and Activated Repos templates, the details-row <tr>
+    // immediately follows the data <tr> in the DOM.
+    const detailsMap = new Map();
+    rows.forEach(row => {
+        var next = row.nextElementSibling;
+        if (next && next.classList.contains('details-row')) {
+            detailsMap.set(row, next);
+        }
+    });
+
     // Group by category
     const groups = {};
     rows.forEach(row => {
@@ -75,12 +86,9 @@ function groupRows(table) {
         tbody.appendChild(header);
         group.rows.forEach(r => {
             tbody.appendChild(r);
-            // Move the corresponding details row to stay adjacent (Story #218 fix)
-            var alias = r.dataset.repoAlias;
-            if (alias) {
-                var detailsRow = document.getElementById('details-' + alias);
-                if (detailsRow) tbody.appendChild(detailsRow);
-            }
+            // Move the corresponding details row to stay adjacent
+            var detailsRow = detailsMap.get(r);
+            if (detailsRow) tbody.appendChild(detailsRow);
         });
     });
 }
@@ -95,16 +103,23 @@ function ungroupRows(table) {
     tbody.querySelectorAll('.category-group-header').forEach(h => h.remove());
     // Show all rows
     tbody.querySelectorAll('tr[data-category-name]').forEach(r => r.style.display = '');
-    // Sort alphabetically by alias
+
+    // Build details map before reordering
     const rows = Array.from(tbody.querySelectorAll('tr[data-category-name]'));
+    const detailsMap = new Map();
+    rows.forEach(row => {
+        var next = row.nextElementSibling;
+        if (next && next.classList.contains('details-row')) {
+            detailsMap.set(row, next);
+        }
+    });
+
+    // Sort alphabetically by alias
     rows.sort((a, b) => (a.dataset.repoAlias || '').localeCompare(b.dataset.repoAlias || ''));
     rows.forEach(r => {
         tbody.appendChild(r);
-        var alias = r.dataset.repoAlias;
-        if (alias) {
-            var detailsRow = document.getElementById('details-' + alias);
-            if (detailsRow) tbody.appendChild(detailsRow);
-        }
+        var detailsRow = detailsMap.get(r);
+        if (detailsRow) tbody.appendChild(detailsRow);
     });
 }
 

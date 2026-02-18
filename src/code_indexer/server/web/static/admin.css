@@ -381,6 +381,16 @@ header.admin-header {
     background-color: #ef4444;
 }
 
+.status-indicator.status-running {
+    background-color: #22c55e;
+    animation: blink-dot 1s ease-in-out infinite;
+}
+
+@keyframes blink-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+}
+
 .status-text {
     font-weight: 500;
 }

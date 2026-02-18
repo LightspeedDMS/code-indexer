@@ -21,6 +21,23 @@ Use plain text headers: `### Performance Improvements`
 
 ---
 
+## CRITICAL: CREDENTIALS - ALWAYS READ FROM .local-testing
+
+**NEVER** assume or guess SSH passwords, server credentials, usernames, or connection details.
+
+**ALWAYS** read `.local-testing` (gitignored, project root) for:
+- SSH usernames and passwords for staging (.20), production (.30), Mac laptop
+- CIDX admin credentials per environment
+- API keys (Langfuse, GitHub, GitLab, Anthropic)
+- MCPB deployment details and encrypted credential paths
+- E2E test credentials
+
+**Workflow**: Before connecting to ANY server or using ANY credential, read `.local-testing` first. Declare it as a secret file before reading.
+
+*Recorded 2026-02-18*
+
+---
+
 ## CRITICAL: LOCAL TESTING BEFORE DEPLOYMENT
 
 **NEVER** deploy/test on production until user explicitly approves.
