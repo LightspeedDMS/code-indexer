@@ -1281,14 +1281,14 @@ class DependencyMapService:
         # READ current _domains.json from versioned path (Story #224)
         read_domains_file = self._get_cidx_meta_read_path() / "dependency-map" / "_domains.json"
         if not read_domains_file.exists():
-            logger.warning("_domains.json not found, cannot assign new repos")
-            return affected, True
-
-        try:
-            domain_list = json.loads(read_domains_file.read_text())
-        except Exception as e:
-            logger.warning(f"Failed to read _domains.json for new repo assignment: {e}")
-            return affected, True
+            logger.info("_domains.json not found, starting with empty domain list for new repo assignment")
+            domain_list = []
+        else:
+            try:
+                domain_list = json.loads(read_domains_file.read_text())
+            except Exception as e:
+                logger.warning(f"Failed to read _domains.json for new repo assignment: {e}")
+                return affected, True
 
         # Build alias-to-domain index for fast lookup
         domain_by_name = {d["name"]: d for d in domain_list}

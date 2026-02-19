@@ -522,3 +522,67 @@ class TestBug3MissingIndexMd:
             "When _index.md is missing and new_repos is empty, "
             "empty set should be returned (no work to do)"
         )
+
+
+class TestBug4MissingDomainsJson:
+    """Bug 4: _discover_and_assign_new_repos() should start with empty domain list when _domains.json missing."""
+
+    def test_discover_assigns_new_repos_when_domains_json_missing(self, tmp_path):
+        """Bug 4: When _domains.json doesn't exist, method should still process Claude's assignments
+        and create new domains (not return early with 'cannot assign new repos')."""
+        svc = _make_service(tmp_path)
+
+        # Create dependency-map dir WITHOUT _domains.json
+        depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
+        depmap_dir.mkdir(parents=True)
+        # Deliberately do NOT create _domains.json
+
+        new_repos = [{"alias": "new-svc", "clone_path": str(tmp_path / "new-svc")}]
+        svc._analyzer.build_domain_discovery_prompt.return_value = "discovery prompt"
+
+        with patch.object(svc._analyzer, "invoke_domain_discovery",
+                          return_value='[{"repo": "new-svc", "domains": ["payments"]}]'):
+            affected, write_success = svc._discover_and_assign_new_repos(
+                new_repos=new_repos,
+                existing_domains=["payments"],
+                dependency_map_dir=depmap_dir,
+                config=Mock(dependency_map_delta_max_turns=5, dependency_map_pass_timeout_seconds=120),
+            )
+
+        assert isinstance(affected, set), "Must return a set of affected domains"
+        assert "payments" in affected, (
+            "Domain 'payments' must be in affected set - method should not return early "
+            "just because _domains.json was missing"
+        )
+
+    def test_discover_creates_domains_json_when_missing(self, tmp_path):
+        """Bug 4: When _domains.json doesn't exist, the written _domains.json should contain
+        the newly created domains from Claude's assignment."""
+        svc = _make_service(tmp_path)
+
+        # Create dependency-map dir WITHOUT _domains.json
+        depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
+        depmap_dir.mkdir(parents=True)
+        # Deliberately do NOT create _domains.json
+
+        new_repos = [{"alias": "new-svc", "clone_path": str(tmp_path / "new-svc")}]
+        svc._analyzer.build_domain_discovery_prompt.return_value = "discovery prompt"
+
+        with patch.object(svc._analyzer, "invoke_domain_discovery",
+                          return_value='[{"repo": "new-svc", "domains": ["payments"]}]'):
+            svc._discover_and_assign_new_repos(
+                new_repos=new_repos,
+                existing_domains=["payments"],
+                dependency_map_dir=depmap_dir,
+                config=Mock(dependency_map_delta_max_turns=5, dependency_map_pass_timeout_seconds=120),
+            )
+
+        domains_file = depmap_dir / "_domains.json"
+        assert domains_file.exists(), (
+            "_domains.json must be created even when it didn't exist before"
+        )
+        written = json.loads(domains_file.read_text())
+        domain_names = [d["name"] for d in written]
+        assert "payments" in domain_names, (
+            "Newly created domain 'payments' must be written to _domains.json"
+        )
