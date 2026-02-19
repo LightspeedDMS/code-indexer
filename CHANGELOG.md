@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.31] - 2026-02-19
+
+### Fixed
+
+- Delta refresh now creates new domains when Claude assigns repos to domains not yet in _domains.json
+- Delta refresh tracking no longer finalizes new repos when _domains.json write fails (prevents permanent data loss)
+- Wired P1/P2 pass timing into Recent Run Metrics (was always showing 0.0s)
+
 ## [9.3.30] - 2026-02-19
 
 ### Fixed

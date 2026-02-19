@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -121,12 +122,12 @@ class DependencyMapService:
             )
 
             # Execute analysis passes
-            domain_list, errors = self._execute_analysis_passes(
+            domain_list, errors, pass1_duration_s, pass2_duration_s = self._execute_analysis_passes(
                 config, paths, repo_list
             )
 
             # Finalize and cleanup
-            self._finalize_analysis(config, paths, repo_list, domain_list)
+            self._finalize_analysis(config, paths, repo_list, domain_list, pass1_duration_s, pass2_duration_s)
 
             return {
                 "status": "completed",
@@ -207,7 +208,7 @@ class DependencyMapService:
 
     def _execute_analysis_passes(
         self, config, paths: Dict[str, Path], repo_list: List[Dict[str, Any]]
-    ) -> Tuple[List[Dict[str, Any]], List[str]]:
+    ) -> Tuple[List[Dict[str, Any]], List[str], float, float]:
         """
         Execute the three-pass analysis pipeline with journal-based resumability.
 
@@ -217,7 +218,7 @@ class DependencyMapService:
             repo_list: List of repository metadata
 
         Returns:
-            Tuple of (domain_list, errors)
+            Tuple of (domain_list, errors, pass1_duration_s, pass2_duration_s)
         """
         staging_dir = paths["staging_dir"]
         final_dir = paths["final_dir"]
@@ -250,17 +251,20 @@ class DependencyMapService:
         self._analyzer.generate_claude_md(repo_list)
 
         # Pass 1: Synthesis (skip if already completed)
+        pass1_duration_s = 0.0
         if journal.get("pass1", {}).get("status") != "completed":
             # Read repo descriptions from cidx-meta (Fix 8: filter stale repos)
             active_aliases = {r.get("alias") for r in repo_list}
             repo_descriptions = self._read_repo_descriptions(cidx_meta_read_path, active_aliases=active_aliases)
 
+            pass1_start = time.time()
             domain_list = self._analyzer.run_pass_1_synthesis(
                 staging_dir=staging_dir,
                 repo_descriptions=repo_descriptions,
                 repo_list=repo_list,
                 max_turns=config.dependency_map_pass1_max_turns,
             )
+            pass1_duration_s = time.time() - pass1_start
             journal["pass1"] = {
                 "status": "completed",
                 "domains_count": len(domain_list),
@@ -283,6 +287,7 @@ class DependencyMapService:
 
         # Pass 2: Per-domain (skip completed domains)
         errors = []
+        pass2_start = time.time()
         for domain in domain_list:
             domain_name = domain["name"]
             domain_status = journal.get("pass2", {}).get(domain_name, {}).get("status")
@@ -315,6 +320,8 @@ class DependencyMapService:
 
             self._save_journal(staging_dir, journal)  # Save after each domain
 
+        pass2_duration_s = time.time() - pass2_start
+
         # AC2 (Story #216): Pass 3 (Index generation) is replaced by programmatic
         # _generate_index_md() called in _finalize_analysis(). No Claude CLI call needed.
         # Update journal to reflect pass3 is handled programmatically.
@@ -325,7 +332,7 @@ class DependencyMapService:
         }
         self._save_journal(staging_dir, journal)
 
-        return domain_list, errors
+        return domain_list, errors, pass1_duration_s, pass2_duration_s
 
     def _finalize_analysis(
         self,
@@ -333,6 +340,8 @@ class DependencyMapService:
         paths: Dict[str, Path],
         repo_list: List[Dict[str, Any]],
         domain_list: List[Dict[str, Any]],
+        pass1_duration_s: float = 0.0,
+        pass2_duration_s: float = 0.0,
     ) -> None:
         """
         Finalize analysis: swap, reindex, update tracking, cleanup.
@@ -342,6 +351,8 @@ class DependencyMapService:
             paths: Dict with staging_dir, final_dir, cidx_meta_path, golden_repos_root
             repo_list: List of repository metadata
             domain_list: List of identified domains
+            pass1_duration_s: Duration of Pass 1 in seconds
+            pass2_duration_s: Duration of Pass 2 in seconds
         """
         staging_dir = paths["staging_dir"]
         final_dir = paths["final_dir"]
@@ -375,7 +386,7 @@ class DependencyMapService:
         )
 
         # AC9 (Story #216): Record run metrics to run_history table
-        self._record_run_metrics(final_dir, domain_list, repo_list)
+        self._record_run_metrics(final_dir, domain_list, repo_list, pass1_duration_s, pass2_duration_s)
 
     def _stage_then_swap(self, staging_dir: Path, final_dir: Path) -> None:
         """
@@ -407,6 +418,8 @@ class DependencyMapService:
         output_dir: Path,
         domain_list: List[Dict[str, Any]],
         repo_list: List[Dict[str, Any]],
+        pass1_duration_s: float = 0.0,
+        pass2_duration_s: float = 0.0,
     ) -> None:
         """
         Compute and record run metrics to tracking backend (AC9, Story #216).
@@ -419,6 +432,8 @@ class DependencyMapService:
             output_dir: Output directory where domain .md files were written
             domain_list: List of domain dicts from analysis
             repo_list: List of repo dicts that were analyzed
+            pass1_duration_s: Duration of Pass 1 in seconds
+            pass2_duration_s: Duration of Pass 2 in seconds
         """
         try:
             total_chars = 0
@@ -459,6 +474,8 @@ class DependencyMapService:
                 "zero_char_domains": zero_char_domains,
                 "repos_analyzed": len(repo_list),
                 "repos_skipped": 0,  # Full analysis always processes all repos
+                "pass1_duration_s": pass1_duration_s,
+                "pass2_duration_s": pass2_duration_s,
             }
 
             if hasattr(self._tracking_backend, "record_run_metrics"):
@@ -1233,7 +1250,11 @@ class DependencyMapService:
             config: Claude integration config
 
         Returns:
-            Set of affected domain names that need re-analysis
+            Tuple of (affected domain names, write_success) where:
+            - affected: Set of domain names that need re-analysis
+            - write_success: True if _domains.json was written successfully, False on write failure.
+              When False, new repos should not be finalized in tracking so they are
+              re-detected as new on the next delta run.
         """
         affected: Set[str] = set()
 
@@ -1249,23 +1270,23 @@ class DependencyMapService:
             assignments = DependencyMapAnalyzer._extract_json(result)
         except Exception as e:
             logger.warning(f"Domain discovery failed for new repos: {e}")
-            return affected
+            return affected, True
 
         if not isinstance(assignments, list):
             logger.warning("Domain discovery returned non-list JSON, skipping assignment")
-            return affected
+            return affected, True
 
         # READ current _domains.json from versioned path (Story #224)
         read_domains_file = self._get_cidx_meta_read_path() / "dependency-map" / "_domains.json"
         if not read_domains_file.exists():
             logger.warning("_domains.json not found, cannot assign new repos")
-            return affected
+            return affected, True
 
         try:
             domain_list = json.loads(read_domains_file.read_text())
         except Exception as e:
             logger.warning(f"Failed to read _domains.json for new repo assignment: {e}")
-            return affected
+            return affected, True
 
         # Build alias-to-domain index for fast lookup
         domain_by_name = {d["name"]: d for d in domain_list}
@@ -1289,8 +1310,18 @@ class DependencyMapService:
                         f"Assigned new repo '{repo_alias}' to existing domain '{domain_name}'"
                     )
                 else:
-                    logger.warning(
-                        f"Discovery assigned '{repo_alias}' to unknown domain '{domain_name}' - skipping"
+                    # Create new domain with this repo as first participant
+                    new_domain = {
+                        "name": domain_name,
+                        "description": "",
+                        "participating_repos": [repo_alias],
+                        "evidence": "",
+                    }
+                    domain_list.append(new_domain)
+                    domain_by_name[domain_name] = new_domain
+                    affected.add(domain_name)
+                    logger.info(
+                        f"Created new domain '{domain_name}' for repo '{repo_alias}'"
                     )
 
         # WRITE updated _domains.json to live path (dependency_map_dir)
@@ -1303,10 +1334,10 @@ class DependencyMapService:
                 f"Updated _domains.json with {len(new_repos)} new repo(s): "
                 f"affected domains: {affected}"
             )
+            return affected, True
         except Exception as e:
             logger.warning(f"Failed to write updated _domains.json: {e}")
-
-        return affected
+            return affected, False
 
     def _finalize_delta_tracking(
         self, config, all_repos: List[Dict[str, Any]]
@@ -1392,13 +1423,14 @@ class DependencyMapService:
             self._analyzer.generate_claude_md(all_repos)
 
             # Handle new repo domain discovery (AC6, Story #216)
+            discovery_write_success = True
             if "__NEW_REPO_DISCOVERY__" in affected_domains:
                 affected_domains.remove("__NEW_REPO_DISCOVERY__")
                 existing_domains = [
                     f.stem for f in dependency_map_read_dir.glob("*.md")
                     if not f.name.startswith("_")
                 ] if dependency_map_read_dir.exists() else []
-                discovered = self._discover_and_assign_new_repos(
+                discovered, discovery_write_success = self._discover_and_assign_new_repos(
                     new_repos=new_repos,
                     existing_domains=existing_domains,
                     dependency_map_dir=dependency_map_dir,
@@ -1421,7 +1453,18 @@ class DependencyMapService:
             )
 
             # Finalize tracking (AC8)
-            self._finalize_delta_tracking(config, all_repos)
+            # When discovery write failed, exclude new repos from finalization so they
+            # are re-detected as new on the next delta run (Bug 2 fix).
+            if discovery_write_success:
+                repos_to_finalize = all_repos
+            else:
+                new_aliases = {r.get("alias") for r in new_repos}
+                repos_to_finalize = [r for r in all_repos if r.get("alias") not in new_aliases]
+                logger.warning(
+                    f"Discovery write failed: excluding {len(new_repos)} new repo(s) "
+                    "from tracking so they are re-detected on next delta run"
+                )
+            self._finalize_delta_tracking(config, repos_to_finalize)
 
             logger.info(f"Delta analysis completed: {len(affected_domains)} domains updated")
 
