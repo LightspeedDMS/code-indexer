@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.24] - 2026-02-18
+
+### Changed
+
+- **Promote cidx-meta to versioned golden repo platform (Story #224)** - cidx-meta now participates in the same immutable versioned snapshot pipeline as git-based golden repos. Each refresh cycle creates a CoW clone, indexes from scratch, and atomically swaps the alias. Eliminates ghost vectors, HNSW cache staleness, and concurrent read/write conflicts that plagued in-place reindexing.
+- **Non-git change detection for local repos** - RefreshScheduler uses mtime-based change detection (`_has_local_changes()`) for `local://` repos instead of `git pull`. Only creates new versioned snapshot when source files are newer than the latest version directory.
+- **Removed all special-case cidx-meta reindex code** - Deleted `reindex_cidx_meta()` from meta_description_hook.py, `_reindex_cidx_meta()` from dependency_map_service.py, `_reindex_cidx_meta_background()` from app.py, and reindex call from description_refresh_scheduler.py. Writers (meta description hook, description refresh scheduler, dependency map service) now only modify files; RefreshScheduler handles versioning on its regular cycle.
+- **Removed `_cidx_meta_index_lock`** - No longer needed since concurrent subprocess `cidx index` calls on the same directory are eliminated by the versioned snapshot approach.
+
+### Fixed
+
+- **Temporal indexing guard for non-git repos** - RefreshScheduler skips `--index-commits` for `local://` repos even when `enable_temporal=1` in database, preventing failures on repos without `.git` directory.
+- **Refresh path resolution for local repos** - `refresh_golden_repo()` now uses `clone_path` (source directory) instead of `get_actual_repo_path()` (versioned CoW path) when refreshing local repos, ensuring source files are copied correctly.
+- **Redundant `cidx init` on existing repos** - `_execute_post_clone_workflow()` skips `cidx init` when configuration already exists and `force_init=False`, avoiding unnecessary re-initialization during versioned refresh.
+
 ## [9.3.23] - 2026-02-18
 
 ### Fixed

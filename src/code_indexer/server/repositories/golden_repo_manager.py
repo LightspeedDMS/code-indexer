@@ -1183,11 +1183,19 @@ class GoldenRepoManager:
         # Build index command for semantic + FTS (always required)
         index_command = ["cidx", "index", "--fts"]
 
+        # Skip cidx init if config already exists and force_init=False (incremental refresh)
+        config_path = Path(clone_path) / ".code-indexer" / "config.json"
+        skip_init = not force_init and config_path.exists()
+        if skip_init:
+            logging.info(
+                f"Skipping cidx init for {clone_path}: config exists and force_init=False (incremental refresh)"
+            )
+
         # Build workflow commands list
-        workflow_commands = [
-            init_command,
-            index_command,
-        ]
+        workflow_commands = []
+        if not skip_init:
+            workflow_commands.append(init_command)
+        workflow_commands.append(index_command)
 
         # If temporal indexing is enabled, add a SEPARATE command for temporal index
         # Note: --index-commits ONLY does temporal indexing, not semantic+FTS
@@ -1349,11 +1357,15 @@ class GoldenRepoManager:
                     logging.info(
                         f"Refreshing local repository {alias} by re-running workflow"
                     )
+                    # Local repos have no git history - skip temporal indexing regardless of flag.
+                    # Use the source path (golden_repo.clone_path) not the versioned path,
+                    # since RefreshScheduler handles versioning via _create_new_index.
+                    source_path = golden_repo.clone_path
                     self._execute_post_clone_workflow(
-                        clone_path,
+                        source_path,
                         force_init=False,
-                        enable_temporal=enable_temporal,
-                        temporal_options=temporal_options,
+                        enable_temporal=False,
+                        temporal_options=None,
                     )
                 else:
                     # For remote repositories, do git pull first

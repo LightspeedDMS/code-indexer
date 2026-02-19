@@ -1,12 +1,12 @@
 """
-Unit tests for RefreshScheduler skipping local:// repos.
+Unit tests for RefreshScheduler handling of local:// repos (Story #224 updated).
 
-Tests that local:// repos (like cidx-meta-global) are skipped both:
-1. In _scheduler_loop() before job submission (avoids phantom Running jobs)
-2. In _execute_refresh() before expensive reconciliation operations
+After Story #224 (C1, C2, C3):
+- Local repos ARE submitted to _submit_refresh_job (C1: skip block removed)
+- Local repos go through reconciliation but use mtime detection, not early return (C2)
+- Local repos use live directory as source_path, not versioned snapshot (C3)
 
-This prevents local repos from appearing as "Running" or "Pending" in the
-dashboard when they will be immediately skipped anyway.
+These tests replace the old "skip" tests that verified behavior removed in Story #224.
 """
 
 from unittest.mock import patch, MagicMock
@@ -22,7 +22,7 @@ from code_indexer.config import ConfigManager
 
 
 class TestRefreshSchedulerLocalRepoSkip:
-    """Test suite for local:// repo skip logic in RefreshScheduler."""
+    """Test suite for local:// repo handling in RefreshScheduler (Story #224)."""
 
     @pytest.fixture
     def golden_repos_dir(self, tmp_path):
@@ -56,7 +56,7 @@ class TestRefreshSchedulerLocalRepoSkip:
         """Create an AliasManager instance."""
         return AliasManager(str(golden_repos_dir / "aliases"))
 
-    def test_scheduler_loop_skips_local_repos_before_job_submission(
+    def test_scheduler_loop_submits_both_local_and_remote_repos(
         self,
         golden_repos_dir,
         config_mgr,
@@ -66,17 +66,18 @@ class TestRefreshSchedulerLocalRepoSkip:
         alias_manager,
     ):
         """
-        Test that _scheduler_loop() skips local:// repos before calling _submit_refresh_job().
+        C1 (Story #224): _scheduler_loop() must submit BOTH local and remote repos.
 
-        This prevents phantom "Running" or "Pending" jobs appearing in the dashboard
-        for local repos that will be immediately skipped.
+        Previously local:// repos were skipped before job submission. After C1
+        that skip is removed — local repos are submitted to _submit_refresh_job()
+        just like remote repos. The RefreshScheduler now handles versioned
+        indexing for local repos via mtime detection.
 
         Setup:
         - Registry with 2 repos: one local:// (cidx-meta-global), one remote (test-repo-global)
 
         Expected:
-        - _submit_refresh_job() called ONLY for remote repo
-        - _submit_refresh_job() NOT called for local repo
+        - _submit_refresh_job() called for BOTH repos
         """
         # Setup: Create one local repo and one remote repo
         local_repo_dir = golden_repos_dir / "cidx-meta"
@@ -85,7 +86,7 @@ class TestRefreshSchedulerLocalRepoSkip:
         registry.register_global_repo(
             "cidx-meta",
             "cidx-meta-global",
-            "local://cidx-meta",  # local:// URL
+            "local://cidx-meta",
             str(local_repo_dir),
             allow_reserved=True,
         )
@@ -96,7 +97,7 @@ class TestRefreshSchedulerLocalRepoSkip:
         registry.register_global_repo(
             "test-repo",
             "test-repo-global",
-            "git@github.com:org/repo.git",  # Remote git URL
+            "git@github.com:org/repo.git",
             str(remote_repo_dir),
         )
 
@@ -108,31 +109,28 @@ class TestRefreshSchedulerLocalRepoSkip:
             registry=registry,
         )
 
-        # Mock _submit_refresh_job to track calls and stop loop after one iteration
-        def stop_after_call(alias_name):
-            scheduler._running = False
+        submitted = []
+
+        def capture_and_stop(alias_name):
+            submitted.append(alias_name)
+            if len(submitted) >= 2:
+                scheduler._running = False
 
         with patch.object(
-            scheduler, "_submit_refresh_job", side_effect=stop_after_call
-        ) as mock_submit, patch.object(
-            scheduler, "get_refresh_interval", return_value=0
-        ):
-            # Run one iteration of the actual scheduler loop
+            scheduler, "_submit_refresh_job", side_effect=capture_and_stop
+        ), patch.object(scheduler, "get_refresh_interval", return_value=0):
             scheduler._running = True
             scheduler._scheduler_loop()
 
-            # Verify: _submit_refresh_job called ONLY for remote repo
-            assert mock_submit.call_count == 1, (
-                f"Expected 1 call (remote repo only), got {mock_submit.call_count}. "
-                "Local repos should be skipped before job submission."
-            )
-            # Verify the call was for the remote repo, not the local one
-            call_args = mock_submit.call_args[0]
-            assert call_args[0] == "test-repo-global", (
-                f"Expected call for 'test-repo-global', got '{call_args[0]}'"
-            )
+        assert "cidx-meta-global" in submitted, (
+            "C1 (Story #224): local:// repos must be submitted to _submit_refresh_job. "
+            "The skip block was removed from _scheduler_loop()."
+        )
+        assert "test-repo-global" in submitted, (
+            "Remote repos must still be submitted (regression guard)."
+        )
 
-    def test_execute_refresh_skips_local_repo_before_reconciliation(
+    def test_execute_refresh_local_repo_uses_mtime_not_early_return(
         self,
         golden_repos_dir,
         config_mgr,
@@ -142,25 +140,25 @@ class TestRefreshSchedulerLocalRepoSkip:
         alias_manager,
     ):
         """
-        Test that _execute_refresh() skips local:// repos BEFORE expensive operations.
+        C2 (Story #224): _execute_refresh() must NOT return early for local:// repos.
 
-        The local:// check must occur before _detect_existing_indexes() and
-        _reconcile_registry_with_filesystem() to avoid unnecessary filesystem
-        scanning for repos that cannot be refreshed.
+        Previously local repos returned {"success": True, "message": "Local repo, skipped"}
+        immediately without reconciliation. After C2, local repos proceed through
+        reconciliation and use _has_local_changes() for mtime-based detection.
 
         Expected:
-        - Returns {"success": True, "message": "Local repo, skipped"}
-        - _detect_existing_indexes() NOT called
-        - _reconcile_registry_with_filesystem() NOT called
+        - _detect_existing_indexes() IS called for local repos
+        - _reconcile_registry_with_filesystem() IS called for local repos
+        - _has_local_changes() IS called for local repos
+        - Result is NOT "Local repo, skipped"
         """
-        # Setup: Create local repo
         local_repo_dir = golden_repos_dir / "cidx-meta"
         local_repo_dir.mkdir()
         alias_manager.create_alias("cidx-meta-global", str(local_repo_dir))
         registry.register_global_repo(
             "cidx-meta",
             "cidx-meta-global",
-            "local://cidx-meta",  # local:// URL
+            "local://cidx-meta",
             str(local_repo_dir),
             allow_reserved=True,
         )
@@ -173,29 +171,33 @@ class TestRefreshSchedulerLocalRepoSkip:
             registry=registry,
         )
 
-        # Mock expensive operations to verify they're NOT called
         with patch.object(
-            scheduler, "_detect_existing_indexes"
+            scheduler, "_detect_existing_indexes", return_value={}
         ) as mock_detect, patch.object(
             scheduler, "_reconcile_registry_with_filesystem"
-        ) as mock_reconcile:
-            # Execute: Refresh local repo
+        ) as mock_reconcile, patch.object(
+            scheduler, "_has_local_changes", return_value=False
+        ) as mock_mtime:
             result = scheduler._execute_refresh("cidx-meta-global")
 
-            # Verify: Returns skip message
-            assert result["success"] is True
-            assert result["alias"] == "cidx-meta-global"
-            assert "Local repo" in result["message"] or "skipped" in result["message"]
+            # Reconciliation must happen for local repos (not skipped early)
+            assert mock_detect.call_count >= 1, (
+                "C2 (Story #224): _detect_existing_indexes() must be called for local repos. "
+                "Local repos no longer return early."
+            )
+            assert mock_reconcile.call_count >= 1, (
+                "C2 (Story #224): _reconcile_registry_with_filesystem() must be called for local repos."
+            )
+            assert mock_mtime.call_count == 1, (
+                "C2 (Story #224): _has_local_changes() must be called for mtime detection."
+            )
 
-            # Verify: Expensive operations NOT called
-            assert mock_detect.call_count == 0, (
-                "_detect_existing_indexes() should NOT be called for local repos. "
-                "Check should happen BEFORE reconciliation."
-            )
-            assert mock_reconcile.call_count == 0, (
-                "_reconcile_registry_with_filesystem() should NOT be called for local repos. "
-                "Check should happen BEFORE reconciliation."
-            )
+        # Result must not be the old "Local repo, skipped" early return
+        assert result["success"] is True
+        assert result["message"] != "Local repo, skipped", (
+            "C2 (Story #224): local repos must not return with old 'Local repo, skipped' message. "
+            "They now use mtime detection and may return 'No changes detected' instead."
+        )
 
     def test_execute_refresh_processes_remote_repos_normally(
         self,

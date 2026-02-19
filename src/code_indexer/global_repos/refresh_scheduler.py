@@ -6,6 +6,7 @@ change detection, index creation, alias swap, and cleanup scheduling.
 """
 
 import logging
+import os
 import shutil
 import subprocess
 import threading
@@ -184,13 +185,6 @@ class RefreshScheduler:
 
                     alias_name = repo.get("alias_name")
                     if alias_name:
-                        # Skip local repos - no remote means no refresh needed
-                        repo_url = repo.get("repo_url", "")
-                        if repo_url and repo_url.startswith("local://"):
-                            logger.debug(
-                                f"Skipping refresh for local repo in scheduler: {alias_name}"
-                            )
-                            continue
                         try:
                             self._submit_refresh_job(alias_name)
                         except Exception as e:
@@ -296,18 +290,9 @@ class RefreshScheduler:
                         "message": "Repo not in registry, skipped",
                     }
 
-                # Skip refresh for local:// repos (no remote = no refresh = no versioning)
-                # Check this BEFORE expensive reconciliation operations
-                repo_url = repo_info.get("repo_url")
-                if repo_url and repo_url.startswith("local://"):
-                    logger.info(
-                        f"Skipping refresh for local repo: {alias_name} ({repo_url})"
-                    )
-                    return {
-                        "success": True,
-                        "alias": alias_name,
-                        "message": "Local repo, skipped",
-                    }
+                # Determine if this is a local (non-git) repo
+                repo_url = repo_info.get("repo_url", "")
+                is_local_repo = repo_url.startswith("local://") if repo_url else False
 
                 # Get golden repo path from alias (registry path becomes stale after refresh)
                 golden_repo_path = current_target
@@ -320,29 +305,50 @@ class RefreshScheduler:
                     f"Reconciled registry with filesystem at START for {alias_name}: {detected_indexes}"
                 )
 
-                # Create updater for this repo
-                updater = GitPullUpdater(golden_repo_path)
+                if is_local_repo:
+                    # C3: For local repos, source_path is the LIVE directory (where writers put files),
+                    # NOT the current alias target which may point to a versioned snapshot.
+                    repo_name = alias_name.replace("-global", "")
+                    source_path = str(self.golden_repos_dir / repo_name)
 
-                # Check for changes
-                has_changes = updater.has_changes()
+                    # C2: Use mtime-based change detection for local repos
+                    has_changes = self._has_local_changes(source_path, alias_name)
 
-                if not has_changes:
-                    logger.info(
-                        f"No changes detected for {alias_name}, skipping refresh"
-                    )
-                    return {
-                        "success": True,
-                        "alias": alias_name,
-                        "message": "No changes detected",
-                    }
+                    if not has_changes:
+                        logger.info(
+                            f"No changes detected for local repo {alias_name}, skipping refresh"
+                        )
+                        return {
+                            "success": True,
+                            "alias": alias_name,
+                            "message": "No changes detected",
+                        }
 
-                # Pull latest changes
-                logger.info(f"Pulling latest changes for {alias_name}")
-                updater.update()
+                    logger.info(f"Changes detected in local repo {alias_name}, creating new index")
+                else:
+                    # Git repo: use GitPullUpdater for change detection and pull
+                    updater = GitPullUpdater(golden_repo_path)
+
+                    has_changes = updater.has_changes()
+
+                    if not has_changes:
+                        logger.info(
+                            f"No changes detected for {alias_name}, skipping refresh"
+                        )
+                        return {
+                            "success": True,
+                            "alias": alias_name,
+                            "message": "No changes detected",
+                        }
+
+                    # Pull latest changes
+                    logger.info(f"Pulling latest changes for {alias_name}")
+                    updater.update()
+                    source_path = updater.get_source_path()
 
                 # Create new versioned index
                 new_index_path = self._create_new_index(
-                    alias_name=alias_name, source_path=updater.get_source_path()
+                    alias_name=alias_name, source_path=source_path
                 )
 
                 # Swap alias to new index
@@ -570,6 +576,16 @@ class RefreshScheduler:
             )
             temporal_options = repo_info.get("temporal_options") if repo_info else None
 
+            # Skip temporal indexing for local:// repos - they have no git history
+            repo_url_for_temporal = repo_info.get("repo_url", "") if repo_info else ""
+            is_local_repo_for_temporal = repo_url_for_temporal.startswith("local://") if repo_url_for_temporal else False
+            if enable_temporal and is_local_repo_for_temporal:
+                logger.warning(
+                    f"Skipping temporal indexing for local repo {alias_name} "
+                    f"(local:// repos have no git history, ignoring enable_temporal flag)"
+                )
+                enable_temporal = False
+
             if enable_temporal:
                 temporal_command = ["cidx", "index", "--index-commits"]
                 logger.info(f"Temporal indexing enabled for {alias_name}")
@@ -694,6 +710,96 @@ class RefreshScheduler:
 
             # Re-raise with context
             raise RuntimeError(f"Failed to create new index for {alias_name}: {type(e).__name__}: {e}")
+
+    def _has_local_changes(self, source_path: str, alias_name: str) -> bool:
+        """
+        Detect changes in a local (non-git) repository using file mtime comparison.
+
+        Compares the maximum mtime of all non-hidden files in source_path against
+        the timestamp embedded in the latest versioned directory name.
+
+        Algorithm:
+        1. Derive repo_name from alias_name (strip "-global")
+        2. Look in .versioned/{repo_name}/ for v_* directories
+        3. If none exist -> return True (first version needed)
+        4. Parse latest version timestamp from directory name
+        5. Walk source_path, skip hidden dirs/files (starting with '.')
+        6. Get max mtime of all non-hidden files
+        7. If no visible files -> return False
+        8. Return max_mtime > latest_version_timestamp
+
+        Args:
+            source_path: Path to the live local repository directory
+            alias_name: Global alias name (e.g., "cidx-meta-global")
+
+        Returns:
+            True if changes detected or first version needed, False otherwise
+        """
+        repo_name = alias_name.replace("-global", "")
+        versioned_base = self.golden_repos_dir / ".versioned" / repo_name
+
+        # Find all v_* versioned directories
+        if not versioned_base.exists():
+            logger.debug(
+                f"No .versioned/{repo_name}/ dir found — treating as first version"
+            )
+            return True
+
+        version_dirs = [
+            d for d in versioned_base.iterdir()
+            if d.is_dir() and d.name.startswith("v_")
+        ]
+
+        if not version_dirs:
+            logger.debug(
+                f"No v_* dirs in .versioned/{repo_name}/ — treating as first version"
+            )
+            return True
+
+        # Extract timestamp from directory name (v_TIMESTAMP)
+        def parse_timestamp(d: Path) -> int:
+            try:
+                return int(d.name[2:])  # strip "v_" prefix
+            except (ValueError, IndexError):
+                return 0
+
+        latest_version_dir = max(version_dirs, key=parse_timestamp)
+        latest_timestamp = parse_timestamp(latest_version_dir)
+
+        logger.debug(
+            f"Latest versioned dir: {latest_version_dir.name} (timestamp={latest_timestamp})"
+        )
+
+        # Walk source_path, skip hidden dirs and files
+        max_mtime: float = 0.0
+        found_files = False
+
+        for root, dirs, files in os.walk(source_path):
+            # Skip hidden directories in-place (prevents descent into them)
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+
+            for filename in files:
+                if filename.startswith("."):
+                    continue
+                file_path = os.path.join(root, filename)
+                try:
+                    mtime = os.stat(file_path).st_mtime
+                    found_files = True
+                    if mtime > max_mtime:
+                        max_mtime = mtime
+                except OSError as e:
+                    logger.debug(f"Cannot stat {file_path}: {e}")
+
+        if not found_files:
+            logger.debug(f"No visible files in {source_path} — no changes")
+            return False
+
+        has_changes = int(max_mtime) > latest_timestamp
+        logger.debug(
+            f"mtime check for {alias_name}: max_mtime={max_mtime:.0f} "
+            f"vs latest_version={latest_timestamp} -> changes={has_changes}"
+        )
+        return has_changes
 
     def _detect_existing_indexes(self, repo_path: Path) -> Dict[str, bool]:
         """

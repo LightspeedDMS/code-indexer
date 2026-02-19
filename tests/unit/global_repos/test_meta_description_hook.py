@@ -72,14 +72,14 @@ class TestOnRepoAdded:
         assert repo_name in content
         assert repo_url in content
 
-        # Verify: cidx index was called in cidx-meta directory
-        # Find the cidx index call among all subprocess calls
+        # Verify: cidx index is NOT called by on_repo_added (C6: RefreshScheduler handles indexing)
         cidx_index_calls = [
             call for call in mock_run.call_args_list if call[0][0] == ["cidx", "index", "--detect-deletions"]
         ]
-        assert len(cidx_index_calls) == 1, "Expected exactly one 'cidx index --detect-deletions' call"
-        call_args = cidx_index_calls[0]
-        assert call_args[1]["cwd"] == str(cidx_meta_path)
+        assert len(cidx_index_calls) == 0, (
+            "on_repo_added() must NOT call 'cidx index' after C6 removal. "
+            "RefreshScheduler handles versioned indexing of cidx-meta."
+        )
 
     def test_skips_cidx_meta_itself(self, cidx_meta_path, temp_golden_repos_dir):
         """Test that hook does not create .md file for cidx-meta itself."""
@@ -148,11 +148,8 @@ class TestOnRepoRemoved:
         # Verify: .md file was deleted
         assert not md_file.exists(), f"Expected .md file to be deleted: {md_file}"
 
-        # Verify: cidx index was called to re-index cidx-meta
-        mock_run.assert_called_once()
-        call_args = mock_run.call_args
-        assert call_args[0][0] == ["cidx", "index", "--detect-deletions"]
-        assert call_args[1]["cwd"] == str(cidx_meta_path)
+        # Verify: cidx index is NOT called by on_repo_removed (C6: RefreshScheduler handles indexing)
+        mock_run.assert_not_called()
 
     def test_handles_nonexistent_md_file_gracefully(
         self, cidx_meta_path, temp_golden_repos_dir

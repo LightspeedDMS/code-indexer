@@ -181,7 +181,6 @@ class TestRunDeltaAnalysisNewRepoDiscovery:
              patch.object(svc, "_discover_and_assign_new_repos",
                           return_value={"auth"}) as mock_discover, \
              patch.object(svc, "_update_affected_domains", return_value=[]), \
-             patch.object(svc, "_reindex_cidx_meta"), \
              patch.object(svc, "_finalize_delta_tracking"), \
              patch.object(svc, "_get_activated_repos", return_value=[new_repo]):
             svc._analyzer.generate_claude_md.return_value = None
@@ -220,7 +219,6 @@ class TestRunDeltaAnalysisNewRepoDiscovery:
                           return_value={"auth", "__NEW_REPO_DISCOVERY__"}), \
              patch.object(svc, "_discover_and_assign_new_repos", return_value={"auth"}), \
              patch.object(svc, "_update_affected_domains", side_effect=capture_update), \
-             patch.object(svc, "_reindex_cidx_meta"), \
              patch.object(svc, "_finalize_delta_tracking"), \
              patch.object(svc, "_get_activated_repos", return_value=[new_repo]):
             svc._analyzer.generate_claude_md.return_value = None

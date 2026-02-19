@@ -52,7 +52,6 @@ class TestFinalizeAnalysisPipelineWiring:
         config.dependency_map_interval_hours = 24
 
         with patch.object(svc, "_stage_then_swap"), \
-             patch.object(svc, "_reindex_cidx_meta"), \
              patch.object(svc, "_get_commit_hashes", return_value={}):
             svc._finalize_analysis(config, _make_paths(tmp_path), repo_list, domain_list)
 
@@ -72,7 +71,6 @@ class TestFinalizeAnalysisPipelineWiring:
         paths = _make_paths(tmp_path)
 
         with patch.object(svc, "_stage_then_swap"), \
-             patch.object(svc, "_reindex_cidx_meta"), \
              patch.object(svc, "_get_commit_hashes", return_value={}):
             svc._finalize_analysis(config, paths, repo_list, domain_list)
 
@@ -89,7 +87,6 @@ class TestFinalizeAnalysisPipelineWiring:
         config.dependency_map_interval_hours = 24
 
         with patch.object(svc, "_stage_then_swap"), \
-             patch.object(svc, "_reindex_cidx_meta"), \
              patch.object(svc, "_get_commit_hashes", return_value={}):
             svc._finalize_analysis(config, _make_paths(tmp_path), repo_list, domain_list)
 
@@ -116,7 +113,6 @@ class TestFinalizeAnalysisPipelineWiring:
         config.dependency_map_interval_hours = 24
 
         with patch.object(svc, "_stage_then_swap"), \
-             patch.object(svc, "_reindex_cidx_meta"), \
              patch.object(svc, "_get_commit_hashes", return_value={}):
             svc._finalize_analysis(config, _make_paths(tmp_path), repo_list, domain_list)
 

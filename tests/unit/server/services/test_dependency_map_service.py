@@ -363,14 +363,19 @@ def test_run_full_analysis_pass_2_continues_on_domain_failure(
     assert mock_analyzer.run_pass_2_per_domain.call_count == 2
 
 
-def test_run_full_analysis_invokes_cidx_index_reindex(
+def test_run_full_analysis_does_not_reindex_cidx_meta(
     tmp_golden_repos_root: Path,
     mock_golden_repos_manager,
     mock_config_manager,
     mock_tracking_backend,
     mock_analyzer,
 ):
-    """Test run_full_analysis invokes cidx index to re-index cidx-meta."""
+    """Test run_full_analysis does NOT call cidx index to re-index cidx-meta.
+
+    C7 (Story #224): _reindex_cidx_meta() was removed from DependencyMapService.
+    RefreshScheduler now handles versioned indexing of cidx-meta. The full
+    analysis pipeline must NOT call cidx index directly.
+    """
     service = DependencyMapService(
         golden_repos_manager=mock_golden_repos_manager,
         config_manager=mock_config_manager,
@@ -378,17 +383,24 @@ def test_run_full_analysis_invokes_cidx_index_reindex(
         analyzer=mock_analyzer,
     )
 
-    cidx_meta = tmp_golden_repos_root / "cidx-meta"
+    cidx_calls = []
 
-    with patch("subprocess.run") as mock_run:
+    def capture_subprocess(cmd, **kwargs):
+        if isinstance(cmd, list) and "cidx" in cmd:
+            cidx_calls.append(cmd)
+        result = Mock()
+        result.returncode = 0
+        return result
+
+    with patch("subprocess.run", side_effect=capture_subprocess):
         service.run_full_analysis()
 
-    # Verify subprocess.run was called with cidx index
-    mock_run.assert_called_once()
-    call_args = mock_run.call_args
-    assert call_args[0][0] == ["cidx", "index", "--clear"]
-    assert call_args[1]["cwd"] == str(cidx_meta)
-    assert call_args[1]["timeout"] == 120
+    # Verify subprocess.run was NOT called with cidx index for cidx-meta
+    assert cidx_calls == [], (
+        "C7 (Story #224): run_full_analysis() must NOT call cidx index. "
+        "RefreshScheduler handles versioned indexing of cidx-meta. "
+        f"Got unexpected cidx calls: {cidx_calls}"
+    )
 
 
 def test_run_full_analysis_cleans_up_claude_md(

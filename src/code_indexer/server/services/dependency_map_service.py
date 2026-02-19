@@ -29,7 +29,6 @@ from .constants import CIDX_META_REPO
 logger = logging.getLogger(__name__)
 
 # Constants
-CIDX_REINDEX_TIMEOUT_SECONDS = 120
 SCHEDULER_POLL_INTERVAL_SECONDS = 60  # Story #193: Delta refresh polling interval
 THREAD_JOIN_TIMEOUT_SECONDS = 5.0  # Story #193: Daemon thread join timeout
 
@@ -360,9 +359,6 @@ class DependencyMapService:
                 f"Stage-then-swap failed: {e} -- previous dependency map preserved"
             ) from e
 
-        # Re-index cidx-meta (AC5: cidx-meta Re-indexing) - full clear after stage-then-swap
-        self._reindex_cidx_meta(cidx_meta_path, clear=True)
-
         # Update tracking (AC6: Configuration and Tracking)
         commit_hashes = self._get_commit_hashes(repo_list)
         next_run = (
@@ -402,38 +398,6 @@ class DependencyMapService:
             shutil.rmtree(old_dir)
 
         logger.info(f"Stage-then-swap completed: {final_dir}")
-
-    def _reindex_cidx_meta(self, cidx_meta_path: Path, clear: bool = False) -> None:
-        """
-        Re-index cidx-meta using cidx CLI.
-
-        Args:
-            cidx_meta_path: Path to cidx-meta directory
-            clear: If True, use --clear (full reindex); if False, use --reconcile (incremental)
-        """
-        from code_indexer.global_repos.meta_description_hook import _cidx_meta_index_lock
-
-        cmd = ["cidx", "index", "--clear"] if clear else ["cidx", "index", "--reconcile"]
-
-        with _cidx_meta_index_lock:
-            try:
-                result = subprocess.run(
-                    cmd,
-                    cwd=str(cidx_meta_path),
-                    capture_output=True,
-                    text=True,
-                    timeout=CIDX_REINDEX_TIMEOUT_SECONDS,
-                )
-                if result.returncode != 0:
-                    logger.warning(
-                        f"cidx reindex failed for cidx-meta: {result.stderr or result.stdout}"
-                    )
-                else:
-                    logger.info("Re-indexed cidx-meta after dependency map update")
-            except subprocess.TimeoutExpired:
-                logger.error("cidx reindex timed out for cidx-meta")
-            except Exception as e:
-                logger.warning(f"cidx reindex failed: {e}")
 
     def _record_run_metrics(
         self,
@@ -1364,9 +1328,6 @@ class DependencyMapService:
                 removed_repos,
                 config,
             )
-
-            # Re-index cidx-meta
-            self._reindex_cidx_meta(cidx_meta_path)
 
             # Finalize tracking (AC8)
             self._finalize_delta_tracking(config, all_repos)

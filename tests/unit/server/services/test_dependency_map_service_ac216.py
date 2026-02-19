@@ -168,9 +168,8 @@ class TestRecordRunMetricsCalled:
         svc._analyzer._reconcile_domains_json.return_value = domain_list
         svc._analyzer._generate_index_md.return_value = None
 
-        # Mock the stage-then-swap and reindex to avoid filesystem complexity
+        # Mock the stage-then-swap to avoid filesystem complexity
         svc._stage_then_swap = Mock()
-        svc._reindex_cidx_meta = Mock()
         svc._get_commit_hashes = Mock(return_value={"repo1": "abc123"})
 
         svc._finalize_analysis(config, paths, repo_list, domain_list)
@@ -226,7 +225,6 @@ class TestRecordRunMetricsCalled:
         svc._analyzer._reconcile_domains_json.return_value = domain_list
         svc._analyzer._generate_index_md.return_value = None
         svc._stage_then_swap = Mock()
-        svc._reindex_cidx_meta = Mock()
         svc._get_commit_hashes = Mock(return_value={"repo1": "abc123"})
 
         svc._finalize_analysis(config, paths, repo_list, domain_list)

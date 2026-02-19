@@ -7,8 +7,6 @@ meta directory management code.
 """
 
 import logging
-import subprocess
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -32,9 +30,6 @@ README_NAMES = [
 # Module-level tracking backend (initialized by set_tracking_backend)
 _tracking_backend: Optional["DescriptionRefreshTrackingBackend"] = None  # type: ignore
 _scheduler: Optional["DescriptionRefreshScheduler"] = None  # type: ignore
-
-# Lock to prevent concurrent cidx index on cidx-meta
-_cidx_meta_index_lock = threading.Lock()
 
 
 def set_tracking_backend(backend) -> None:
@@ -156,9 +151,6 @@ def on_repo_added(
         md_file.write_text(md_content)
         logger.info(f"Created meta description file: {md_file}")
 
-        # Re-index cidx-meta
-        reindex_cidx_meta(cidx_meta_path)
-
     except Exception as e:
         logger.error(
             f"Failed to create meta description for {repo_name}: {e}", exc_info=True
@@ -192,9 +184,6 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
         try:
             md_file.unlink()
             logger.info(f"Deleted meta description file: {md_file}")
-
-            # Re-index cidx-meta
-            reindex_cidx_meta(cidx_meta_path)
 
         except Exception as e:
             logger.error(
@@ -271,9 +260,6 @@ def _create_readme_fallback(
         fallback_path.write_text(content, encoding="utf-8")
         logger.info(f"Created README fallback: {fallback_path}")
 
-        # Trigger re-index
-        reindex_cidx_meta(meta_dir)
-
         return fallback_path
 
     except Exception as e:
@@ -346,38 +332,3 @@ last_analyzed: {now}
     return frontmatter + body
 
 
-def reindex_cidx_meta(cidx_meta_path: Path) -> None:
-    """
-    Re-index cidx-meta after .md file changes.
-
-    Thread-safe: uses _cidx_meta_index_lock to prevent concurrent
-    cidx index processes on the same HNSW index.
-
-    Args:
-        cidx_meta_path: Path to cidx-meta directory
-
-    Note:
-        Runs 'cidx index' in cidx-meta directory.
-        Logs errors but does not raise exceptions (non-critical operation).
-    """
-    with _cidx_meta_index_lock:
-        try:
-            result = subprocess.run(
-                ["cidx", "index", "--detect-deletions"],
-                cwd=str(cidx_meta_path),
-                capture_output=True,
-                text=True,
-                timeout=300,  # 5 minute timeout
-            )
-
-            if result.returncode != 0:
-                logger.warning(
-                    f"cidx index failed for cidx-meta: {result.stderr or result.stdout}"
-                )
-            else:
-                logger.info("Re-indexed cidx-meta successfully")
-
-        except subprocess.TimeoutExpired:
-            logger.error("cidx index timed out for cidx-meta")
-        except Exception as e:
-            logger.error(f"Failed to re-index cidx-meta: {e}", exc_info=True)

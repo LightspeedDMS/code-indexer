@@ -1913,30 +1913,6 @@ def migrate_legacy_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None
             )
 
 
-def _reindex_cidx_meta_background(cidx_meta_path_str: str) -> None:
-    """Re-index cidx-meta content in a background thread.
-
-    Runs ``cidx index`` against the cidx-meta folder so that newly-added
-    .md files (e.g. repo descriptions created during golden-repo registration)
-    are picked up without blocking server startup.
-    """
-    from code_indexer.server.middleware.error_formatters import generate_correlation_id
-    from code_indexer.global_repos.meta_description_hook import reindex_cidx_meta
-
-    # contextvars are not inherited by threading.Thread — generate a fresh ID
-    set_correlation_id(generate_correlation_id())
-
-    logger.info(
-        "Re-indexing cidx-meta content (background)",
-        extra={"correlation_id": get_correlation_id()},
-    )
-    reindex_cidx_meta(Path(cidx_meta_path_str))
-    logger.info(
-        "Background cidx-meta re-indexing completed",
-        extra={"correlation_id": get_correlation_id()},
-    )
-
-
 def bootstrap_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None:
     """
     Bootstrap cidx-meta as a regular golden repo on fresh installations.
@@ -1944,9 +1920,6 @@ def bootstrap_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None:
     Creates cidx-meta directory, registers it with local://cidx-meta URL,
     and initializes the CIDX index structure.
     This is idempotent - safe to call multiple times.
-
-    ALWAYS re-indexes cidx-meta on each server startup to pick up new files
-    added during golden repo registration (in a background thread).
 
     Args:
         golden_repo_manager: GoldenRepoManager instance
@@ -2015,23 +1988,6 @@ def bootstrap_cidx_meta(golden_repo_manager, golden_repos_dir: str) -> None:
         )
         logger.info(
             "Bootstrapped cidx-meta via register_local_repo",
-            extra={"correlation_id": get_correlation_id()},
-        )
-
-    # ALWAYS re-index cidx-meta to pick up new files (even if already registered).
-    # Runs in a background thread so server startup is not blocked.
-    if cidx_meta_path.exists():
-        import threading
-
-        thread = threading.Thread(
-            target=_reindex_cidx_meta_background,
-            args=(str(cidx_meta_path),),
-            daemon=True,
-            name="cidx-meta-reindex",
-        )
-        thread.start()
-        logger.info(
-            "Started background cidx-meta re-indexing",
             extra={"correlation_id": get_correlation_id()},
         )
 
