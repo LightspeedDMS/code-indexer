@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.32] - 2026-02-19
+
+### Fixed
+
+- Delta refresh new repo discovery no longer silently skipped when `_index.md` is missing - `identify_affected_domains()` now returns the `__NEW_REPO_DISCOVERY__` sentinel for new repos even without `_index.md`, so `_discover_and_assign_new_repos()` is correctly triggered
+
 ## [9.3.31] - 2026-02-19
 
 ### Fixed

@@ -11,6 +11,7 @@ Story #216 AC6:
 Bug fixes:
 - Bug 1: Delta refresh creates new domains when Claude assigns to unknown domain
 - Bug 2: Write failure is signalled so tracking does not finalize new repos
+- Bug 3: identify_affected_domains() drops __NEW_REPO_DISCOVERY__ sentinel when _index.md is missing
 """
 
 import json
@@ -467,4 +468,57 @@ class TestBug2WriteFailureTracking:
         )
         assert "existing-repo" in finalized_aliases, (
             "Changed repo 'existing-repo' must be finalized"
+        )
+
+
+class TestBug3MissingIndexMd:
+    """Bug 3: identify_affected_domains() drops __NEW_REPO_DISCOVERY__ sentinel when _index.md is missing."""
+
+    def test_identify_affected_domains_returns_sentinel_when_no_index_md_and_new_repos(
+        self, tmp_path
+    ):
+        """Bug 3: When _index.md missing but new_repos non-empty, sentinel must be returned.
+
+        Currently the method returns set() which causes run_delta_analysis() to early-return
+        at line 1415 without ever reaching the __NEW_REPO_DISCOVERY__ check.
+        """
+        svc = _make_service(tmp_path)
+        # Create dependency-map dir WITHOUT _index.md
+        depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
+        depmap_dir.mkdir(parents=True)
+        # Deliberately do NOT create _index.md
+
+        new_repo = {"alias": "brand-new", "clone_path": str(tmp_path / "brand-new")}
+
+        result = svc.identify_affected_domains(
+            changed_repos=[],
+            new_repos=[new_repo],
+            removed_repos=[],
+        )
+
+        assert "__NEW_REPO_DISCOVERY__" in result, (
+            "When _index.md is missing but new_repos is non-empty, "
+            "__NEW_REPO_DISCOVERY__ sentinel must be returned so run_delta_analysis "
+            "can trigger domain discovery"
+        )
+
+    def test_identify_affected_domains_returns_empty_when_no_index_md_and_no_new_repos(
+        self, tmp_path
+    ):
+        """Bug 3: When _index.md missing and no new repos, empty set is correct (preserve existing behavior)."""
+        svc = _make_service(tmp_path)
+        # Create dependency-map dir WITHOUT _index.md
+        depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
+        depmap_dir.mkdir(parents=True)
+        # Deliberately do NOT create _index.md
+
+        result = svc.identify_affected_domains(
+            changed_repos=[],
+            new_repos=[],
+            removed_repos=[],
+        )
+
+        assert result == set(), (
+            "When _index.md is missing and new_repos is empty, "
+            "empty set should be returned (no work to do)"
         )

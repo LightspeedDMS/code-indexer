@@ -971,6 +971,8 @@ class DependencyMapService:
 
         if not index_file.exists():
             logger.warning("_index.md not found, cannot identify affected domains")
+            if new_repos:
+                return {"__NEW_REPO_DISCOVERY__"}
             return set()
 
         # Parse _index.md to build repo-to-domain mapping
