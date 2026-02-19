@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.29] - 2026-02-19
+
+### Fixed
+
+- **Domain Explorer empty on staging: versioned path resolution for local repos** - `_get_cidx_meta_read_path()` now checks `.versioned/cidx-meta/v_*/` directly instead of relying on `get_actual_repo_path()`. The latter always returned the live clone_path for local repos (because the directory exists as a write sentinel), causing it to miss the versioned content where `_domains.json`, `_index.md`, and domain `.md` files actually live.
+
+## [9.3.28] - 2026-02-19
+
+### Fixed
+
+- **Domain Explorer reads from versioned cidx-meta path** - All read operations in `DependencyMapService`, `DependencyMapDomainService`, and `DependencyMapDashboardService` now resolve the versioned cidx-meta path via `_get_cidx_meta_read_path()` and `cidx_meta_read_path` property. Previously, these services read from the live `golden-repos/cidx-meta/` directory which is mostly empty after Story #224 promoted cidx-meta to the versioned golden repo platform.
+
 ## [9.3.27] - 2026-02-19
 
 ### Changed

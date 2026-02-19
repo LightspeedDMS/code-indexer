@@ -116,21 +116,71 @@ class TestGetCidxMetaReadPath:
 
             assert result == Path(tmp) / "cidx-meta"
 
-    def test_calls_get_actual_repo_path_with_cidx_meta_alias(self):
+    def test_does_not_call_get_actual_repo_path_when_versioned_dir_exists(self):
         """
-        _get_cidx_meta_read_path() must call get_actual_repo_path with 'cidx-meta'.
+        When .versioned/cidx-meta/v_*/ exists on disk, _get_cidx_meta_read_path()
+        must return the versioned path WITHOUT calling get_actual_repo_path.
+
+        The new implementation checks .versioned/ directly to bypass the bug
+        where get_actual_repo_path() returns the live clone_path (always exists
+        for local repos) instead of the versioned content path.
         """
         with tempfile.TemporaryDirectory() as tmp:
             versioned_path = os.path.join(tmp, ".versioned", "cidx-meta", "v_1700000000")
             os.makedirs(versioned_path)
 
             service = _make_service(tmp)
-            service._golden_repos_manager.get_actual_repo_path.return_value = versioned_path
+
+            result = service._get_cidx_meta_read_path()
+
+            assert result == Path(versioned_path)
+            service._golden_repos_manager.get_actual_repo_path.assert_not_called()
+
+    def test_calls_get_actual_repo_path_when_no_versioned_dir(self):
+        """
+        When no .versioned/cidx-meta/ dir exists on disk,
+        _get_cidx_meta_read_path() must fall through to get_actual_repo_path.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            non_versioned_path = os.path.join(tmp, "cidx-meta")
+            os.makedirs(non_versioned_path)
+
+            service = _make_service(tmp)
+            service._golden_repos_manager.get_actual_repo_path.return_value = non_versioned_path
 
             service._get_cidx_meta_read_path()
 
             service._golden_repos_manager.get_actual_repo_path.assert_called_once_with(
                 "cidx-meta"
+            )
+
+    def test_versioned_path_preferred_over_get_actual_repo_path_return_value(self):
+        """
+        When .versioned/cidx-meta/v_*/ exists, the versioned path must be
+        returned even if get_actual_repo_path() would return a different path.
+
+        This is the core fix: get_actual_repo_path() returns the live dir
+        (which always exists for local repos) but the content is in .versioned/.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            versioned_path = os.path.join(tmp, ".versioned", "cidx-meta", "v_1700000000")
+            os.makedirs(versioned_path)
+
+            # get_actual_repo_path returns the live (stale) path
+            live_path = os.path.join(tmp, "cidx-meta")
+            os.makedirs(live_path)
+
+            service = _make_service(tmp)
+            service._golden_repos_manager.get_actual_repo_path.return_value = live_path
+
+            result = service._get_cidx_meta_read_path()
+
+            # Must return versioned path, NOT the live path from get_actual_repo_path
+            assert result == Path(versioned_path), (
+                f"Expected versioned path {versioned_path}, got {result}"
+            )
+            assert result != Path(live_path), (
+                "Must not return the stale live path from get_actual_repo_path()"
             )
 
 

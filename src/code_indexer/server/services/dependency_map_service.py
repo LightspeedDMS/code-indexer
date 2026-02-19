@@ -529,19 +529,46 @@ class DependencyMapService:
         READS must come from the versioned path.
         WRITES must continue to use the live path so RefreshScheduler detects changes.
 
+        Note: We check .versioned/ directly rather than using get_actual_repo_path()
+        because that method returns the live clone_path when it exists, which is
+        always true for local repos (the live dir is the write sentinel). This
+        causes it to return the empty live dir instead of the versioned content.
+
         Returns:
             Path to the versioned cidx-meta directory if available,
             otherwise falls back to the live golden-repos/cidx-meta/ path.
         """
+        golden_repos_dir = Path(self._golden_repos_manager.golden_repos_dir)
+
+        # Check versioned path directly (bypasses get_actual_repo_path() bug
+        # where live dir existence masks versioned content for local repos)
+        versioned_base = golden_repos_dir / ".versioned" / "cidx-meta"
+        if versioned_base.exists():
+            try:
+                version_dirs = sorted(
+                    [d for d in versioned_base.iterdir()
+                     if d.name.startswith("v_") and d.is_dir()],
+                    key=lambda d: d.name,
+                    reverse=True,
+                )
+                if version_dirs:
+                    return version_dirs[0]
+            except OSError as e:
+                logger.warning(
+                    "Failed to list versioned cidx-meta dirs: %s", e
+                )
+
+        # Fallback: try get_actual_repo_path (handles non-versioned repos)
         try:
             actual_path = self._golden_repos_manager.get_actual_repo_path("cidx-meta")
             if actual_path:
                 return Path(actual_path)
         except Exception as e:
             logger.warning(
-                "Failed to resolve versioned cidx-meta path, falling back to live: %s", e
+                "Failed to resolve cidx-meta path, falling back to live: %s", e
             )
-        return Path(self._golden_repos_manager.golden_repos_dir) / "cidx-meta"
+
+        return golden_repos_dir / "cidx-meta"
 
     @property
     def cidx_meta_read_path(self) -> Path:
