@@ -213,9 +213,14 @@ class DependencyMapDomainService:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _get_depmap_dir(self) -> Path:
-        """Return the path to the dependency-map directory."""
-        golden_repos_dir = self._dependency_map_service.golden_repos_dir
-        return Path(golden_repos_dir) / "cidx-meta" / "dependency-map"
+        """Return the path to the dependency-map directory.
+
+        Uses the versioned cidx-meta path for reads since Story #224 made
+        cidx-meta a versioned golden repo. The actual content lives in
+        .versioned/cidx-meta/v_*/ rather than the live golden-repos/cidx-meta/.
+        """
+        cidx_meta_read_path = self._dependency_map_service.cidx_meta_read_path
+        return cidx_meta_read_path / "dependency-map"
 
     def _load_domains_json(self) -> List[Dict[str, Any]]:
         """

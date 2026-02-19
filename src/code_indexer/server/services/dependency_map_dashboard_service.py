@@ -379,13 +379,14 @@ class DependencyMapDashboardService:
 
         if domains_file_path is None and self._dependency_map_service is not None:
             try:
-                golden_repos_dir = self._dependency_map_service.golden_repos_dir
+                # READ from versioned path: cidx-meta is versioned since Story #224
+                cidx_meta_read_path = self._dependency_map_service.cidx_meta_read_path
                 domains_file_path = str(
-                    Path(golden_repos_dir) / "cidx-meta" / "dependency-map" / "_domains.json"
+                    cidx_meta_read_path / "dependency-map" / "_domains.json"
                 )
             except Exception as e:
                 logger.warning(
-                    "dependency_map_dashboard: failed to get golden_repos_dir: %s", e
+                    "dependency_map_dashboard: failed to get cidx_meta_read_path: %s", e
                 )
                 return {}
 

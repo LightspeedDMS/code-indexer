@@ -28,6 +28,7 @@ def _make_dep_map_service(golden_repos_dir: str):
     """Build a mock DependencyMapService with a golden_repos_dir property."""
     svc = Mock()
     svc.golden_repos_dir = golden_repos_dir
+    svc.cidx_meta_read_path = Path(golden_repos_dir) / "cidx-meta"
     return svc
 
 

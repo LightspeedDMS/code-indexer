@@ -29,6 +29,7 @@ def _make_domain_service(golden_repos_dir: str):
     )
     dep_map_svc = Mock()
     dep_map_svc.golden_repos_dir = golden_repos_dir
+    dep_map_svc.cidx_meta_read_path = Path(golden_repos_dir) / "cidx-meta"
     config_manager = Mock()
     return DependencyMapDomainService(dep_map_svc, config_manager)
 

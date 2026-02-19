@@ -173,13 +173,15 @@ class DependencyMapService:
 
         # Get repo list and paths
         golden_repos_root = self._golden_repos_manager.golden_repos_dir
-        cidx_meta_path = Path(golden_repos_root) / "cidx-meta"
+        cidx_meta_path = Path(golden_repos_root) / "cidx-meta"  # WRITE path (live)
+        cidx_meta_read_path = self._get_cidx_meta_read_path()    # READ path (versioned)
         staging_dir = cidx_meta_path / "dependency-map.staging"
         final_dir = cidx_meta_path / "dependency-map"
 
         paths = {
             "golden_repos_root": Path(golden_repos_root),
-            "cidx_meta_path": cidx_meta_path,
+            "cidx_meta_path": cidx_meta_path,           # WRITE: used for staging/final dirs
+            "cidx_meta_read_path": cidx_meta_read_path, # READ: versioned .versioned/cidx-meta/v_*/
             "staging_dir": staging_dir,
             "final_dir": final_dir,
         }
@@ -220,6 +222,7 @@ class DependencyMapService:
         staging_dir = paths["staging_dir"]
         final_dir = paths["final_dir"]
         cidx_meta_path = paths["cidx_meta_path"]
+        cidx_meta_read_path = paths["cidx_meta_read_path"]  # READ: versioned path
 
         # Check for resumable journal (Iteration 15)
         journal = self._should_resume(staging_dir, repo_list)
@@ -250,7 +253,7 @@ class DependencyMapService:
         if journal.get("pass1", {}).get("status") != "completed":
             # Read repo descriptions from cidx-meta (Fix 8: filter stale repos)
             active_aliases = {r.get("alias") for r in repo_list}
-            repo_descriptions = self._read_repo_descriptions(cidx_meta_path, active_aliases=active_aliases)
+            repo_descriptions = self._read_repo_descriptions(cidx_meta_read_path, active_aliases=active_aliases)
 
             domain_list = self._analyzer.run_pass_1_synthesis(
                 staging_dir=staging_dir,
@@ -514,6 +517,43 @@ class DependencyMapService:
         """
         return self._golden_repos_manager.golden_repos_dir
 
+    def _get_cidx_meta_read_path(self) -> Path:
+        """
+        Resolve the cidx-meta path for READ operations.
+
+        Since Story #224 made cidx-meta a versioned golden repo, the live
+        golden-repos/cidx-meta/ directory is mostly empty. The actual content
+        (_domains.json, _index.md, domain .md files) lives in
+        .versioned/cidx-meta/v_*/.
+
+        READS must come from the versioned path.
+        WRITES must continue to use the live path so RefreshScheduler detects changes.
+
+        Returns:
+            Path to the versioned cidx-meta directory if available,
+            otherwise falls back to the live golden-repos/cidx-meta/ path.
+        """
+        try:
+            actual_path = self._golden_repos_manager.get_actual_repo_path("cidx-meta")
+            if actual_path:
+                return Path(actual_path)
+        except Exception as e:
+            logger.warning(
+                "Failed to resolve versioned cidx-meta path, falling back to live: %s", e
+            )
+        return Path(self._golden_repos_manager.golden_repos_dir) / "cidx-meta"
+
+    @property
+    def cidx_meta_read_path(self) -> Path:
+        """
+        Public property: versioned cidx-meta path for READ operations.
+
+        See _get_cidx_meta_read_path() for full documentation.
+        Used by DependencyMapDomainService and other consumers that read
+        dependency-map content.
+        """
+        return self._get_cidx_meta_read_path()
+
     def _get_activated_repos(self) -> List[Dict[str, Any]]:
         """
         Get list of activated golden repos with metadata.
@@ -522,6 +562,9 @@ class DependencyMapService:
             List of dicts with alias, clone_path, description_summary
         """
         repos = self._golden_repos_manager.list_golden_repos()
+
+        # Resolve versioned cidx-meta path once before the loop (READ path for Story #224)
+        cidx_meta_read_path = self._get_cidx_meta_read_path()
 
         result = []
         for repo in repos:
@@ -552,10 +595,8 @@ class DependencyMapService:
 
             # Extract description summary (first line of description)
             description_summary = "No description"
-            cidx_meta_path = (
-                Path(self._golden_repos_manager.golden_repos_dir) / "cidx-meta"
-            )
-            md_file = cidx_meta_path / f"{alias}.md"
+            # Use versioned path for reads: cidx-meta is a versioned golden repo since Story #224
+            md_file = cidx_meta_read_path / f"{alias}.md"
             if md_file.exists():
                 try:
                     content = md_file.read_text()
@@ -880,8 +921,9 @@ class DependencyMapService:
         Returns:
             Set of affected domain names (may include __NEW_REPO_DISCOVERY__ marker)
         """
-        cidx_meta_path = Path(self._golden_repos_manager.golden_repos_dir) / "cidx-meta"
-        index_file = cidx_meta_path / "dependency-map" / "_index.md"
+        # Use versioned path for reads: cidx-meta is a versioned golden repo since Story #224
+        cidx_meta_read_path = self._get_cidx_meta_read_path()
+        index_file = cidx_meta_read_path / "dependency-map" / "_index.md"
 
         if not index_file.exists():
             logger.warning("_index.md not found, cannot identify affected domains")
@@ -1101,10 +1143,12 @@ class DependencyMapService:
 
         # Build full domain list from ALL domain files (Code Review H2: cross-domain awareness)
         # Claude needs the complete domain landscape, not just affected domains
+        # READ from versioned path: live path is empty after Story #224
+        dependency_map_read_dir = self._get_cidx_meta_read_path() / "dependency-map"
         domain_list = [
-            f.stem for f in dependency_map_dir.glob("*.md")
+            f.stem for f in dependency_map_read_dir.glob("*.md")
             if not f.name.startswith("_")
-        ]
+        ] if dependency_map_read_dir.exists() else []
 
         # Code Review M4: Sort for deterministic processing order
         for domain_name in sorted(affected_domains):
@@ -1174,14 +1218,14 @@ class DependencyMapService:
             logger.warning("Domain discovery returned non-list JSON, skipping assignment")
             return affected
 
-        # Load current _domains.json
-        domains_file = dependency_map_dir / "_domains.json"
-        if not domains_file.exists():
+        # READ current _domains.json from versioned path (Story #224)
+        read_domains_file = self._get_cidx_meta_read_path() / "dependency-map" / "_domains.json"
+        if not read_domains_file.exists():
             logger.warning("_domains.json not found, cannot assign new repos")
             return affected
 
         try:
-            domain_list = json.loads(domains_file.read_text())
+            domain_list = json.loads(read_domains_file.read_text())
         except Exception as e:
             logger.warning(f"Failed to read _domains.json for new repo assignment: {e}")
             return affected
@@ -1212,9 +1256,10 @@ class DependencyMapService:
                         f"Discovery assigned '{repo_alias}' to unknown domain '{domain_name}' - skipping"
                     )
 
-        # Write updated _domains.json
+        # WRITE updated _domains.json to live path (dependency_map_dir)
+        write_domains_file = dependency_map_dir / "_domains.json"
         try:
-            domains_file.write_text(json.dumps(domain_list, indent=2))
+            write_domains_file.write_text(json.dumps(domain_list, indent=2))
             logger.info(
                 f"Updated _domains.json with {len(new_repos)} new repo(s): "
                 f"affected domains: {affected}"
@@ -1285,9 +1330,12 @@ class DependencyMapService:
             )
 
             # Get paths
+            # WRITE path: live golden-repos/cidx-meta/ so RefreshScheduler detects changes
             golden_repos_root = Path(self._golden_repos_manager.golden_repos_dir)
             cidx_meta_path = golden_repos_root / "cidx-meta"
             dependency_map_dir = cidx_meta_path / "dependency-map"
+            # READ path: versioned cidx-meta (Story #224 made cidx-meta a versioned repo)
+            dependency_map_read_dir = self._get_cidx_meta_read_path() / "dependency-map"
 
             # Identify affected domains (AC3/4)
             affected_domains = self.identify_affected_domains(
@@ -1308,9 +1356,9 @@ class DependencyMapService:
             if "__NEW_REPO_DISCOVERY__" in affected_domains:
                 affected_domains.remove("__NEW_REPO_DISCOVERY__")
                 existing_domains = [
-                    f.stem for f in dependency_map_dir.glob("*.md")
+                    f.stem for f in dependency_map_read_dir.glob("*.md")
                     if not f.name.startswith("_")
-                ]
+                ] if dependency_map_read_dir.exists() else []
                 discovered = self._discover_and_assign_new_repos(
                     new_repos=new_repos,
                     existing_domains=existing_domains,
