@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.26] - 2026-02-19
+
+### Fixed
+
+- **Local repo git detection bypassed by stale paths** - `_resolve_git_repo_path()` now checks the repo URL from the registry first. If the URL starts with `local://`, git operations are blocked immediately regardless of filesystem state. Previously, a stale pre-migration directory with `.git` at `.cidx-server/golden-repos/cidx-meta/` caused `_resolve_repo_path()` to find it via its cascading path search, allowing git operations on `local://` repos that should not support them.
+- **First-gen git handlers missing `.git` validation** - All 8 first-gen handlers (`handle_git_log`, `handle_git_show_commit`, `handle_git_file_at_revision`, `handle_git_diff`, `handle_git_blame`, `handle_git_file_history`, `handle_git_search_commits`, `handle_git_search_diffs`) now use `_resolve_git_repo_path()` instead of `_resolve_repo_path()` directly, ensuring consistent `.git` validation and local repo detection across all git operations.
+
 ## [9.3.25] - 2026-02-18
 
 ### Fixed

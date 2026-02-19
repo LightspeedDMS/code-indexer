@@ -4058,6 +4058,16 @@ def _resolve_git_repo_path(
     """
     if repository_alias.endswith("-global"):
         golden_repos_dir = _get_golden_repos_dir()
+
+        # Check repo URL first — local:// repos never support git operations
+        registry = get_server_global_registry(golden_repos_dir)
+        repo_entry = registry.get_global_repo(repository_alias)
+        if repo_entry and repo_entry.get("repo_url", "").startswith("local://"):
+            return None, (
+                f"Repository '{repository_alias}' is a local repository "
+                "and does not support git operations."
+            )
+
         resolved = _resolve_repo_path(repository_alias, golden_repos_dir)
         if resolved is None:
             return None, f"Repository '{repository_alias}' not found."
