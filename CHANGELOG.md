@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.34] - 2026-02-19
+
+### Added
+
+- Write-lock coordination for local golden repo writers (Story #227): prevents RefreshScheduler from snapshotting cidx-meta and Langfuse folders mid-write
+- Write-lock registry on RefreshScheduler with non-blocking acquire/release/check semantics
+- RefreshScheduler skips CoW clone for write-locked local repos, writers trigger explicit refresh after completion
+- DependencyMapService and LangfuseTraceSyncService acquire write locks during analysis/sync operations
+
+### Fixed
+
+- Delta analysis refresh trigger was missing on main success path (P0 code review finding)
+- write_lock() context manager now raises on failed acquire instead of silently proceeding
+- release_write_lock() gracefully handles releasing unheld locks instead of raising RuntimeError
+
 ## [9.3.33] - 2026-02-19
 
 ### Fixed

@@ -2697,6 +2697,7 @@ def create_app() -> FastAPI:
                 config_manager=config_service,
                 tracking_backend=tracking_backend,
                 analyzer=analyzer,
+                refresh_scheduler=global_lifecycle_manager.refresh_scheduler if global_lifecycle_manager else None,
             )
 
             # Start scheduler (internally checks if enabled)
@@ -3110,6 +3111,7 @@ def create_app() -> FastAPI:
                 config_getter=config_service.get_config,
                 data_dir=str(Path(server_data_dir) / "data"),
                 on_sync_complete=_on_langfuse_sync_complete,
+                refresh_scheduler=global_lifecycle_manager.refresh_scheduler if global_lifecycle_manager else None,
             )
 
             # Start background sync if pull is enabled

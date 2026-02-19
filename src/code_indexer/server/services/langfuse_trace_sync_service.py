@@ -67,12 +67,14 @@ class LangfuseTraceSyncService:
         config_getter: Callable[[], Any],
         data_dir: str,
         on_sync_complete: Optional[Callable[[], None]] = None,
+        refresh_scheduler=None,
     ):
         """
         Args:
             config_getter: Callable returning ServerConfig (for dynamic config)
             data_dir: Base directory for data (typically ~/.cidx-server/data)
             on_sync_complete: Optional callback invoked after each sync cycle completes
+            refresh_scheduler: Optional RefreshScheduler for write-lock coordination (Story #227)
         """
         self._config_getter = config_getter
         self._data_dir = data_dir
@@ -82,6 +84,7 @@ class LangfuseTraceSyncService:
         self._metrics: Dict[str, SyncMetrics] = {}  # Per-project metrics
         self._lock = threading.Lock()  # Metrics lock
         self._sync_lock = threading.Lock()  # Concurrent sync guard (C1/H4)
+        self._refresh_scheduler = refresh_scheduler  # Story #227: write-lock coordination
 
     def start(self) -> None:
         """Start background sync thread."""
@@ -189,9 +192,33 @@ class LangfuseTraceSyncService:
         # 1. Create API client
         api_client = LangfuseApiClient(host, creds)
 
-        # 2. Discover project name via GET /api/public/projects
-        project_info = api_client.discover_project()
-        project_name = project_info.get("name", "unknown")
+        # Story #227: Acquire write lock BEFORE any work (including discovery).
+        # Use generic "langfuse" alias since project name isn't known until after discover.
+        _lock_alias = "langfuse"
+        _trigger_alias = None
+        _sync_succeeded = False
+        if self._refresh_scheduler is not None:
+            self._refresh_scheduler.acquire_write_lock(_lock_alias)
+        try:
+            # 2. Discover project name via GET /api/public/projects
+            project_info = api_client.discover_project()
+            project_name = project_info.get("name", "unknown")
+            safe_project = self._sanitize_folder_name(project_name)
+            _trigger_alias = f"langfuse_{safe_project}-global"
+
+            self._sync_project_inner(api_client, project_name, trace_age_days, max_concurrent_observations)
+            _sync_succeeded = True
+        finally:
+            if self._refresh_scheduler is not None:
+                self._refresh_scheduler.release_write_lock(_lock_alias)
+                # Story #227: Trigger refresh only on success (AC5: no trigger on exception).
+                if _sync_succeeded and _trigger_alias:
+                    self._refresh_scheduler.trigger_refresh_for_repo(_trigger_alias)
+
+    def _sync_project_inner(
+        self, api_client: "LangfuseApiClient", project_name: str, trace_age_days: int, max_concurrent_observations: int
+    ) -> None:
+        """Internal sync logic for a single project after write-lock is acquired."""
 
         # 3. Load sync state
         state = self._load_sync_state(project_name)

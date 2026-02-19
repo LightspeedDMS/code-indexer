@@ -48,6 +48,7 @@ class DependencyMapService:
         config_manager,
         tracking_backend,
         analyzer,
+        refresh_scheduler=None,
     ):
         """
         Initialize dependency map service.
@@ -57,12 +58,14 @@ class DependencyMapService:
             config_manager: ServerConfigManager instance
             tracking_backend: DependencyMapTrackingBackend instance
             analyzer: DependencyMapAnalyzer instance
+            refresh_scheduler: Optional RefreshScheduler for write-lock coordination (Story #227)
         """
         self._golden_repos_manager = golden_repos_manager
         self._config_manager = config_manager
         self._tracking_backend = tracking_backend
         self._analyzer = analyzer
         self._lock = threading.Lock()
+        self._refresh_scheduler = refresh_scheduler  # Story #227: write-lock coordination
 
         # Story #193: Scheduler daemon thread state
         self._daemon_thread: Optional[threading.Thread] = None
@@ -104,10 +107,16 @@ class DependencyMapService:
         if not self._lock.acquire(blocking=False):
             raise RuntimeError("Dependency map analysis already in progress")
 
+        # Story #227: Acquire write lock so RefreshScheduler skips CoW clone during writes.
+        if self._refresh_scheduler is not None:
+            self._refresh_scheduler.acquire_write_lock("cidx-meta")
+
+        _analysis_succeeded = False
         try:
             # Setup and validation
             setup_result = self._setup_analysis()
             if setup_result.get("early_return"):
+                _analysis_succeeded = True
                 return setup_result
 
             config, paths, repo_list = (
@@ -129,6 +138,7 @@ class DependencyMapService:
             # Finalize and cleanup
             self._finalize_analysis(config, paths, repo_list, domain_list, pass1_duration_s, pass2_duration_s)
 
+            _analysis_succeeded = True
             return {
                 "status": "completed",
                 "domains_count": len(domain_list),
@@ -156,6 +166,17 @@ class DependencyMapService:
                 logger.debug(f"CLAUDE.md cleanup failed (non-fatal): {cleanup_error}")
 
             self._lock.release()
+
+            # Story #227: Release write lock so RefreshScheduler can proceed.
+            if self._refresh_scheduler is not None:
+                self._refresh_scheduler.release_write_lock("cidx-meta")
+
+            # Story #227: Trigger explicit refresh after lock released (only on success).
+            # AC2: Writer triggers refresh so RefreshScheduler captures complete data.
+            # Must be inside finally so it runs after lock is released, but gated on success
+            # to satisfy AC5 (no trigger on exception).
+            if _analysis_succeeded and self._refresh_scheduler is not None:
+                self._refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
 
     def _setup_analysis(self) -> Dict[str, Any]:
         """
@@ -1376,6 +1397,11 @@ class DependencyMapService:
             logger.info("Delta analysis skipped - analysis already in progress")
             return None
 
+        # Story #227: Acquire write lock so RefreshScheduler skips CoW clone during writes.
+        if self._refresh_scheduler is not None:
+            self._refresh_scheduler.acquire_write_lock("cidx-meta")
+
+        _delta_succeeded = False
         try:
             # Check if enabled (AC6: Runtime Configuration Check)
             config = self._config_manager.get_claude_integration_config()
@@ -1394,6 +1420,7 @@ class DependencyMapService:
                     + timedelta(hours=config.dependency_map_interval_hours)
                 ).isoformat()
                 self._tracking_backend.update_tracking(next_run=next_run)
+                _delta_succeeded = True
                 return {"status": "skipped", "message": "No changes detected"}
 
             # Update tracking to running
@@ -1418,6 +1445,7 @@ class DependencyMapService:
                 logger.info("No affected domains identified")
                 all_repos = self._get_activated_repos()
                 self._finalize_delta_tracking(config, all_repos)
+                _delta_succeeded = True
                 return {"status": "completed", "affected_domains": 0}
 
             # Generate CLAUDE.md
@@ -1470,6 +1498,7 @@ class DependencyMapService:
 
             logger.info(f"Delta analysis completed: {len(affected_domains)} domains updated")
 
+            _delta_succeeded = True
             return {
                 "status": "completed",
                 "affected_domains": len(affected_domains),
@@ -1495,3 +1524,14 @@ class DependencyMapService:
                 logger.debug(f"CLAUDE.md cleanup failed (non-fatal): {cleanup_error}")
 
             self._lock.release()
+
+            # Story #227: Release write lock so RefreshScheduler can proceed.
+            if self._refresh_scheduler is not None:
+                self._refresh_scheduler.release_write_lock("cidx-meta")
+
+            # Story #227: Trigger explicit refresh after lock released (only on success).
+            # AC2: Writer triggers refresh so RefreshScheduler captures complete data.
+            # Must be inside finally so it runs after lock is released, but gated on success
+            # to satisfy AC5 (no trigger on exception).
+            if _delta_succeeded and self._refresh_scheduler is not None:
+                self._refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")

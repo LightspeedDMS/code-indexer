@@ -87,6 +87,13 @@ class RefreshScheduler:
         self._repo_locks: dict[str, threading.Lock] = {}
         self._repo_locks_lock = threading.Lock()  # Protects _repo_locks dict
 
+        # Write-lock registry for external writers (Story #227).
+        # Separate from _repo_locks: these coordinate between external writers
+        # (DependencyMapService, LangfuseTraceSyncService) and the snapshotter.
+        # Keyed by repo alias without -global suffix (e.g., "cidx-meta").
+        self._write_locks: dict[str, threading.Lock] = {}
+        self._write_locks_guard = threading.Lock()  # Protects _write_locks dict creation
+
     def _get_repo_lock(self, alias_name: str) -> threading.Lock:
         """
         Get or create a lock for a specific repository.
@@ -103,6 +110,110 @@ class RefreshScheduler:
             if alias_name not in self._repo_locks:
                 self._repo_locks[alias_name] = threading.Lock()
             return self._repo_locks[alias_name]
+
+    # ------------------------------------------------------------------
+    # Write-lock registry (Story #227)
+    # ------------------------------------------------------------------
+
+    def _get_or_create_write_lock(self, alias: str) -> threading.Lock:
+        """Get or create a write lock for a repo alias (thread-safe)."""
+        with self._write_locks_guard:
+            if alias not in self._write_locks:
+                self._write_locks[alias] = threading.Lock()
+            return self._write_locks[alias]
+
+    def acquire_write_lock(self, alias: str) -> bool:
+        """
+        Non-blocking acquire of the write lock for a repo alias.
+
+        Args:
+            alias: Repo alias without -global suffix (e.g., "cidx-meta")
+
+        Returns:
+            True if lock was acquired, False if already held
+        """
+        lock = self._get_or_create_write_lock(alias)
+        return lock.acquire(blocking=False)
+
+    def release_write_lock(self, alias: str) -> None:
+        """
+        Release the write lock for a repo alias.
+
+        Args:
+            alias: Repo alias without -global suffix (e.g., "cidx-meta")
+        """
+        lock = self._write_locks.get(alias)
+        if lock is not None:
+            try:
+                lock.release()
+            except RuntimeError:
+                logger.warning(
+                    f"Attempted to release unheld write lock for '{alias}'"
+                )
+
+    def is_write_locked(self, alias: str) -> bool:
+        """
+        Check whether the write lock for a repo alias is currently held.
+
+        Uses a non-blocking acquire probe: if we can acquire it, it was free
+        (release immediately and return False); if we cannot, it is held (True).
+
+        Args:
+            alias: Repo alias without -global suffix (e.g., "cidx-meta")
+
+        Returns:
+            True if write lock is held, False otherwise
+        """
+        lock = self._write_locks.get(alias)
+        if lock is None:
+            return False
+        acquired = lock.acquire(blocking=False)
+        if acquired:
+            lock.release()
+            return False
+        return True
+
+    def write_lock(self, alias: str):
+        """
+        Context manager that acquires the write lock on entry and releases on exit.
+
+        Usage::
+
+            with scheduler.write_lock("cidx-meta"):
+                # write files here
+                ...
+
+        Args:
+            alias: Repo alias without -global suffix (e.g., "cidx-meta")
+        """
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx():
+            acquired = self.acquire_write_lock(alias)
+            if not acquired:
+                raise RuntimeError(f"Write lock for '{alias}' is already held")
+            try:
+                yield
+            finally:
+                self.release_write_lock(alias)
+
+        return _ctx()
+
+    def trigger_refresh_for_repo(self, alias_name: str) -> None:
+        """
+        Request a refresh for a specific repo after external writes complete.
+
+        Routes through BackgroundJobManager if available (server mode with dashboard
+        visibility), otherwise falls back to direct _execute_refresh() (CLI mode).
+
+        Args:
+            alias_name: Global alias name (e.g., "cidx-meta-global")
+        """
+        if self.background_job_manager:
+            self._submit_refresh_job(alias_name)
+        else:
+            self._execute_refresh(alias_name)
 
     def get_refresh_interval(self) -> int:
         """
@@ -310,6 +421,20 @@ class RefreshScheduler:
                     # NOT the current alias target which may point to a versioned snapshot.
                     repo_name = alias_name.replace("-global", "")
                     source_path = str(self.golden_repos_dir / repo_name)
+
+                    # Story #227: Skip CoW clone if an external writer holds the write lock.
+                    # Writers (DependencyMapService, LangfuseTraceSyncService) acquire the lock
+                    # before writing and trigger an explicit refresh when done.
+                    # Non-blocking check — never wait, just skip this cycle.
+                    if self.is_write_locked(repo_name):
+                        logger.info(
+                            f"Skipping refresh for {alias_name}, write lock held by external writer"
+                        )
+                        return {
+                            "success": True,
+                            "alias": alias_name,
+                            "message": "Skipped, write lock held",
+                        }
 
                     # C2: Use mtime-based change detection for local repos
                     has_changes = self._has_local_changes(source_path, alias_name)
