@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.30] - 2026-02-19
+
+### Fixed
+
+- **Delta analysis write-path failures for versioned cidx-meta** - `_update_affected_domains()` now reads existing domain `.md` files from the versioned path (via `read_file` parameter) while writing updates to the live path. `_discover_and_assign_new_repos()` and `run_delta_analysis()` ensure the live `dependency-map/` directory exists before writing. Fixes `[Errno 2] No such file or directory` for `_domains.json` writes and "Domain file not found" warnings during delta refresh.
+
 ## [9.3.29] - 2026-02-19
 
 ### Fixed

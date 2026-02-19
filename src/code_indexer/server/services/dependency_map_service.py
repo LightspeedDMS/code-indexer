@@ -1097,24 +1097,30 @@ class DependencyMapService:
         removed_repos: List[str],
         domain_list: List[str],
         config,
+        read_file: Optional[Path] = None,
     ) -> None:
         """
         Update a single domain file with delta analysis (Story #193, AC5).
 
         Args:
             domain_name: Name of the domain
-            domain_file: Path to domain .md file
+            domain_file: Path to write updated domain .md file (live path)
             changed_repos: List of changed repo aliases
             new_repos: List of new repo aliases
             removed_repos: List of removed repo aliases
             domain_list: Full list of all domain names
             config: Claude integration config
+            read_file: Optional path to read existing content from (versioned path).
+                       When provided, existing content is read from this path while
+                       the updated content is written to domain_file (live path).
+                       Falls back to domain_file when None.
 
         Raises:
             Exception: If Claude CLI invocation or file write fails
         """
-        # Read existing content
-        existing_content = domain_file.read_text()
+        # Read existing content from versioned path if provided, else from write path
+        source_file = read_file if read_file is not None else domain_file
+        existing_content = source_file.read_text()
 
         # Build delta merge prompt
         merge_prompt = self._analyzer.build_delta_merge_prompt(
@@ -1179,10 +1185,13 @@ class DependencyMapService:
 
         # Code Review M4: Sort for deterministic processing order
         for domain_name in sorted(affected_domains):
+            # READ existence check and content from versioned path (live path is empty after Story #224)
+            read_domain_file = dependency_map_read_dir / f"{domain_name}.md"
+            # WRITE updated file to live path (so RefreshScheduler detects changes)
             domain_file = dependency_map_dir / f"{domain_name}.md"
 
-            if not domain_file.exists():
-                logger.warning(f"Domain file not found: {domain_file}, skipping")
+            if not read_domain_file.exists():
+                logger.warning(f"Domain file not found: {read_domain_file}, skipping")
                 continue
 
             try:
@@ -1194,6 +1203,7 @@ class DependencyMapService:
                     removed_repos=removed_repos,
                     domain_list=domain_list,
                     config=config,
+                    read_file=read_domain_file,
                 )
             except Exception as e:
                 errors.append(f"Domain '{domain_name}': {e}")
@@ -1284,8 +1294,10 @@ class DependencyMapService:
                     )
 
         # WRITE updated _domains.json to live path (dependency_map_dir)
+        # Ensure directory exists: live path may not exist for versioned cidx-meta repos
         write_domains_file = dependency_map_dir / "_domains.json"
         try:
+            dependency_map_dir.mkdir(parents=True, exist_ok=True)
             write_domains_file.write_text(json.dumps(domain_list, indent=2))
             logger.info(
                 f"Updated _domains.json with {len(new_repos)} new repo(s): "
@@ -1393,6 +1405,10 @@ class DependencyMapService:
                     config=config,
                 )
                 affected_domains.update(discovered)
+
+            # Ensure live dependency-map directory exists before writing domain files
+            # (versioned cidx-meta repos have empty live path; content is in .versioned/)
+            dependency_map_dir.mkdir(parents=True, exist_ok=True)
 
             # Update affected domains (AC5: In-Place Updates)
             errors = self._update_affected_domains(
