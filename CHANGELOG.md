@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.27] - 2026-02-19
+
+### Changed
+
+- **Langfuse repos now use versioned golden repo platform (Story #226)** - Langfuse trace repos (`langfuse_*`) now use the same RefreshScheduler-based versioned snapshot pipeline as cidx-meta and git repos. Eliminates three competing indexing systems (in-place subprocess, SimpleWatchHandler, RefreshScheduler) that caused ghost vectors, HNSW cache staleness, and Tantivy FTS errors.
+
+### Removed
+
+- **In-place indexing from `register_langfuse_golden_repos()`** - Removed `subprocess.run()` calls to `cidx init` and `cidx index --fts` that ran in the live Langfuse folder. Registration now only calls `register_local_repo()`. RefreshScheduler handles indexing via versioned snapshots.
+- **Watch-mode startup for Langfuse folders** - Removed `auto_watch_manager.start_watch()` calls from `_on_langfuse_sync_complete()`. No watchdog observers are created for Langfuse directories.
+- **`LangfuseWatchIntegration` class** - Deleted `langfuse_watch_integration.py` (116 lines). Auto-start watches, reset timeouts, and status reporting for Langfuse folders are all superseded by RefreshScheduler.
+- **`_create_simple_watch_handler()` from DaemonWatchManager** - Deleted the non-git folder watch handler factory (~80 lines) and the `_is_git_folder()` helper. `_create_watch_handler()` now always creates `GitAwareWatchHandler`.
+- **Bug #177 VectorStoreConfig workaround** - Removed the non-git folder fallback that initialized default filesystem backend config. No longer needed without non-git watch paths.
+
 ## [9.3.26] - 2026-02-19
 
 ### Fixed

@@ -2003,8 +2003,6 @@ def register_langfuse_golden_repos(golden_repo_manager: "GoldenRepoManager", gol
         golden_repo_manager: GoldenRepoManager instance
         golden_repos_dir: Path to golden-repos directory
     """
-    import subprocess
-
     golden_repos_path = Path(golden_repos_dir)
     if not golden_repos_path.exists():
         return
@@ -2027,50 +2025,6 @@ def register_langfuse_golden_repos(golden_repo_manager: "GoldenRepoManager", gol
                 f"Auto-registered Langfuse folder as golden repo: {alias}",
                 extra={"correlation_id": get_correlation_id()},
             )
-
-        # Always ensure CIDX index exists (handles restart after failed/deleted index)
-        index_dir = folder / ".code-indexer" / "index"
-        needs_init = not (folder / ".code-indexer").exists()
-        try:
-            index_has_content = index_dir.exists() and any(index_dir.iterdir())
-        except (FileNotFoundError, OSError):
-            index_has_content = False
-        needs_indexing = newly_registered or not index_has_content
-
-        if needs_init:
-            try:
-                subprocess.run(
-                    ["cidx", "init"],
-                    cwd=str(folder),
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            except (subprocess.CalledProcessError, Exception) as e:
-                logger.warning(
-                    f"Failed to initialize CIDX index for {alias}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-
-        if needs_indexing:
-            try:
-                subprocess.run(
-                    ["cidx", "index", "--fts"],
-                    cwd=str(folder),
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-                action = "Initial indexing" if newly_registered else "Re-indexing"
-                logger.info(
-                    f"{action} complete for Langfuse folder: {alias}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-            except (subprocess.CalledProcessError, Exception) as e:
-                logger.warning(
-                    f"Failed to index Langfuse folder {alias}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
 
 
 def create_app() -> FastAPI:
@@ -3145,30 +3099,10 @@ def create_app() -> FastAPI:
 
             # Define callback for auto-registering new Langfuse folders after sync
             def _on_langfuse_sync_complete():
-                """Auto-register new Langfuse folders after sync and keep watch active."""
+                """Auto-register new Langfuse folders after sync."""
                 if golden_repo_manager is not None:
                     register_langfuse_golden_repos(
                         golden_repo_manager, str(golden_repos_dir)
-                    )
-
-                # Start/reset watch on all Langfuse folders to pick up new traces
-                try:
-                    from code_indexer.server.services.auto_watch_manager import auto_watch_manager
-                    golden_repos_path = Path(golden_repos_dir)
-                    if golden_repos_path.exists():
-                        for folder in golden_repos_path.iterdir():
-                            if folder.is_dir() and folder.name.startswith("langfuse_"):
-                                if auto_watch_manager.is_watching(str(folder)):
-                                    auto_watch_manager.reset_timeout(str(folder))
-                                else:
-                                    auto_watch_manager.start_watch(
-                                        repo_path=str(folder),
-                                        timeout=300,  # 5 min idle timeout, reset each sync cycle
-                                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to start/reset watch for Langfuse folders: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
 
             # Create service with config_getter callable
