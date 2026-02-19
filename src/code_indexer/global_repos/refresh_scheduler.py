@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 import threading
-from datetime import datetime
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Union, TYPE_CHECKING, cast
 
@@ -424,8 +424,10 @@ class RefreshScheduler:
             cidx_fix_timeout = self.resource_config.cidx_fix_config_timeout
             cidx_index_timeout = self.resource_config.cidx_index_timeout
 
-        # Generate version timestamp
-        timestamp = int(datetime.utcnow().timestamp())
+        # Generate version timestamp (use time.time() for correct UTC epoch;
+        # datetime.utcnow().timestamp() is wrong on non-UTC servers due to
+        # naive datetime timezone interpretation)
+        timestamp = int(time.time())
         version = f"v_{timestamp}"
 
         # Create versioned directory path
@@ -468,6 +470,22 @@ class RefreshScheduler:
                     exc_info=True
                 )
                 raise RuntimeError(f"CoW clone timed out for {alias_name} after {cow_timeout} seconds: {type(e).__name__}")
+
+            # Step 2b: Delete inherited tantivy FTS index to prevent ghost vectors.
+            # The CoW clone copies .code-indexer/tantivy_index/ from the source,
+            # which may contain entries for files no longer present in this snapshot.
+            # Deleting it here forces cidx index --fts to rebuild from scratch.
+            tantivy_dir = versioned_path / ".code-indexer" / "tantivy_index"
+            if tantivy_dir.exists():
+                shutil.rmtree(tantivy_dir, ignore_errors=True)
+                if not tantivy_dir.exists():
+                    logger.info(
+                        f"Deleted inherited tantivy index for clean FTS rebuild: {tantivy_dir}"
+                    )
+                else:
+                    logger.warning(
+                        f"Failed to fully delete inherited tantivy index: {tantivy_dir}"
+                    )
 
             # Step 3: Fix git status (only if .git exists)
             git_dir = versioned_path / ".git"

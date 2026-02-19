@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.25] - 2026-02-18
+
+### Fixed
+
+- **FTS ghost vectors in versioned snapshots** - CoW clone inherited the tantivy index from the previous version, causing `cidx index --fts` to open it incrementally and preserve stale entries for deleted/renamed files. Now deletes `tantivy_index/` after CoW clone so FTS rebuilds from scratch, matching the semantic index behavior.
+- **Timezone timestamp bug in versioned directory names** - `datetime.utcnow().timestamp()` produces a future timestamp on non-UTC servers (e.g. 6 hours ahead on UTC-6) because Python interprets the naive datetime as local time. Replaced with `int(time.time())` which returns the correct UTC epoch. This was causing `_has_local_changes()` to always return False, breaking automatic change detection for local repos.
+- **Git tools error for global repos** - All git handlers (first-gen and second-gen) now use `_resolve_git_repo_path()` helper that validates `.git` directory existence before attempting git operations. Local repos (e.g. cidx-meta-global backed by `local://`) return a clear error message instead of crashing with filesystem errors. Also distinguishes "repo not found" from "repo is local" in error messages.
+
 ## [9.3.24] - 2026-02-18
 
 ### Changed

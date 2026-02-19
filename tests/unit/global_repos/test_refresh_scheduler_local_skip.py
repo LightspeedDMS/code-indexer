@@ -9,6 +9,8 @@ After Story #224 (C1, C2, C3):
 These tests replace the old "skip" tests that verified behavior removed in Story #224.
 """
 
+import subprocess
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -264,3 +266,126 @@ class TestRefreshSchedulerLocalRepoSkip:
 
                 # Verify: Did not return early with skip message
                 assert "Local repo" not in result.get("message", "")
+
+
+class TestRefreshSchedulerVersionTimestamp:
+    """Test that versioned index directory names use correct (non-UTC-shifted) timestamps."""
+
+    @pytest.fixture
+    def golden_repos_dir(self, tmp_path):
+        golden_repos_dir = tmp_path / ".code-indexer" / "golden_repos"
+        golden_repos_dir.mkdir(parents=True)
+        return golden_repos_dir
+
+    @pytest.fixture
+    def config_mgr(self, tmp_path):
+        return ConfigManager(tmp_path / ".code-indexer" / "config.json")
+
+    @pytest.fixture
+    def query_tracker(self):
+        return QueryTracker()
+
+    @pytest.fixture
+    def cleanup_manager(self, query_tracker):
+        return CleanupManager(query_tracker)
+
+    @pytest.fixture
+    def registry(self, golden_repos_dir):
+        return GlobalRegistry(str(golden_repos_dir))
+
+    @pytest.fixture
+    def alias_manager(self, golden_repos_dir):
+        return AliasManager(str(golden_repos_dir / "aliases"))
+
+    def test_create_new_index_uses_correct_timestamp(
+        self,
+        golden_repos_dir,
+        config_mgr,
+        query_tracker,
+        cleanup_manager,
+        registry,
+        alias_manager,
+    ):
+        """
+        Bug fix: _create_new_index() must use time.time() not datetime.utcnow().timestamp().
+
+        On timezone-offset servers (e.g., UTC-6), datetime.utcnow().timestamp() produces
+        a timestamp 6 hours in the FUTURE. This causes _has_local_changes() to always
+        return False, breaking automatic change detection for local repos like cidx-meta.
+
+        The version directory name v_{timestamp} must embed the actual current epoch time
+        (within a 5-second tolerance), not a timezone-shifted future timestamp.
+
+        Regression guard: If this test fails, the timestamp generation bug has returned.
+        """
+        import time as time_module
+
+        before = int(time_module.time())
+
+        # Setup source directory with a file (needed for _create_new_index to work)
+        local_repo_dir = golden_repos_dir / "cidx-meta"
+        local_repo_dir.mkdir()
+        (local_repo_dir / "test.md").write_text("# test")
+
+        scheduler = RefreshScheduler(
+            golden_repos_dir=str(golden_repos_dir),
+            config_source=config_mgr,
+            query_tracker=query_tracker,
+            cleanup_manager=cleanup_manager,
+            registry=registry,
+        )
+
+        # Capture the version directory from subprocess.run cp command args.
+        # The cp command is: cp --reflink=auto -a <source> <dest>
+        # where <dest> is .versioned/<alias>/v_<timestamp>
+        captured_version_path = []
+        original_subprocess_run = subprocess.run
+
+        def capture_subprocess_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and len(cmd) >= 4 and cmd[0] == "cp":
+                dest = cmd[-1]
+                if "/v_" in dest:
+                    captured_version_path.append(dest)
+            # Let cp actually run so mkdir + clone work, but mock cidx commands
+            if isinstance(cmd, list) and cmd[0] == "cidx":
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return original_subprocess_run(cmd, *args, **kwargs)
+
+        with patch("subprocess.run", side_effect=capture_subprocess_run):
+            try:
+                scheduler._create_new_index(
+                    alias_name="cidx-meta-global",
+                    source_path=str(local_repo_dir),
+                )
+            except Exception:
+                pass  # cidx commands are mocked, alias swap may fail
+
+        after = int(time_module.time()) + 5  # 5 second tolerance
+
+        assert len(captured_version_path) > 0, (
+            "No versioned directory path was captured from cp command. "
+            "_create_new_index() must create a v_TIMESTAMP directory."
+        )
+
+        # Extract timestamp from the captured path
+        for path in captured_version_path:
+            if "/v_" in path:
+                parts = path.split("/v_")
+                if len(parts) > 1:
+                    ts_str = parts[-1].split("/")[0]
+                    try:
+                        ts = int(ts_str)
+                        assert before <= ts <= after, (
+                            f"Version timestamp {ts} is NOT within [{before}, {after}]. "
+                            f"Difference from 'before': {ts - before} seconds. "
+                            f"If this is ~21600 (6 hours), the datetime.utcnow().timestamp() "
+                            f"bug has returned. Use int(time.time()) instead."
+                        )
+                        return  # Test passed
+                    except ValueError:
+                        continue
+
+        pytest.fail(
+            "Could not extract a valid timestamp from captured version directory paths: "
+            f"{captured_version_path}"
+        )

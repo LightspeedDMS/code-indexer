@@ -17,7 +17,7 @@ import difflib
 import json
 import logging
 import pathspec
-from typing import Dict, Any, Optional, List, TYPE_CHECKING
+from typing import Dict, Any, Optional, List, Tuple, TYPE_CHECKING
 from pathlib import Path
 
 if TYPE_CHECKING:
@@ -3709,14 +3709,12 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        golden_repos_dir = _get_golden_repos_dir()
-
-        # Resolve repository_alias to actual path
-        repo_path = _resolve_repo_path(repository_alias, golden_repos_dir)
-        if repo_path is None:
-            return _mcp_response(
-                {"success": False, "error": "Repository '.*' not found"}
-            )
+        # Resolve repository path, checking for .git directory existence
+        repo_path, error_msg = _resolve_git_repo_path(
+            repository_alias, user.username
+        )
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         # Create service and execute query
         service = GitOperationsService(Path(repo_path))
@@ -3829,14 +3827,12 @@ def handle_git_show_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        golden_repos_dir = _get_golden_repos_dir()
-
-        # Resolve repository_alias to actual path
-        repo_path = _resolve_repo_path(repository_alias, golden_repos_dir)
-        if repo_path is None:
-            return _mcp_response(
-                {"success": False, "error": "Repository '.*' not found"}
-            )
+        # Resolve repository path, checking for .git directory existence
+        repo_path, error_msg = _resolve_git_repo_path(
+            repository_alias, user.username
+        )
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         # Create service and execute query
         service = GitOperationsService(Path(repo_path))
@@ -3916,14 +3912,12 @@ def handle_git_file_at_revision(args: Dict[str, Any], user: User) -> Dict[str, A
         )
 
     try:
-        golden_repos_dir = _get_golden_repos_dir()
-
-        # Resolve repository_alias to actual path
-        repo_path = _resolve_repo_path(repository_alias, golden_repos_dir)
-        if repo_path is None:
-            return _mcp_response(
-                {"success": False, "error": "Repository '.*' not found"}
-            )
+        # Resolve repository path, checking for .git directory existence
+        repo_path, error_msg = _resolve_git_repo_path(
+            repository_alias, user.username
+        )
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         # Create service and execute query
         service = GitOperationsService(Path(repo_path))
@@ -4047,6 +4041,40 @@ def _resolve_repo_path(repo_identifier: str, golden_repos_dir: str) -> Optional[
     return None
 
 
+def _resolve_git_repo_path(
+    repository_alias: str, username: str
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve repository path for git operations.
+
+    For global repos (ending in -global): validates that the resolved path
+    has a .git directory. Local repos (e.g. cidx-meta-global backed by
+    local://) have no .git and git operations are not meaningful.
+
+    For user-activated repos: returns the activated-repo path if it exists.
+
+    Returns:
+        (path, error_message) tuple. If error_message is not None,
+        the caller should return the error to the user.
+    """
+    if repository_alias.endswith("-global"):
+        golden_repos_dir = _get_golden_repos_dir()
+        resolved = _resolve_repo_path(repository_alias, golden_repos_dir)
+        if resolved is None:
+            return None, f"Repository '{repository_alias}' not found."
+        if not (Path(resolved) / ".git").exists():
+            return None, (
+                f"Repository '{repository_alias}' is a local repository "
+                "and does not support git operations."
+            )
+        return resolved, None
+
+    activated_repo_manager = ActivatedRepoManager()
+    repo_path = activated_repo_manager.get_activated_repo_path(
+        username=username, user_alias=repository_alias
+    )
+    return repo_path, None
+
+
 # Update handler registry with git exploration tools
 HANDLER_REGISTRY["git_log"] = handle_git_log
 HANDLER_REGISTRY["git_show_commit"] = handle_git_show_commit
@@ -4079,14 +4107,12 @@ def handle_git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        golden_repos_dir = _get_golden_repos_dir()
-
-        # Resolve repository_alias to actual path
-        repo_path = _resolve_repo_path(repository_alias, golden_repos_dir)
-        if repo_path is None:
-            return _mcp_response(
-                {"success": False, "error": "Repository '.*' not found"}
-            )
+        # Resolve repository path, checking for .git directory existence
+        repo_path, error_msg = _resolve_git_repo_path(
+            repository_alias, user.username
+        )
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         # Create service and execute query
         service = GitOperationsService(Path(repo_path))
@@ -4211,14 +4237,12 @@ def handle_git_blame(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        golden_repos_dir = _get_golden_repos_dir()
-
-        # Resolve repository_alias to actual path
-        repo_path = _resolve_repo_path(repository_alias, golden_repos_dir)
-        if repo_path is None:
-            return _mcp_response(
-                {"success": False, "error": "Repository '.*' not found"}
-            )
+        # Resolve repository path, checking for .git directory existence
+        repo_path, error_msg = _resolve_git_repo_path(
+            repository_alias, user.username
+        )
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         # Create service and execute query
         service = GitOperationsService(Path(repo_path))
@@ -4282,14 +4306,12 @@ def handle_git_file_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        golden_repos_dir = _get_golden_repos_dir()
-
-        # Resolve repository_alias to actual path
-        repo_path = _resolve_repo_path(repository_alias, golden_repos_dir)
-        if repo_path is None:
-            return _mcp_response(
-                {"success": False, "error": "Repository '.*' not found"}
-            )
+        # Resolve repository path, checking for .git directory existence
+        repo_path, error_msg = _resolve_git_repo_path(
+            repository_alias, user.username
+        )
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         # Create service and execute query
         service = GitOperationsService(Path(repo_path))
@@ -4448,14 +4470,12 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
         )
 
     try:
-        golden_repos_dir = _get_golden_repos_dir()
-
-        # Resolve repository_alias to actual path
-        repo_path = _resolve_repo_path(repository_alias, golden_repos_dir)
-        if repo_path is None:
-            return _mcp_response(
-                {"success": False, "error": "Repository '.*' not found"}
-            )
+        # Resolve repository path, checking for .git directory existence
+        repo_path, error_msg = _resolve_git_repo_path(
+            repository_alias, user.username
+        )
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         # Create service and execute search
         service = GitOperationsService(Path(repo_path))
@@ -4532,14 +4552,12 @@ def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        golden_repos_dir = _get_golden_repos_dir()
-
-        # Resolve repository_alias to actual path
-        repo_path = _resolve_repo_path(repository_alias, golden_repos_dir)
-        if repo_path is None:
-            return _mcp_response(
-                {"success": False, "error": "Repository '.*' not found"}
-            )
+        # Resolve repository path, checking for .git directory existence
+        repo_path, error_msg = _resolve_git_repo_path(
+            repository_alias, user.username
+        )
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         # Create service and execute search
         # search_diffs uses search_string for literal, search_pattern for regex
@@ -5960,10 +5978,9 @@ def git_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        repo_manager = ActivatedRepoManager()
-        repo_path = repo_manager.get_activated_repo_path(
-            username=user.username, user_alias=repository_alias
-        )
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         result = git_operations_service.git_status(Path(repo_path))
         result["success"] = True
@@ -6011,10 +6028,9 @@ def git_stage(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        repo_manager = ActivatedRepoManager()
-        repo_path = repo_manager.get_activated_repo_path(
-            username=user.username, user_alias=repository_alias
-        )
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         result = git_operations_service.git_stage(Path(repo_path), file_paths)
         return _mcp_response(result)
@@ -6061,10 +6077,9 @@ def git_unstage(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        repo_manager = ActivatedRepoManager()
-        repo_path = repo_manager.get_activated_repo_path(
-            username=user.username, user_alias=repository_alias
-        )
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         result = git_operations_service.git_unstage(Path(repo_path), file_paths)
         return _mcp_response(result)
@@ -6111,10 +6126,9 @@ def git_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        repo_manager = ActivatedRepoManager()
-        repo_path = repo_manager.get_activated_repo_path(
-            username=user.username, user_alias=repository_alias
-        )
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         # Get user email - try from user object first, fallback to username-based
         user_email = getattr(user, "email", None) or f"{user.username}@cidx.local"
@@ -6304,10 +6318,9 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     confirmation_token = args.get("confirmation_token")
 
     try:
-        repo_manager = ActivatedRepoManager()
-        repo_path = repo_manager.get_activated_repo_path(
-            username=user.username, user_alias=repository_alias
-        )
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         result = git_operations_service.git_reset(
             Path(repo_path),
@@ -6381,10 +6394,9 @@ def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     confirmation_token = args.get("confirmation_token")
 
     try:
-        repo_manager = ActivatedRepoManager()
-        repo_path = repo_manager.get_activated_repo_path(
-            username=user.username, user_alias=repository_alias
-        )
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         result = git_operations_service.git_clean(
             Path(repo_path), confirmation_token=confirmation_token
@@ -6453,10 +6465,9 @@ def git_merge_abort(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        repo_manager = ActivatedRepoManager()
-        repo_path = repo_manager.get_activated_repo_path(
-            username=user.username, user_alias=repository_alias
-        )
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         result = git_operations_service.git_merge_abort(Path(repo_path))
         return _mcp_response(result)
@@ -6503,10 +6514,9 @@ def git_checkout_file(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        repo_manager = ActivatedRepoManager()
-        repo_path = repo_manager.get_activated_repo_path(
-            username=user.username, user_alias=repository_alias
-        )
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         result = git_operations_service.git_checkout_file(Path(repo_path), file_path)
         return _mcp_response(result)
@@ -6547,10 +6557,9 @@ def git_branch_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        repo_manager = ActivatedRepoManager()
-        repo_path = repo_manager.get_activated_repo_path(
-            username=user.username, user_alias=repository_alias
-        )
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         result = git_operations_service.git_branch_list(Path(repo_path))
         result["success"] = True
@@ -6598,10 +6607,9 @@ def git_branch_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        repo_manager = ActivatedRepoManager()
-        repo_path = repo_manager.get_activated_repo_path(
-            username=user.username, user_alias=repository_alias
-        )
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         result = git_operations_service.git_branch_create(Path(repo_path), branch_name)
         # Map created_branch to branch_name for consistent API
@@ -6651,10 +6659,9 @@ def git_branch_switch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        repo_manager = ActivatedRepoManager()
-        repo_path = repo_manager.get_activated_repo_path(
-            username=user.username, user_alias=repository_alias
-        )
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         result = git_operations_service.git_branch_switch(Path(repo_path), branch_name)
         # Map current_branch to branch_name for consistent API
@@ -6706,10 +6713,9 @@ def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     confirmation_token = args.get("confirmation_token")
 
     try:
-        repo_manager = ActivatedRepoManager()
-        repo_path = repo_manager.get_activated_repo_path(
-            username=user.username, user_alias=repository_alias
-        )
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         result = git_operations_service.git_branch_delete(
             Path(repo_path), branch_name, confirmation_token=confirmation_token
@@ -6796,10 +6802,9 @@ def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        repo_manager = ActivatedRepoManager()
-        repo_path = repo_manager.get_activated_repo_path(
-            username=user.username, user_alias=repository_alias
-        )
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         # Story #686: Extract pagination parameters
         file_paths = args.get("file_paths")
@@ -6851,10 +6856,9 @@ def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        repo_manager = ActivatedRepoManager()
-        repo_path = repo_manager.get_activated_repo_path(
-            username=user.username, user_alias=repository_alias
-        )
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
 
         # Story #686: Updated default limit to 50, added offset parameter
         limit = _coerce_int(args.get("limit"), 50)
