@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.35] - 2026-02-19
+
+### Added
+
+- Index-source-first refresh pipeline (Story #229): FTS/temporal/SCIP indexes built on golden repo source before CoW clone, eliminating duplicate indexing
+- File-based named write locks via WriteLockManager (Story #230): atomic lock creation with owner identity, PID staleness detection, TTL expiry
+- MCP enter_write_mode/exit_write_mode tools (Story #231): write mode redirects read_alias to source for immediate visibility, CRUD gating requires active write mode, synchronous refresh on exit
+- Lock-leak protection via try/finally in write mode handlers
+
+### Changed
+
+- RefreshScheduler split into _index_source() and _create_snapshot() phases for index-source-first ordering
+- WriteLockManager extracted from RefreshScheduler as standalone module with file-based persistence
+- DependencyMapService and LangfuseTraceSyncService pass owner identity to write lock facade
+- AliasManager.read_alias() checks .write_mode marker before normal alias resolution
+- FileCRUDService enforces write-mode gating for write-exception repos
+
 ## [9.3.34] - 2026-02-19
 
 ### Added
