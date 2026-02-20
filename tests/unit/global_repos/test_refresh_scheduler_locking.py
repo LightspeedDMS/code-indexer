@@ -88,7 +88,10 @@ def test_concurrent_refreshes_different_repos_no_interference(
     with (
         patch.object(scheduler.registry, "get_global_repo") as mock_get_repo,
         patch.object(scheduler.alias_manager, "read_alias") as mock_read_alias,
-        patch.object(scheduler, "_create_new_index") as mock_create_index,
+        patch.object(scheduler, "_index_source") as mock_index_source,
+        patch.object(scheduler, "_create_snapshot") as mock_create_snapshot,
+        patch.object(scheduler, "_detect_existing_indexes", return_value={}),
+        patch.object(scheduler, "_reconcile_registry_with_filesystem"),
         patch.object(scheduler.alias_manager, "swap_alias"),
         patch.object(scheduler.cleanup_manager, "schedule_cleanup"),
         patch.object(scheduler.registry, "update_refresh_timestamp"),
@@ -111,15 +114,17 @@ def test_concurrent_refreshes_different_repos_no_interference(
         # Track when each refresh starts and completes
         refresh_events = {"repo1": [], "repo2": []}
 
-        def slow_create_index(alias_name, source_path):
-            """Simulate slow index creation to test concurrency."""
+        def slow_index_source(alias_name, source_path):
+            """Simulate slow indexing to test concurrency."""
             repo_key = "repo1" if "repo1" in alias_name else "repo2"
             refresh_events[repo_key].append(("start", time.time()))
             time.sleep(0.1)  # Simulate work
             refresh_events[repo_key].append(("end", time.time()))
-            return f"/path/to/new/index/{repo_key}"
 
-        mock_create_index.side_effect = slow_create_index
+        mock_index_source.side_effect = slow_index_source
+        mock_create_snapshot.side_effect = lambda alias_name, source_path: (
+            f"/path/to/new/index/{'repo1' if 'repo1' in alias_name else 'repo2'}"
+        )
 
         # Run two concurrent refreshes
         thread1 = threading.Thread(
@@ -171,7 +176,10 @@ def test_concurrent_refreshes_same_repo_serialized(scheduler, mock_git_pull_upda
     with (
         patch.object(scheduler.registry, "get_global_repo") as mock_get_repo,
         patch.object(scheduler.alias_manager, "read_alias") as mock_read_alias,
-        patch.object(scheduler, "_create_new_index") as mock_create_index,
+        patch.object(scheduler, "_index_source") as mock_index_source,
+        patch.object(scheduler, "_create_snapshot") as mock_create_snapshot,
+        patch.object(scheduler, "_detect_existing_indexes", return_value={}),
+        patch.object(scheduler, "_reconcile_registry_with_filesystem"),
         patch.object(scheduler.alias_manager, "swap_alias"),
         patch.object(scheduler.cleanup_manager, "schedule_cleanup"),
         patch.object(scheduler.registry, "update_refresh_timestamp"),
@@ -191,16 +199,18 @@ def test_concurrent_refreshes_same_repo_serialized(scheduler, mock_git_pull_upda
         refresh_order = []
         lock = threading.Lock()
 
-        def slow_create_index(alias_name, source_path):
-            """Simulate slow index creation to test serialization."""
+        def slow_index_source(alias_name, source_path):
+            """Simulate slow indexing to test serialization."""
             with lock:
                 refresh_order.append(("start", threading.current_thread().name))
             time.sleep(0.1)  # Simulate work
             with lock:
                 refresh_order.append(("end", threading.current_thread().name))
-            return f"/path/to/new/index/{threading.current_thread().name}"
 
-        mock_create_index.side_effect = slow_create_index
+        mock_index_source.side_effect = slow_index_source
+        mock_create_snapshot.side_effect = lambda alias_name, source_path: (
+            f"/path/to/new/index/{threading.current_thread().name}"
+        )
 
         # Run two concurrent refresh attempts on same repo
         thread1 = threading.Thread(
@@ -258,7 +268,9 @@ def test_refresh_lock_released_on_exception(scheduler, mock_git_pull_updater):
     with (
         patch.object(scheduler.registry, "get_global_repo") as mock_get_repo,
         patch.object(scheduler.alias_manager, "read_alias") as mock_read_alias,
-        patch.object(scheduler, "_create_new_index") as mock_create_index,
+        patch.object(scheduler, "_index_source") as mock_index_source,
+        patch.object(scheduler, "_detect_existing_indexes", return_value={}),
+        patch.object(scheduler, "_reconcile_registry_with_filesystem"),
         patch(
             "code_indexer.global_repos.refresh_scheduler.GitPullUpdater"
         ) as mock_updater_class,
@@ -274,13 +286,12 @@ def test_refresh_lock_released_on_exception(scheduler, mock_git_pull_updater):
         # First call raises exception, second succeeds
         call_count = [0]
 
-        def create_index_with_exception(alias_name, source_path):
+        def index_source_with_exception(alias_name, source_path):
             call_count[0] += 1
             if call_count[0] == 1:
                 raise RuntimeError("Index creation failed")
-            return "/path/to/new/index"
 
-        mock_create_index.side_effect = create_index_with_exception
+        mock_index_source.side_effect = index_source_with_exception
 
         # First refresh should fail and raise exception (Bug #84 fix)
         with pytest.raises(RuntimeError, match="Refresh failed"):
@@ -291,6 +302,7 @@ def test_refresh_lock_released_on_exception(scheduler, mock_git_pull_updater):
 
         # Second refresh should succeed (lock was released)
         with (
+            patch.object(scheduler, "_create_snapshot", return_value="/path/to/new/index"),
             patch.object(scheduler.alias_manager, "swap_alias"),
             patch.object(scheduler.cleanup_manager, "schedule_cleanup"),
             patch.object(scheduler.registry, "update_refresh_timestamp"),
@@ -374,7 +386,10 @@ def test_refresh_lock_prevents_duplicate_refresh(scheduler, mock_git_pull_update
     with (
         patch.object(scheduler.registry, "get_global_repo") as mock_get_repo,
         patch.object(scheduler.alias_manager, "read_alias") as mock_read_alias,
-        patch.object(scheduler, "_create_new_index") as mock_create_index,
+        patch.object(scheduler, "_index_source") as mock_index_source,
+        patch.object(scheduler, "_create_snapshot") as mock_create_snapshot,
+        patch.object(scheduler, "_detect_existing_indexes", return_value={}),
+        patch.object(scheduler, "_reconcile_registry_with_filesystem"),
         patch.object(scheduler.alias_manager, "swap_alias"),
         patch.object(scheduler.cleanup_manager, "schedule_cleanup"),
         patch.object(scheduler.registry, "update_refresh_timestamp"),
@@ -390,15 +405,15 @@ def test_refresh_lock_prevents_duplicate_refresh(scheduler, mock_git_pull_update
         mock_read_alias.return_value = "/path/to/current/index"
         mock_updater_class.return_value = mock_git_pull_updater()
 
-        # Track number of index creations
+        # Track number of index_source calls (represents one indexing cycle)
         create_count = [0]
 
-        def track_create_index(alias_name, source_path):
+        def track_index_source(alias_name, source_path):
             create_count[0] += 1
             time.sleep(0.1)  # Simulate work
-            return "/path/to/new/index"
 
-        mock_create_index.side_effect = track_create_index
+        mock_index_source.side_effect = track_index_source
+        mock_create_snapshot.return_value = "/path/to/new/index"
 
         # Run three concurrent refresh attempts
         threads = [

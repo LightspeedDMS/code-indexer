@@ -159,6 +159,18 @@ def _get_query_tracker():
     return getattr(app_module.app.state, "query_tracker", None)
 
 
+def _get_app_refresh_scheduler():
+    """Get RefreshScheduler from app.state via global_lifecycle_manager (Story #231).
+
+    Returns:
+        RefreshScheduler instance if configured, None otherwise.
+    """
+    lifecycle_manager = getattr(app_module.app.state, "global_lifecycle_manager", None)
+    if lifecycle_manager is None:
+        return None
+    return getattr(lifecycle_manager, "refresh_scheduler", None)
+
+
 def _get_scip_query_service():
     """Get SCIPQueryService instance for SCIP handlers.
 
@@ -3567,6 +3579,166 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
+# ---------------------------------------------------------------------------
+# Write-mode helpers (Story #231)
+# ---------------------------------------------------------------------------
+
+
+def _write_mode_strip_global(repo_alias: str) -> str:
+    """Return alias without trailing '-global' suffix."""
+    return repo_alias[: -len("-global")] if repo_alias.endswith("-global") else repo_alias
+
+
+def _write_mode_acquire_lock(refresh_scheduler: Any, alias: str) -> Tuple[bool, str]:
+    """Acquire write lock; return (acquired, owner_if_held)."""
+    acquired = refresh_scheduler.acquire_write_lock(alias, owner_name="mcp_write_mode")
+    if acquired:
+        return True, ""
+    wlm = getattr(refresh_scheduler, "write_lock_manager", None)
+    owner = "unknown"
+    if wlm is not None:
+        info = wlm.get_lock_info(alias)
+        if info:
+            owner = info.get("owner", "unknown")
+    return False, owner
+
+
+def _write_mode_create_marker(golden_repos_dir: Path, alias: str, source_path: str) -> None:
+    """Create the .write_mode/{alias}.json marker file."""
+    import json as _json
+    from datetime import datetime, timezone
+
+    write_mode_dir = golden_repos_dir / ".write_mode"
+    write_mode_dir.mkdir(parents=True, exist_ok=True)
+    marker_file = write_mode_dir / f"{alias}.json"
+    marker_file.write_text(
+        _json.dumps(
+            {
+                "alias": alias,
+                "source_path": source_path,
+                "entered_at": datetime.now(timezone.utc).isoformat(),
+            },
+            indent=2,
+        )
+    )
+
+
+def handle_enter_write_mode(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Enter write mode for a write-exception repo (Story #231 C1).
+
+    No-op for non-write-exception repos. For write-exception repos: acquires
+    write lock, creates marker file, returns source path.
+    """
+    try:
+        repo_alias = params.get("repo_alias")
+        if not repo_alias:
+            return _mcp_response(
+                {"success": False, "error": "Missing required parameter: repo_alias"}
+            )
+        from code_indexer.server.services.file_crud_service import file_crud_service
+
+        if not file_crud_service.is_write_exception(repo_alias):
+            return _mcp_response(
+                {"success": True, "message": f"no-op: '{repo_alias}' is not a write-exception repo"}
+            )
+
+        alias = _write_mode_strip_global(repo_alias)
+        refresh_scheduler = _get_app_refresh_scheduler()
+        if refresh_scheduler is None:
+            return _mcp_response({"success": False, "error": "RefreshScheduler not available"})
+
+        acquired, owner = _write_mode_acquire_lock(refresh_scheduler, alias)
+        if not acquired:
+            return _mcp_response(
+                {"success": False, "message": f"Write lock for '{alias}' is already held by '{owner}'"}
+            )
+
+        try:
+            source_path = file_crud_service.get_write_exception_path(repo_alias)
+            golden_repos_dir = Path(_get_golden_repos_dir())
+            _write_mode_create_marker(golden_repos_dir, alias, str(source_path))
+        except Exception:
+            refresh_scheduler.release_write_lock(alias, owner_name="mcp_write_mode")
+            raise
+        logger.info(f"enter_write_mode: write mode active for '{repo_alias}', source={source_path}")
+        return _mcp_response({"success": True, "alias": repo_alias, "source_path": str(source_path)})
+    except Exception as e:
+        logger.exception(f"Unexpected error in handle_enter_write_mode: {e}",
+                         extra={"correlation_id": get_correlation_id()})
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+def _write_mode_run_refresh(
+    refresh_scheduler: Any, repo_alias: str, golden_repos_dir: Path, alias: str
+) -> None:
+    """Run synchronous refresh, delete marker, release lock.
+
+    The write lock and marker are released BEFORE calling _execute_refresh so
+    that _execute_refresh does not see the lock as held and skip the refresh.
+    (_execute_refresh checks is_write_locked() and skips for local repos when
+    the lock is held — Story #227 guard for external writers.)
+
+    The exception from _execute_refresh is re-raised so the caller can return
+    an appropriate error response.
+    """
+    # Release marker and lock FIRST so _execute_refresh sees no lock
+    marker_file = golden_repos_dir / ".write_mode" / f"{alias}.json"
+    try:
+        marker_file.unlink()
+    except FileNotFoundError:
+        pass
+    refresh_scheduler.release_write_lock(alias, owner_name="mcp_write_mode")
+
+    # Now run the refresh — lock is clear, refresh will proceed
+    refresh_scheduler._execute_refresh(repo_alias)
+
+
+def handle_exit_write_mode(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Exit write mode for a write-exception repo (Story #231 C2).
+
+    No-op for non-write-exception repos. For write-exception repos: triggers
+    synchronous refresh, removes marker, releases lock.
+    """
+    try:
+        repo_alias = params.get("repo_alias")
+        if not repo_alias:
+            return _mcp_response(
+                {"success": False, "error": "Missing required parameter: repo_alias"}
+            )
+        from code_indexer.server.services.file_crud_service import file_crud_service
+
+        if not file_crud_service.is_write_exception(repo_alias):
+            return _mcp_response(
+                {"success": True, "message": f"no-op: '{repo_alias}' is not a write-exception repo"}
+            )
+
+        alias = _write_mode_strip_global(repo_alias)
+        golden_repos_dir = Path(_get_golden_repos_dir())
+        marker_file = golden_repos_dir / ".write_mode" / f"{alias}.json"
+
+        if not marker_file.exists():
+            logger.warning(f"exit_write_mode: no marker for '{repo_alias}' — not in write mode")
+            return _mcp_response(
+                {"success": True, "warning": f"Write mode was not active for '{repo_alias}'",
+                 "message": "not in write mode — nothing to exit"}
+            )
+
+        refresh_scheduler = _get_app_refresh_scheduler()
+        if refresh_scheduler is None:
+            return _mcp_response({"success": False, "error": "RefreshScheduler not available"})
+
+        logger.info(f"exit_write_mode: triggering synchronous refresh for '{repo_alias}'")
+        _write_mode_run_refresh(refresh_scheduler, repo_alias, golden_repos_dir, alias)
+        logger.info(f"exit_write_mode: write mode exited for '{repo_alias}', refresh complete")
+        return _mcp_response(
+            {"success": True, "message": f"Refresh complete, write mode exited for '{repo_alias}'"}
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error in handle_exit_write_mode: {e}",
+                         extra={"correlation_id": get_correlation_id()})
+        return _mcp_response({"success": False, "error": str(e)})
+
+
 # Handler registry mapping tool names to handler functions
 # Type: Dict[str, Any] because handlers have varying signatures (2-param vs 3-param)
 HANDLER_REGISTRY: Dict[str, Any] = {
@@ -3604,6 +3776,8 @@ HANDLER_REGISTRY: Dict[str, Any] = {
     "create_file": handle_create_file,
     "edit_file": handle_edit_file,
     "delete_file": handle_delete_file,
+    "enter_write_mode": handle_enter_write_mode,
+    "exit_write_mode": handle_exit_write_mode,
 }
 
 

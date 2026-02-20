@@ -102,56 +102,23 @@ class TestRefreshSchedulerFtsCleanup:
         source_repo_with_tantivy,
     ):
         """
-        BUG-1: tantivy_index/ must be deleted after CoW clone, before cidx index.
+        Story #229: tantivy_index is PRESERVED in the CoW clone, NOT deleted.
 
-        The CoW clone copies the entire source directory including
-        .code-indexer/tantivy_index/. This directory must be deleted before
-        cidx index --fts runs so that a fresh FTS index is created with no
-        inherited ghost entries.
+        The new workflow builds FTS on the source first (_index_source), then the
+        CoW clone inherits the correct tantivy_index via reflink copy.  There is
+        no ghost-vector problem because the FTS is built on the same content that
+        will be cloned, so inherited entries are always accurate.
+
+        This test (previously BUG-1) is now inverted: it verifies that
+        tantivy_index IS present in the versioned snapshot after _create_new_index,
+        confirming it was inherited from the source and not deleted.
 
         Approach:
-        - Create source repo with .code-indexer/tantivy_index/ containing dummy files
-        - Mock subprocess.run so CoW clone actually copies via Python (shutil) to
-          simulate the clone, while cidx commands are mocked to do nothing
-        - Verify the tantivy_index directory is absent when cidx index --fts runs
+        - Source repo has .code-indexer/tantivy_index/ (pre-indexed FTS)
+        - _index_source runs cidx index --fts on source (mocked: no-op)
+        - _create_snapshot CoW-clones source → versioned path (shutil.copytree)
+        - Verify tantivy_index exists in the versioned path
         """
-        # Track the state of tantivy_index at the moment cidx index --fts is called
-        tantivy_state_at_cidx_index = []
-
-        def mock_subprocess_run(cmd, **kwargs):
-            """
-            Mock subprocess.run:
-            - cp --reflink=auto -a: actually copy with shutil to simulate CoW clone
-            - git update-index: no-op
-            - git restore: no-op
-            - cidx fix-config: no-op, creates .code-indexer/index dir
-            - cidx index: record tantivy state at this moment, then no-op
-            - cidx scip: no-op
-            """
-            mock_result = MagicMock()
-            mock_result.returncode = 0
-            mock_result.stdout = ""
-            mock_result.stderr = ""
-
-            if cmd[0] == "cp":
-                # Simulate CoW clone: actually copy the directory
-                src = cmd[-2]
-                dst = cmd[-1]
-                shutil.copytree(src, dst)
-            elif cmd[:2] == ["cidx", "index"] and "--fts" in cmd:
-                # Record whether tantivy_index exists at this exact moment
-                cwd = Path(kwargs.get("cwd", "."))
-                tantivy_path = cwd / ".code-indexer" / "tantivy_index"
-                tantivy_state_at_cidx_index.append(tantivy_path.exists())
-                # Also create the index dir so Step 6 validation passes
-                index_dir = cwd / ".code-indexer" / "index"
-                index_dir.mkdir(parents=True, exist_ok=True)
-            elif cmd[:2] == ["cidx", "fix-config"]:
-                # No-op for fix-config
-                pass
-
-            return mock_result
-
         # Register a dummy repo so registry.get_global_repo() returns something
         scheduler.registry.register_global_repo(
             "test-repo",
@@ -160,25 +127,38 @@ class TestRefreshSchedulerFtsCleanup:
             str(source_repo_with_tantivy),
         )
 
+        def mock_subprocess_run(cmd, **kwargs):
+            """
+            Mock subprocess.run:
+            - cidx index --fts: no-op (FTS built on source — mocked away)
+            - cp --reflink=auto: CoW clone via shutil.copytree; also creates index dir
+            - git / cidx fix-config: no-op
+            """
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.stdout = ""
+            mock_result.stderr = ""
+
+            if cmd[0] == "cp":
+                dst = cmd[-1]
+                shutil.copytree(cmd[-2], dst)
+                # Simulate source was already indexed: index dir must exist
+                (Path(dst) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+
+            return mock_result
+
         with patch("subprocess.run", side_effect=mock_subprocess_run):
             result_path = scheduler._create_new_index(
                 alias_name="test-repo-global",
                 source_path=str(source_repo_with_tantivy),
             )
 
-        # cidx index --fts must have been called at least once
-        assert len(tantivy_state_at_cidx_index) >= 1, (
-            "cidx index --fts was never called. "
-            "_create_new_index() must run 'cidx index --fts'."
-        )
-
-        # At the moment cidx index --fts was called, tantivy_index must NOT exist
-        assert tantivy_state_at_cidx_index[0] is False, (
-            "BUG-1: tantivy_index/ still exists when 'cidx index --fts' runs. "
-            "The inherited FTS index from the CoW clone must be deleted before "
-            "cidx index --fts to prevent ghost vectors in search results. "
-            "Add shutil.rmtree() for .code-indexer/tantivy_index/ between "
-            "the CoW clone and cidx fix-config steps in _create_new_index()."
+        # Story #229: tantivy_index must be PRESENT in the versioned snapshot
+        versioned_tantivy = Path(result_path) / ".code-indexer" / "tantivy_index"
+        assert versioned_tantivy.exists(), (
+            "Story #229: tantivy_index must be preserved in the CoW clone. "
+            "FTS is built on the source first (_index_source), then the clone "
+            "inherits it directly — no deletion needed or wanted."
         )
 
     def test_tantivy_cleanup_only_when_dir_exists(
@@ -258,11 +238,16 @@ class TestRefreshSchedulerFtsCleanup:
         source_repo_with_tantivy,
     ):
         """
-        BUG-1 ordering: tantivy cleanup must happen before cidx fix-config.
+        Story #229: tantivy_index is PRESERVED through the entire _create_snapshot workflow.
 
-        The fix must be placed between the CoW clone (Step 2) and
-        cidx fix-config --force (Step 4), not after fix-config.
-        This test verifies the deletion order by tracking call sequence.
+        Previously (BUG-1 fix) tantivy was deleted before fix-config. With Story #229,
+        FTS is built on the source by _index_source() first, so the CoW clone inherits
+        a correct, fresh tantivy_index. No deletion is needed or performed.
+
+        This test now verifies:
+        - CoW clone happens
+        - cidx fix-config runs with tantivy_index PRESENT (inherited correctly)
+        - tantivy_index is not deleted at any point in _create_snapshot
         """
         call_sequence = []
 
@@ -273,25 +258,18 @@ class TestRefreshSchedulerFtsCleanup:
             mock_result.stderr = ""
 
             if cmd[0] == "cp":
-                src = cmd[-2]
                 dst = cmd[-1]
-                shutil.copytree(src, dst)
+                shutil.copytree(cmd[-2], dst)
+                # Simulate source was already indexed: index dir must exist in clone
+                (Path(dst) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
                 call_sequence.append("cow_clone")
             elif cmd[:2] == ["cidx", "fix-config"]:
-                # Record tantivy state at fix-config time
+                # Record tantivy state at fix-config time — must be PRESENT
                 cwd = Path(kwargs.get("cwd", "."))
                 tantivy_path = cwd / ".code-indexer" / "tantivy_index"
                 call_sequence.append(
                     f"fix-config:tantivy_exists={tantivy_path.exists()}"
                 )
-            elif cmd[:2] == ["cidx", "index"] and "--fts" in cmd:
-                cwd = Path(kwargs.get("cwd", "."))
-                tantivy_path = cwd / ".code-indexer" / "tantivy_index"
-                call_sequence.append(
-                    f"cidx-index-fts:tantivy_exists={tantivy_path.exists()}"
-                )
-                index_dir = cwd / ".code-indexer" / "index"
-                index_dir.mkdir(parents=True, exist_ok=True)
 
             return mock_result
 
@@ -314,28 +292,16 @@ class TestRefreshSchedulerFtsCleanup:
             "CoW clone step was not recorded in call sequence."
         )
 
-        # Verify fix-config happened with tantivy already deleted
+        # Verify fix-config happened with tantivy PRESENT (Story #229: no deletion)
         fix_config_entries = [
             e for e in call_sequence if e.startswith("fix-config:")
         ]
         assert len(fix_config_entries) >= 1, (
             "cidx fix-config was not called."
         )
-        assert fix_config_entries[0] == "fix-config:tantivy_exists=False", (
-            "BUG-1 ordering: tantivy_index must be deleted BEFORE cidx fix-config runs. "
+        assert fix_config_entries[0] == "fix-config:tantivy_exists=True", (
+            "Story #229: tantivy_index must be PRESENT when cidx fix-config runs. "
             f"Got: {fix_config_entries[0]}. "
-            "The deletion must happen immediately after CoW clone (Step 2b), "
-            "not after fix-config."
-        )
-
-        # Verify cidx index --fts happened with tantivy deleted
-        cidx_entries = [
-            e for e in call_sequence if e.startswith("cidx-index-fts:")
-        ]
-        assert len(cidx_entries) >= 1, (
-            "cidx index --fts was not called."
-        )
-        assert cidx_entries[0] == "cidx-index-fts:tantivy_exists=False", (
-            "BUG-1: tantivy_index must not exist when cidx index --fts runs. "
-            f"Got: {cidx_entries[0]}."
+            "FTS is built on source before the CoW clone and inherited correctly — "
+            "no deletion should occur between CoW clone and fix-config."
         )

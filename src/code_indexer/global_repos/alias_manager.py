@@ -86,12 +86,48 @@ class AliasManager:
         """
         Read the target path from an alias.
 
+        Write-mode redirection (Story #231):
+        If the alias ends with '-global' and a write-mode marker file exists at
+        golden_repos_dir/.write_mode/{alias_without_global}.json with a valid
+        'source_path' field, that source_path is returned instead of the
+        versioned snapshot path.  This allows reads during an active write
+        session to see the live source directory.  If the marker is corrupt or
+        lacks 'source_path', normal resolution proceeds.
+
         Args:
             alias_name: Name of the alias
 
         Returns:
             Target path or None if alias doesn't exist
         """
+        # Story #231: Check write-mode marker for -global aliases before normal resolution
+        if alias_name.endswith("-global"):
+            alias_without_global = alias_name[: -len("-global")]
+            golden_repos_dir = self.aliases_dir.parent
+            write_mode_marker = (
+                golden_repos_dir / ".write_mode" / f"{alias_without_global}.json"
+            )
+            if write_mode_marker.exists():
+                try:
+                    marker_data = json.loads(write_mode_marker.read_text())
+                    source_path: Optional[str] = marker_data.get("source_path")
+                    if source_path:
+                        logger.debug(
+                            f"Write-mode active for {alias_name}: "
+                            f"redirecting reads to source {source_path}"
+                        )
+                        return source_path
+                    # source_path missing — fall through to normal resolution
+                    logger.warning(
+                        f"Write-mode marker for {alias_name} has no source_path, "
+                        "falling back to normal alias resolution"
+                    )
+                except (json.JSONDecodeError, IOError, OSError) as e:
+                    logger.warning(
+                        f"Corrupt write-mode marker for {alias_name}: {e}, "
+                        "falling back to normal alias resolution"
+                    )
+
         alias_file = self.aliases_dir / f"{alias_name}.json"
 
         if not alias_file.exists():

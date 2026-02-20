@@ -106,7 +106,9 @@ class TestDependencyMapServiceWriteLock:
             except Exception:
                 pass
 
-        mock_scheduler.acquire_write_lock.assert_called_with("cidx-meta")
+        mock_scheduler.acquire_write_lock.assert_called_with(
+            "cidx-meta", owner_name="dependency_map_service"
+        )
 
     def test_run_full_analysis_releases_write_lock_after_completion(self):
         """run_full_analysis() releases write lock on 'cidx-meta' in the finally block."""
@@ -126,7 +128,9 @@ class TestDependencyMapServiceWriteLock:
             except Exception:
                 pass
 
-        mock_scheduler.release_write_lock.assert_called_with("cidx-meta")
+        mock_scheduler.release_write_lock.assert_called_with(
+            "cidx-meta", owner_name="dependency_map_service"
+        )
 
     def test_run_full_analysis_calls_trigger_refresh_after_release(self):
         """AC2: After write lock release, trigger_refresh_for_repo('cidx-meta-global') is called."""
@@ -161,7 +165,9 @@ class TestDependencyMapServiceWriteLock:
             with pytest.raises(RuntimeError):
                 service.run_full_analysis()
 
-        mock_scheduler.release_write_lock.assert_called_with("cidx-meta")
+        mock_scheduler.release_write_lock.assert_called_with(
+            "cidx-meta", owner_name="dependency_map_service"
+        )
         mock_scheduler.trigger_refresh_for_repo.assert_not_called()
 
     def test_run_delta_analysis_acquires_write_lock(self):
@@ -182,7 +188,9 @@ class TestDependencyMapServiceWriteLock:
             except Exception:
                 pass
 
-        mock_scheduler.acquire_write_lock.assert_called_with("cidx-meta")
+        mock_scheduler.acquire_write_lock.assert_called_with(
+            "cidx-meta", owner_name="dependency_map_service"
+        )
 
     def test_run_delta_analysis_releases_write_lock(self):
         """run_delta_analysis() releases write lock on 'cidx-meta' in the finally block."""
@@ -202,7 +210,9 @@ class TestDependencyMapServiceWriteLock:
             except Exception:
                 pass
 
-        mock_scheduler.release_write_lock.assert_called_with("cidx-meta")
+        mock_scheduler.release_write_lock.assert_called_with(
+            "cidx-meta", owner_name="dependency_map_service"
+        )
 
     def test_run_delta_analysis_calls_trigger_refresh(self):
         """run_delta_analysis() calls trigger_refresh_for_repo('cidx-meta-global') after release."""

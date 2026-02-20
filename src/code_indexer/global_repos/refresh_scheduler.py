@@ -87,12 +87,11 @@ class RefreshScheduler:
         self._repo_locks: dict[str, threading.Lock] = {}
         self._repo_locks_lock = threading.Lock()  # Protects _repo_locks dict
 
-        # Write-lock registry for external writers (Story #227).
-        # Separate from _repo_locks: these coordinate between external writers
-        # (DependencyMapService, LangfuseTraceSyncService) and the snapshotter.
+        # File-based write-lock manager for external writers (Story #230).
+        # Replaces the in-memory threading.Lock registry from Story #227.
         # Keyed by repo alias without -global suffix (e.g., "cidx-meta").
-        self._write_locks: dict[str, threading.Lock] = {}
-        self._write_locks_guard = threading.Lock()  # Protects _write_locks dict creation
+        from .write_lock_manager import WriteLockManager
+        self.write_lock_manager = WriteLockManager(golden_repos_dir=self.golden_repos_dir)
 
     def _get_repo_lock(self, alias_name: str) -> threading.Lock:
         """
@@ -112,51 +111,51 @@ class RefreshScheduler:
             return self._repo_locks[alias_name]
 
     # ------------------------------------------------------------------
-    # Write-lock registry (Story #227)
+    # Write-lock registry (Story #227, delegating to WriteLockManager Story #230)
     # ------------------------------------------------------------------
 
-    def _get_or_create_write_lock(self, alias: str) -> threading.Lock:
-        """Get or create a write lock for a repo alias (thread-safe)."""
-        with self._write_locks_guard:
-            if alias not in self._write_locks:
-                self._write_locks[alias] = threading.Lock()
-            return self._write_locks[alias]
-
-    def acquire_write_lock(self, alias: str) -> bool:
+    def acquire_write_lock(self, alias: str, owner_name: str = "refresh_scheduler") -> bool:
         """
         Non-blocking acquire of the write lock for a repo alias.
 
+        Delegates to WriteLockManager which uses file-based locks with owner
+        identity, PID-based staleness detection, and TTL expiry (Story #230).
+
         Args:
             alias: Repo alias without -global suffix (e.g., "cidx-meta")
+            owner_name: Human-readable caller identity recorded in the lock file.
+                        Defaults to "refresh_scheduler" for internal scheduler use.
+                        Pass the actual service name when calling from other services
+                        (e.g., "dependency_map_service", "langfuse_trace_sync").
 
         Returns:
             True if lock was acquired, False if already held
         """
-        lock = self._get_or_create_write_lock(alias)
-        return lock.acquire(blocking=False)
+        return self.write_lock_manager.acquire(alias, owner_name=owner_name)
 
-    def release_write_lock(self, alias: str) -> None:
+    def release_write_lock(self, alias: str, owner_name: str = "refresh_scheduler") -> None:
         """
         Release the write lock for a repo alias.
 
+        Delegates to WriteLockManager (Story #230).
+
         Args:
             alias: Repo alias without -global suffix (e.g., "cidx-meta")
+            owner_name: Must match the owner name used when acquiring the lock.
+                        Defaults to "refresh_scheduler".
         """
-        lock = self._write_locks.get(alias)
-        if lock is not None:
-            try:
-                lock.release()
-            except RuntimeError:
-                logger.warning(
-                    f"Attempted to release unheld write lock for '{alias}'"
-                )
+        result = self.write_lock_manager.release(alias, owner_name=owner_name)
+        if not result:
+            logger.warning(
+                f"Attempted to release write lock for '{alias}' but owner mismatch"
+            )
 
     def is_write_locked(self, alias: str) -> bool:
         """
         Check whether the write lock for a repo alias is currently held.
 
-        Uses a non-blocking acquire probe: if we can acquire it, it was free
-        (release immediately and return False); if we cannot, it is held (True).
+        Delegates to WriteLockManager which checks file existence and staleness
+        (Story #230).
 
         Args:
             alias: Repo alias without -global suffix (e.g., "cidx-meta")
@@ -164,16 +163,9 @@ class RefreshScheduler:
         Returns:
             True if write lock is held, False otherwise
         """
-        lock = self._write_locks.get(alias)
-        if lock is None:
-            return False
-        acquired = lock.acquire(blocking=False)
-        if acquired:
-            lock.release()
-            return False
-        return True
+        return self.write_lock_manager.is_locked(alias)
 
-    def write_lock(self, alias: str):
+    def write_lock(self, alias: str, owner_name: str = "refresh_scheduler"):
         """
         Context manager that acquires the write lock on entry and releases on exit.
 
@@ -183,20 +175,26 @@ class RefreshScheduler:
                 # write files here
                 ...
 
+            # With explicit caller identity (for non-scheduler callers):
+            with scheduler.write_lock("cidx-meta", owner_name="dependency_map_service"):
+                ...
+
         Args:
             alias: Repo alias without -global suffix (e.g., "cidx-meta")
+            owner_name: Human-readable caller identity recorded in the lock file.
+                        Defaults to "refresh_scheduler".
         """
         from contextlib import contextmanager
 
         @contextmanager
         def _ctx():
-            acquired = self.acquire_write_lock(alias)
+            acquired = self.acquire_write_lock(alias, owner_name=owner_name)
             if not acquired:
                 raise RuntimeError(f"Write lock for '{alias}' is already held")
             try:
                 yield
             finally:
-                self.release_write_lock(alias)
+                self.release_write_lock(alias, owner_name=owner_name)
 
         return _ctx()
 
@@ -471,8 +469,9 @@ class RefreshScheduler:
                     updater.update()
                     source_path = updater.get_source_path()
 
-                # Create new versioned index
-                new_index_path = self._create_new_index(
+                # Index source first, then create versioned snapshot (Story #229)
+                self._index_source(alias_name=alias_name, source_path=source_path)
+                new_index_path = self._create_snapshot(
                     alias_name=alias_name, source_path=source_path
                 )
 
@@ -512,25 +511,195 @@ class RefreshScheduler:
                 # BackgroundJobManager marks jobs as FAILED only when exceptions are raised
                 raise RuntimeError(f"Refresh failed for {alias_name}: {type(e).__name__}: {e}")
 
-    def _create_new_index(self, alias_name: str, source_path: str) -> str:
+    def _index_source(self, alias_name: str, source_path: str) -> None:
         """
-        Create a new versioned index directory with CoW clone and indexing.
+        Index the golden repo source in place (Story #229: index-source-first).
 
-        Complete workflow:
-        1. Create .versioned/{repo_name}/v_{timestamp}/ directory structure
-        2. Perform CoW clone using cp --reflink=auto -a
-        3. Fix git status (git update-index --refresh, git restore .)
-        4. Run cidx fix-config --force
-        5. Run cidx index to create indexes
-        6. Validate index exists before returning
-        7. Return path only if validation passes
+        Runs all indexing (semantic+FTS, temporal, SCIP) directly on the source
+        repository, before any CoW clone is performed.  The versioned snapshot
+        created later by _create_snapshot() then inherits the indexes via reflink,
+        eliminating the disk cost of re-indexing an identical copy.
+
+        Ordering contract:
+        - Must be called BEFORE _create_snapshot().
+        - cidx fix-config is NOT called here (only called on the clone in _create_snapshot).
 
         Args:
             alias_name: Global alias name (e.g., "my-repo-global")
-            source_path: Path to source repository (golden repo)
+            source_path: Path to the golden repo source directory
+
+        Raises:
+            RuntimeError: If any indexing step fails or times out
+        """
+        cidx_index_timeout = 3600  # Default: 1 hour
+        if self.resource_config:
+            cidx_index_timeout = self.resource_config.cidx_index_timeout
+
+        # Step 1: Run cidx index for semantic + FTS (always required)
+        index_command = ["cidx", "index", "--fts"]
+        logger.info(
+            f"Running cidx index (semantic+FTS) on source for {alias_name}: {' '.join(index_command)}"
+        )
+        try:
+            subprocess.run(
+                index_command,
+                cwd=str(source_path),
+                capture_output=True,
+                text=True,
+                timeout=cidx_index_timeout,
+                check=True,
+            )
+            logger.info("cidx index (semantic+FTS) on source completed successfully")
+        except subprocess.CalledProcessError as e:
+            logger.error(
+                f"Indexing (semantic+FTS) on source failed for {alias_name}: {type(e).__name__}: {e.stderr}",
+                exc_info=True,
+            )
+            raise RuntimeError(
+                f"Indexing (semantic+FTS) on source failed for {alias_name}: {type(e).__name__}: {e.stderr}"
+            )
+        except subprocess.TimeoutExpired as e:
+            logger.error(
+                f"Indexing (semantic+FTS) on source timed out for {alias_name} "
+                f"after {cidx_index_timeout} seconds: {type(e).__name__}",
+                exc_info=True,
+            )
+            raise RuntimeError(
+                f"Indexing (semantic+FTS) on source timed out for {alias_name} "
+                f"after {cidx_index_timeout} seconds: {type(e).__name__}"
+            )
+
+        # Step 2: Temporal indexing on source (if enabled and not local://)
+        repo_info = self.registry.get_global_repo(alias_name)
+        enable_temporal = repo_info.get("enable_temporal", False) if repo_info else False
+        temporal_options = repo_info.get("temporal_options") if repo_info else None
+
+        repo_url = repo_info.get("repo_url", "") if repo_info else ""
+        is_local_repo = repo_url.startswith("local://") if repo_url else False
+
+        if enable_temporal and is_local_repo:
+            logger.warning(
+                f"Skipping temporal indexing for local repo {alias_name} "
+                f"(local:// repos have no git history, ignoring enable_temporal flag)"
+            )
+            enable_temporal = False
+
+        if enable_temporal:
+            temporal_command = ["cidx", "index", "--index-commits"]
+            logger.info(f"Temporal indexing enabled for {alias_name}")
+
+            if temporal_options:
+                if temporal_options.get("max_commits"):
+                    temporal_command.extend(
+                        ["--max-commits", str(temporal_options["max_commits"])]
+                    )
+                if temporal_options.get("since_date"):
+                    temporal_command.extend(
+                        ["--since-date", temporal_options["since_date"]]
+                    )
+                if temporal_options.get("diff_context"):
+                    temporal_command.extend(
+                        ["--diff-context", str(temporal_options["diff_context"])]
+                    )
+
+            logger.info(
+                f"Running cidx index (temporal) on source for {alias_name}: {' '.join(temporal_command)}"
+            )
+            try:
+                subprocess.run(
+                    temporal_command,
+                    cwd=str(source_path),
+                    capture_output=True,
+                    text=True,
+                    timeout=cidx_index_timeout,
+                    check=True,
+                )
+                logger.info("cidx index (temporal) on source completed successfully")
+            except subprocess.CalledProcessError as e:
+                logger.error(
+                    f"Temporal indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}",
+                    exc_info=True,
+                )
+                raise RuntimeError(
+                    f"Temporal indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}"
+                )
+            except subprocess.TimeoutExpired as e:
+                logger.error(
+                    f"Temporal indexing on source timed out for {alias_name} "
+                    f"after {cidx_index_timeout} seconds: {type(e).__name__}",
+                    exc_info=True,
+                )
+                raise RuntimeError(
+                    f"Temporal indexing on source timed out for {alias_name} "
+                    f"after {cidx_index_timeout} seconds: {type(e).__name__}"
+                )
+
+        # Step 3: SCIP indexing on source (if enabled)
+        enable_scip = repo_info.get("enable_scip", False) if repo_info else False
+
+        if enable_scip:
+            scip_timeout = 1800  # Default: 30 minutes
+            if self.resource_config:
+                scip_timeout = getattr(self.resource_config, "cidx_scip_generate_timeout", 1800)
+
+            scip_command = ["cidx", "scip", "generate"]
+            logger.info(f"SCIP indexing enabled for {alias_name}")
+            logger.info(
+                f"Running cidx scip generate on source for {alias_name}: {' '.join(scip_command)}"
+            )
+            try:
+                subprocess.run(
+                    scip_command,
+                    cwd=str(source_path),
+                    capture_output=True,
+                    text=True,
+                    timeout=scip_timeout,
+                    check=True,
+                )
+                logger.info("cidx scip generate on source completed successfully")
+            except subprocess.CalledProcessError as e:
+                logger.error(
+                    f"SCIP indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}",
+                    exc_info=True,
+                )
+                raise RuntimeError(
+                    f"SCIP indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}"
+                )
+            except subprocess.TimeoutExpired as e:
+                logger.error(
+                    f"SCIP indexing on source timed out for {alias_name} "
+                    f"after {scip_timeout} seconds: {type(e).__name__}",
+                    exc_info=True,
+                )
+                raise RuntimeError(
+                    f"SCIP indexing on source timed out for {alias_name} "
+                    f"after {scip_timeout} seconds: {type(e).__name__}"
+                )
+
+    def _create_snapshot(self, alias_name: str, source_path: str) -> str:
+        """
+        Create a versioned CoW snapshot of the already-indexed source (Story #229).
+
+        Must be called AFTER _index_source() has built the indexes on source_path.
+        The snapshot inherits all indexes from source via reflink — no re-indexing
+        needed here.
+
+        Workflow:
+        1. Generate version timestamp and compute versioned_path
+        2. CoW clone: cp --reflink=auto -a source_path versioned_path
+           NOTE: tantivy_index is NOT deleted — it was built on source and is correct
+        3. Git timestamp fix on clone (non-fatal)
+        4. cidx fix-config --force on CLONE only (never on source)
+        5. Validate .code-indexer/index exists
+        6. Return str(versioned_path)
+        7. Cleanup versioned_path on any failure, then re-raise
+
+        Args:
+            alias_name: Global alias name (e.g., "my-repo-global")
+            source_path: Path to the golden repo source (already indexed by _index_source)
 
         Returns:
-            Path to new index directory (only if validation passes)
+            Path to new versioned snapshot directory
 
         Raises:
             RuntimeError: If any step fails (with cleanup of partial artifacts)
@@ -540,14 +709,12 @@ class RefreshScheduler:
         git_update_timeout = 300  # Default: 5 minutes
         git_restore_timeout = 300  # Default: 5 minutes
         cidx_fix_timeout = 60  # Default: 1 minute
-        cidx_index_timeout = 3600  # Default: 1 hour
 
         if self.resource_config:
             cow_timeout = self.resource_config.cow_clone_timeout
             git_update_timeout = self.resource_config.git_update_index_timeout
             git_restore_timeout = self.resource_config.git_restore_timeout
             cidx_fix_timeout = self.resource_config.cidx_fix_config_timeout
-            cidx_index_timeout = self.resource_config.cidx_index_timeout
 
         # Generate version timestamp (use time.time() for correct UTC epoch;
         # datetime.utcnow().timestamp() is wrong on non-UTC servers due to
@@ -555,21 +722,22 @@ class RefreshScheduler:
         timestamp = int(time.time())
         version = f"v_{timestamp}"
 
-        # Create versioned directory path
         repo_name = alias_name.replace("-global", "")
         versioned_base = self.golden_repos_dir / ".versioned" / repo_name
         versioned_path = versioned_base / version
 
-        logger.info(f"Creating new versioned index at: {versioned_path}")
+        logger.info(f"Creating versioned snapshot at: {versioned_path}")
 
         try:
             # Step 1: Create versioned directory structure
             versioned_base.mkdir(parents=True, exist_ok=True)
 
             # Step 2: Perform CoW clone
+            # NOTE: tantivy_index is NOT deleted — indexes were built on source
+            # and are correct. The CoW clone inherits them directly.
             logger.info(f"CoW cloning from {source_path} to {versioned_path}")
             try:
-                result = subprocess.run(
+                subprocess.run(
                     [
                         "cp",
                         "--reflink=auto",
@@ -586,36 +754,23 @@ class RefreshScheduler:
             except subprocess.CalledProcessError as e:
                 logger.error(
                     f"CoW clone failed for {alias_name}: {type(e).__name__}: {e.stderr}",
-                    exc_info=True
+                    exc_info=True,
                 )
-                raise RuntimeError(f"CoW clone failed for {alias_name}: {type(e).__name__}: {e.stderr}")
+                raise RuntimeError(
+                    f"CoW clone failed for {alias_name}: {type(e).__name__}: {e.stderr}"
+                )
             except subprocess.TimeoutExpired as e:
                 logger.error(
                     f"CoW clone timed out for {alias_name} after {cow_timeout} seconds: {type(e).__name__}",
-                    exc_info=True
+                    exc_info=True,
                 )
-                raise RuntimeError(f"CoW clone timed out for {alias_name} after {cow_timeout} seconds: {type(e).__name__}")
+                raise RuntimeError(
+                    f"CoW clone timed out for {alias_name} after {cow_timeout} seconds: {type(e).__name__}"
+                )
 
-            # Step 2b: Delete inherited tantivy FTS index to prevent ghost vectors.
-            # The CoW clone copies .code-indexer/tantivy_index/ from the source,
-            # which may contain entries for files no longer present in this snapshot.
-            # Deleting it here forces cidx index --fts to rebuild from scratch.
-            tantivy_dir = versioned_path / ".code-indexer" / "tantivy_index"
-            if tantivy_dir.exists():
-                shutil.rmtree(tantivy_dir, ignore_errors=True)
-                if not tantivy_dir.exists():
-                    logger.info(
-                        f"Deleted inherited tantivy index for clean FTS rebuild: {tantivy_dir}"
-                    )
-                else:
-                    logger.warning(
-                        f"Failed to fully delete inherited tantivy index: {tantivy_dir}"
-                    )
-
-            # Step 3: Fix git status (only if .git exists)
+            # Step 3: Fix git status on clone (only if .git exists) — non-fatal
             git_dir = versioned_path / ".git"
             if git_dir.exists():
-                # Step 3a: git update-index --refresh
                 logger.info("Running git update-index --refresh to fix CoW timestamps")
                 try:
                     result = subprocess.run(
@@ -624,7 +779,7 @@ class RefreshScheduler:
                         capture_output=True,
                         text=True,
                         timeout=git_update_timeout,
-                        check=False,  # Non-fatal - may show modified files
+                        check=False,  # Non-fatal
                     )
                     if result.returncode != 0:
                         logger.debug(f"git update-index output: {result.stderr}")
@@ -633,7 +788,6 @@ class RefreshScheduler:
                         f"git update-index timed out after {git_update_timeout} seconds"
                     )
 
-                # Step 3b: git restore .
                 logger.info("Running git restore . to clean up timestamp changes")
                 try:
                     result = subprocess.run(
@@ -651,10 +805,10 @@ class RefreshScheduler:
                         f"git restore timed out after {git_restore_timeout} seconds"
                     )
 
-            # Step 4: Run cidx fix-config --force
-            logger.info("Running cidx fix-config --force to update paths")
+            # Step 4: Run cidx fix-config --force on CLONE only (never on source)
+            logger.info("Running cidx fix-config --force on clone to update paths")
             try:
-                result = subprocess.run(
+                subprocess.run(
                     ["cidx", "fix-config", "--force"],
                     cwd=str(versioned_path),
                     capture_output=True,
@@ -662,197 +816,77 @@ class RefreshScheduler:
                     timeout=cidx_fix_timeout,
                     check=True,
                 )
-                logger.info("cidx fix-config completed successfully")
+                logger.info("cidx fix-config on clone completed successfully")
             except subprocess.CalledProcessError as e:
                 logger.error(
                     f"cidx fix-config failed for {alias_name}: {type(e).__name__}: {e.stderr}",
-                    exc_info=True
+                    exc_info=True,
                 )
-                raise RuntimeError(f"cidx fix-config failed for {alias_name}: {type(e).__name__}: {e.stderr}")
+                raise RuntimeError(
+                    f"cidx fix-config failed for {alias_name}: {type(e).__name__}: {e.stderr}"
+                )
             except subprocess.TimeoutExpired as e:
                 logger.error(
                     f"cidx fix-config timed out for {alias_name} after {cidx_fix_timeout} seconds: {type(e).__name__}",
-                    exc_info=True
+                    exc_info=True,
                 )
                 raise RuntimeError(
                     f"cidx fix-config timed out for {alias_name} after {cidx_fix_timeout} seconds: {type(e).__name__}"
                 )
 
-            # Step 5: Run cidx index for semantic + FTS (always required)
-            # Note: --index-commits ONLY does temporal indexing, not semantic+FTS
-            # So we need two separate cidx index calls: one for semantic+FTS, one for temporal
-            index_command = ["cidx", "index", "--fts"]
-
-            logger.info(
-                f"Running cidx index for semantic+FTS: {' '.join(index_command)}"
-            )
-            try:
-                result = subprocess.run(
-                    index_command,
-                    cwd=str(versioned_path),
-                    capture_output=True,
-                    text=True,
-                    timeout=cidx_index_timeout,
-                    check=True,
-                )
-                logger.info("cidx index (semantic+FTS) completed successfully")
-            except subprocess.CalledProcessError as e:
-                logger.error(
-                    f"Indexing (semantic+FTS) failed for {alias_name}: {type(e).__name__}: {e.stderr}",
-                    exc_info=True
-                )
-                raise RuntimeError(f"Indexing (semantic+FTS) failed for {alias_name}: {type(e).__name__}: {e.stderr}")
-            except subprocess.TimeoutExpired as e:
-                logger.error(
-                    f"Indexing (semantic+FTS) timed out for {alias_name} after {cidx_index_timeout} seconds: {type(e).__name__}",
-                    exc_info=True
-                )
-                raise RuntimeError(
-                    f"Indexing (semantic+FTS) timed out for {alias_name} after {cidx_index_timeout} seconds: {type(e).__name__}"
-                )
-
-            # Step 5b: Run cidx index --index-commits for temporal indexing (if enabled)
-            # Read temporal settings from registry
-            repo_info = self.registry.get_global_repo(alias_name)
-            enable_temporal = (
-                repo_info.get("enable_temporal", False) if repo_info else False
-            )
-            temporal_options = repo_info.get("temporal_options") if repo_info else None
-
-            # Skip temporal indexing for local:// repos - they have no git history
-            repo_url_for_temporal = repo_info.get("repo_url", "") if repo_info else ""
-            is_local_repo_for_temporal = repo_url_for_temporal.startswith("local://") if repo_url_for_temporal else False
-            if enable_temporal and is_local_repo_for_temporal:
-                logger.warning(
-                    f"Skipping temporal indexing for local repo {alias_name} "
-                    f"(local:// repos have no git history, ignoring enable_temporal flag)"
-                )
-                enable_temporal = False
-
-            if enable_temporal:
-                temporal_command = ["cidx", "index", "--index-commits"]
-                logger.info(f"Temporal indexing enabled for {alias_name}")
-
-                if temporal_options:
-                    if temporal_options.get("max_commits"):
-                        temporal_command.extend(
-                            ["--max-commits", str(temporal_options["max_commits"])]
-                        )
-                    if temporal_options.get("since_date"):
-                        temporal_command.extend(
-                            ["--since-date", temporal_options["since_date"]]
-                        )
-                    if temporal_options.get("diff_context"):
-                        temporal_command.extend(
-                            ["--diff-context", str(temporal_options["diff_context"])]
-                        )
-
-                logger.info(
-                    f"Running cidx index for temporal: {' '.join(temporal_command)}"
-                )
-                try:
-                    result = subprocess.run(
-                        temporal_command,
-                        cwd=str(versioned_path),
-                        capture_output=True,
-                        text=True,
-                        timeout=cidx_index_timeout,
-                        check=True,
-                    )
-                    logger.info("cidx index (temporal) completed successfully")
-                except subprocess.CalledProcessError as e:
-                    logger.error(
-                        f"Temporal indexing failed for {alias_name}: {type(e).__name__}: {e.stderr}",
-                        exc_info=True
-                    )
-                    raise RuntimeError(f"Temporal indexing failed for {alias_name}: {type(e).__name__}: {e.stderr}")
-                except subprocess.TimeoutExpired as e:
-                    logger.error(
-                        f"Temporal indexing timed out for {alias_name} after {cidx_index_timeout} seconds: {type(e).__name__}",
-                        exc_info=True
-                    )
-                    raise RuntimeError(
-                        f"Temporal indexing timed out for {alias_name} after {cidx_index_timeout} seconds: {type(e).__name__}"
-                    )
-
-            # Step 5c: Run cidx scip generate for code intelligence indexing (if enabled)
-            # Read SCIP settings from registry
-            enable_scip = (
-                repo_info.get("enable_scip", False) if repo_info else False
-            )
-
-            if enable_scip:
-                # Get SCIP timeout from resource config or use default (AC4)
-                scip_timeout = 1800  # Default: 30 minutes
-                if self.resource_config:
-                    scip_timeout = getattr(
-                        self.resource_config, "cidx_scip_generate_timeout", 1800
-                    )
-
-                scip_command = ["cidx", "scip", "generate"]
-                logger.info(f"SCIP indexing enabled for {alias_name}")
-
-                logger.info(
-                    f"Running cidx scip generate: {' '.join(scip_command)}"
-                )
-                try:
-                    result = subprocess.run(
-                        scip_command,
-                        cwd=str(versioned_path),
-                        capture_output=True,
-                        text=True,
-                        timeout=scip_timeout,
-                        check=True,
-                    )
-                    logger.info("cidx scip generate completed successfully")
-                except subprocess.CalledProcessError as e:
-                    # AC5: SCIP failures should raise RuntimeError
-                    logger.error(
-                        f"SCIP indexing failed for {alias_name}: {type(e).__name__}: {e.stderr}",
-                        exc_info=True
-                    )
-                    raise RuntimeError(f"SCIP indexing failed for {alias_name}: {type(e).__name__}: {e.stderr}")
-                except subprocess.TimeoutExpired as e:
-                    # AC5: SCIP timeout should raise RuntimeError
-                    logger.error(
-                        f"SCIP indexing timed out for {alias_name} after {scip_timeout} seconds: {type(e).__name__}",
-                        exc_info=True
-                    )
-                    raise RuntimeError(
-                        f"SCIP indexing timed out for {alias_name} after {scip_timeout} seconds: {type(e).__name__}"
-                    )
-
-            # Step 6: Validate index exists
+            # Step 5: Validate index exists
             index_dir = versioned_path / ".code-indexer" / "index"
             if not index_dir.exists():
                 logger.error(f"Index validation failed: {index_dir} does not exist")
-                raise RuntimeError(
-                    "Index validation failed: index directory not created"
-                )
+                raise RuntimeError("Index validation failed: index directory not created")
 
-            logger.info(
-                f"New versioned index created successfully at: {versioned_path}"
-            )
+            logger.info(f"Versioned snapshot created successfully at: {versioned_path}")
             return str(versioned_path)
 
         except Exception as e:
-            # Step 7: Cleanup partial artifacts on failure
+            # Cleanup partial artifacts on failure
             logger.error(
-                f"Failed to create new index for {alias_name}, cleaning up: {type(e).__name__}: {e}",
-                exc_info=True
+                f"Failed to create snapshot for {alias_name}, cleaning up: {type(e).__name__}: {e}",
+                exc_info=True,
             )
             if versioned_path.exists():
                 try:
                     shutil.rmtree(versioned_path)
-                    logger.info(f"Cleaned up partial index at: {versioned_path}")
+                    logger.info(f"Cleaned up partial snapshot at: {versioned_path}")
                 except Exception as cleanup_error:
                     logger.error(
-                        f"Failed to cleanup partial index for {alias_name}: {type(cleanup_error).__name__}: {cleanup_error}",
-                        exc_info=True
+                        f"Failed to cleanup partial snapshot for {alias_name}: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}",
+                        exc_info=True,
                     )
+            raise RuntimeError(
+                f"Failed to create snapshot for {alias_name}: {type(e).__name__}: {e}"
+            )
 
-            # Re-raise with context
-            raise RuntimeError(f"Failed to create new index for {alias_name}: {type(e).__name__}: {e}")
+    def _create_new_index(self, alias_name: str, source_path: str) -> str:
+        """
+        Create a new versioned index directory with CoW clone and indexing.
+
+        Story #229: This method is now a thin delegator that calls
+        _index_source() followed by _create_snapshot() in sequence.
+        Kept for backward compatibility with existing tests and callers.
+
+        Complete workflow (delegated):
+        1. _index_source(): Run all indexing on golden repo source
+        2. _create_snapshot(): CoW clone, git fix, cidx fix-config, validate
+
+        Args:
+            alias_name: Global alias name (e.g., "my-repo-global")
+            source_path: Path to source repository (golden repo)
+
+        Returns:
+            Path to new index directory (only if validation passes)
+
+        Raises:
+            RuntimeError: If any step fails (with cleanup of partial artifacts)
+        """
+        self._index_source(alias_name=alias_name, source_path=source_path)
+        return self._create_snapshot(alias_name=alias_name, source_path=source_path)
 
     def _has_local_changes(self, source_path: str, alias_name: str) -> bool:
         """

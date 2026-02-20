@@ -71,6 +71,9 @@ class FileCRUDService:
         self.activated_repo_manager = ActivatedRepoManager()
         # Write exceptions map: alias -> canonical path (Story #197)
         self._global_write_exceptions: Dict[str, Path] = {}
+        # Golden repos directory for write-mode marker lookup (Story #231).
+        # Set at startup via set_golden_repos_dir() or directly via _golden_repos_dir.
+        self._golden_repos_dir: Optional[Path] = None
 
     def register_write_exception(self, alias: str, canonical_path: Path) -> None:
         """
@@ -108,6 +111,61 @@ class FileCRUDService:
             Canonical path if alias is registered, None otherwise
         """
         return self._global_write_exceptions.get(repo_alias)
+
+    def set_golden_repos_dir(self, golden_repos_dir: Path) -> None:
+        """
+        Set the golden repos directory for write-mode marker lookup (Story #231).
+
+        Called at startup to inject the golden repos path so that write-mode
+        enforcement can check for marker files under .write_mode/.
+
+        Args:
+            golden_repos_dir: Path to the golden repos root directory
+        """
+        self._golden_repos_dir = Path(golden_repos_dir)
+
+    def _check_write_mode_active(self, repo_alias: str) -> None:
+        """
+        Enforce write-mode gate for write-exception repos (Story #231).
+
+        Write-exception repos (e.g. cidx-meta-global) require callers to call
+        enter_write_mode() before issuing CRUD operations.  This is signalled by
+        a marker file at golden_repos_dir/.write_mode/{alias_without_global}.json.
+
+        If the repo is NOT a write exception, this check is a no-op.
+
+        Args:
+            repo_alias: Repository alias (e.g. 'cidx-meta-global')
+
+        Raises:
+            PermissionError: If the repo is a write exception and no active
+                             write-mode marker exists.
+        """
+        if not self.is_write_exception(repo_alias):
+            return
+
+        # Determine marker path
+        golden_repos_dir = self._golden_repos_dir
+        if golden_repos_dir is None:
+            # Cannot check — allow operation but log a warning
+            import logging
+            logging.getLogger(__name__).warning(
+                f"_golden_repos_dir not set on FileCRUDService; "
+                f"skipping write-mode check for {repo_alias}"
+            )
+            return
+
+        # Build alias name without -global suffix for marker filename
+        alias_without_global = (
+            repo_alias[: -len("-global")] if repo_alias.endswith("-global") else repo_alias
+        )
+        marker_file = golden_repos_dir / ".write_mode" / f"{alias_without_global}.json"
+
+        if not marker_file.exists():
+            raise PermissionError(
+                f"Repo '{repo_alias}' requires write mode. "
+                f"Call enter_write_mode('{repo_alias}') before performing file operations."
+            )
 
     def _resolve_repo_path(self, repo_alias: str, username: str) -> Path:
         """
@@ -162,6 +220,9 @@ class FileCRUDService:
         from .api_metrics_service import api_metrics_service
 
         api_metrics_service.increment_other_api_call()
+
+        # Enforce write-mode gate for write-exception repos (Story #231)
+        self._check_write_mode_active(repo_alias)
 
         # Validate path security
         self._validate_crud_path(file_path, "create_file")
@@ -240,6 +301,9 @@ class FileCRUDService:
         from .api_metrics_service import api_metrics_service
 
         api_metrics_service.increment_other_api_call()
+
+        # Enforce write-mode gate for write-exception repos (Story #231)
+        self._check_write_mode_active(repo_alias)
 
         # Validate path security
         self._validate_crud_path(file_path, "edit_file")
@@ -329,6 +393,9 @@ class FileCRUDService:
         from .api_metrics_service import api_metrics_service
 
         api_metrics_service.increment_other_api_call()
+
+        # Enforce write-mode gate for write-exception repos (Story #231)
+        self._check_write_mode_active(repo_alias)
 
         # Validate path security
         self._validate_crud_path(file_path, "delete_file")

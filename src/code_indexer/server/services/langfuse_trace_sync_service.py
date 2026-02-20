@@ -198,7 +198,7 @@ class LangfuseTraceSyncService:
         _trigger_alias = None
         _sync_succeeded = False
         if self._refresh_scheduler is not None:
-            self._refresh_scheduler.acquire_write_lock(_lock_alias)
+            self._refresh_scheduler.acquire_write_lock(_lock_alias, owner_name="langfuse_trace_sync")
         try:
             # 2. Discover project name via GET /api/public/projects
             project_info = api_client.discover_project()
@@ -210,7 +210,7 @@ class LangfuseTraceSyncService:
             _sync_succeeded = True
         finally:
             if self._refresh_scheduler is not None:
-                self._refresh_scheduler.release_write_lock(_lock_alias)
+                self._refresh_scheduler.release_write_lock(_lock_alias, owner_name="langfuse_trace_sync")
                 # Story #227: Trigger refresh only on success (AC5: no trigger on exception).
                 if _sync_succeeded and _trigger_alias:
                     self._refresh_scheduler.trigger_refresh_for_repo(_trigger_alias)

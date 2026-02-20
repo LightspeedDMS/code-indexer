@@ -90,6 +90,9 @@ class TestSemanticFtsIndexingErrorLogging:
         THEN the log contains the exception type name (CalledProcessError)
         AND the log contains the repository alias
         AND exc_info=True is used (stack trace captured)
+
+        Story #229: cidx index --fts now runs on source FIRST (in _index_source),
+        before the CoW clone. So the failing command is the first subprocess call.
         """
         alias_name = "test-repo-global"
 
@@ -104,30 +107,26 @@ class TestSemanticFtsIndexingErrorLogging:
                         mock_updater_cls.return_value = mock_updater
 
                         with patch("subprocess.run") as mock_run:
-                            # CoW clone succeeds, then cidx index fails with empty stderr
+                            # Story #229: cidx index --fts runs FIRST (on source),
+                            # then cp/git/fix-config in _create_snapshot.
+                            # Fail on cidx index --fts with empty stderr.
                             mock_run.side_effect = [
-                                Mock(returncode=0),  # cp --reflink
-                                Mock(returncode=0),  # git update-index
-                                Mock(returncode=0),  # git restore
-                                Mock(returncode=0),  # cidx fix-config
-                                # cidx index fails with empty stderr
                                 subprocess.CalledProcessError(1, "cidx index", stderr=""),
                             ]
 
-                            # Mock index directory validation to skip it
-                            with patch("pathlib.Path.exists", return_value=True):
-                                with caplog.at_level(logging.ERROR):
-                                    with pytest.raises(RuntimeError):
-                                        scheduler._create_new_index(alias_name, "/path/to/repo")
+                            with caplog.at_level(logging.ERROR):
+                                with pytest.raises(RuntimeError):
+                                    scheduler._create_new_index(alias_name, "/path/to/repo")
 
                             # Verify log contains exception type
                             error_logs = [r for r in caplog.records if r.levelname == "ERROR"]
                             assert len(error_logs) > 0, "Expected at least one ERROR log"
 
-                            # Find the semantic+FTS indexing error log (first occurrence, not cleanup)
+                            # Find the semantic+FTS indexing error log
+                            # New message: "Indexing (semantic+FTS) on source failed for"
                             indexing_logs = [
                                 r for r in error_logs
-                                if "Indexing (semantic+FTS) failed for" in r.message
+                                if "Indexing (semantic+FTS) on source failed for" in r.message
                             ]
                             assert len(indexing_logs) >= 1, f"Expected at least one semantic+FTS indexing error log, got {len(indexing_logs)}"
 
@@ -149,6 +148,8 @@ class TestSemanticFtsIndexingErrorLogging:
         WHEN the error is logged
         THEN the log contains both the exception type name and the stderr message
         AND the log contains the repository alias
+
+        Story #229: cidx index --fts now runs first on source (_index_source).
         """
         alias_name = "test-repo-global"
         error_message = "Index creation failed: out of memory"
@@ -163,23 +164,18 @@ class TestSemanticFtsIndexingErrorLogging:
                         mock_updater_cls.return_value = mock_updater
 
                         with patch("subprocess.run") as mock_run:
+                            # cidx index --fts fails first (Story #229: runs on source)
                             mock_run.side_effect = [
-                                Mock(returncode=0),  # cp --reflink
-                                Mock(returncode=0),  # git update-index
-                                Mock(returncode=0),  # git restore
-                                Mock(returncode=0),  # cidx fix-config
                                 subprocess.CalledProcessError(1, "cidx index", stderr=error_message),
                             ]
 
-                            # Mock index directory validation to skip it
-                            with patch("pathlib.Path.exists", return_value=True):
-                                with caplog.at_level(logging.ERROR):
-                                    with pytest.raises(RuntimeError):
-                                        scheduler._create_new_index(alias_name, "/path/to/repo")
+                            with caplog.at_level(logging.ERROR):
+                                with pytest.raises(RuntimeError):
+                                    scheduler._create_new_index(alias_name, "/path/to/repo")
 
                             indexing_logs = [
                                 r for r in caplog.records
-                                if "Indexing (semantic+FTS) failed for" in r.message
+                                if "Indexing (semantic+FTS) on source failed for" in r.message
                             ]
                             assert len(indexing_logs) >= 1, f"Expected at least one semantic+FTS indexing error log"
 
@@ -201,6 +197,11 @@ class TestTemporalIndexingErrorLogging:
         THEN the log contains the exception type name
         AND the repository alias
         AND exc_info=True is used
+
+        Story #229: Both cidx index calls now run on source in _index_source():
+        1. cidx index --fts (semantic+FTS) — succeeds
+        2. cidx index --index-commits (temporal) — fails
+        The CoW clone steps (cp/git/fix-config) never run.
         """
         alias_name = "test-repo-global"
 
@@ -222,25 +223,22 @@ class TestTemporalIndexingErrorLogging:
                         mock_updater_cls.return_value = mock_updater
 
                         with patch("subprocess.run") as mock_run:
+                            # Story #229: _index_source runs cidx index --fts first,
+                            # then cidx index --index-commits. Both on source.
+                            # CoW clone never reached because temporal fails.
                             mock_run.side_effect = [
-                                Mock(returncode=0),  # cp --reflink
-                                Mock(returncode=0),  # git update-index
-                                Mock(returncode=0),  # git restore
-                                Mock(returncode=0),  # cidx fix-config
-                                Mock(returncode=0),  # cidx index (semantic+FTS)
+                                Mock(returncode=0),  # cidx index --fts (semantic+FTS on source)
                                 # Temporal indexing fails with empty stderr
                                 subprocess.CalledProcessError(1, "cidx index --index-commits", stderr=""),
                             ]
 
-                            # Mock index directory validation to skip it
-                            with patch("pathlib.Path.exists", return_value=True):
-                                with caplog.at_level(logging.ERROR):
-                                    with pytest.raises(RuntimeError):
-                                        scheduler._create_new_index(alias_name, "/path/to/repo")
+                            with caplog.at_level(logging.ERROR):
+                                with pytest.raises(RuntimeError):
+                                    scheduler._create_new_index(alias_name, "/path/to/repo")
 
                             temporal_logs = [
                                 r for r in caplog.records
-                                if "Temporal indexing failed for" in r.message
+                                if "Temporal indexing on source failed for" in r.message
                             ]
                             assert len(temporal_logs) >= 1, f"Expected at least one temporal indexing error log"
 
@@ -262,6 +260,12 @@ class TestScipIndexingErrorLogging:
         THEN the log contains the exception type name
         AND the repository alias
         AND exc_info=True is used
+
+        Story #229: All indexing (cidx index --fts, cidx scip generate) runs on source
+        in _index_source(), before the CoW clone. Sequence:
+        1. cidx index --fts (semantic+FTS on source) — succeeds
+        2. cidx scip generate (on source) — fails
+        The CoW clone steps never run.
         """
         alias_name = "test-repo-global"
 
@@ -283,25 +287,21 @@ class TestScipIndexingErrorLogging:
                         mock_updater_cls.return_value = mock_updater
 
                         with patch("subprocess.run") as mock_run:
+                            # Story #229: _index_source runs cidx index --fts first,
+                            # then cidx scip generate. Both on source.
                             mock_run.side_effect = [
-                                Mock(returncode=0),  # cp --reflink
-                                Mock(returncode=0),  # git update-index
-                                Mock(returncode=0),  # git restore
-                                Mock(returncode=0),  # cidx fix-config
-                                Mock(returncode=0),  # cidx index (semantic+FTS)
+                                Mock(returncode=0),  # cidx index --fts (semantic+FTS on source)
                                 # SCIP indexing fails with empty stderr
                                 subprocess.CalledProcessError(1, "cidx scip generate", stderr=""),
                             ]
 
-                            # Mock index directory validation to skip it
-                            with patch("pathlib.Path.exists", return_value=True):
-                                with caplog.at_level(logging.ERROR):
-                                    with pytest.raises(RuntimeError):
-                                        scheduler._create_new_index(alias_name, "/path/to/repo")
+                            with caplog.at_level(logging.ERROR):
+                                with pytest.raises(RuntimeError):
+                                    scheduler._create_new_index(alias_name, "/path/to/repo")
 
                             scip_logs = [
                                 r for r in caplog.records
-                                if "SCIP indexing failed for" in r.message
+                                if "SCIP indexing on source failed for" in r.message
                             ]
                             assert len(scip_logs) >= 1, f"Expected at least one SCIP indexing error log"
 
@@ -318,40 +318,39 @@ class TestCleanupErrorLogging:
         self, scheduler, caplog, mock_registry
     ):
         """
-        GIVEN an exception during index creation that triggers cleanup
+        GIVEN an exception during snapshot creation that triggers cleanup
         WHEN the cleanup error is logged
         THEN the log contains the exception type name
         AND exc_info=True is used
+
+        Story #229: The cleanup log now comes from _create_snapshot()'s exception
+        handler: "Failed to create snapshot for {alias} cleaning up: RuntimeError: ..."
+        To trigger it, _index_source must succeed (mocked as no-op), then
+        subprocess.run raises RuntimeError("") on the cp --reflink step inside
+        _create_snapshot, triggering the cleanup log.
         """
         alias_name = "test-repo-global"
 
-        with patch.object(scheduler.alias_manager, "read_alias", return_value="/path/to/repo"):
-            with patch.object(scheduler, "_detect_existing_indexes", return_value={}):
-                with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
-                    with patch("code_indexer.global_repos.refresh_scheduler.GitPullUpdater") as mock_updater_cls:
-                        mock_updater = Mock()
-                        mock_updater.has_changes.return_value = True
-                        mock_updater.get_source_path.return_value = "/path/to/repo"
-                        mock_updater_cls.return_value = mock_updater
+        with patch.object(scheduler, "_index_source"):
+            # _index_source no-ops; failure happens in _create_snapshot
+            with patch("subprocess.run") as mock_run:
+                # RuntimeError fires on cp --reflink (first call in _create_snapshot)
+                mock_run.side_effect = RuntimeError("")
 
-                        with patch("subprocess.run") as mock_run:
-                            # Simulate RuntimeError with empty message (wrapped exception)
-                            mock_run.side_effect = RuntimeError("")
+                with caplog.at_level(logging.ERROR):
+                    with pytest.raises(RuntimeError):
+                        scheduler._create_new_index(alias_name, "/path/to/repo")
 
-                            with caplog.at_level(logging.ERROR):
-                                with pytest.raises(RuntimeError):
-                                    scheduler._create_new_index(alias_name, "/path/to/repo")
+            # Find cleanup error log from _create_snapshot
+            cleanup_logs = [
+                r for r in caplog.records
+                if "Failed to create snapshot for" in r.message and "cleaning up" in r.message
+            ]
+            assert len(cleanup_logs) >= 1, f"Expected at least one cleanup error log"
 
-                            # Find cleanup error log
-                            cleanup_logs = [
-                                r for r in caplog.records
-                                if "Failed to create new index for" in r.message and "cleaning up" in r.message
-                            ]
-                            assert len(cleanup_logs) >= 1, f"Expected at least one cleanup error log"
-
-                            log_message = cleanup_logs[0].message
-                            # Should contain exception type even if message is empty
-                            assert "RuntimeError" in log_message, \
-                                f"Log must contain exception type 'RuntimeError', got: {log_message}"
-                            assert alias_name in log_message, \
-                                f"Log must contain repository alias '{alias_name}', got: {log_message}"
+            log_message = cleanup_logs[0].message
+            # Should contain exception type even if message is empty
+            assert "RuntimeError" in log_message, \
+                f"Log must contain exception type 'RuntimeError', got: {log_message}"
+            assert alias_name in log_message, \
+                f"Log must contain repository alias '{alias_name}', got: {log_message}"

@@ -3461,6 +3461,8 @@ def create_app() -> FastAPI:
         from code_indexer.server.services.file_crud_service import file_crud_service
         cidx_meta_path = Path(golden_repo_manager.golden_repos_dir) / "cidx-meta"
         file_crud_service.register_write_exception("cidx-meta-global", cidx_meta_path)
+        # Inject golden_repos_dir for write-mode marker lookup (Story #231)
+        file_crud_service.set_golden_repos_dir(Path(golden_repo_manager.golden_repos_dir))
         logger.info(
             "Registered cidx-meta-global as write exception for direct editing",
             extra={"correlation_id": get_correlation_id()},

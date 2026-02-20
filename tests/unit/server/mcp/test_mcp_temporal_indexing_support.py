@@ -486,17 +486,22 @@ class TestRefreshSchedulerTemporalCommand:
 
         def capture_subprocess(cmd, *args, **kwargs):
             captured_commands.append(cmd)
-            # Create index dir for cidx index command
-            if len(cmd) >= 2 and cmd[0] == "cidx" and cmd[1] == "index":
-                # Get cwd from kwargs
+            if cmd[0] == "cp" and "--reflink=auto" in cmd:
+                # Simulate CoW clone: create destination dir with index subdir
+                # so _create_snapshot's index validation passes
+                dst = cmd[-1]
+                Path(dst).mkdir(parents=True, exist_ok=True)
+                (Path(dst) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+            elif len(cmd) >= 2 and cmd[0] == "cidx" and cmd[1] == "index":
+                # Create index dir on source (run by _index_source with cwd=source_path)
                 cwd = kwargs.get("cwd", "")
                 if cwd:
                     index_dir = Path(cwd) / ".code-indexer" / "index"
                     index_dir.mkdir(parents=True, exist_ok=True)
             return MagicMock(returncode=0, stdout="", stderr="")
 
-        with patch("code_indexer.global_repos.refresh_scheduler.datetime") as mock_dt:
-            mock_dt.utcnow.return_value.timestamp.return_value = 1234567890
+        with patch("code_indexer.global_repos.refresh_scheduler.time") as mock_time:
+            mock_time.time.return_value = 1234567890
 
             with patch("subprocess.run", side_effect=capture_subprocess):
                 scheduler._create_new_index(
@@ -578,15 +583,22 @@ class TestRefreshSchedulerTemporalCommand:
 
         def capture_subprocess(cmd, *args, **kwargs):
             captured_commands.append(cmd)
-            if len(cmd) >= 2 and cmd[0] == "cidx" and cmd[1] == "index":
+            if cmd[0] == "cp" and "--reflink=auto" in cmd:
+                # Simulate CoW clone: create destination dir with index subdir
+                # so _create_snapshot's index validation passes
+                dst = cmd[-1]
+                Path(dst).mkdir(parents=True, exist_ok=True)
+                (Path(dst) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+            elif len(cmd) >= 2 and cmd[0] == "cidx" and cmd[1] == "index":
+                # Create index dir on source (run by _index_source with cwd=source_path)
                 cwd = kwargs.get("cwd", "")
                 if cwd:
                     index_dir = Path(cwd) / ".code-indexer" / "index"
                     index_dir.mkdir(parents=True, exist_ok=True)
             return MagicMock(returncode=0, stdout="", stderr="")
 
-        with patch("code_indexer.global_repos.refresh_scheduler.datetime") as mock_dt:
-            mock_dt.utcnow.return_value.timestamp.return_value = 1234567890
+        with patch("code_indexer.global_repos.refresh_scheduler.time") as mock_time:
+            mock_time.time.return_value = 1234567890
 
             with patch("subprocess.run", side_effect=capture_subprocess):
                 scheduler._create_new_index(
@@ -662,15 +674,22 @@ class TestRefreshSchedulerTemporalCommand:
 
         def capture_subprocess(cmd, *args, **kwargs):
             captured_commands.append(cmd)
-            if len(cmd) >= 2 and cmd[0] == "cidx" and cmd[1] == "index":
+            if cmd[0] == "cp" and "--reflink=auto" in cmd:
+                # Simulate CoW clone: create destination dir with index subdir
+                # so _create_snapshot's index validation passes
+                dst = cmd[-1]
+                Path(dst).mkdir(parents=True, exist_ok=True)
+                (Path(dst) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+            elif len(cmd) >= 2 and cmd[0] == "cidx" and cmd[1] == "index":
+                # Create index dir on source (run by _index_source with cwd=source_path)
                 cwd = kwargs.get("cwd", "")
                 if cwd:
                     index_dir = Path(cwd) / ".code-indexer" / "index"
                     index_dir.mkdir(parents=True, exist_ok=True)
             return MagicMock(returncode=0, stdout="", stderr="")
 
-        with patch("code_indexer.global_repos.refresh_scheduler.datetime") as mock_dt:
-            mock_dt.utcnow.return_value.timestamp.return_value = 1234567890
+        with patch("code_indexer.global_repos.refresh_scheduler.time") as mock_time:
+            mock_time.time.return_value = 1234567890
 
             with patch("subprocess.run", side_effect=capture_subprocess):
                 scheduler._create_new_index(

@@ -369,13 +369,14 @@ class TestExecuteRefreshLocalRepoSourcePath:
 
         captured_source_paths = []
 
-        def capture_create(alias_name, source_path):
+        def capture_index_source(alias_name, source_path):
+            # Capture the source_path then stop — _create_snapshot never runs
             captured_source_paths.append(source_path)
             raise RuntimeError("Stop after capture")
 
         with patch.object(scheduler, "_has_local_changes", return_value=True):
             with patch.object(
-                scheduler, "_create_new_index", side_effect=capture_create
+                scheduler, "_index_source", side_effect=capture_index_source
             ):
                 with patch.object(
                     scheduler, "_detect_existing_indexes", return_value={}

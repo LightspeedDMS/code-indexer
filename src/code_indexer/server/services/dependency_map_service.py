@@ -109,7 +109,7 @@ class DependencyMapService:
 
         # Story #227: Acquire write lock so RefreshScheduler skips CoW clone during writes.
         if self._refresh_scheduler is not None:
-            self._refresh_scheduler.acquire_write_lock("cidx-meta")
+            self._refresh_scheduler.acquire_write_lock("cidx-meta", owner_name="dependency_map_service")
 
         _analysis_succeeded = False
         try:
@@ -169,7 +169,7 @@ class DependencyMapService:
 
             # Story #227: Release write lock so RefreshScheduler can proceed.
             if self._refresh_scheduler is not None:
-                self._refresh_scheduler.release_write_lock("cidx-meta")
+                self._refresh_scheduler.release_write_lock("cidx-meta", owner_name="dependency_map_service")
 
             # Story #227: Trigger explicit refresh after lock released (only on success).
             # AC2: Writer triggers refresh so RefreshScheduler captures complete data.
@@ -1399,7 +1399,7 @@ class DependencyMapService:
 
         # Story #227: Acquire write lock so RefreshScheduler skips CoW clone during writes.
         if self._refresh_scheduler is not None:
-            self._refresh_scheduler.acquire_write_lock("cidx-meta")
+            self._refresh_scheduler.acquire_write_lock("cidx-meta", owner_name="dependency_map_service")
 
         _delta_succeeded = False
         try:
@@ -1527,7 +1527,7 @@ class DependencyMapService:
 
             # Story #227: Release write lock so RefreshScheduler can proceed.
             if self._refresh_scheduler is not None:
-                self._refresh_scheduler.release_write_lock("cidx-meta")
+                self._refresh_scheduler.release_write_lock("cidx-meta", owner_name="dependency_map_service")
 
             # Story #227: Trigger explicit refresh after lock released (only on success).
             # AC2: Writer triggers refresh so RefreshScheduler captures complete data.
