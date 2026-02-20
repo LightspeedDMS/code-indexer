@@ -1179,6 +1179,22 @@ class DependencyMapService:
             max_turns=config.dependency_map_delta_max_turns,
         )
 
+        # Story #234 AC3: Truncation guard — prevent short summary-only responses from
+        # overwriting full domain documentation.
+        # Strip frontmatter from existing content to measure meaningful body length.
+        frontmatter_split = existing_content.split("---\n\n", 1)
+        existing_body = frontmatter_split[-1] if len(frontmatter_split) > 1 else existing_content
+        existing_body_len = len(existing_body)
+
+        if existing_body_len > 500 and len(result) < int(existing_body_len * 0.5):
+            logger.warning(
+                f"Truncation guard fired for domain '{domain_name}': "
+                f"delta result is suspiciously short ({len(result)} chars) "
+                f"compared to existing body ({existing_body_len} chars). "
+                f"Preserving existing content to prevent data loss."
+            )
+            return
+
         # Update frontmatter timestamp and write in-place
         updated_content = self._update_frontmatter_timestamp(
             existing_content, result, domain_name

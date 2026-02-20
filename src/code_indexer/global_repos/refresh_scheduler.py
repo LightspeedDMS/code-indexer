@@ -447,12 +447,15 @@ class RefreshScheduler:
                 repo_url = repo_info.get("repo_url", "")
                 is_local_repo = repo_url.startswith("local://") if repo_url else False
 
-                # Get golden repo path from alias (registry path becomes stale after refresh)
-                golden_repo_path = current_target
+                # Story #236 Fix 2: Always derive master path from golden_repos_dir / repo_name.
+                # current_target from alias JSON may point to a .versioned/ snapshot after first
+                # refresh — using it for git pull or as snapshot source would be wrong.
+                repo_name = alias_name.replace("-global", "")
+                master_path = str(self.golden_repos_dir / repo_name)
 
                 # AC6: Reconcile registry with filesystem at START of refresh
                 # This ensures registry flags reflect actual index state before refresh begins
-                detected_indexes = self._detect_existing_indexes(Path(golden_repo_path))
+                detected_indexes = self._detect_existing_indexes(Path(current_target))
                 self._reconcile_registry_with_filesystem(alias_name, detected_indexes)
                 logger.info(
                     f"Reconciled registry with filesystem at START for {alias_name}: {detected_indexes}"
@@ -461,8 +464,7 @@ class RefreshScheduler:
                 if is_local_repo:
                     # C3: For local repos, source_path is the LIVE directory (where writers put files),
                     # NOT the current alias target which may point to a versioned snapshot.
-                    repo_name = alias_name.replace("-global", "")
-                    source_path = str(self.golden_repos_dir / repo_name)
+                    source_path = master_path
 
                     # Story #227: Skip CoW clone if an external writer holds the write lock.
                     # Writers (DependencyMapService, LangfuseTraceSyncService) acquire the lock
@@ -493,8 +495,10 @@ class RefreshScheduler:
 
                     logger.info(f"Changes detected in local repo {alias_name}, creating new index")
                 else:
-                    # Git repo: use GitPullUpdater for change detection and pull
-                    updater = GitPullUpdater(golden_repo_path)
+                    # Story #236 Fix 2: Always git pull into the master golden repo, never into
+                    # a versioned snapshot. current_target may be a .versioned/ path after first
+                    # refresh, but git pull must always operate on the canonical master.
+                    updater = GitPullUpdater(master_path)
 
                     has_changes = updater.has_changes()
 
@@ -508,10 +512,11 @@ class RefreshScheduler:
                             "message": "No changes detected",
                         }
 
-                    # Pull latest changes
-                    logger.info(f"Pulling latest changes for {alias_name}")
+                    # Pull latest changes into master
+                    logger.info(f"Pulling latest changes for {alias_name} into master: {master_path}")
                     updater.update()
-                    source_path = updater.get_source_path()
+                    # Story #236 Fix 3: Always create snapshot from master, not from current_target.
+                    source_path = master_path
 
                 # Index source first, then create versioned snapshot (Story #229)
                 self._index_source(alias_name=alias_name, source_path=source_path)
@@ -527,9 +532,17 @@ class RefreshScheduler:
                     old_target=current_target,
                 )
 
-                # Schedule cleanup of old index
-                logger.info(f"Scheduling cleanup of old index: {current_target}")
-                self.cleanup_manager.schedule_cleanup(current_target)
+                # Story #236 Fix 1: Only schedule cleanup for versioned snapshots.
+                # Never schedule cleanup for the master golden repo (golden-repos/{alias}/).
+                # On first refresh, current_target IS the master golden repo — scheduling it
+                # for cleanup would permanently destroy the master.
+                if ".versioned" in current_target:
+                    logger.info(f"Scheduling cleanup of old versioned snapshot: {current_target}")
+                    self.cleanup_manager.schedule_cleanup(current_target)
+                else:
+                    logger.info(
+                        f"Preserving master golden repo (not scheduling cleanup): {current_target}"
+                    )
 
                 # Update registry timestamp
                 self.registry.update_refresh_timestamp(alias_name)
@@ -1090,6 +1103,193 @@ class RefreshScheduler:
         # Check for .scip.db files (converted SQLite indexes)
         scip_db_files = list(scip_dir.glob("*.scip.db"))
         return len(scip_db_files) > 0
+
+    def _restore_master_from_versioned(self, alias_name: str, master_path: Path) -> bool:
+        """
+        Restore a missing master golden repo via reverse CoW clone from latest versioned snapshot.
+
+        Finds the highest-timestamp v_* directory under .versioned/{repo_name}/,
+        clones it to master_path via ``cp --reflink=auto -a``, then runs
+        ``cidx fix-config --force`` on the restored master to repair paths.
+
+        Args:
+            alias_name: Global alias name (e.g., "my-repo-global")
+            master_path: Destination path for the restored master
+
+        Returns:
+            True if restoration succeeded, False on any error
+        """
+        repo_name = alias_name.replace("-global", "")
+        versioned_base = self.golden_repos_dir / ".versioned" / repo_name
+
+        if not versioned_base.exists():
+            logger.warning(f"Reconciliation: {alias_name} has no master and no versioned dir")
+            return False
+
+        version_dirs = [
+            d for d in versioned_base.iterdir()
+            if d.is_dir() and d.name.startswith("v_")
+        ]
+
+        if not version_dirs:
+            logger.warning(f"Reconciliation: {alias_name} has no v_* snapshots to restore from")
+            return False
+
+        def _parse_ts(d: Path) -> int:
+            try:
+                return int(d.name[2:])
+            except (ValueError, IndexError):
+                return 0
+
+        latest_version = max(version_dirs, key=_parse_ts)
+        logger.info(
+            f"Reconciliation: restoring {alias_name} master from {latest_version} via reverse CoW"
+        )
+
+        try:
+            subprocess.run(
+                ["cp", "--reflink=auto", "-a", str(latest_version), str(master_path)],
+                capture_output=True, text=True, timeout=600, check=True,
+            )
+        except Exception as e:
+            logger.error(
+                f"Reconciliation: reverse CoW clone failed for {alias_name}: "
+                f"{type(e).__name__}: {e}", exc_info=True,
+            )
+            return False
+
+        # Fix .code-indexer/ paths — non-fatal if cidx is not available
+        try:
+            subprocess.run(
+                ["cidx", "fix-config", "--force"],
+                cwd=str(master_path), capture_output=True, text=True, timeout=60, check=False,
+            )
+            logger.info(f"Reconciliation: cidx fix-config --force done for {alias_name}")
+        except Exception as fix_err:
+            logger.warning(
+                f"Reconciliation: cidx fix-config failed for {alias_name} "
+                f"(non-fatal): {type(fix_err).__name__}: {fix_err}"
+            )
+
+        return True
+
+    def _queue_missing_description(
+        self, alias_name: str, master_path: Path, claude_cli_manager: Any
+    ) -> bool:
+        """
+        Queue description generation when cidx-meta description file is missing.
+
+        Checks for golden-repos/cidx-meta/{alias_name}.md and submits work to
+        ClaudeCliManager if the file does not exist.
+
+        Args:
+            alias_name: Global alias name (e.g., "my-repo-global")
+            master_path: Master golden repo path (used as repo_path for generation)
+            claude_cli_manager: ClaudeCliManager instance to submit work to
+
+        Returns:
+            True if description was queued, False if already exists or error
+        """
+        cidx_meta_dir = self.golden_repos_dir / "cidx-meta"
+        repo_name = alias_name.replace("-global", "")
+        description_file = cidx_meta_dir / f"{repo_name}.md"
+
+        if description_file.exists():
+            return False
+
+        logger.info(
+            f"Reconciliation: queueing description for {alias_name} (missing {description_file})"
+        )
+        try:
+            claude_cli_manager.submit_work(
+                master_path,
+                lambda success, result, _a=alias_name: logger.info(
+                    f"Description generation for {_a}: "
+                    f"{'success' if success else 'failed'} — {result}"
+                ),
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                f"Reconciliation: failed to queue description for {alias_name}: "
+                f"{type(e).__name__}: {e}"
+            )
+            return False
+
+    def reconcile_golden_repos(self, claude_cli_manager: Optional[Any] = None) -> None:
+        """
+        Startup reconciliation: restore missing master golden repos via reverse CoW clone.
+
+        Runs ONCE on server startup, guarded by a marker file. Iterates all registered
+        git-backed repos, restores any with missing masters from versioned snapshots, and
+        optionally queues description generation for repos missing cidx-meta files.
+
+        Non-blocking: per-repo failures are logged and skipped (AC7).
+        Idempotent: marker file golden-repos/.reconciliation_complete_v1 (AC6).
+
+        Args:
+            claude_cli_manager: Optional ClaudeCliManager for description queuing (AC5).
+
+        Story #236 AC4-AC7.
+        """
+        from datetime import datetime
+
+        marker_file = self.golden_repos_dir / ".reconciliation_complete_v1"
+
+        if marker_file.exists():
+            logger.info("Startup reconciliation already completed (marker exists), skipping")
+            return
+
+        logger.info("Starting startup reconciliation of golden repos (Story #236)")
+        restored_count = 0
+        description_queued_count = 0
+
+        try:
+            all_repos = self.registry.list_global_repos()
+        except Exception as e:
+            logger.error(f"Failed to list repos for reconciliation: {type(e).__name__}: {e}")
+            marker_file.write_text(f"Completed (with errors) at {datetime.now().isoformat()}")
+            return
+
+        for repo in all_repos:
+            alias_name = repo.get("alias_name", "")
+            repo_url = repo.get("repo_url", "")
+            if not alias_name:
+                continue
+            # Skip local repos — no versioned copies to restore from
+            if repo_url.startswith("local://"):
+                continue
+
+            repo_name = alias_name.replace("-global", "")
+            master_path = self.golden_repos_dir / repo_name
+
+            # AC4: Restore missing master via reverse CoW clone
+            if not master_path.exists():
+                try:
+                    if self._restore_master_from_versioned(alias_name, master_path):
+                        restored_count += 1
+                except Exception as e:
+                    logger.error(
+                        f"Reconciliation: unexpected error for {alias_name}: "
+                        f"{type(e).__name__}: {e}", exc_info=True,
+                    )
+
+            # AC5: Queue description generation if cidx-meta file is missing
+            if claude_cli_manager is not None:
+                try:
+                    if self._queue_missing_description(alias_name, master_path, claude_cli_manager):
+                        description_queued_count += 1
+                except Exception as e:
+                    logger.warning(
+                        f"Reconciliation: description queue error for {alias_name}: "
+                        f"{type(e).__name__}: {e}"
+                    )
+
+        logger.info(
+            f"Startup reconciliation complete: {restored_count} masters restored, "
+            f"{description_queued_count} descriptions queued"
+        )
+        marker_file.write_text(f"Completed at {datetime.now().isoformat()}")
 
     def _reconcile_registry_with_filesystem(
         self, alias_name: str, detected: Dict[str, bool]

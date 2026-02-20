@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.38] - 2026-02-20
+
+### Fixed
+
+- RefreshScheduler no longer deletes master golden repos on first refresh; cleanup guard only schedules versioned snapshots for deletion (Story #236)
+- Git pull always targets master golden repo path, never versioned snapshots (Story #236)
+- CoW snapshots always created from master golden repo, not from previous versioned snapshots (Story #236)
+- Startup reconciliation restores missing master golden repos via reverse CoW clone from latest versioned snapshot (Story #236)
+- Delta analysis no longer overwrites full domain documentation with change summaries; truncation guard rejects results below 50% of original size (Story #234)
+- Delta analysis no longer falsely claims dependency removal for repos not in the analysis scope (Story #235)
+- Description filename in reconciliation correctly strips -global suffix from alias names
+
+### Added
+
+- POST /admin/diagnostics/generate-missing-descriptions endpoint for bulk description generation (Story #233)
+- Generate Missing Descriptions button in diagnostics UI (Story #233)
+- Path traversal protection on cidx-meta description file paths
+
 ## [9.3.37] - 2026-02-20
 
 ### Fixed

@@ -37,6 +37,21 @@
     <div id="restart-status" style="margin-top: 0.5rem;"></div>
 </div>
 
+<!-- Story #233: Generate Missing Descriptions Button -->
+<div class="generate-descriptions-section" style="margin-bottom: 2rem;">
+    <button
+        id="generate-descriptions-btn"
+        class="generate-descriptions-button"
+        onclick="generateMissingDescriptions()"
+    >
+        Generate Missing Descriptions
+    </button>
+    <p style="color: var(--muted-color); font-size: 0.875rem; margin-top: 0.5rem;">
+        Queue description generation for all golden repositories that do not yet have a description.
+    </p>
+    <div id="generate-descriptions-status" style="margin-top: 0.5rem;"></div>
+</div>
+
 <!-- Diagnostics Results Section with HTMX Polling -->
 <section id="diagnostics-results" class="diagnostics-section">
 
@@ -155,6 +170,21 @@
 
 .restart-button:hover {
     background-color: #b71c1c;
+}
+
+/* Story #233: Generate Missing Descriptions button */
+.generate-descriptions-button {
+    background-color: #1565c0;
+    color: white;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    border-radius: 0.25rem;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.generate-descriptions-button:hover {
+    background-color: #0d47a1;
 }
 
 .diagnostics-header {
@@ -320,6 +350,59 @@
 </style>
 
 <script>
+// Story #233: Generate Missing Descriptions
+function generateMissingDescriptions() {
+    // Get CSRF token from data attribute
+    const csrfData = document.getElementById('csrf-data');
+    const csrfToken = csrfData ? csrfData.getAttribute('data-csrf-token') : '';
+
+    // Disable button while in-flight
+    const btn = document.getElementById('generate-descriptions-btn');
+    const statusDiv = document.getElementById('generate-descriptions-status');
+    btn.disabled = true;
+    btn.textContent = 'Generating...';
+    statusDiv.innerHTML = '';
+
+    // Call POST /admin/diagnostics/generate-missing-descriptions
+    fetch('/admin/diagnostics/generate-missing-descriptions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': csrfToken
+        }
+    })
+    .then(response => {
+        if (response.ok) {
+            return response.json();
+        } else if (response.status === 403) {
+            throw new Error('Insufficient permissions. Admin access required.');
+        } else {
+            throw new Error('Request failed. Status: ' + response.status);
+        }
+    })
+    .then(data => {
+        const msg = document.createElement('p');
+        msg.style.color = '#4caf50';
+        msg.style.fontWeight = '600';
+        msg.textContent = 'Queued ' + data.repos_queued + ' repositories for description generation. '
+            + data.repos_with_descriptions + ' of ' + data.total_repos + ' already have descriptions.';
+        statusDiv.innerHTML = '';
+        statusDiv.appendChild(msg);
+        btn.disabled = false;
+        btn.textContent = 'Generate Missing Descriptions';
+    })
+    .catch(error => {
+        const errorMsg = document.createElement('p');
+        errorMsg.style.color = '#d32f2f';
+        errorMsg.style.fontWeight = '600';
+        errorMsg.textContent = 'Error: ' + error.message;
+        statusDiv.innerHTML = '';
+        statusDiv.appendChild(errorMsg);
+        btn.disabled = false;
+        btn.textContent = 'Generate Missing Descriptions';
+    });
+}
+
 // Story #205: Server Restart from Diagnostics Tab
 function restartServer() {
     // Show confirmation dialog (AC2)

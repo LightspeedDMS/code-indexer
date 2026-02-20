@@ -12,6 +12,7 @@ Coordinates startup, shutdown, and graceful cleanup of these services.
 from code_indexer.server.middleware.correlation import get_correlation_id
 
 import logging
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -130,6 +131,36 @@ class GlobalReposLifecycleManager:
         self.refresh_scheduler.start()
         logger.debug(
             "RefreshScheduler started", extra={"correlation_id": get_correlation_id()}
+        )
+
+        # Trigger reconciliation in background thread (non-blocking, Story #236)
+        # Failures must not block startup per AC7
+        def _run_reconcile() -> None:
+            try:
+                logger.info(
+                    "Starting golden repos reconciliation",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                self.refresh_scheduler.reconcile_golden_repos()
+                logger.info(
+                    "Golden repos reconciliation completed",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Golden repos reconciliation failed during startup (non-fatal): {exc}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
+        reconcile_thread = threading.Thread(
+            target=_run_reconcile,
+            name="golden-repos-reconcile",
+            daemon=True,
+        )
+        reconcile_thread.start()
+        logger.debug(
+            "Golden repos reconciliation thread started",
+            extra={"correlation_id": get_correlation_id()},
         )
 
         self._running = True

@@ -1952,6 +1952,47 @@ class DependencyMapAnalyzer:
             prompt += f"- {domain}\n"
         prompt += "\n"
 
+        # Compute unchanged repos: extract all repo aliases from existing_content
+        # (headings matching "### alias" pattern in Repository Roles section only),
+        # then subtract changed, new, and removed aliases.
+        repo_roles_match = re.search(
+            r"## Repository Roles\s*\n(.*?)(?=\n## |\Z)",
+            existing_content,
+            re.DOTALL,
+        )
+        if repo_roles_match:
+            repo_roles_section = repo_roles_match.group(1)
+            all_repos_in_domain = set(
+                re.findall(r"^### ([\w][\w\-\.]*)", repo_roles_section, re.MULTILINE)
+            )
+        else:
+            all_repos_in_domain = set()
+        changed_aliases = {
+            r.get("alias", "") if isinstance(r, dict) else r
+            for r in changed_repos
+        }
+        new_aliases = {
+            r.get("alias", "") if isinstance(r, dict) else r
+            for r in new_repos
+        }
+        removed_aliases = set(removed_repos)
+        unchanged_repos = (
+            all_repos_in_domain - changed_aliases - new_aliases - removed_aliases
+        )
+        # Remove empty strings that may result from dict repos with no alias key
+        unchanged_repos.discard("")
+
+        if unchanged_repos:
+            prompt += "## Unchanged Repositories\n\n"
+            prompt += (
+                "These repos had NO code changes. "
+                "You MUST preserve their analysis exactly as-is.\n"
+                "Do NOT remove, modify, or question dependencies involving these repos:\n"
+            )
+            for repo in sorted(unchanged_repos):
+                prompt += f"- {repo}\n"
+            prompt += "\n"
+
         prompt += "## Source Code Exploration (MCP Tool)\n\n"
         prompt += "You MUST use the `cidx-local` MCP server's `search_code` tool to verify changes.\n"
         prompt += "For each CHANGED or NEW repository, use `search_code` to find:\n"
@@ -1977,19 +2018,18 @@ class DependencyMapAnalyzer:
 
         prompt += "## CRITICAL SELF-CORRECTION RULES\n\n"
         prompt += "1. For every CHANGED repo: re-verify ALL dependencies listed for that repo against current source code\n"
-        prompt += "2. REMOVE dependencies that are no longer present in source code (do NOT preserve stale deps)\n"
+        prompt += "2. For CHANGED repos ONLY: remove dependencies no longer present in source code (do NOT preserve stale deps)\n"
         prompt += (
             "3. CORRECT dependencies where the nature of the relationship changed\n"
         )
         prompt += "4. ADD new dependencies discovered in changed/new repos\n"
-        prompt += "5. For UNCHANGED repos: preserve existing analysis as-is\n"
-        prompt += "6. Cross-Domain Connections MUST use the structured table format with Outgoing and Incoming subsections\n\n"
-
-        prompt += "If you cannot confirm a previously documented dependency from current source code, REMOVE it.\n\n"
+        prompt += "5. For UNCHANGED repos: preserve ALL existing analysis EXACTLY as-is — do NOT remove or modify their dependencies\n"
+        prompt += "6. NEVER remove a cross-domain dependency involving an UNCHANGED repo\n"
+        prompt += "7. Cross-Domain Connections MUST use the structured table format with Outgoing and Incoming subsections\n\n"
 
         prompt += "## Evidence-Based Claims Requirement\n\n"
         prompt += "Every dependency you document MUST include a source reference (module/subsystem name) and evidence type.\n"
-        prompt += "Do NOT preserve or add dependencies you cannot verify from current source code.\n"
+        prompt += "For CHANGED repos: Do NOT preserve or add dependencies you cannot verify from current source code.\n"
         prompt += '"I assume this exists" is NOT evidence. "I found import X in module Y" IS evidence.\n\n'
 
         prompt += "## Granularity Guidelines\n\n"
@@ -2008,7 +2048,13 @@ class DependencyMapAnalyzer:
 
         prompt += "## Output Format\n\n"
         prompt += "CRITICAL: Your output MUST begin with a markdown heading (# Domain Analysis: domain-name).\n"
-        prompt += "Provide: overview, repo roles, subdomain dependencies, cross-domain connections.\n"
+        prompt += "You MUST return the COMPLETE updated domain analysis document.\n"
+        prompt += "Do NOT return only a summary of changes — return the full document with all sections.\n\n"
+        prompt += "The output MUST include ALL of the following sections:\n"
+        prompt += "- Overview\n"
+        prompt += "- Repository Roles\n"
+        prompt += "- Intra-Domain Dependencies\n"
+        prompt += "- Cross-Domain Connections\n\n"
         prompt += "Output ONLY the content (no markdown code blocks, no preamble).\n\n"
         prompt += "The Cross-Domain Connections section MUST use the following structured table format:\n\n"
         prompt += _CROSS_DOMAIN_SCHEMA
