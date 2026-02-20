@@ -182,13 +182,22 @@ class TestRefreshSchedulerTrigger:
     """Tests for RefreshScheduler.trigger_refresh_for_repo() method."""
 
     def test_trigger_refresh_submits_job_to_background_manager(
-        self, golden_repos_dir, config_mgr, query_tracker, cleanup_manager, registry
+        self,
+        golden_repos_dir,
+        config_mgr,
+        query_tracker,
+        cleanup_manager,
+        registry,
+        alias_manager,
     ):
         """
         When background_job_manager is set, trigger_refresh_for_repo() routes via _submit_refresh_job.
 
         AC2: Writers call trigger after releasing lock; BackgroundJobManager handles visibility.
         """
+        # Register the alias so _resolve_global_alias() can find it
+        _setup_local_repo(golden_repos_dir, alias_manager, registry)
+
         mock_bgm = MagicMock()
         sched = RefreshScheduler(
             golden_repos_dir=str(golden_repos_dir),
@@ -202,14 +211,23 @@ class TestRefreshSchedulerTrigger:
         with patch.object(sched, "_submit_refresh_job") as mock_submit:
             sched.trigger_refresh_for_repo("cidx-meta-global")
 
-            mock_submit.assert_called_once_with("cidx-meta-global")
+            mock_submit.assert_called_once_with("cidx-meta-global", submitter_username="system")
 
     def test_trigger_refresh_falls_back_to_direct_execution(
-        self, golden_repos_dir, config_mgr, query_tracker, cleanup_manager, registry
+        self,
+        golden_repos_dir,
+        config_mgr,
+        query_tracker,
+        cleanup_manager,
+        registry,
+        alias_manager,
     ):
         """
         When no background_job_manager (CLI mode), trigger_refresh_for_repo() calls _execute_refresh.
         """
+        # Register the alias so _resolve_global_alias() can find it
+        _setup_local_repo(golden_repos_dir, alias_manager, registry)
+
         sched = RefreshScheduler(
             golden_repos_dir=str(golden_repos_dir),
             config_source=config_mgr,

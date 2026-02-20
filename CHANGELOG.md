@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.36] - 2026-02-20
+
+### Changed
+
+- All golden repo refresh entry points (MCP, REST API, Web UI) now route through RefreshScheduler index-source-first pipeline
+- Removed legacy GoldenRepoManager.refresh_golden_repo() method (108 lines) that bypassed versioned snapshot pipeline
+- RefreshScheduler._resolve_global_alias() encapsulates -global suffix convention, accepts bare or suffixed alias names
+- RefreshScheduler.trigger_refresh_for_repo() returns job_id and accepts submitter_username for attribution
+
+### Fixed
+
+- MCP refresh_golden_repo tool was using old in-place refresh path instead of index-source-first pipeline
+- Golden repo removal endpoint now cancels both legacy and scheduler-submitted refresh jobs
+- Double-suffix edge case in alias resolution (my-repo-global-global) prevented by endswith check
+
 ## [9.3.35] - 2026-02-19
 
 ### Added

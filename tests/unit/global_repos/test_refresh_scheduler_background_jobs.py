@@ -268,6 +268,131 @@ class TestRefreshSchedulerBackgroundJobManagerIntegration:
             assert "Simulated refresh timeout" in job.error
 
 
+class TestTriggerRefreshForRepoReturnsJobId:
+    """Tests for trigger_refresh_for_repo returning job_id (not None).
+
+    After the signature change, trigger_refresh_for_repo must return
+    Optional[str] - the job_id when BackgroundJobManager is available,
+    None otherwise (CLI mode).
+    """
+
+    @pytest.fixture
+    def golden_repos_dir(self, tmp_path):
+        """Create a golden repos directory structure."""
+        golden_repos_dir = tmp_path / ".code-indexer" / "golden_repos"
+        golden_repos_dir.mkdir(parents=True)
+        return golden_repos_dir
+
+    @pytest.fixture
+    def config_mgr(self, tmp_path):
+        """Create a ConfigManager instance."""
+        return ConfigManager(tmp_path / ".code-indexer" / "config.json")
+
+    @pytest.fixture
+    def query_tracker(self):
+        """Create a QueryTracker instance."""
+        return QueryTracker()
+
+    @pytest.fixture
+    def cleanup_manager(self, query_tracker):
+        """Create a CleanupManager instance."""
+        return CleanupManager(query_tracker)
+
+    @pytest.fixture
+    def mock_background_job_manager(self):
+        """Create a mock BackgroundJobManager."""
+        manager = MagicMock()
+        manager.submit_job = MagicMock(return_value="scheduler-job-42")
+        return manager
+
+    @pytest.fixture
+    def mock_registry_with_test_repos(self):
+        """Create a mock GlobalRegistry that knows about test repos.
+
+        Required because trigger_refresh_for_repo() now calls _resolve_global_alias()
+        which queries the registry. Tests that call trigger_refresh_for_repo() must
+        provide a registry that recognises the alias being passed.
+        """
+        registry = MagicMock()
+
+        def get_global_repo(alias_name):
+            known = {"test-repo-global", "cidx-meta-global"}
+            return {"alias_name": alias_name} if alias_name in known else None
+
+        registry.get_global_repo = MagicMock(side_effect=get_global_repo)
+        return registry
+
+    def test_trigger_refresh_returns_job_id_when_bjm_available(
+        self,
+        golden_repos_dir,
+        config_mgr,
+        query_tracker,
+        cleanup_manager,
+        mock_background_job_manager,
+        mock_registry_with_test_repos,
+    ):
+        """trigger_refresh_for_repo must return job_id from BackgroundJobManager."""
+        scheduler = RefreshScheduler(
+            golden_repos_dir=str(golden_repos_dir),
+            config_source=config_mgr,
+            query_tracker=query_tracker,
+            cleanup_manager=cleanup_manager,
+            background_job_manager=mock_background_job_manager,
+            registry=mock_registry_with_test_repos,
+        )
+
+        job_id = scheduler.trigger_refresh_for_repo("test-repo-global")
+
+        assert job_id == "scheduler-job-42"
+        mock_background_job_manager.submit_job.assert_called_once()
+
+    def test_trigger_refresh_returns_none_without_bjm(
+        self,
+        golden_repos_dir,
+        config_mgr,
+        query_tracker,
+        cleanup_manager,
+        mock_registry_with_test_repos,
+    ):
+        """trigger_refresh_for_repo must return None in CLI mode (no BackgroundJobManager)."""
+        scheduler = RefreshScheduler(
+            golden_repos_dir=str(golden_repos_dir),
+            config_source=config_mgr,
+            query_tracker=query_tracker,
+            cleanup_manager=cleanup_manager,
+            registry=mock_registry_with_test_repos,
+        )
+
+        with patch.object(scheduler, "_execute_refresh"):
+            result = scheduler.trigger_refresh_for_repo("test-repo-global")
+
+        assert result is None
+
+    def test_trigger_refresh_passes_alias_to_submit_job(
+        self,
+        golden_repos_dir,
+        config_mgr,
+        query_tracker,
+        cleanup_manager,
+        mock_background_job_manager,
+        mock_registry_with_test_repos,
+    ):
+        """trigger_refresh_for_repo must pass the resolved global alias to _submit_refresh_job."""
+        scheduler = RefreshScheduler(
+            golden_repos_dir=str(golden_repos_dir),
+            config_source=config_mgr,
+            query_tracker=query_tracker,
+            cleanup_manager=cleanup_manager,
+            background_job_manager=mock_background_job_manager,
+            registry=mock_registry_with_test_repos,
+        )
+
+        scheduler.trigger_refresh_for_repo("cidx-meta-global")
+
+        call_kwargs = mock_background_job_manager.submit_job.call_args[1]
+        assert call_kwargs["repo_alias"] == "cidx-meta-global"
+
+
 class TestGlobalReposLifecycleManagerBackgroundJobManager:
     """Test suite for GlobalReposLifecycleManager BackgroundJobManager integration."""
 

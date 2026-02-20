@@ -2515,9 +2515,15 @@ def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Refresh a golden repository (admin only)."""
     try:
         alias = params["alias"]
-        job_id = app_module.golden_repo_manager.refresh_golden_repo(
-            alias, submitter_username=user.username
-        )
+        # Validate repo exists via golden_repo_manager before scheduling
+        if alias not in app_module.golden_repo_manager.golden_repos:
+            raise Exception(f"Golden repository '{alias}' not found")
+        # Delegate to RefreshScheduler (index-source-first versioned pipeline)
+        refresh_scheduler = _get_app_refresh_scheduler()
+        if refresh_scheduler is None:
+            raise Exception("RefreshScheduler not available")
+        # Resolution from bare alias to global format happens inside RefreshScheduler
+        job_id = refresh_scheduler.trigger_refresh_for_repo(alias)
         return _mcp_response(
             {
                 "success": True,

@@ -198,20 +198,63 @@ class RefreshScheduler:
 
         return _ctx()
 
-    def trigger_refresh_for_repo(self, alias_name: str) -> None:
+    def _resolve_global_alias(self, alias_name: str) -> str:
+        """Resolve bare alias to global alias format.
+
+        Accepts either bare alias ("my-repo") or global alias ("my-repo-global").
+        Tries the alias as-is first (fast path for callers already using global format).
+        If not found, appends the "-global" suffix and retries.
+
+        This keeps the -global suffix convention encapsulated in the scheduler layer,
+        so callers (MCP handlers, REST endpoints, Web UI) can pass bare aliases.
+
+        Args:
+            alias_name: Either bare alias ("my-repo") or global alias ("my-repo-global")
+
+        Returns:
+            Global alias name (e.g., "my-repo-global")
+
+        Raises:
+            ValueError: If alias is not found in either bare or global format
+        """
+        # Try as-is first (already global format or exact match)
+        if self.registry.get_global_repo(alias_name) is not None:
+            return alias_name
+        # Only append -global if not already present (avoid double-suffix edge case)
+        if not alias_name.endswith("-global"):
+            global_name = f"{alias_name}-global"
+            if self.registry.get_global_repo(global_name) is not None:
+                return global_name
+        raise ValueError(f"Repository '{alias_name}' not found in global registry")
+
+    def trigger_refresh_for_repo(self, alias_name: str, submitter_username: str = "system") -> Optional[str]:
         """
         Request a refresh for a specific repo after external writes complete.
+
+        Accepts either bare alias ("my-repo") or global alias ("my-repo-global").
+        Resolves to global format internally via _resolve_global_alias().
 
         Routes through BackgroundJobManager if available (server mode with dashboard
         visibility), otherwise falls back to direct _execute_refresh() (CLI mode).
 
         Args:
-            alias_name: Global alias name (e.g., "cidx-meta-global")
+            alias_name: Bare alias (e.g., "my-repo") or global alias (e.g., "cidx-meta-global")
+            submitter_username: Username to attribute the job to (default: "system" for
+                background/scheduled refreshes; pass actual username for user-initiated refreshes)
+
+        Returns:
+            Job ID string if submitted to BackgroundJobManager, None if executed directly
+            (CLI mode) or if no BackgroundJobManager is configured.
+
+        Raises:
+            ValueError: If alias is not found in the global registry
         """
+        global_alias = self._resolve_global_alias(alias_name)
         if self.background_job_manager:
-            self._submit_refresh_job(alias_name)
+            return self._submit_refresh_job(global_alias, submitter_username=submitter_username)
         else:
-            self._execute_refresh(alias_name)
+            self._execute_refresh(global_alias)
+            return None
 
     def get_refresh_interval(self) -> int:
         """
@@ -311,7 +354,7 @@ class RefreshScheduler:
 
         logger.debug("Refresh scheduler loop exited")
 
-    def _submit_refresh_job(self, alias_name: str) -> Optional[str]:
+    def _submit_refresh_job(self, alias_name: str, submitter_username: str = "system") -> Optional[str]:
         """
         Submit a refresh job to BackgroundJobManager.
 
@@ -320,6 +363,7 @@ class RefreshScheduler:
 
         Args:
             alias_name: Global alias name (e.g., "my-repo-global")
+            submitter_username: Username to attribute the job to (default: "system")
 
         Returns:
             Job ID if submitted to BackgroundJobManager, None if executed directly
@@ -332,7 +376,7 @@ class RefreshScheduler:
         job_id: str = self.background_job_manager.submit_job(
             operation_type="global_repo_refresh",
             func=lambda: self._execute_refresh(alias_name),
-            submitter_username="system",
+            submitter_username=submitter_username,
             is_admin=True,
             repo_alias=alias_name,
         )

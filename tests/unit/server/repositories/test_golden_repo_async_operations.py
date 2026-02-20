@@ -78,52 +78,6 @@ class TestGoldenRepoAsyncOperations:
 
         return golden_repo_manager
 
-    # Test refresh_golden_repo
-    def test_refresh_golden_repo_returns_job_id(self, manager_with_existing_repo):
-        """Test that refresh_golden_repo returns a job_id string."""
-        # Mock git operations
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-
-            result = manager_with_existing_repo.refresh_golden_repo("test-repo")
-
-            # Should return job_id string, not Dict
-            assert isinstance(result, str)
-            assert result == "test-job-id-12345"
-
-    def test_refresh_golden_repo_submits_background_job(
-        self, manager_with_existing_repo
-    ):
-        """Test that refresh_golden_repo submits job to BackgroundJobManager."""
-        # Mock git operations
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-
-            manager_with_existing_repo.refresh_golden_repo("test-repo")
-
-            # Verify job was submitted
-            manager_with_existing_repo.background_job_manager.submit_job.assert_called_once()
-
-            # Verify job parameters
-            call_args = (
-                manager_with_existing_repo.background_job_manager.submit_job.call_args
-            )
-            assert call_args[1]["operation_type"] == "refresh_golden_repo"
-            assert call_args[1]["submitter_username"] == "admin"
-            assert call_args[1]["is_admin"] is True
-
-    def test_refresh_golden_repo_validates_before_job_submission(
-        self, golden_repo_manager
-    ):
-        """Test that refresh_golden_repo validates repo exists before submitting job."""
-        with pytest.raises(
-            GoldenRepoError, match="Golden repository 'nonexistent' not found"
-        ):
-            golden_repo_manager.refresh_golden_repo("nonexistent")
-
-        # Job should NOT have been submitted
-        golden_repo_manager.background_job_manager.submit_job.assert_not_called()
-
     # Test add_golden_repo
     def test_add_golden_repo_returns_job_id(self, golden_repo_manager):
         """Test that add_golden_repo returns a job_id string."""
@@ -236,31 +190,6 @@ class TestGoldenRepoAsyncOperations:
         golden_repo_manager.background_job_manager.submit_job.assert_not_called()
 
     # Test background worker execution
-    def test_refresh_golden_repo_background_worker_callable(
-        self, manager_with_existing_repo
-    ):
-        """Test that refresh_golden_repo submits a callable with no args."""
-        # Mock git operations
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-
-            manager_with_existing_repo.refresh_golden_repo("test-repo")
-
-            # Get the func argument passed to submit_job
-            call_args = (
-                manager_with_existing_repo.background_job_manager.submit_job.call_args
-            )
-            func = call_args[1]["func"]
-
-            # Verify it's callable
-            assert callable(func)
-
-            # Verify it takes no arguments (wrapper pattern)
-            import inspect
-
-            sig = inspect.signature(func)
-            assert len(sig.parameters) == 0
-
     def test_add_golden_repo_background_worker_callable(self, golden_repo_manager):
         """Test that add_golden_repo submits a callable with no args."""
         with patch.object(
@@ -401,21 +330,6 @@ class TestGoldenRepoAsyncOperations:
         assert call_kwargs["submitter_username"] == "bob"
         assert call_kwargs["is_admin"] is True
 
-    def test_refresh_golden_repo_passes_username_to_job_manager(
-        self, manager_with_existing_repo
-    ):
-        """Verify actual username is passed to background job manager for refresh."""
-        manager_with_existing_repo.refresh_golden_repo(
-            "test-repo", submitter_username="charlie"
-        )
-
-        # Verify submit_job was called with correct username
-        call_kwargs = (
-            manager_with_existing_repo.background_job_manager.submit_job.call_args[1]
-        )
-        assert call_kwargs["submitter_username"] == "charlie"
-        assert call_kwargs["is_admin"] is True
-
     def test_add_golden_repo_default_username_is_admin(self, golden_repo_manager):
         """Verify default username is 'admin' when not specified."""
         with patch.object(
@@ -447,15 +361,3 @@ class TestGoldenRepoAsyncOperations:
         )
         assert call_kwargs["submitter_username"] == "admin"
 
-    def test_refresh_golden_repo_default_username_is_admin(
-        self, manager_with_existing_repo
-    ):
-        """Verify default username is 'admin' when not specified."""
-        # Call without submitter_username parameter
-        manager_with_existing_repo.refresh_golden_repo("test-repo")
-
-        # Verify default username is "admin"
-        call_kwargs = (
-            manager_with_existing_repo.background_job_manager.submit_job.call_args[1]
-        )
-        assert call_kwargs["submitter_username"] == "admin"

@@ -2382,10 +2382,19 @@ def refresh_golden_repo(
     # Try to refresh the repository
     try:
         manager = _get_golden_repo_manager()
-        job_id = manager.refresh_golden_repo(
-            alias=alias,
-            submitter_username=session.username,
+        # Validate repo exists before scheduling
+        if alias not in manager.golden_repos:
+            raise Exception(f"Repository '{alias}' not found")
+        # Delegate to RefreshScheduler (index-source-first versioned pipeline)
+        from code_indexer.server import app as app_module
+
+        lifecycle_manager = getattr(
+            app_module.app.state, "global_lifecycle_manager", None
         )
+        if not lifecycle_manager or not lifecycle_manager.refresh_scheduler:
+            raise Exception("RefreshScheduler not available")
+        # Resolution from bare alias to global format happens inside RefreshScheduler
+        job_id = lifecycle_manager.refresh_scheduler.trigger_refresh_for_repo(alias)
         return _create_golden_repos_page_response(
             request,
             session,

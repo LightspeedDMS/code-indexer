@@ -5056,15 +5056,28 @@ def create_app() -> FastAPI:
             HTTPException: If job submission fails
         """
         try:
-            # Directly call refresh_golden_repo which submits its own job internally
-            job_id = golden_repo_manager.refresh_golden_repo(
-                alias=alias,
-                submitter_username=current_user.username,
-            )
+            # Validate repo exists before scheduling
+            if alias not in golden_repo_manager.golden_repos:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Golden repository '{alias}' not found",
+                )
+            # Delegate to RefreshScheduler (index-source-first versioned pipeline)
+            lifecycle_manager = getattr(app.state, "global_lifecycle_manager", None)
+            if not lifecycle_manager or not lifecycle_manager.refresh_scheduler:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="RefreshScheduler not available",
+                )
+            # Resolution from bare alias to global format happens inside RefreshScheduler
+            job_id = lifecycle_manager.refresh_scheduler.trigger_refresh_for_repo(alias)
             return JobResponse(
-                job_id=job_id, message=f"Golden repository '{alias}' refresh started"
+                job_id=job_id or "",
+                message=f"Golden repository '{alias}' refresh started",
             )
 
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -5519,6 +5532,7 @@ def create_app() -> FastAPI:
                             operation_types=[
                                 GOLDEN_REPO_ADD_OPERATION,
                                 GOLDEN_REPO_REFRESH_OPERATION,
+                                "global_repo_refresh",
                             ],
                             params_filter={"alias": alias},
                         )
