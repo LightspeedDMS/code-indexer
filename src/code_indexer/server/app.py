@@ -5070,7 +5070,9 @@ def create_app() -> FastAPI:
                     detail="RefreshScheduler not available",
                 )
             # Resolution from bare alias to global format happens inside RefreshScheduler
-            job_id = lifecycle_manager.refresh_scheduler.trigger_refresh_for_repo(alias)
+            job_id = lifecycle_manager.refresh_scheduler.trigger_refresh_for_repo(
+                alias, submitter_username=current_user.username
+            )
             return JobResponse(
                 job_id=job_id or "",
                 message=f"Golden repository '{alias}' refresh started",

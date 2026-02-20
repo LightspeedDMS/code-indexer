@@ -2394,7 +2394,9 @@ def refresh_golden_repo(
         if not lifecycle_manager or not lifecycle_manager.refresh_scheduler:
             raise Exception("RefreshScheduler not available")
         # Resolution from bare alias to global format happens inside RefreshScheduler
-        job_id = lifecycle_manager.refresh_scheduler.trigger_refresh_for_repo(alias)
+        job_id = lifecycle_manager.refresh_scheduler.trigger_refresh_for_repo(
+            alias, submitter_username=session.username
+        )
         return _create_golden_repos_page_response(
             request,
             session,

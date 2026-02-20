@@ -2523,7 +2523,9 @@ def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if refresh_scheduler is None:
             raise Exception("RefreshScheduler not available")
         # Resolution from bare alias to global format happens inside RefreshScheduler
-        job_id = refresh_scheduler.trigger_refresh_for_repo(alias)
+        job_id = refresh_scheduler.trigger_refresh_for_repo(
+            alias, submitter_username=user.username
+        )
         return _mcp_response(
             {
                 "success": True,

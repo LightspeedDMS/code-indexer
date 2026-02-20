@@ -207,8 +207,10 @@ class TestRefreshGoldenRepoHandlerViaScheduler:
             ):
                 result = refresh_golden_repo(mcp_params, mock_admin_user)
 
-        # RefreshScheduler must be called with bare alias (resolution happens inside scheduler)
-        mock_scheduler.trigger_refresh_for_repo.assert_called_once_with("my-repo")
+        # RefreshScheduler must be called with bare alias and submitter_username
+        mock_scheduler.trigger_refresh_for_repo.assert_called_once_with(
+            "my-repo", submitter_username="admin"
+        )
 
         # GoldenRepoManager.refresh_golden_repo must NOT be called
         mock_manager.refresh_golden_repo.assert_not_called()

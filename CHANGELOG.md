@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.37] - 2026-02-20
+
+### Fixed
+
+- Refresh jobs submitted via MCP, REST API, and Web UI now use the requesting user's username as submitter, making jobs visible in Recent Activity and via get_job_details
+- Previously all user-triggered refresh jobs were owned by "system", preventing the triggering user from tracking their own jobs
+
+## [9.3.37] - 2026-02-20
+
+### Fixed
+
+- User-triggered refresh jobs (MCP, REST, Web UI) now correctly attribute submitter_username to the actual user instead of defaulting to "system", making jobs visible in Recent Activity and get_job_details
+
 ## [9.3.36] - 2026-02-20
 
 ### Changed
