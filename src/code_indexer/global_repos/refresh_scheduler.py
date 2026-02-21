@@ -495,6 +495,18 @@ class RefreshScheduler:
 
                     logger.info(f"Changes detected in local repo {alias_name}, creating new index")
                 else:
+                    # Bug #239: Check write lock for git repos too. Protects against
+                    # reconciliation restoring a master while refresh tries to snapshot it.
+                    if self.is_write_locked(repo_name):
+                        logger.info(
+                            f"Skipping refresh for {alias_name}, write lock held by external writer"
+                        )
+                        return {
+                            "success": True,
+                            "alias": alias_name,
+                            "message": "Skipped, write lock held",
+                        }
+
                     # Story #236 Fix 2: Always git pull into the master golden repo, never into
                     # a versioned snapshot. current_target may be a .versioned/ path after first
                     # refresh, but git pull must always operate on the canonical master.
@@ -1265,6 +1277,18 @@ class RefreshScheduler:
 
             # AC4: Restore missing master via reverse CoW clone
             if not master_path.exists():
+                # Bug #239: Acquire write lock before restoring to prevent
+                # RefreshScheduler from creating a CoW snapshot of a
+                # partially-restored master directory.
+                _write_lock_acquired = self.acquire_write_lock(
+                    repo_name, owner_name="reconciliation"
+                )
+                if not _write_lock_acquired:
+                    logger.warning(
+                        f"Reconciliation: could not acquire write lock for {repo_name}, "
+                        f"skipping restoration to avoid race condition"
+                    )
+                    continue
                 try:
                     if self._restore_master_from_versioned(alias_name, master_path):
                         restored_count += 1
@@ -1272,6 +1296,10 @@ class RefreshScheduler:
                     logger.error(
                         f"Reconciliation: unexpected error for {alias_name}: "
                         f"{type(e).__name__}: {e}", exc_info=True,
+                    )
+                finally:
+                    self.release_write_lock(
+                        repo_name, owner_name="reconciliation"
                     )
 
             # AC5: Queue description generation if cidx-meta file is missing

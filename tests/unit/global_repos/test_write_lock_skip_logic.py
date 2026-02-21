@@ -154,28 +154,35 @@ class TestRefreshSchedulerWriteLockSkip:
                 "When no write lock and no changes, result must indicate 'No changes detected'"
             )
 
-    def test_execute_refresh_does_not_check_write_lock_for_git_repos(
+    def test_execute_refresh_checks_write_lock_for_git_repos_and_proceeds_when_unlocked(
         self, scheduler, golden_repos_dir, alias_manager, registry
     ):
         """
-        AC4: For git repos, _execute_refresh() does NOT call is_write_locked().
+        Bug #239 Fix 2: For git repos, _execute_refresh() NOW calls is_write_locked().
 
-        Git repos manage writes via git pull — write-lock is not applicable.
+        This supersedes the old AC4 assumption ("git repos don't check write lock").
+        When the lock is NOT held (returns False), the normal GitPullUpdater flow proceeds.
+        When the lock IS held (e.g. by reconciliation), refresh is skipped — see
+        test_refresh_scheduler_race_condition.py for the skip-when-locked cases.
         """
         _setup_git_repo(golden_repos_dir, alias_manager, registry)
 
         with patch.object(scheduler, "_detect_existing_indexes", return_value={}), \
              patch.object(scheduler, "_reconcile_registry_with_filesystem"), \
-             patch.object(scheduler, "is_write_locked") as mock_is_locked, \
+             patch.object(scheduler, "is_write_locked", return_value=False) as mock_is_locked, \
              patch("code_indexer.global_repos.refresh_scheduler.GitPullUpdater") as mock_cls:
 
             mock_updater = MagicMock()
             mock_updater.has_changes.return_value = False
             mock_cls.return_value = mock_updater
 
-            scheduler._execute_refresh("test-repo-global")
+            result = scheduler._execute_refresh("test-repo-global")
 
-            mock_is_locked.assert_not_called()
+            # is_write_locked MUST be called for git repos (Bug #239 Fix 2)
+            mock_is_locked.assert_called()
+            # Normal GitPullUpdater flow proceeds when lock is not held
+            mock_cls.assert_called_once()
+            assert result["success"] is True
 
 
 class TestRefreshSchedulerTrigger:
