@@ -1819,7 +1819,12 @@ class DependencyMapAnalyzer:
         if allowed_tools is not None:
             cmd.extend(["--allowedTools", allowed_tools])
 
-        cmd.extend(["-p", prompt])
+        # Prompt passed via stdin (not command-line) to avoid E2BIG with large prompts
+        prompt_size_kb = len(prompt.encode('utf-8')) / 1024
+        logger.info(
+            f"Claude CLI prompt size: {prompt_size_kb:.1f} KB, "
+            f"cmd args: {len(' '.join(cmd))} chars"
+        )
 
         # Run subprocess (wrapped in try/finally to ensure counter file cleanup)
         try:
@@ -1833,7 +1838,7 @@ class DependencyMapAnalyzer:
                     ("CLAUDECODE", "ANTHROPIC_API_KEY") if "CLAUDECODE" in os.environ
                     else ("CLAUDECODE",)
                 )},
-                stdin=subprocess.DEVNULL,  # Prevent Claude CLI from hanging on stdin
+                input=prompt,  # Pass prompt via stdin to avoid ARG_MAX (E2BIG) with large prompts
             )
         finally:
             # Clean up counter file if it was created

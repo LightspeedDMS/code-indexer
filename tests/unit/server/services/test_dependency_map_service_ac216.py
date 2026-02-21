@@ -116,6 +116,7 @@ class TestPass3NotCalled:
             "staging_dir": staging_dir,
             "final_dir": final_dir,
             "cidx_meta_path": cidx_meta_path,
+            "cidx_meta_read_path": cidx_meta_path,
             "golden_repos_root": tmp_path,
         }
         repo_list = [{"alias": "repo1", "clone_path": str(tmp_path / "repo1"), "file_count": 5, "total_bytes": 100}]

@@ -120,8 +120,9 @@ class TestPass1Synthesis:
         assert "--print" in cmd
         assert "--model" in cmd
         assert "--max-turns" in cmd
-        assert "-p" in cmd
-        assert "Identify domain clusters" in cmd[-1]  # Last element is the prompt
+        # Prompt is passed via stdin (input= kwarg), not as -p CLI arg (avoids E2BIG with large prompts)
+        assert "-p" not in cmd
+        assert "Identify domain clusters" in call_args[1]["input"]  # Prompt via stdin
         assert call_args[1]["cwd"] == str(tmp_path)
         assert call_args[1]["timeout"] == 600  # full pass_timeout (Pass 1 is heaviest phase)
 
@@ -291,7 +292,7 @@ class TestPass2PerDomain:
         # Verify subprocess was called with prompt containing tech stack verification
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
-        prompt = call_args[0][0][-1]  # Last element is the prompt
+        prompt = call_args[1]["input"]  # Prompt passed via stdin
 
         # Verify the Technology Stack Verification section exists
         assert "## MANDATORY: Technology Stack Verification" in prompt
@@ -588,7 +589,7 @@ class TestPass1PromptGuardrails:
         # Verify prompt contains critical guardrails
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
-        prompt = call_args[0][0][-1]  # Last element is the prompt
+        prompt = call_args[1]["input"]  # Prompt passed via stdin
 
         # Verify COMPLETENESS MANDATE section instructs internal verification
         assert "Verify INTERNALLY that total repos across all domains equals" in prompt
@@ -806,7 +807,7 @@ class TestIncrementalPass2:
         # Verify subprocess was called with prompt containing previous content
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
-        prompt = call_args[0][0][-1]  # Last element is the prompt
+        prompt = call_args[1]["input"]  # Prompt passed via stdin
 
         assert "Previous Analysis (refine and improve)" in prompt
         assert "Old content here" in prompt
@@ -957,13 +958,14 @@ class TestSingleShotVsAgenticMode:
         call_args = mock_subprocess.call_args
         cmd = call_args[0][0]
 
-        # Verify command structure: claude --print --model opus -p <prompt>
-        # WITHOUT --max-turns
+        # Verify command structure: claude --print --model opus
+        # WITHOUT --max-turns, prompt passed via stdin (not -p CLI arg)
         assert cmd[0] == "claude"
         assert "--print" in cmd
         assert "--model" in cmd
         assert "--max-turns" not in cmd
-        assert "-p" in cmd
+        assert "-p" not in cmd  # Prompt via stdin to avoid E2BIG
+        assert "input" in call_args[1]  # Prompt passed as stdin input
 
     @patch("subprocess.run")
     def test_agentic_mode_includes_max_turns(self, mock_subprocess, tmp_path):
@@ -1007,7 +1009,8 @@ class TestSingleShotVsAgenticMode:
         assert "--max-turns" in cmd
         turns_idx = cmd.index("--max-turns")
         assert cmd[turns_idx + 1] == "50"
-        assert "-p" in cmd
+        assert "-p" not in cmd  # Prompt via stdin to avoid E2BIG
+        assert "input" in call_args[1]  # Prompt passed as stdin input
 
 
 class TestEmptyOutputDetection:
@@ -1449,7 +1452,7 @@ class TestPass2PromptGuardrails:
         # Verify prompt contains YAML prohibition
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
-        prompt = call_args[0][0][-1]  # Last element is the prompt
+        prompt = call_args[1]["input"]  # Prompt passed via stdin
 
         assert "## PROHIBITED Content" in prompt
         assert "YAML frontmatter blocks (the system adds these automatically)" in prompt
@@ -1480,7 +1483,7 @@ class TestPass2PromptGuardrails:
         # Verify prompt contains speculative content prohibition
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
-        prompt = call_args[0][0][-1]
+        prompt = call_args[1]["input"]
 
         # Check for exact text in PROHIBITED section
         assert "## PROHIBITED Content" in prompt
@@ -1724,7 +1727,7 @@ class TestIteration10PromptReinforcement:
         # Verify prompt contains heading requirement
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
-        prompt = call_args[0][0][-1]  # Last element is the prompt
+        prompt = call_args[1]["input"]  # Prompt passed via stdin
 
         assert "CRITICAL: Your output MUST begin with a markdown heading" in prompt
         assert "Do NOT start with summary text, meta-commentary, or a description of what you found" in prompt
@@ -1769,7 +1772,7 @@ class TestIteration11Fix2QualityCheckPrevious:
         # Verify subprocess was called with prompt that does NOT include previous content
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
-        prompt = call_args[0][0][-1]  # Last element is the prompt
+        prompt = call_args[1]["input"]  # Prompt passed via stdin
 
         # Should NOT contain "Previous Analysis" section
         assert "Previous Analysis (refine and improve)" not in prompt
@@ -1810,7 +1813,7 @@ class TestIteration11Fix2QualityCheckPrevious:
         # Verify subprocess was called with prompt that DOES include previous content
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
-        prompt = call_args[0][0][-1]  # Last element is the prompt
+        prompt = call_args[1]["input"]  # Prompt passed via stdin
 
         # Should contain "Previous Analysis" section
         assert "Previous Analysis (refine and improve)" in prompt
@@ -2167,7 +2170,7 @@ class TestIteration13LargeDomainDetection:
 
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args[0][0]
-        prompt = call_args[-1]  # Last element is the prompt
+        prompt = mock_subprocess.call_args[1]["input"]  # Prompt passed via stdin
 
         # Verify output-first prompt characteristics
         assert "WRITE YOUR ANALYSIS FIRST" in prompt
@@ -2203,8 +2206,7 @@ class TestIteration13LargeDomainDetection:
         analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
 
         mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args[0][0]
-        prompt = call_args[-1]
+        prompt = mock_subprocess.call_args[1]["input"]
 
         # Verify standard prompt characteristics (existing behavior)
         assert "Source Code Exploration Mandate" in prompt
@@ -2637,7 +2639,7 @@ class TestIteration14PurposeDrivenHooks:
             assert retry_cmd[tools_idx + 1] == "", "Retry should use allowed_tools='' (write-only)"
 
         # Verify retry prompt includes write-focused language
-        retry_prompt = retry_cmd[-1]
+        retry_prompt = retry_call[1]["input"]
         assert "Write your dependency analysis NOW" in retry_prompt
         assert "NO searching" in retry_prompt or "without searching" in retry_prompt.lower()
 
@@ -2683,8 +2685,7 @@ class TestIteration15InsideOutAndConciseness:
 
         # Extract prompt from subprocess call
         mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args[0][0]
-        prompt = call_args[-1]
+        prompt = mock_subprocess.call_args[1]["input"]
 
         # Verify file count and MB size in prompt
         assert "150 files" in prompt
@@ -2722,8 +2723,7 @@ class TestIteration15InsideOutAndConciseness:
 
         # Extract prompt
         mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args[0][0]
-        prompt = call_args[-1]
+        prompt = mock_subprocess.call_args[1]["input"]
 
         # Verify INSIDE-OUT section present
         assert "INSIDE-OUT ANALYSIS STRATEGY" in prompt
@@ -2762,8 +2762,7 @@ class TestIteration15InsideOutAndConciseness:
 
         # Extract prompt
         mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args[0][0]
-        prompt = call_args[-1]
+        prompt = mock_subprocess.call_args[1]["input"]
 
         # Extract the "Repository Filesystem Locations" section where repos should be sorted
         repo_section_start = prompt.find("## Repository Filesystem Locations")
@@ -2812,8 +2811,7 @@ class TestIteration15InsideOutAndConciseness:
 
         # Extract prompt
         mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args[0][0]
-        prompt = call_args[-1]
+        prompt = mock_subprocess.call_args[1]["input"]
 
         # Verify OUTPUT TEMPLATE section with required headings
         assert "OUTPUT TEMPLATE" in prompt
@@ -2849,8 +2847,7 @@ class TestIteration15InsideOutAndConciseness:
 
         # Extract prompt
         mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args[0][0]
-        prompt = call_args[-1]
+        prompt = mock_subprocess.call_args[1]["input"]
 
         # Verify Output Budget section
         assert "Output Budget" in prompt
@@ -2884,8 +2881,7 @@ class TestIteration15InsideOutAndConciseness:
 
         # Extract prompt
         mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args[0][0]
-        prompt = call_args[-1]
+        prompt = mock_subprocess.call_args[1]["input"]
 
         # Verify PROHIBITED section mentions MCP Searches
         assert "PROHIBITED" in prompt
