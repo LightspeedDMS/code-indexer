@@ -136,6 +136,25 @@ def _mock_config_service(token_limit):
 class TestGitLogTruncationWithCacheHandle:
     """Test git_log handler truncation with cache_handle support."""
 
+    @pytest.fixture(autouse=True)
+    def mock_activated_repo(self, tmp_path):
+        """Patch ActivatedRepoManager to return a path with .git dir.
+
+        Required because _resolve_git_repo_path now validates .git existence
+        for user-activated repos (non-global aliases like 'test-repo').
+        """
+        from unittest.mock import patch
+
+        repo_dir = tmp_path / "test-repo"
+        repo_dir.mkdir()
+        (repo_dir / ".git").mkdir()
+        with patch(
+            "code_indexer.server.mcp.handlers.ActivatedRepoManager"
+        ) as MockClass:
+            mock_instance = MockClass.return_value
+            mock_instance.get_activated_repo_path.return_value = str(repo_dir)
+            yield
+
     def test_large_log_returns_cache_handle(self, mock_user, mock_payload_cache):
         """Verify large log returns cache_handle when truncated.
 
@@ -468,6 +487,25 @@ class TestGitLogTruncationWithCacheHandle:
 
 class TestGitLogTruncationHelperIntegration:
     """Test git_log handler's integration with TruncationHelper."""
+
+    @pytest.fixture(autouse=True)
+    def mock_activated_repo(self, tmp_path):
+        """Patch ActivatedRepoManager to return a path with .git dir.
+
+        Required because _resolve_git_repo_path now validates .git existence
+        for user-activated repos (non-global aliases like 'test-repo').
+        """
+        from unittest.mock import patch
+
+        repo_dir = tmp_path / "test-repo"
+        repo_dir.mkdir()
+        (repo_dir / ".git").mkdir()
+        with patch(
+            "code_indexer.server.mcp.handlers.ActivatedRepoManager"
+        ) as MockClass:
+            mock_instance = MockClass.return_value
+            mock_instance.get_activated_repo_path.return_value = str(repo_dir)
+            yield
 
     def test_uses_truncation_helper_with_log_content_type(
         self, mock_user, mock_payload_cache

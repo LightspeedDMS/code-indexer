@@ -108,8 +108,9 @@ class DependencyMapService:
             raise RuntimeError("Dependency map analysis already in progress")
 
         # Story #227: Acquire write lock so RefreshScheduler skips CoW clone during writes.
+        _write_lock_acquired = False
         if self._refresh_scheduler is not None:
-            self._refresh_scheduler.acquire_write_lock("cidx-meta", owner_name="dependency_map_service")
+            _write_lock_acquired = self._refresh_scheduler.acquire_write_lock("cidx-meta", owner_name="dependency_map_service")
 
         _analysis_succeeded = False
         try:
@@ -168,7 +169,7 @@ class DependencyMapService:
             self._lock.release()
 
             # Story #227: Release write lock so RefreshScheduler can proceed.
-            if self._refresh_scheduler is not None:
+            if _write_lock_acquired and self._refresh_scheduler is not None:
                 self._refresh_scheduler.release_write_lock("cidx-meta", owner_name="dependency_map_service")
 
             # Story #227: Trigger explicit refresh after lock released (only on success).
@@ -1414,8 +1415,9 @@ class DependencyMapService:
             return None
 
         # Story #227: Acquire write lock so RefreshScheduler skips CoW clone during writes.
+        _write_lock_acquired = False
         if self._refresh_scheduler is not None:
-            self._refresh_scheduler.acquire_write_lock("cidx-meta", owner_name="dependency_map_service")
+            _write_lock_acquired = self._refresh_scheduler.acquire_write_lock("cidx-meta", owner_name="dependency_map_service")
 
         _delta_succeeded = False
         try:
@@ -1542,7 +1544,7 @@ class DependencyMapService:
             self._lock.release()
 
             # Story #227: Release write lock so RefreshScheduler can proceed.
-            if self._refresh_scheduler is not None:
+            if _write_lock_acquired and self._refresh_scheduler is not None:
                 self._refresh_scheduler.release_write_lock("cidx-meta", owner_name="dependency_map_service")
 
             # Story #227: Trigger explicit refresh after lock released (only on success).

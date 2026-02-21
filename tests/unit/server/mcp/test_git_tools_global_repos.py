@@ -138,22 +138,25 @@ class TestResolveGitRepoPath:
         assert error_msg is None
         assert path == str(repo_dir)
 
-    def test_returns_activated_repo_path_for_non_global_alias(self):
+    def test_returns_activated_repo_path_for_non_global_alias(self, tmp_path):
         """Non-global alias returns path from ActivatedRepoManager with no error."""
         from code_indexer.server.mcp.handlers import _resolve_git_repo_path
 
-        expected_path = Path("/srv/activated-repos/testuser/my-repo")
+        # Create a real directory with .git so the validation passes
+        repo_dir = tmp_path / "my-repo"
+        repo_dir.mkdir()
+        (repo_dir / ".git").mkdir()
 
         with patch(
             "code_indexer.server.mcp.handlers.ActivatedRepoManager"
         ) as MockClass:
             mock_instance = MockClass.return_value
-            mock_instance.get_activated_repo_path.return_value = expected_path
+            mock_instance.get_activated_repo_path.return_value = str(repo_dir)
 
             path, error_msg = _resolve_git_repo_path("my-repo", "testuser")
 
         assert error_msg is None
-        assert path == expected_path
+        assert path == str(repo_dir)
         mock_instance.get_activated_repo_path.assert_called_once_with(
             username="testuser", user_alias="my-repo"
         )

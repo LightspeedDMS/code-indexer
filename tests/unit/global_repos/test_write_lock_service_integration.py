@@ -379,8 +379,8 @@ class TestLangfuseTraceSyncServiceWriteLock:
             f"trigger alias must contain 'langfuse'. Got: '{trigger_alias}'"
         )
 
-    def test_sync_project_releases_lock_on_exception_no_trigger(self, tmp_path):
-        """AC5: On exception, write lock is released but trigger is NOT called."""
+    def test_sync_project_no_lock_on_discovery_failure(self, tmp_path):
+        """When discover_project() raises, no lock is acquired or released (lock is post-discovery)."""
         from code_indexer.server.utils.config_manager import LangfusePullProject
 
         mock_scheduler = MagicMock()
@@ -405,9 +405,52 @@ class TestLangfuseTraceSyncServiceWriteLock:
                     max_concurrent_observations=1,
                 )
 
-        assert mock_scheduler.release_write_lock.called, (
-            "release_write_lock() must be called even when sync_project() raises exception"
+        # Lock is acquired AFTER discovery, so discovery failure means no lock was held
+        mock_scheduler.acquire_write_lock.assert_not_called()
+        mock_scheduler.release_write_lock.assert_not_called()
+        mock_scheduler.trigger_refresh_for_repo.assert_not_called()
+
+    def test_sync_project_releases_lock_on_inner_sync_exception(self, tmp_path):
+        """AC5: When inner sync raises after lock acquired, lock is released but trigger is NOT called."""
+        from code_indexer.server.utils.config_manager import LangfusePullProject
+
+        mock_scheduler = MagicMock()
+        mock_scheduler.acquire_write_lock.return_value = True
+
+        service = _make_langfuse_service(refresh_scheduler=mock_scheduler, tmp_path=tmp_path)
+
+        mock_api_client = MagicMock()
+        mock_api_client.discover_project.return_value = {"name": "my-project", "id": "proj-123"}
+
+        creds = LangfusePullProject(public_key="pk-test", secret_key="sk-test")
+
+        with patch(
+            "code_indexer.server.services.langfuse_trace_sync_service.LangfuseApiClient",
+            return_value=mock_api_client,
+        ), patch.object(
+            service, "_sync_project_inner",
+            side_effect=RuntimeError("Sync failed mid-write"),
+        ):
+            with pytest.raises(RuntimeError, match="Sync failed mid-write"):
+                service.sync_project(
+                    host="http://localhost:3000",
+                    creds=creds,
+                    trace_age_days=7,
+                    max_concurrent_observations=1,
+                )
+
+        # Lock WAS acquired (discovery succeeded), so it must be released
+        mock_scheduler.acquire_write_lock.assert_called_once()
+        call_alias = mock_scheduler.acquire_write_lock.call_args[0][0]
+        assert call_alias == "langfuse_my-project", (
+            f"Expected lock alias 'langfuse_my-project', got '{call_alias}'"
         )
+        mock_scheduler.release_write_lock.assert_called_once()
+        release_alias = mock_scheduler.release_write_lock.call_args[0][0]
+        assert release_alias == "langfuse_my-project", (
+            f"Expected release alias 'langfuse_my-project', got '{release_alias}'"
+        )
+        # Trigger must NOT be called on exception (AC5)
         mock_scheduler.trigger_refresh_for_repo.assert_not_called()
 
     def test_sync_project_no_lock_when_no_scheduler(self, tmp_path):

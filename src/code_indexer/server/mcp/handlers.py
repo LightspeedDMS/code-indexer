@@ -4264,6 +4264,13 @@ def _resolve_git_repo_path(
     repo_path = activated_repo_manager.get_activated_repo_path(
         username=username, user_alias=repository_alias
     )
+    if repo_path is None:
+        return None, f"User-activated repository '{repository_alias}' not found."
+    if not (Path(repo_path) / ".git").exists():
+        return None, (
+            f"Repository '{repository_alias}' does not have a .git directory "
+            "and does not support git operations."
+        )
     return repo_path, None
 
 

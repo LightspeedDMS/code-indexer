@@ -192,25 +192,33 @@ class LangfuseTraceSyncService:
         # 1. Create API client
         api_client = LangfuseApiClient(host, creds)
 
-        # Story #227: Acquire write lock BEFORE any work (including discovery).
-        # Use generic "langfuse" alias since project name isn't known until after discover.
-        _lock_alias = "langfuse"
+        # Story #227: Acquire write lock AFTER discovery so the alias matches the actual
+        # repo folder name that RefreshScheduler uses (e.g. "langfuse_myproject").
+        # A generic alias acquired before discovery would never match and provide no protection.
+        _lock_alias = None
         _trigger_alias = None
         _sync_succeeded = False
-        if self._refresh_scheduler is not None:
-            self._refresh_scheduler.acquire_write_lock(_lock_alias, owner_name="langfuse_trace_sync")
+        _write_lock_acquired = False
         try:
             # 2. Discover project name via GET /api/public/projects
             project_info = api_client.discover_project()
             project_name = project_info.get("name", "unknown")
             safe_project = self._sanitize_folder_name(project_name)
+            _lock_alias = f"langfuse_{safe_project}"
             _trigger_alias = f"langfuse_{safe_project}-global"
+
+            # Acquire lock after discovery so alias matches RefreshScheduler's registry.
+            if self._refresh_scheduler is not None:
+                _write_lock_acquired = self._refresh_scheduler.acquire_write_lock(
+                    _lock_alias, owner_name="langfuse_trace_sync"
+                )
 
             self._sync_project_inner(api_client, project_name, trace_age_days, max_concurrent_observations)
             _sync_succeeded = True
         finally:
             if self._refresh_scheduler is not None:
-                self._refresh_scheduler.release_write_lock(_lock_alias, owner_name="langfuse_trace_sync")
+                if _write_lock_acquired and _lock_alias:
+                    self._refresh_scheduler.release_write_lock(_lock_alias, owner_name="langfuse_trace_sync")
                 # Story #227: Trigger refresh only on success (AC5: no trigger on exception).
                 if _sync_succeeded and _trigger_alias:
                     self._refresh_scheduler.trigger_refresh_for_repo(_trigger_alias)
