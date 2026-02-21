@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 # Note: Using ~/.cidx-server/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
 # and /var/lib/ is not writable by non-root service users
 PENDING_REDEPLOY_MARKER = Path.home() / ".cidx-server" / "pending-redeploy"
+# Legacy marker path used in v8.15.0 (before path moved to ~/.cidx-server/)
+LEGACY_REDEPLOY_MARKER = Path("/var/lib/cidx-pending-redeploy")
 AUTO_UPDATE_SERVICE_NAME = "cidx-auto-update"
 
 # Self-restart mechanism constants
@@ -2242,7 +2244,15 @@ class DeploymentExecutor:
             )
 
         # Step 8: Ensure sudoers rule for server self-restart
-        self._ensure_sudoers_restart()
+        if not self._ensure_sudoers_restart():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-057",
+                    "Sudoers restart rule could not be verified/created - "
+                    "server self-restart may fail",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         logger.info(
             "Deployment execution completed successfully",

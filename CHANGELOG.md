@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.41] - 2026-02-21
+
+### Fixed
+
+- Auto-updater cross-version restart: legacy redeploy marker at `/var/lib/cidx-pending-redeploy` (v8.15.0) is now migrated to `~/.cidx-server/pending-redeploy` (v9.x), fixing production servers that skip intermediate versions
+- Auto-updater forced deployment now checks `restart_server()` return value and logs error on failure instead of silently ignoring restart failures
+- Auto-updater `_ensure_sudoers_restart()` return value now logged as warning when sudoers rule creation fails, instead of silent fire-and-forget
+
 ## [9.3.40] - 2026-02-21
 
 ### Fixed

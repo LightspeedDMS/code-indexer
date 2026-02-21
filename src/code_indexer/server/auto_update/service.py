@@ -11,7 +11,10 @@ if TYPE_CHECKING:
     from .change_detector import ChangeDetector
     from .deployment_lock import DeploymentLock
     from .deployment_executor import DeploymentExecutor
-from code_indexer.server.auto_update.deployment_executor import PENDING_REDEPLOY_MARKER
+from code_indexer.server.auto_update.deployment_executor import (
+    LEGACY_REDEPLOY_MARKER,
+    PENDING_REDEPLOY_MARKER,
+)
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
@@ -92,6 +95,22 @@ class AutoUpdateService:
         ), "deployment_executor must be set before calling poll_once()"
 
         # Issue #154: Check for pending-redeploy marker FIRST (before state checks)
+        # Backwards compatibility: migrate legacy marker path (v8.15.0 wrote to /var/lib/)
+        if not PENDING_REDEPLOY_MARKER.exists() and LEGACY_REDEPLOY_MARKER.exists():
+            logger.info(
+                "Found legacy redeploy marker at old path, migrating",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            try:
+                PENDING_REDEPLOY_MARKER.parent.mkdir(parents=True, exist_ok=True)
+                PENDING_REDEPLOY_MARKER.touch()
+                LEGACY_REDEPLOY_MARKER.unlink(missing_ok=True)
+            except Exception as e:
+                logger.warning(
+                    f"Could not migrate legacy marker: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
         if PENDING_REDEPLOY_MARKER.exists():
             logger.info(
                 "Pending redeploy marker found, forcing deployment",
@@ -197,11 +216,20 @@ class AutoUpdateService:
                 if success:
                     # Restart server after successful deployment
                     self.transition_to(ServiceState.RESTARTING)
-                    self.deployment_executor.restart_server()
-                    logger.info(
-                        "Deployment and restart completed successfully",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    restart_ok = self.deployment_executor.restart_server()
+                    if restart_ok:
+                        logger.info(
+                            "Deployment and restart completed successfully",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    else:
+                        logger.error(
+                            format_error_log(
+                                "AUTO-UPDATE-012",
+                                "Deployment succeeded but server restart FAILED",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
                 else:
                     logger.error(
                         format_error_log(

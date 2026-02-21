@@ -1,7 +1,10 @@
 """Tests for AutoUpdateService pending redeploy marker handling (Issue #154)."""
 
 from code_indexer.server.auto_update.service import AutoUpdateService, ServiceState
-from code_indexer.server.auto_update.deployment_executor import PENDING_REDEPLOY_MARKER
+from code_indexer.server.auto_update.deployment_executor import (
+    LEGACY_REDEPLOY_MARKER,
+    PENDING_REDEPLOY_MARKER,
+)
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 import pytest
@@ -35,8 +38,8 @@ class TestPollOncePendingRedeploy:
 
             service.poll_once()
 
-        # Verify marker.exists() was called
-        mock_marker.exists.assert_called_once()
+        # Verify marker.exists() was called (called twice: legacy migration check + main check)
+        assert mock_marker.exists.call_count == 2
 
         # Verify marker was removed
         mock_marker.unlink.assert_called_once()
@@ -70,14 +73,17 @@ class TestPollOncePendingRedeploy:
         """Test normal flow when marker absent: state machine runs, change detection happens."""
         mock_marker = MagicMock()
         mock_marker.exists.return_value = False
+        mock_legacy = MagicMock()
+        mock_legacy.exists.return_value = False
 
         with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
-            service.change_detector.has_changes.return_value = False
+            with patch("code_indexer.server.auto_update.service.LEGACY_REDEPLOY_MARKER", mock_legacy):
+                service.change_detector.has_changes.return_value = False
 
-            service.poll_once()
+                service.poll_once()
 
-        # Verify marker check happened
-        mock_marker.exists.assert_called_once()
+        # Verify marker check happened (called twice: legacy migration check + main check)
+        assert mock_marker.exists.call_count == 2
 
         # Verify normal flow: change detection runs
         service.change_detector.has_changes.assert_called_once()
@@ -93,6 +99,8 @@ class TestPollOncePendingRedeploy:
         call_order = []
 
         mock_marker = MagicMock()
+        mock_legacy = MagicMock()
+        mock_legacy.exists.return_value = False
 
         def mock_exists():
             call_order.append("marker_check")
@@ -104,14 +112,15 @@ class TestPollOncePendingRedeploy:
             call_order.append(f"transition_{state.value}")
 
         with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
-            service.transition_to = mock_transition
-            service.change_detector.has_changes.return_value = False
+            with patch("code_indexer.server.auto_update.service.LEGACY_REDEPLOY_MARKER", mock_legacy):
+                service.transition_to = mock_transition
+                service.change_detector.has_changes.return_value = False
 
-            service.poll_once()
+                service.poll_once()
 
-        # Marker check must be first operation
+        # Marker check must be first operation (called twice: legacy migration check + main check)
         assert call_order[0] == "marker_check"
-        assert call_order[1] == "transition_checking"
+        assert call_order[2] == "transition_checking"
 
     def test_marker_path_constant_verified(self, service):
         """Test that PENDING_REDEPLOY_MARKER constant is the path checked."""
@@ -123,15 +132,18 @@ class TestPollOncePendingRedeploy:
         # Verify poll_once uses the marker (functional test)
         mock_marker = MagicMock()
         mock_marker.exists.return_value = False
+        mock_legacy = MagicMock()
+        mock_legacy.exists.return_value = False
 
         with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
-            service.change_detector.has_changes.return_value = False
+            with patch("code_indexer.server.auto_update.service.LEGACY_REDEPLOY_MARKER", mock_legacy):
+                service.change_detector.has_changes.return_value = False
 
-            # Should complete without error, confirming marker check integration
-            service.poll_once()
+                # Should complete without error, confirming marker check integration
+                service.poll_once()
 
-        # Verify marker was checked
-        mock_marker.exists.assert_called_once()
+        # Verify marker was checked (called twice: legacy migration check + main check)
+        assert mock_marker.exists.call_count == 2
 
         # Verify normal flow completed
         service.change_detector.has_changes.assert_called_once()
