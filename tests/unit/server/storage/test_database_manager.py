@@ -172,6 +172,51 @@ class TestDatabaseSchema:
 
         conn.close()
 
+    def test_performance_indexes_exist(self, tmp_path: Path) -> None:
+        """
+        Given a fresh database path
+        When DatabaseSchema.initialize_database() is called
+        Then all 12 required performance indexes exist across background_jobs,
+        sync_jobs, user_api_keys, user_mcp_credentials, and research_messages.
+
+        These indexes prevent full table scans on polling-heavy endpoints and
+        auth lookups that occur on every authenticated request.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' ORDER BY name"
+        )
+        indexes = [row[0] for row in cursor.fetchall()]
+        conn.close()
+
+        expected_indexes = [
+            # background_jobs (4 indexes) - dashboard polling
+            "idx_background_jobs_completed_status",
+            "idx_background_jobs_operation_type",
+            "idx_background_jobs_status",
+            "idx_background_jobs_status_created",
+            # sync_jobs (3 indexes) - jobs tab polling
+            "idx_sync_jobs_username_status",
+            "idx_sync_jobs_status",
+            "idx_sync_jobs_created_at",
+            # user_api_keys (2 indexes) - auth lookups on every authenticated request
+            "idx_user_api_keys_username",
+            "idx_user_api_keys_key_hash",
+            # user_mcp_credentials (2 indexes) - MCP auth lookups
+            "idx_user_mcp_credentials_username",
+            "idx_user_mcp_credentials_client_id",
+            # research_messages (1 index) - session message lookups with ordering
+            "idx_research_messages_session_id",
+        ]
+        for expected in expected_indexes:
+            assert expected in indexes, f"Missing index: {expected}"
+
     def test_database_schema_ssh_key_hosts_foreign_key_cascade(
         self, tmp_path: Path
     ) -> None:

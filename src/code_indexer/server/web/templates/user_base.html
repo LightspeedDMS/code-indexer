@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}CIDX{% endblock %}</title>
     <link rel="icon" type="image/svg+xml" href="/admin/static/favicon.svg">
-    <link rel="stylesheet" href="/admin/static/pico.min.css">
-    <link rel="stylesheet" href="/admin/static/admin.css">
-    <script src="/admin/static/htmx.min.js"></script>
+    <link rel="stylesheet" href="/admin/static/pico.min.css?v={{ static_version }}">
+    <link rel="stylesheet" href="/admin/static/admin.css?v={{ static_version }}">
+    <script src="/admin/static/htmx.min.js?v={{ static_version }}"></script>
 </head>
 <body>
     <main class="container">

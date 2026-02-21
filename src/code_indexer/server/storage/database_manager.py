@@ -224,6 +224,71 @@ class DatabaseSchema:
         )
     """
 
+    # Performance indexes for background_jobs table
+    CREATE_BACKGROUND_JOBS_STATUS_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_background_jobs_status
+        ON background_jobs(status)
+    """
+
+    CREATE_BACKGROUND_JOBS_OPERATION_TYPE_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_background_jobs_operation_type
+        ON background_jobs(operation_type)
+    """
+
+    CREATE_BACKGROUND_JOBS_STATUS_CREATED_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_background_jobs_status_created
+        ON background_jobs(status, created_at DESC)
+    """
+
+    CREATE_BACKGROUND_JOBS_COMPLETED_STATUS_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_background_jobs_completed_status
+        ON background_jobs(completed_at, status)
+    """
+
+    # Performance indexes for sync_jobs table
+    CREATE_SYNC_JOBS_USERNAME_STATUS_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_sync_jobs_username_status
+        ON sync_jobs(username, status)
+    """
+
+    CREATE_SYNC_JOBS_STATUS_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_sync_jobs_status
+        ON sync_jobs(status)
+    """
+
+    CREATE_SYNC_JOBS_CREATED_AT_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_sync_jobs_created_at
+        ON sync_jobs(created_at DESC)
+    """
+
+    # Performance indexes for user_api_keys table (auth lookups on every authenticated request)
+    CREATE_USER_API_KEYS_USERNAME_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_user_api_keys_username
+        ON user_api_keys(username)
+    """
+
+    CREATE_USER_API_KEYS_KEY_HASH_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_user_api_keys_key_hash
+        ON user_api_keys(key_hash)
+    """
+
+    # Performance indexes for user_mcp_credentials table (MCP auth lookups)
+    CREATE_USER_MCP_CREDENTIALS_USERNAME_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_user_mcp_credentials_username
+        ON user_mcp_credentials(username)
+    """
+
+    CREATE_USER_MCP_CREDENTIALS_CLIENT_ID_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_user_mcp_credentials_client_id
+        ON user_mcp_credentials(client_id)
+    """
+
+    # Performance indexes for research_messages table (session message lookups with ordering)
+    CREATE_RESEARCH_MESSAGES_SESSION_ID_INDEX = """
+        CREATE INDEX IF NOT EXISTS idx_research_messages_session_id
+        ON research_messages(session_id, created_at)
+    """
+
     # Indexes for self-monitoring tables
     CREATE_SELF_MONITORING_SCANS_STARTED_AT_INDEX = """
         CREATE INDEX IF NOT EXISTS idx_self_monitoring_scans_started_at
@@ -352,9 +417,19 @@ class DatabaseSchema:
             conn.execute(self.CREATE_GLOBAL_REPOS_TABLE)
             conn.execute(self.CREATE_USERS_TABLE)
             conn.execute(self.CREATE_USER_API_KEYS_TABLE)
+            # Performance indexes for user_api_keys
+            conn.execute(self.CREATE_USER_API_KEYS_USERNAME_INDEX)
+            conn.execute(self.CREATE_USER_API_KEYS_KEY_HASH_INDEX)
             conn.execute(self.CREATE_USER_MCP_CREDENTIALS_TABLE)
+            # Performance indexes for user_mcp_credentials
+            conn.execute(self.CREATE_USER_MCP_CREDENTIALS_USERNAME_INDEX)
+            conn.execute(self.CREATE_USER_MCP_CREDENTIALS_CLIENT_ID_INDEX)
             conn.execute(self.CREATE_USER_OIDC_IDENTITIES_TABLE)
             conn.execute(self.CREATE_SYNC_JOBS_TABLE)
+            # Performance indexes for sync_jobs
+            conn.execute(self.CREATE_SYNC_JOBS_USERNAME_STATUS_INDEX)
+            conn.execute(self.CREATE_SYNC_JOBS_STATUS_INDEX)
+            conn.execute(self.CREATE_SYNC_JOBS_CREATED_AT_INDEX)
             conn.execute(self.CREATE_CI_TOKENS_TABLE)
             conn.execute(self.CREATE_INVALIDATED_SESSIONS_TABLE)
             conn.execute(self.CREATE_PASSWORD_CHANGE_TIMESTAMPS_TABLE)
@@ -362,6 +437,11 @@ class DatabaseSchema:
             conn.execute(self.CREATE_SSH_KEY_HOSTS_TABLE)
             conn.execute(self.CREATE_GOLDEN_REPOS_METADATA_TABLE)
             conn.execute(self.CREATE_BACKGROUND_JOBS_TABLE)
+            # Performance indexes for background_jobs
+            conn.execute(self.CREATE_BACKGROUND_JOBS_STATUS_INDEX)
+            conn.execute(self.CREATE_BACKGROUND_JOBS_OPERATION_TYPE_INDEX)
+            conn.execute(self.CREATE_BACKGROUND_JOBS_STATUS_CREATED_INDEX)
+            conn.execute(self.CREATE_BACKGROUND_JOBS_COMPLETED_STATUS_INDEX)
             # Story #72: Self-monitoring tables
             conn.execute(self.CREATE_SELF_MONITORING_SCANS_TABLE)
             conn.execute(self.CREATE_SELF_MONITORING_ISSUES_TABLE)
@@ -371,6 +451,8 @@ class DatabaseSchema:
             # Story #141: Research Assistant tables
             conn.execute(self.CREATE_RESEARCH_SESSIONS_TABLE)
             conn.execute(self.CREATE_RESEARCH_MESSAGES_TABLE)
+            # Performance indexes for research_messages
+            conn.execute(self.CREATE_RESEARCH_MESSAGES_SESSION_ID_INDEX)
             # Diagnostic results persistence
             conn.execute(self.CREATE_DIAGNOSTIC_RESULTS_TABLE)
             # Story #180: Repository Categories
@@ -387,6 +469,7 @@ class DatabaseSchema:
             self._migrate_global_repos_schema(conn)
             self._migrate_research_sessions_schema(conn)
             self._migrate_golden_repos_metadata_category(conn)
+            self._migrate_performance_indexes(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
@@ -527,6 +610,34 @@ class DatabaseSchema:
             logger.info(
                 f"Migrated golden_repos_metadata schema: added {migrations_applied}"
             )
+
+    def _migrate_performance_indexes(self, conn: sqlite3.Connection) -> None:
+        """
+        Add performance indexes to multiple tables for existing databases.
+
+        Covers background_jobs, sync_jobs, user_api_keys, user_mcp_credentials,
+        and research_messages. Uses CREATE INDEX IF NOT EXISTS throughout so it
+        is safe to run multiple times (idempotent).
+        """
+        # background_jobs indexes (dashboard polling)
+        conn.execute(self.CREATE_BACKGROUND_JOBS_STATUS_INDEX)
+        conn.execute(self.CREATE_BACKGROUND_JOBS_OPERATION_TYPE_INDEX)
+        conn.execute(self.CREATE_BACKGROUND_JOBS_STATUS_CREATED_INDEX)
+        conn.execute(self.CREATE_BACKGROUND_JOBS_COMPLETED_STATUS_INDEX)
+        # sync_jobs indexes (jobs tab polling)
+        conn.execute(self.CREATE_SYNC_JOBS_USERNAME_STATUS_INDEX)
+        conn.execute(self.CREATE_SYNC_JOBS_STATUS_INDEX)
+        conn.execute(self.CREATE_SYNC_JOBS_CREATED_AT_INDEX)
+        # user_api_keys indexes (auth lookups on every authenticated request)
+        conn.execute(self.CREATE_USER_API_KEYS_USERNAME_INDEX)
+        conn.execute(self.CREATE_USER_API_KEYS_KEY_HASH_INDEX)
+        # user_mcp_credentials indexes (MCP auth lookups)
+        conn.execute(self.CREATE_USER_MCP_CREDENTIALS_USERNAME_INDEX)
+        conn.execute(self.CREATE_USER_MCP_CREDENTIALS_CLIENT_ID_INDEX)
+        # research_messages indexes (session message lookups with ordering)
+        conn.execute(self.CREATE_RESEARCH_MESSAGES_SESSION_ID_INDEX)
+        conn.commit()
+        logger.info("Migrated performance indexes: background_jobs, sync_jobs, user_api_keys, user_mcp_credentials, research_messages")
 
 
 class DatabaseConnectionManager:

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from code_indexer import __version__ as _cidx_version
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -35,6 +36,8 @@ def _get_server_time_for_template() -> str:
 
 
 templates.env.globals["get_server_time"] = _get_server_time_for_template
+# Cache busting: version appended to static asset URLs
+templates.env.globals["static_version"] = _cidx_version
 
 # Router for dependency map pages
 dependency_map_router = APIRouter(tags=["dependency-map-web"])

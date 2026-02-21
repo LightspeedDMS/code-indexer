@@ -4,6 +4,7 @@ Web Admin UI Routes.
 Provides admin web interface routes for CIDX server administration.
 """
 
+from code_indexer import __version__ as _cidx_version
 from code_indexer.server.middleware.correlation import get_correlation_id
 
 import json
@@ -109,6 +110,8 @@ def _get_server_time_for_template() -> str:
 
 # Add server time function to Jinja2 globals for server clock (Story #89)
 templates.env.globals["get_server_time"] = _get_server_time_for_template
+# Cache busting: version appended to static asset URLs
+templates.env.globals["static_version"] = _cidx_version
 
 # Create router
 web_router = APIRouter()

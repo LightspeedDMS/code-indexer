@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from code_indexer import __version__ as _cidx_version
 from fastapi import APIRouter, Request, Form
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -37,6 +38,8 @@ def _get_server_time_for_template() -> str:
 
 # Register template global functions
 templates.env.globals["get_server_time"] = _get_server_time_for_template
+# Cache busting: version appended to static asset URLs
+templates.env.globals["static_version"] = _cidx_version
 
 # Create router for repo category management
 repo_category_web_router = APIRouter(tags=["repo-categories-web"])

@@ -196,7 +196,7 @@ document.body.addEventListener('htmx:afterSettle', function(event) {
 
 <!-- Load scripts synchronously in dependency order (Bug #170 fix) -->
 <!-- repo_health.js MUST load first - defines renderHealthIndicator, renderHealthDetails, escapeHtml -->
-<script src="/admin/static/js/repo_health.js"></script>
+<script src="/admin/static/js/repo_health.js?v={{ static_version }}"></script>
 <!-- activated_repo_management.js loads second - depends on repo_health.js functions -->
-<script src="/admin/static/js/activated_repo_management.js"></script>
+<script src="/admin/static/js/activated_repo_management.js?v={{ static_version }}"></script>
 {% endblock %}
