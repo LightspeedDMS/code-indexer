@@ -94,21 +94,26 @@ def ensure_indexes_created(conn: sqlite3.Connection) -> None:
     """
     cursor = conn.cursor()
 
-    # Index 1: call_graph caller lookup (forward BFS)
+    # Check if call_graph table exists before creating indexes on it
     cursor.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_call_graph_caller
-        ON call_graph(caller_symbol_id)
-    """
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='call_graph'"
     )
+    if cursor.fetchone():
+        # Index 1: call_graph caller lookup (forward BFS)
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_call_graph_caller
+            ON call_graph(caller_symbol_id)
+        """
+        )
 
-    # Index 2: call_graph callee lookup (backward reachability)
-    cursor.execute(
+        # Index 2: call_graph callee lookup (backward reachability)
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_call_graph_callee
+            ON call_graph(callee_symbol_id)
         """
-        CREATE INDEX IF NOT EXISTS idx_call_graph_callee
-        ON call_graph(callee_symbol_id)
-    """
-    )
+        )
 
     # Index 3: symbol_references from lookup (dependency queries)
     cursor.execute(

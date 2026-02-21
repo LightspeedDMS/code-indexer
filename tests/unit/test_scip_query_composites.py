@@ -155,7 +155,7 @@ class TestAnalyzeImpactFunctionality:
         assert call_count["count"] > 0, "Should have queried at least one SCIP file"
         assert len(result) > 0, "Should find dependents"
 
-    def test_bfs_traverse_passes_depth_to_engine(self, scip_dir):
+    def test_bfs_traverse_passes_depth_to_engine(self, scip_dir, tmp_path):
         """Should pass depth parameter to engine.get_dependents() to leverage database optimization.
 
         Performance bug: _bfs_traverse_dependents() calls engine.get_dependents(symbol, exact=False)
@@ -167,8 +167,10 @@ class TestAnalyzeImpactFunctionality:
         from code_indexer.scip.query.composites import _bfs_traverse_dependents
         from unittest.mock import MagicMock, patch
 
-        # Create mock SCIP directory
-        mock_scip_dir = Path("/fake/scip")
+        # Create a real temporary .scip.db file with non-zero content so
+        # scip_file.stat().st_size == 0 guard in composites.py passes
+        real_scip_file = tmp_path / "index.scip.db"
+        real_scip_file.write_bytes(b"placeholder")
 
         # Mock SCIPQueryEngine to capture get_dependents calls
         mock_engine = MagicMock()
@@ -179,14 +181,14 @@ class TestAnalyzeImpactFunctionality:
         ) as mock_engine_class:
             mock_engine_class.return_value = mock_engine
 
-            # Mock glob to return fake SCIP file
+            # Mock glob to return the real temp file path
             with patch.object(Path, "glob") as mock_glob:
-                mock_glob.return_value = [Path("/fake/scip/index.scip")]
+                mock_glob.return_value = [real_scip_file]
 
                 # Call _bfs_traverse_dependents with depth=3
                 _bfs_traverse_dependents(
                     symbol="target_symbol",
-                    scip_dir=mock_scip_dir,
+                    scip_dir=tmp_path,
                     depth=3,
                     project=None,
                     exclude=None,
@@ -284,7 +286,7 @@ class TestAnalyzeImpactFunctionality:
 class TestExcludeIncludeFilters:
     """Tests for exclude/include path filtering."""
 
-    def test_exclude_filter_with_glob_patterns(self):
+    def test_exclude_filter_with_glob_patterns(self, tmp_path):
         """Should correctly filter out paths matching exclude patterns.
 
         BUG DEMONSTRATION: fnmatch() fails to match patterns like '*/tests/*'
@@ -296,8 +298,10 @@ class TestExcludeIncludeFilters:
         from code_indexer.scip.query.composites import _bfs_traverse_dependents
         from unittest.mock import MagicMock, patch
 
-        # Create mock SCIP directory
-        scip_dir = Path("/fake/scip")
+        # Create a real temporary .scip.db file with non-zero content so
+        # scip_file.stat().st_size == 0 guard in composites.py passes
+        real_scip_file = tmp_path / "index.scip.db"
+        real_scip_file.write_bytes(b"placeholder")
 
         # Mock SCIPQueryEngine.get_dependents to return test paths
         # Note: Symbol names must contain '().' to pass _is_meaningful_call filter
@@ -339,14 +343,14 @@ class TestExcludeIncludeFilters:
             mock_engine.get_dependents.return_value = mock_dependents
             mock_engine_class.return_value = mock_engine
 
-            # Mock glob to return fake SCIP file
+            # Mock glob to return the real temp file path
             with patch.object(Path, "glob") as mock_glob:
-                mock_glob.return_value = [Path("/fake/scip/index.scip")]
+                mock_glob.return_value = [real_scip_file]
 
                 # Call _bfs_traverse_dependents with exclude pattern
                 result = _bfs_traverse_dependents(
                     symbol="target_symbol",
-                    scip_dir=scip_dir,
+                    scip_dir=tmp_path,
                     depth=1,
                     project=None,
                     exclude="*/tests/*",  # This pattern should exclude test files
@@ -520,7 +524,7 @@ class TestGetSmartContext:
 
         assert len(result.files) <= 5
 
-    def test_limit_zero_means_unlimited(self, scip_dir):
+    def test_limit_zero_means_unlimited(self, scip_dir, tmp_path):
         """Should treat limit=0 as unlimited, not as 'return 0 files'.
 
         Bug: When limit=0 (CLI default for unlimited), the code was doing
@@ -528,6 +532,11 @@ class TestGetSmartContext:
 
         Fix: limit=0 should skip the slicing and return all files.
         """
+        # Create a real temporary .scip.db file with non-zero content so
+        # scip_file.stat().st_size == 0 guard in composites.py passes
+        real_scip_file = tmp_path / "index.scip.db"
+        real_scip_file.write_bytes(b"placeholder")
+
         # Create mock query results simulating 3 files found
         mock_definitions = [
             QueryResult(
@@ -561,9 +570,9 @@ class TestGetSmartContext:
         mock_engine.find_references.return_value = []
         mock_impact = MagicMock(affected_symbols=[])
 
-        # Use side_effect to return fresh iterator each call
+        # Use side_effect to return fresh iterator each call using the real temp file
         def fresh_glob(*args):
-            return iter([Path("fake.scip")])
+            return iter([real_scip_file])
 
         with (
             patch.object(Path, "glob", side_effect=fresh_glob),

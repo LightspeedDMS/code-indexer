@@ -1,6 +1,10 @@
 """SCIP composite queries - impact analysis and other high-level queries."""
 
 import logging
+try:
+    from pysqlite3 import dbapi2 as sqlite3
+except ImportError:
+    import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import List, Optional, Set, Dict
@@ -231,6 +235,9 @@ def _find_target_definition(symbol: str, scip_dir: Path) -> Optional[QueryResult
     scip_files = list(scip_dir.glob("**/*.scip.db"))
 
     for scip_file in scip_files:
+        # Skip empty database files (size == 0)
+        if scip_file.stat().st_size == 0:
+            continue
         try:
             engine = SCIPQueryEngine(scip_file)
             definitions = engine.find_definition(symbol, exact=False)
@@ -238,6 +245,8 @@ def _find_target_definition(symbol: str, scip_dir: Path) -> Optional[QueryResult
                 return definitions[0]
         except (FileNotFoundError, KeyError) as e:
             logger.debug(f"No definition in {scip_file}: {e}")
+        except sqlite3.OperationalError as e:
+            logger.debug(f"Skipping {scip_file} (incomplete schema): {e}")
         except Exception as e:
             logger.error(f"Error searching {scip_file}: {e}")
 
@@ -267,6 +276,9 @@ def _bfs_traverse_dependents(
     # Query all SCIP files for transitive dependents
     # Database CTE handles the traversal, returning all dependents with depth info
     for scip_file in scip_files:
+        # Skip empty database files (size == 0)
+        if scip_file.stat().st_size == 0:
+            continue
         try:
             engine = SCIPQueryEngine(scip_file)
 
@@ -309,6 +321,8 @@ def _bfs_traverse_dependents(
 
         except (FileNotFoundError, KeyError) as e:
             logger.debug(f"No dependents in {scip_file} for {symbol}: {e}")
+        except sqlite3.OperationalError as e:
+            logger.debug(f"Skipping {scip_file} (incomplete schema): {e}")
         except Exception as e:
             logger.error(f"Error querying {scip_file} for {symbol}: {e}")
 
@@ -597,6 +611,9 @@ def trace_call_chain(
             all_chains.extend(chains)
             max_depth_reached = max_depth_reached or depth_reached
 
+        except sqlite3.OperationalError as e:
+            logger.debug(f"Skipping {scip_file} (incomplete schema): {e}")
+            continue
         except Exception as e:
             logger.warning(f"Failed to trace call chain in {scip_file}: {e}")
             continue
@@ -649,6 +666,9 @@ def get_smart_context(
     # 1. Definition (highest priority - score 1.0)
     try:
         for scip_file in scip_files:
+            # Skip empty database files (size == 0)
+            if scip_file.stat().st_size == 0:
+                continue
             try:
                 engine = SCIPQueryEngine(scip_file)
                 definitions = engine.find_definition(symbol, exact=False)
@@ -661,6 +681,8 @@ def get_smart_context(
                     if fp not in context_data:
                         context_data[fp] = []
                     context_data[fp].append((defn.symbol, "definition", defn, 1.0))
+            except sqlite3.OperationalError as e:
+                logger.debug(f"Skipping {scip_file} (incomplete schema): {e}")
             except Exception:
                 pass
     except Exception:
@@ -684,6 +706,9 @@ def get_smart_context(
     # 3. References (callers - score 0.7)
     try:
         for scip_file in scip_files:
+            # Skip empty database files (size == 0)
+            if scip_file.stat().st_size == 0:
+                continue
             try:
                 engine = SCIPQueryEngine(scip_file)
                 refs = engine.find_references(symbol, exact=False)
@@ -696,6 +721,8 @@ def get_smart_context(
                     if fp not in context_data:
                         context_data[fp] = []
                     context_data[fp].append((ref.symbol, "reference", ref, 0.6))
+            except sqlite3.OperationalError as e:
+                logger.debug(f"Skipping {scip_file} (incomplete schema): {e}")
             except Exception:
                 pass
     except Exception:
