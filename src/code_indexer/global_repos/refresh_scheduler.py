@@ -1180,7 +1180,7 @@ class RefreshScheduler:
             logger.debug(f"No visible files in {source_path} — no changes")
             return False
 
-        has_changes = int(max_mtime) > latest_timestamp
+        has_changes = max_mtime > latest_timestamp
         logger.debug(
             f"mtime check for {alias_name}: max_mtime={max_mtime:.0f} "
             f"vs latest_version={latest_timestamp} -> changes={has_changes}"

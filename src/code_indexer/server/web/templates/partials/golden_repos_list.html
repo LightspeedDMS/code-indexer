@@ -659,14 +659,12 @@ async function loadRepoDescription(repoAlias) {
 
         // Render markdown - use marked.js if available, else plain text fallback
         // DOMPurify sanitization prevents XSS from untrusted markdown content (Story #218)
-        if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
-            if (typeof DOMPurify !== 'undefined') {
-                box.innerHTML = DOMPurify.sanitize(marked.parse(markdownBody));
-            } else {
-                box.innerHTML = marked.parse(markdownBody);
-            }
+        // Both marked AND DOMPurify must be present; if either is missing, fall back to
+        // safe plain-text display to avoid XSS via unsanitized HTML (Bug #242).
+        if (typeof marked !== 'undefined' && typeof marked.parse === 'function' && typeof DOMPurify !== 'undefined') {
+            box.innerHTML = DOMPurify.sanitize(marked.parse(markdownBody));
         } else {
-            // Plain-text fallback when marked.js is not loaded yet
+            // Plain-text fallback when marked.js or DOMPurify are not loaded yet
             const pre = document.createElement('pre');
             pre.style.whiteSpace = 'pre-wrap';
             pre.style.fontFamily = 'inherit';

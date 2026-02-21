@@ -71,7 +71,6 @@ class DeploymentExecutor:
         self.server_url = server_url
         self.drain_timeout = drain_timeout
         self.drain_poll_interval = drain_poll_interval
-        self._auth_token: Optional[str] = None  # Cached auth token for maintenance API
 
     def _get_auth_token(self) -> Optional[str]:
         """Generate JWT token directly using the server's JWT secret.
@@ -80,14 +79,12 @@ class DeploymentExecutor:
         read the JWT secret file directly. This avoids needing to know the
         admin password or make HTTP calls for authentication.
 
-        Token is cached for reuse across multiple maintenance API calls.
+        A fresh token is generated per call to avoid expiry during long
+        deployments (Bug #243).
 
         Returns:
             JWT token string if generation successful, None on error
         """
-        if self._auth_token:
-            return self._auth_token
-
         try:
             from code_indexer.server.utils.jwt_secret_manager import JWTSecretManager
             from code_indexer.server.auth.jwt_manager import JWTManager
@@ -103,7 +100,6 @@ class DeploymentExecutor:
                 "created_at": "2025-01-01T00:00:00Z",
             })
 
-            self._auth_token = token
             logger.debug(
                 "Generated JWT token for maintenance API",
                 extra={"correlation_id": get_correlation_id()},
