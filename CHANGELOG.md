@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.39] - 2026-02-20
+
+### Fixed
+
+- Reconciliation/scheduler startup race condition: write locks now initialized before reconciliation runs, preventing "lock not found" errors on first boot (Bug #239, P0)
+- Stale write mode marker cleanup: orphaned `.write_mode` files from crashed sessions are detected and removed on startup, preventing permanent read-path redirection (Bug #240, P0)
+- SCIP composite repositories gracefully handle missing `call_graph` table instead of raising unhandled exceptions (Bug #238)
+- File mtime comparison uses integer-truncated timestamps to avoid sub-second precision mismatches across filesystems (Bug #241)
+- XSS sanitization fallback: golden repo HTML templates escape untrusted content server-side when DOMPurify client library is not loaded (Bug #242)
+- JWT token caching removed from DeploymentExecutor auto-updater; tokens are now fetched fresh per request to avoid using expired credentials (Bug #243)
+- Write lock alias resolution normalizes `-global` suffix consistently across acquire/release/check operations
+- Write lock `acquire()` return value correctly propagated to callers; `.git` directory validation added for git repo detection
+- Write mode check is now fail-closed: raises `PermissionError` when `golden_repos_dir` is not configured, instead of silently allowing writes
+- Generate-missing-descriptions endpoint protected by concurrency guard (`threading.Lock`) to prevent duplicate parallel runs
+- `_discover_and_assign_new_repos()` return type annotation corrected from `Set[str]` to `Tuple[Set[str], bool]`
+- Research assistant session setup detects and removes broken symlinks before recreating them
+
 ## [9.3.38] - 2026-02-20
 
 ### Fixed
