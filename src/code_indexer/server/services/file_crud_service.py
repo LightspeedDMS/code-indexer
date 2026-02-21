@@ -147,13 +147,10 @@ class FileCRUDService:
         # Determine marker path
         golden_repos_dir = self._golden_repos_dir
         if golden_repos_dir is None:
-            # Cannot check — allow operation but log a warning
-            import logging
-            logging.getLogger(__name__).warning(
-                f"_golden_repos_dir not set on FileCRUDService; "
-                f"skipping write-mode check for {repo_alias}"
+            raise PermissionError(
+                f"Cannot verify write-mode for '{repo_alias}': "
+                f"golden_repos_dir not configured. Server may not be fully initialized."
             )
-            return
 
         # Build alias name without -global suffix for marker filename
         alias_without_global = (

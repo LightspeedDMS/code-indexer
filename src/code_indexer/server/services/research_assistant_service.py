@@ -751,6 +751,11 @@ class ResearchAssistantService:
         issue_manager_source = Path.home() / ".claude" / "scripts" / "utils" / "issue_manager.py"
         issue_manager_link = folder / "issue_manager.py"
 
+        # Handle broken symlinks: is_symlink() returns True but exists() returns False
+        if issue_manager_link.is_symlink() and not issue_manager_link.exists():
+            issue_manager_link.unlink()
+            logger.info(f"Removed broken symlink: {issue_manager_link}")
+
         if not issue_manager_link.exists():
             if issue_manager_source.exists():
                 issue_manager_link.symlink_to(issue_manager_source)

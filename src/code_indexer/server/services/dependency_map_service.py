@@ -1276,7 +1276,7 @@ class DependencyMapService:
         existing_domains: List[str],
         dependency_map_dir: Path,
         config,
-    ) -> Set[str]:
+    ) -> Tuple[Set[str], bool]:
         """
         Discover which domains new repos belong to and update _domains.json (AC6, Story #216).
 

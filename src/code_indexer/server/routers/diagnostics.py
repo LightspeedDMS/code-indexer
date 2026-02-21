@@ -14,6 +14,7 @@ Implements HTMX-based polling for async diagnostic execution.
 """
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Dict
 
@@ -283,6 +284,10 @@ class GenerateMissingDescriptionsResponse(BaseModel):
     total_repos: int
 
 
+# Concurrency guard: only one generate-missing-descriptions run at a time (Finding 8).
+_generate_descriptions_lock = threading.Lock()
+
+
 def _make_description_callback(
     repo_alias: str,
     md_path: Path,
@@ -395,78 +400,88 @@ async def generate_missing_descriptions(
     Raises:
         HTTPException 500: Server not properly initialised
     """
-    from code_indexer.global_repos.meta_description_hook import _generate_repo_description
-
-    golden_repos_dir = getattr(request.app.state, "golden_repos_dir", None)
-    golden_repo_manager = getattr(request.app.state, "golden_repo_manager", None)
-
-    if not golden_repos_dir or not golden_repo_manager:
-        raise HTTPException(
-            status_code=500,
-            detail="Server not configured: golden_repos_dir or golden_repo_manager not initialised",
+    if not _generate_descriptions_lock.acquire(blocking=False):
+        return GenerateMissingDescriptionsResponse(
+            repos_queued=0,
+            repos_with_descriptions=0,
+            total_repos=0,
         )
-
-    cidx_meta_dir = Path(golden_repos_dir) / "cidx-meta"
-    cli_manager = get_claude_cli_manager()
 
     try:
-        all_repos = golden_repo_manager.list_golden_repos()
-    except Exception as e:
-        logger.error(f"Failed to list golden repos: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to list golden repositories: {e}",
-        )
+        from code_indexer.global_repos.meta_description_hook import _generate_repo_description
 
-    eligible_repos = [r for r in all_repos if r.get("alias") != "cidx-meta"]
+        golden_repos_dir = getattr(request.app.state, "golden_repos_dir", None)
+        golden_repo_manager = getattr(request.app.state, "golden_repo_manager", None)
 
-    repos_with_descriptions = 0
-    repos_queued = 0
-
-    for repo in eligible_repos:
-        alias = repo.get("alias", "")
-        repo_url = repo.get("repo_url", "")
-
-        # Use get_actual_repo_path() to resolve versioned paths (Epic #211).
-        # golden_repos_metadata.clone_path is stale for repos that have been
-        # refreshed into .versioned/ directories; this method resolves correctly.
-        try:
-            clone_path = str(golden_repo_manager.get_actual_repo_path(alias))
-        except Exception:
-            clone_path = repo.get("clone_path", "")
-
-        # AC3: Skip repos that already have a description file (idempotent)
-        md_file = cidx_meta_dir / f"{alias}.md"
-        # Prevent path traversal: reject any alias that escapes the cidx-meta dir
-        if not md_file.resolve().is_relative_to(cidx_meta_dir.resolve()):
-            logger.warning(
-                f"Skipping repo with suspicious alias (path traversal): {alias}"
+        if not golden_repos_dir or not golden_repo_manager:
+            raise HTTPException(
+                status_code=500,
+                detail="Server not configured: golden_repos_dir or golden_repo_manager not initialised",
             )
-            continue
-        if md_file.exists():
-            repos_with_descriptions += 1
-            continue
 
-        # AC4: Isolate individual failures - one bad repo must not block others
+        cidx_meta_dir = Path(golden_repos_dir) / "cidx-meta"
+        cli_manager = get_claude_cli_manager()
+
         try:
-            queued = _queue_repo_description(
-                alias=alias,
-                repo_url=repo_url,
-                clone_path=clone_path,
-                md_file=md_file,
-                cli_manager=cli_manager,
-                generate_fn=_generate_repo_description,
-            )
-            if queued:
-                repos_queued += 1
+            all_repos = golden_repo_manager.list_golden_repos()
         except Exception as e:
-            logger.warning(
-                f"Failed to queue description generation for {alias}: {e}",
-                exc_info=True,
+            logger.error(f"Failed to list golden repos: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to list golden repositories: {e}",
             )
 
-    return GenerateMissingDescriptionsResponse(
-        repos_queued=repos_queued,
-        repos_with_descriptions=repos_with_descriptions,
-        total_repos=len(eligible_repos),
-    )
+        eligible_repos = [r for r in all_repos if r.get("alias") != "cidx-meta"]
+
+        repos_with_descriptions = 0
+        repos_queued = 0
+
+        for repo in eligible_repos:
+            alias = repo.get("alias", "")
+            repo_url = repo.get("repo_url", "")
+
+            # Use get_actual_repo_path() to resolve versioned paths (Epic #211).
+            # golden_repos_metadata.clone_path is stale for repos that have been
+            # refreshed into .versioned/ directories; this method resolves correctly.
+            try:
+                clone_path = str(golden_repo_manager.get_actual_repo_path(alias))
+            except Exception:
+                clone_path = repo.get("clone_path", "")
+
+            # AC3: Skip repos that already have a description file (idempotent)
+            md_file = cidx_meta_dir / f"{alias}.md"
+            # Prevent path traversal: reject any alias that escapes the cidx-meta dir
+            if not md_file.resolve().is_relative_to(cidx_meta_dir.resolve()):
+                logger.warning(
+                    f"Skipping repo with suspicious alias (path traversal): {alias}"
+                )
+                continue
+            if md_file.exists():
+                repos_with_descriptions += 1
+                continue
+
+            # AC4: Isolate individual failures - one bad repo must not block others
+            try:
+                queued = _queue_repo_description(
+                    alias=alias,
+                    repo_url=repo_url,
+                    clone_path=clone_path,
+                    md_file=md_file,
+                    cli_manager=cli_manager,
+                    generate_fn=_generate_repo_description,
+                )
+                if queued:
+                    repos_queued += 1
+            except Exception as e:
+                logger.warning(
+                    f"Failed to queue description generation for {alias}: {e}",
+                    exc_info=True,
+                )
+
+        return GenerateMissingDescriptionsResponse(
+            repos_queued=repos_queued,
+            repos_with_descriptions=repos_with_descriptions,
+            total_repos=len(eligible_repos),
+        )
+    finally:
+        _generate_descriptions_lock.release()
