@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .langfuse_api_client import LangfuseApiClient
-from ..utils.config_manager import LangfuseConfig, LangfusePullProject
+from ..utils.config_manager import LangfusePullProject
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,10 @@ class ProcessTraceResult:
     hash_update: Optional[Dict[str, Any]] = None
     # Rename info (to be queued for Phase 2 finalize)
     rename_info: Optional[Tuple[str, str, str, str, str, str]] = None
+    # Per-user repo folder name (e.g. "langfuse_Claude_Code_seba_battig"); set when
+    # trace was written (new or updated). Used by sync_project() to trigger per-user
+    # refresh instead of non-existent project-level alias.
+    repo_folder_name: Optional[str] = None
 
 
 class SyncMetrics:
@@ -192,41 +196,43 @@ class LangfuseTraceSyncService:
         # 1. Create API client
         api_client = LangfuseApiClient(host, creds)
 
-        # Story #227: Acquire write lock AFTER discovery so the alias matches the actual
-        # repo folder name that RefreshScheduler uses (e.g. "langfuse_myproject").
-        # A generic alias acquired before discovery would never match and provide no protection.
-        _lock_alias = None
-        _trigger_alias = None
-        _sync_succeeded = False
-        _write_lock_acquired = False
-        try:
-            # 2. Discover project name via GET /api/public/projects
-            project_info = api_client.discover_project()
-            project_name = project_info.get("name", "unknown")
-            safe_project = self._sanitize_folder_name(project_name)
-            _lock_alias = f"langfuse_{safe_project}"
-            _trigger_alias = f"langfuse_{safe_project}-global"
+        # 2. Discover project name via GET /api/public/projects
+        project_info = api_client.discover_project()
+        project_name = project_info.get("name", "unknown")
 
-            # Acquire lock after discovery so alias matches RefreshScheduler's registry.
-            if self._refresh_scheduler is not None:
-                _write_lock_acquired = self._refresh_scheduler.acquire_write_lock(
-                    _lock_alias, owner_name="langfuse_trace_sync"
-                )
+        # 3. Run sync and collect per-user repos that received writes.
+        #    Note: We do NOT acquire a project-level write lock here.
+        #    The project-level alias (e.g. "langfuse_Claude_Code") does not exist
+        #    in RefreshScheduler's registry - only per-user repos do
+        #    (e.g. "langfuse_Claude_Code_seba_battig_lightspeeddms_com").
+        #    Acquiring a non-existent alias raises ValueError every 60 seconds.
+        #    The overlap window + content hash strategy makes partial snapshots
+        #    self-healing, so per-page locking is not required for correctness.
+        modified_repos = self._sync_project_inner(
+            api_client, project_name, trace_age_days, max_concurrent_observations
+        )
 
-            self._sync_project_inner(api_client, project_name, trace_age_days, max_concurrent_observations)
-            _sync_succeeded = True
-        finally:
-            if self._refresh_scheduler is not None:
-                if _write_lock_acquired and _lock_alias:
-                    self._refresh_scheduler.release_write_lock(_lock_alias, owner_name="langfuse_trace_sync")
-                # Story #227: Trigger refresh only on success (AC5: no trigger on exception).
-                if _sync_succeeded and _trigger_alias:
-                    self._refresh_scheduler.trigger_refresh_for_repo(_trigger_alias)
+        # 4. Trigger refresh for each per-user repo that received writes (Story #227).
+        #    Each per-user repo has its own entry in RefreshScheduler's registry.
+        if self._refresh_scheduler is not None:
+            for repo_folder_name in modified_repos:
+                trigger_alias = f"{repo_folder_name}-global"
+                try:
+                    self._refresh_scheduler.trigger_refresh_for_repo(trigger_alias)
+                except Exception as e:
+                    logger.warning(f"Failed to trigger refresh for '{trigger_alias}': {e}")
 
     def _sync_project_inner(
         self, api_client: "LangfuseApiClient", project_name: str, trace_age_days: int, max_concurrent_observations: int
-    ) -> None:
-        """Internal sync logic for a single project after write-lock is acquired."""
+    ) -> set:
+        """Internal sync logic for a single project.
+
+        Returns:
+            Set[str] of per-user repo folder names that received writes (new or updated
+            traces), e.g. {"langfuse_Claude_Code_seba_battig", "langfuse_Claude_Code_no_user"}.
+            Used by sync_project() to trigger per-user-repo refresh via RefreshScheduler.
+            Returns empty set when no traces were written (unchanged or no traces fetched).
+        """
 
         # 3. Load sync state
         state = self._load_sync_state(project_name)
@@ -256,6 +262,7 @@ class LangfuseTraceSyncService:
         start_time = time.monotonic()
         seen_trace_ids = set()  # Finding 1: track seen traces for pruning
         pending_renames = []  # Lightweight: (timestamp, trace_id, folder_path, trace_type, short_id)
+        modified_repos: set = set()  # Per-user repo folder names that received writes
 
         page = 1
         while True:
@@ -301,6 +308,9 @@ class LangfuseTraceSyncService:
                         # Queue rename info
                         if result.rename_info is not None:
                             pending_renames.append(result.rename_info)
+                        # Collect per-user repo folder name for post-sync refresh
+                        if result.repo_folder_name is not None:
+                            modified_repos.add(result.repo_folder_name)
                     except Exception as e:
                         metrics.traces_checked += 1
                         metrics.errors_count += 1
@@ -355,6 +365,8 @@ class LangfuseTraceSyncService:
             f"{metrics.traces_written_new} new, {metrics.traces_written_updated} updated, "
             f"{metrics.traces_unchanged} unchanged, {metrics.errors_count} errors ({elapsed_ms}ms)"
         )
+
+        return modified_repos
 
 
     def _process_trace(
@@ -422,6 +434,11 @@ class LangfuseTraceSyncService:
 
         is_new = trace_id not in trace_hashes
 
+        # Per-user repo folder name (e.g. "langfuse_Claude_Code_seba_battig").
+        # dest_folder is golden-repos/{folder_name}/{session_id}/, so parent.name is the
+        # per-user repo folder name that RefreshScheduler tracks in its registry.
+        repo_folder_name = dest_folder.parent.name
+
         # Determine filename for writing
         if stored_filename:
             # Existing trace with sequential name - write directly to destination
@@ -440,6 +457,7 @@ class LangfuseTraceSyncService:
             else:
                 result.metric_updated = 1
 
+            result.repo_folder_name = repo_folder_name
             return result
         else:
             # New trace or migration from old naming - write to STAGING directory
@@ -466,6 +484,7 @@ class LangfuseTraceSyncService:
             short_id = self._extract_short_id(trace_id)
             result.rename_info = (timestamp, trace_id, str(staging_folder), str(dest_folder), trace_type, short_id)
 
+            result.repo_folder_name = repo_folder_name
             return result
 
     @staticmethod

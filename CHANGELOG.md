@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.40] - 2026-02-21
+
+### Fixed
+
+- Langfuse sync per-user repo refresh: sync_project() no longer acquires a project-level write lock on non-existent alias (e.g., "langfuse_Claude_Code-global"), eliminating ValueError every 60 seconds on staging; instead triggers refresh for each per-user repo that received writes
+
 ## [9.3.39] - 2026-02-20
 
 ### Fixed

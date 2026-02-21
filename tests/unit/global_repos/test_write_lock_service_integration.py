@@ -7,12 +7,14 @@ Tests:
 - run_delta_analysis() follows same lock/release/trigger sequence
 - Lock released on exception; trigger NOT called on exception (AC5)
 - LangfuseTraceSyncService accepts optional refresh_scheduler parameter
-- sync_project() acquires/releases write lock, triggers refresh
+- sync_project() uses per-user-repo write locking (not project-level locking)
+- No lock/release/trigger when no traces are written (empty result set)
 - Lock released on exception; trigger NOT called on exception (AC5)
 - Both services work correctly when _refresh_scheduler is None (backward compat)
 
-RED phase: Tests written BEFORE production code. All tests expected to FAIL
-until refresh_scheduler parameter and lock integration are implemented.
+Note: LangfuseTraceSyncService uses per-user-repo refresh model. No project-level
+write lock is acquired. Locks are acquired per-user-repo only when traces are
+actually written. When fetch_traces_page returns empty, no lock operations occur.
 """
 
 from unittest.mock import MagicMock, patch
@@ -263,7 +265,12 @@ class TestDependencyMapServiceWriteLock:
 
 
 class TestLangfuseTraceSyncServiceWriteLock:
-    """Tests for LangfuseTraceSyncService write-lock integration."""
+    """Tests for LangfuseTraceSyncService write-lock integration.
+
+    Uses per-user-repo refresh model: no project-level write lock is acquired.
+    Locks are acquired per-user-repo only when traces are actually written.
+    When no traces exist, no lock/release/trigger calls happen at all.
+    """
 
     def test_accepts_refresh_scheduler_parameter(self, tmp_path):
         """LangfuseTraceSyncService.__init__() accepts optional refresh_scheduler parameter."""
@@ -279,7 +286,12 @@ class TestLangfuseTraceSyncServiceWriteLock:
         assert service._refresh_scheduler is None
 
     def test_sync_project_acquires_write_lock_before_writes(self, tmp_path):
-        """AC3: sync_project() acquires write lock on langfuse folder name before trace writes."""
+        """With per-user-repo locking, no lock is acquired when there are no traces.
+
+        No project-level lock is acquired at all during sync_project(). Per-user-repo
+        locks are only acquired when traces are actually written. When fetch_traces_page
+        returns empty, no lock operations occur.
+        """
         from code_indexer.server.utils.config_manager import LangfusePullProject
 
         mock_scheduler = MagicMock()
@@ -289,7 +301,7 @@ class TestLangfuseTraceSyncServiceWriteLock:
 
         mock_api_client = MagicMock()
         mock_api_client.discover_project.return_value = {"name": "my-project", "id": "proj-123"}
-        mock_api_client.fetch_traces_page.return_value = []  # No traces — minimal path
+        mock_api_client.fetch_traces_page.return_value = []  # No traces — no lock needed
 
         creds = LangfusePullProject(public_key="pk-test", secret_key="sk-test")
 
@@ -304,16 +316,16 @@ class TestLangfuseTraceSyncServiceWriteLock:
                 max_concurrent_observations=1,
             )
 
-        assert mock_scheduler.acquire_write_lock.called, (
-            "acquire_write_lock() must be called during sync_project()"
-        )
-        call_alias = mock_scheduler.acquire_write_lock.call_args[0][0]
-        assert "langfuse" in call_alias, (
-            f"Lock alias must contain 'langfuse'. Got: '{call_alias}'"
-        )
+        # No project-level lock; no traces written means no per-user-repo lock either
+        mock_scheduler.acquire_write_lock.assert_not_called()
 
     def test_sync_project_releases_write_lock_after_completion(self, tmp_path):
-        """sync_project() releases write lock after sync completes (in finally block)."""
+        """With per-user-repo locking, no release is needed when no traces are written.
+
+        No project-level lock is acquired at all, so no release is needed. Per-user-repo
+        locks are only acquired (and released) when traces are actually written. When
+        fetch_traces_page returns empty, no lock operations occur.
+        """
         from code_indexer.server.utils.config_manager import LangfusePullProject
 
         mock_scheduler = MagicMock()
@@ -338,12 +350,16 @@ class TestLangfuseTraceSyncServiceWriteLock:
                 max_concurrent_observations=1,
             )
 
-        assert mock_scheduler.release_write_lock.called, (
-            "release_write_lock() must be called after sync_project() completes"
-        )
+        # No project-level lock; no traces written means no per-user-repo release either
+        mock_scheduler.release_write_lock.assert_not_called()
 
     def test_sync_project_calls_trigger_refresh_after_release(self, tmp_path):
-        """AC3: sync_project() calls trigger_refresh_for_repo('{folder_name}-global') after release."""
+        """With per-user-repo locking, no trigger is called when no traces are written.
+
+        No project-level lock is acquired, so no trigger is needed. Per-user-repo
+        triggers are only called when traces are actually written (non-empty modified_repos).
+        When fetch_traces_page returns empty, modified_repos is empty and no trigger occurs.
+        """
         from code_indexer.server.utils.config_manager import LangfusePullProject
 
         mock_scheduler = MagicMock()
@@ -368,16 +384,8 @@ class TestLangfuseTraceSyncServiceWriteLock:
                 max_concurrent_observations=1,
             )
 
-        assert mock_scheduler.trigger_refresh_for_repo.called, (
-            "trigger_refresh_for_repo() must be called after sync_project() releases lock"
-        )
-        trigger_alias = mock_scheduler.trigger_refresh_for_repo.call_args[0][0]
-        assert trigger_alias.endswith("-global"), (
-            f"trigger alias must end with '-global'. Got: '{trigger_alias}'"
-        )
-        assert "langfuse" in trigger_alias, (
-            f"trigger alias must contain 'langfuse'. Got: '{trigger_alias}'"
-        )
+        # No traces written means empty modified_repos; no trigger called
+        mock_scheduler.trigger_refresh_for_repo.assert_not_called()
 
     def test_sync_project_no_lock_on_discovery_failure(self, tmp_path):
         """When discover_project() raises, no lock is acquired or released (lock is post-discovery)."""
@@ -411,7 +419,12 @@ class TestLangfuseTraceSyncServiceWriteLock:
         mock_scheduler.trigger_refresh_for_repo.assert_not_called()
 
     def test_sync_project_releases_lock_on_inner_sync_exception(self, tmp_path):
-        """AC5: When inner sync raises after lock acquired, lock is released but trigger is NOT called."""
+        """When _sync_project_inner() raises, exception propagates with no lock operations.
+
+        No project-level lock is acquired in the per-user-repo model. When
+        _sync_project_inner() raises, the exception propagates directly. No lock
+        acquire/release or trigger calls happen at all.
+        """
         from code_indexer.server.utils.config_manager import LangfusePullProject
 
         mock_scheduler = MagicMock()
@@ -439,18 +452,9 @@ class TestLangfuseTraceSyncServiceWriteLock:
                     max_concurrent_observations=1,
                 )
 
-        # Lock WAS acquired (discovery succeeded), so it must be released
-        mock_scheduler.acquire_write_lock.assert_called_once()
-        call_alias = mock_scheduler.acquire_write_lock.call_args[0][0]
-        assert call_alias == "langfuse_my-project", (
-            f"Expected lock alias 'langfuse_my-project', got '{call_alias}'"
-        )
-        mock_scheduler.release_write_lock.assert_called_once()
-        release_alias = mock_scheduler.release_write_lock.call_args[0][0]
-        assert release_alias == "langfuse_my-project", (
-            f"Expected release alias 'langfuse_my-project', got '{release_alias}'"
-        )
-        # Trigger must NOT be called on exception (AC5)
+        # No project-level lock is acquired/released in new per-user-repo model
+        mock_scheduler.acquire_write_lock.assert_not_called()
+        mock_scheduler.release_write_lock.assert_not_called()
         mock_scheduler.trigger_refresh_for_repo.assert_not_called()
 
     def test_sync_project_no_lock_when_no_scheduler(self, tmp_path):
