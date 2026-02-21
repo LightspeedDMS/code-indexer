@@ -111,7 +111,6 @@ class TestPass3NotCalled:
         config = Mock()
         config.dependency_map_pass1_max_turns = 10
         config.dependency_map_pass2_max_turns = 10
-        config.dependency_map_pass3_max_turns = 10
 
         paths = {
             "staging_dir": staging_dir,

@@ -1,13 +1,12 @@
 """
 Unit tests for ClaudeIntegrationConfig dependency map fields (Story #192).
 
-Tests the 7 new configuration fields:
+Tests the 6 configuration fields:
 - dependency_map_enabled
 - dependency_map_interval_hours
 - dependency_map_pass_timeout_seconds
 - dependency_map_pass1_max_turns
 - dependency_map_pass2_max_turns
-- dependency_map_pass3_max_turns
 - dependency_map_delta_max_turns
 """
 
@@ -38,7 +37,6 @@ class TestDependencyMapConfigDefaults:
         assert claude_config.dependency_map_pass_timeout_seconds == 1800  # 30 minutes (Fix 5)
         assert claude_config.dependency_map_pass1_max_turns == 0  # Single-shot mode (no tool use)
         assert claude_config.dependency_map_pass2_max_turns == 50  # Agentic mode with search_code tool
-        assert claude_config.dependency_map_pass3_max_turns == 0  # Single-shot mode (no tool use)
         assert claude_config.dependency_map_delta_max_turns == 30
 
 
@@ -56,7 +54,6 @@ class TestDependencyMapConfigPersistence:
         config.claude_integration_config.dependency_map_pass_timeout_seconds = 900
         config.claude_integration_config.dependency_map_pass1_max_turns = 40
         config.claude_integration_config.dependency_map_pass2_max_turns = 70
-        config.claude_integration_config.dependency_map_pass3_max_turns = 35
         config.claude_integration_config.dependency_map_delta_max_turns = 25
 
         # Save config
@@ -75,7 +72,6 @@ class TestDependencyMapConfigPersistence:
         assert claude_config.dependency_map_pass_timeout_seconds == 900
         assert claude_config.dependency_map_pass1_max_turns == 40
         assert claude_config.dependency_map_pass2_max_turns == 70
-        assert claude_config.dependency_map_pass3_max_turns == 35
         assert claude_config.dependency_map_delta_max_turns == 25
 
     def test_load_config_with_missing_dependency_map_fields(self, tmp_path):
@@ -107,7 +103,6 @@ class TestDependencyMapConfigPersistence:
         assert claude_config.dependency_map_pass_timeout_seconds == 1800  # Fix 5
         assert claude_config.dependency_map_pass1_max_turns == 0  # Single-shot mode (no tool use)
         assert claude_config.dependency_map_pass2_max_turns == 50  # Fix 6
-        assert claude_config.dependency_map_pass3_max_turns == 0  # Single-shot mode (no tool use)
         assert claude_config.dependency_map_delta_max_turns == 30
 
 
@@ -122,7 +117,6 @@ class TestClaudeIntegrationConfigDataclass:
             dependency_map_pass_timeout_seconds=1200,
             dependency_map_pass1_max_turns=45,
             dependency_map_pass2_max_turns=65,
-            dependency_map_pass3_max_turns=32,
             dependency_map_delta_max_turns=28,
         )
 
@@ -131,5 +125,4 @@ class TestClaudeIntegrationConfigDataclass:
         assert config.dependency_map_pass_timeout_seconds == 1200
         assert config.dependency_map_pass1_max_turns == 45
         assert config.dependency_map_pass2_max_turns == 65
-        assert config.dependency_map_pass3_max_turns == 32
         assert config.dependency_map_delta_max_turns == 28

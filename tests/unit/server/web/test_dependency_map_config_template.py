@@ -78,7 +78,6 @@ def base_config_context():
                 "dependency_map_pass_timeout_seconds": 600,
                 "dependency_map_pass1_max_turns": 50,
                 "dependency_map_pass2_max_turns": 60,
-                "dependency_map_pass3_max_turns": 30,
                 "dependency_map_delta_max_turns": 30,
             },
             "provider_api_keys": {"anthropic_configured": False, "voyageai_configured": False},
@@ -93,7 +92,7 @@ def base_config_context():
 
 
 def test_dependency_map_settings_render_in_display_mode(templates_env, base_config_context):
-    """Verify all 7 dependency map settings appear in display mode with correct default values."""
+    """Verify all 6 dependency map settings appear in display mode with correct default values."""
     template = templates_env.get_template("partials/config_section.html")
     base_config_context["config"]["claude_cli"]["dependency_map_enabled"] = False
 
@@ -102,7 +101,7 @@ def test_dependency_map_settings_render_in_display_mode(templates_env, base_conf
     # Verify Dependency Map subsection header appears
     assert "Dependency Map" in rendered, "Dependency Map subsection header should appear"
 
-    # Verify all 7 dependency map fields appear with correct values
+    # Verify all 6 dependency map fields appear with correct values
     assert "Dependency Map Enabled" in rendered
     assert "No" in rendered  # dependency_map_enabled=False displays as "No"
     assert "Refresh Interval (hours)" in rendered
@@ -113,13 +112,13 @@ def test_dependency_map_settings_render_in_display_mode(templates_env, base_conf
     assert "50" in rendered  # pass1 default
     assert "Pass 2 Max Turns (Per-Domain)" in rendered
     assert "60" in rendered  # pass2 default
-    assert "Pass 3 Max Turns (Index)" in rendered
-    assert "30" in rendered  # pass3 and delta default (both use 30)
+    assert "Pass 3 Max Turns (Index)" not in rendered  # pass3 removed (dead code)
     assert "Delta Max Turns" in rendered
+    assert "30" in rendered  # delta default
 
 
 def test_dependency_map_settings_render_in_edit_mode(templates_env, base_config_context):
-    """Verify all 7 dependency map form fields appear in edit mode with correct input types."""
+    """Verify all 6 dependency map form fields appear in edit mode with correct input types."""
     template = templates_env.get_template("partials/config_section.html")
     base_config_context["config"]["claude_cli"]["dependency_map_enabled"] = True
 
@@ -138,8 +137,8 @@ def test_dependency_map_settings_render_in_edit_mode(templates_env, base_config_
     assert 'name="dependency_map_pass1_max_turns"' in rendered
     assert 'id="depmap-pass2-turns"' in rendered
     assert 'name="dependency_map_pass2_max_turns"' in rendered
-    assert 'id="depmap-pass3-turns"' in rendered
-    assert 'name="dependency_map_pass3_max_turns"' in rendered
+    assert 'id="depmap-pass3-turns"' not in rendered  # pass3 removed (dead code)
+    assert 'name="dependency_map_pass3_max_turns"' not in rendered  # pass3 removed (dead code)
     assert 'id="depmap-delta-turns"' in rendered
     assert 'name="dependency_map_delta_max_turns"' in rendered
 

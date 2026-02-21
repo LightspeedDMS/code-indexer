@@ -430,8 +430,6 @@ class ClaudeIntegrationConfig:
     dependency_map_pass1_max_turns: int = 0
     # Pass 2 (per-domain) max turns (default: 50 = agentic mode with search_code tool)
     dependency_map_pass2_max_turns: int = 50  # Fix 6: Reduced from 60
-    # Pass 3 (index) max turns (default: 0 = single-shot mode, no tool use)
-    dependency_map_pass3_max_turns: int = 0
     # Delta analysis max turns (default: 30, for future incremental updates)
     dependency_map_delta_max_turns: int = 30
 
@@ -1115,6 +1113,11 @@ class ServerConfigManager:
             if "claude_integration_config" in config_dict and isinstance(
                 config_dict["claude_integration_config"], dict
             ):
+                # Migration: remove obsolete dependency_map_pass3_max_turns field
+                # Pass 3 is now deterministic and no longer uses a max_turns setting
+                config_dict["claude_integration_config"].pop(
+                    "dependency_map_pass3_max_turns", None
+                )
                 config_dict["claude_integration_config"] = ClaudeIntegrationConfig(
                     **config_dict["claude_integration_config"]
                 )

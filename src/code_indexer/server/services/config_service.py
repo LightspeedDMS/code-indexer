@@ -180,7 +180,6 @@ class ConfigService:
                 "dependency_map_pass_timeout_seconds": config.claude_integration_config.dependency_map_pass_timeout_seconds,
                 "dependency_map_pass1_max_turns": config.claude_integration_config.dependency_map_pass1_max_turns,
                 "dependency_map_pass2_max_turns": config.claude_integration_config.dependency_map_pass2_max_turns,
-                "dependency_map_pass3_max_turns": config.claude_integration_config.dependency_map_pass3_max_turns,
                 "dependency_map_delta_max_turns": config.claude_integration_config.dependency_map_delta_max_turns,
             },
             # OIDC/SSO authentication
@@ -540,17 +539,15 @@ class ConfigService:
         elif key == "dependency_map_enabled":
             claude_config.dependency_map_enabled = value in ["true", True, "True"]
         elif key == "dependency_map_interval_hours":
-            claude_config.dependency_map_interval_hours = max(1, min(8760, int(value)))
+            claude_config.dependency_map_interval_hours = max(1, int(value))
         elif key == "dependency_map_pass_timeout_seconds":
-            claude_config.dependency_map_pass_timeout_seconds = max(60, min(3600, int(value)))
+            claude_config.dependency_map_pass_timeout_seconds = max(60, int(value))
         elif key == "dependency_map_pass1_max_turns":
-            claude_config.dependency_map_pass1_max_turns = max(0, min(200, int(value)))
+            claude_config.dependency_map_pass1_max_turns = max(0, int(value))
         elif key == "dependency_map_pass2_max_turns":
-            claude_config.dependency_map_pass2_max_turns = max(5, min(200, int(value)))
-        elif key == "dependency_map_pass3_max_turns":
-            claude_config.dependency_map_pass3_max_turns = max(0, min(200, int(value)))
+            claude_config.dependency_map_pass2_max_turns = max(5, int(value))
         elif key == "dependency_map_delta_max_turns":
-            claude_config.dependency_map_delta_max_turns = max(5, min(200, int(value)))
+            claude_config.dependency_map_delta_max_turns = max(5, int(value))
         else:
             raise ValueError(f"Unknown claude_cli setting: {key}")
 

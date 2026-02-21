@@ -64,7 +64,6 @@ def mock_config_manager():
         dependency_map_pass_timeout_seconds=300,
         dependency_map_pass1_max_turns=5,
         dependency_map_pass2_max_turns=10,
-        dependency_map_pass3_max_turns=5,
     )
     config_manager.get_claude_integration_config.return_value = config
     return config_manager

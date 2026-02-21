@@ -168,7 +168,6 @@ def test_api_keys_section_renders_with_github_token():
                 "dependency_map_pass_timeout_seconds": 600,
                 "dependency_map_pass1_max_turns": 50,
                 "dependency_map_pass2_max_turns": 60,
-                "dependency_map_pass3_max_turns": 30,
                 "dependency_map_delta_max_turns": 30,
             },
             "provider_api_keys": {
@@ -366,7 +365,6 @@ def test_api_keys_section_renders_without_tokens():
                 "dependency_map_pass_timeout_seconds": 600,
                 "dependency_map_pass1_max_turns": 50,
                 "dependency_map_pass2_max_turns": 60,
-                "dependency_map_pass3_max_turns": 30,
                 "dependency_map_delta_max_turns": 30,
             },
             "provider_api_keys": {

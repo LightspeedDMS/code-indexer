@@ -51,7 +51,6 @@ def test_restart_indicators_appear_for_worker_settings():
                 "dependency_map_pass_timeout_seconds": 600,
                 "dependency_map_pass1_max_turns": 50,
                 "dependency_map_pass2_max_turns": 60,
-                "dependency_map_pass3_max_turns": 30,
                 "dependency_map_delta_max_turns": 30,
             },
             "multi_search": {
