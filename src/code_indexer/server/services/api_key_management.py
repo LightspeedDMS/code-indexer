@@ -73,7 +73,6 @@ class ApiKeySyncService:
         self,
         claude_config_path: Optional[str] = None,
         systemd_env_path: Optional[str] = None,
-        claude_credentials_path: Optional[str] = None,
     ):
         """
         Initialize ApiKeySyncService.
@@ -81,18 +80,12 @@ class ApiKeySyncService:
         Args:
             claude_config_path: Path to ~/.claude.json (default: ~/.claude.json)
             systemd_env_path: Path to systemd env file (default: /etc/cidx-server/env)
-            claude_credentials_path: Path to credentials file to remove
         """
         self._sync_lock = threading.Lock()
         self._claude_config_path = Path(
             claude_config_path or Path.home() / ".claude.json"
         )
         self._systemd_env_path = Path(systemd_env_path or "/etc/cidx-server/env")
-        self._claude_credentials_path = (
-            Path(claude_credentials_path)
-            if claude_credentials_path
-            else Path.home() / ".claude" / ".credentials.json"
-        )
 
     def sync_anthropic_key(self, api_key: str) -> SyncResult:
         """
@@ -124,23 +117,7 @@ class ApiKeySyncService:
                 # Step 3: Write to systemd env file
                 self._update_systemd_env_file("ANTHROPIC_API_KEY", api_key)
 
-                # Step 4: Remove legacy credentials file if it exists
-                if self._claude_credentials_path.exists():
-                    try:
-                        self._claude_credentials_path.unlink()
-                        logger.info(
-                            f"Removed legacy credentials file: "
-                            f"{self._claude_credentials_path}"
-                        )
-                    except OSError as e:
-                        logger.warning(
-                            format_error_log(
-                                "APP-GENERAL-039",
-                                f"Failed to remove credentials file: {e}",
-                            )
-                        )
-
-                # Step 5: Update ~/.bashrc (for shell persistence)
+                # Step 4: Update ~/.bashrc (for shell persistence)
                 self._update_bashrc("ANTHROPIC_API_KEY", api_key)
 
                 return SyncResult(success=True)

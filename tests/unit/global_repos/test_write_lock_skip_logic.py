@@ -68,10 +68,18 @@ def scheduler(golden_repos_dir, config_mgr, query_tracker, cleanup_manager, regi
 
 
 def _setup_local_repo(golden_repos_dir, alias_manager, registry, alias_name="cidx-meta-global"):
-    """Helper: create local repo dir, alias, and registry entry."""
+    """Helper: create local repo dir, alias, and registry entry.
+
+    Creates .code-indexer/ to mark the repo as initialized (Bug #268 fix:
+    uninitialized local repos are skipped gracefully by _execute_refresh()).
+    Tests using this helper verify behavior for initialized local repos.
+    """
     repo_name = alias_name.replace("-global", "")
     local_repo_dir = golden_repos_dir / repo_name
     local_repo_dir.mkdir(exist_ok=True)
+    # Bug #268: mark as initialized so _execute_refresh() proceeds past the
+    # initialization check and reaches write-lock / mtime detection logic.
+    (local_repo_dir / ".code-indexer").mkdir(exist_ok=True)
     alias_manager.create_alias(alias_name, str(local_repo_dir))
     registry.register_global_repo(
         repo_name,
@@ -266,6 +274,9 @@ class TestConcurrentWriterAndRefreshScheduler:
         """
         local_repo_dir = golden_repos_dir / "cidx-meta"
         local_repo_dir.mkdir(exist_ok=True)
+        # Bug #268: mark as initialized so _execute_refresh() proceeds past
+        # the initialization check when write lock is released (step 4).
+        (local_repo_dir / ".code-indexer").mkdir(exist_ok=True)
         alias_manager.create_alias("cidx-meta-global", str(local_repo_dir))
         registry.register_global_repo(
             "cidx-meta",

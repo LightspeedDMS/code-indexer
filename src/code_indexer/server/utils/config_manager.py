@@ -514,6 +514,10 @@ class BackgroundJobsConfig:
     # Default 2 per resource audit recommendation (was hardcoded to 1)
     subprocess_max_workers: int = 2
 
+    # Story #267: Maximum age in hours for completed/failed/cancelled jobs
+    # Jobs older than this are cleaned up from SQLite on startup and during cleanup
+    cleanup_max_age_hours: int = 24
+
 
 @dataclass
 class ContentLimitsConfig:

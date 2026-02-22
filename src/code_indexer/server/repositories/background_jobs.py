@@ -261,7 +261,9 @@ class BackgroundJobManager:
                     raise DuplicateJobError(operation_type, repo_alias, conflict_job_id)
 
             self.jobs[job_id] = job
-            self._persist_jobs()
+
+        # Story #267 Component 3-4: Persist outside lock
+        self._persist_jobs(job_id=job_id)
 
         # Execute job in background thread
         thread = threading.Thread(
@@ -283,6 +285,9 @@ class BackgroundJobManager:
         """
         Get status of a background job with user isolation.
 
+        Story #267 Component 8: Falls back to SQLite when job is not in memory,
+        since completed/failed jobs are removed from memory after persistence.
+
         Args:
             job_id: Job ID to check
             username: Username requesting the status (for authorization)
@@ -292,30 +297,41 @@ class BackgroundJobManager:
         """
         with self._lock:
             job = self.jobs.get(job_id)
-            if not job or job.username != username:
-                return None
+            if job:
+                if job.username != username:
+                    return None
+                return {
+                    "job_id": job.job_id,
+                    "operation_type": job.operation_type,
+                    "status": job.status.value,
+                    "created_at": job.created_at.isoformat(),
+                    "started_at": job.started_at.isoformat() if job.started_at else None,
+                    "completed_at": (
+                        job.completed_at.isoformat() if job.completed_at else None
+                    ),
+                    "progress": job.progress,
+                    "result": job.result,
+                    "error": job.error,
+                    "username": job.username,
+                    "repo_alias": job.repo_alias,  # AC5: Include repo_alias in response
+                    # AC6: Extended self-healing fields
+                    "resolution_attempts": job.resolution_attempts,
+                    "claude_actions": job.claude_actions,
+                    "failure_reason": job.failure_reason,
+                    "extended_error": job.extended_error,
+                    "language_resolution_status": job.language_resolution_status,
+                }
 
-            return {
-                "job_id": job.job_id,
-                "operation_type": job.operation_type,
-                "status": job.status.value,
-                "created_at": job.created_at.isoformat(),
-                "started_at": job.started_at.isoformat() if job.started_at else None,
-                "completed_at": (
-                    job.completed_at.isoformat() if job.completed_at else None
-                ),
-                "progress": job.progress,
-                "result": job.result,
-                "error": job.error,
-                "username": job.username,
-                "repo_alias": job.repo_alias,  # AC5: Include repo_alias in response
-                # AC6: Extended self-healing fields
-                "resolution_attempts": job.resolution_attempts,
-                "claude_actions": job.claude_actions,
-                "failure_reason": job.failure_reason,
-                "extended_error": job.extended_error,
-                "language_resolution_status": job.language_resolution_status,
-            }
+        # Story #267 Component 8: Fall back to SQLite for completed/failed jobs
+        if self._sqlite_backend:
+            try:
+                db_job = self._sqlite_backend.get_job(job_id)
+                if db_job and db_job.get("username") == username:
+                    return db_job
+            except Exception as e:
+                logging.error(f"Failed to get job {job_id} from SQLite: {e}")
+
+        return None
 
     def list_jobs(
         self,
@@ -424,7 +440,8 @@ class BackgroundJobManager:
                 # and update status accordingly
                 pass
 
-            self._persist_jobs()
+        # Story #267 Component 3-4: Persist outside lock
+        self._persist_jobs(job_id=job_id)
 
         logging.info(f"Job {job_id} cancelled by user {username}")
         return {"success": True, "message": "Job cancelled successfully"}
@@ -458,13 +475,17 @@ class BackgroundJobManager:
                 if job.cancelled:
                     job.status = JobStatus.CANCELLED
                     job.completed_at = datetime.now(timezone.utc)
-                    self._persist_jobs()
-                    return
+            # Story #267 Component 3-4: Persist outside lock
+            if job.cancelled:
+                self._persist_jobs(job_id=job_id)
+                return
 
+            with self._lock:
                 job.status = JobStatus.RUNNING
                 job.started_at = datetime.now(timezone.utc)
                 job.progress = 10
-                self._persist_jobs()
+            # Story #267 Component 3-4: Persist outside lock
+            self._persist_jobs(job_id=job_id)
 
             logging.info(f"Starting background job {job_id}")
 
@@ -473,7 +494,8 @@ class BackgroundJobManager:
                 with self._lock:
                     if job_id in self.jobs and not self.jobs[job_id].cancelled:
                         self.jobs[job_id].progress = progress
-                        self._persist_jobs()
+                # Story #267 Component 3-4: Persist outside lock
+                self._persist_jobs(job_id=job_id)
 
             # Check if function accepts progress callback
             func_signature = inspect.signature(func)
@@ -482,12 +504,16 @@ class BackgroundJobManager:
             progress_callback(25)
 
             # Check for cancellation before execution
+            cancelled = False
             with self._lock:
                 if self.jobs[job_id].cancelled:
                     self.jobs[job_id].status = JobStatus.CANCELLED
                     self.jobs[job_id].completed_at = datetime.now(timezone.utc)
-                    self._persist_jobs()
-                    return
+                    cancelled = True
+            if cancelled:
+                # Story #267 Component 3-4: Persist outside lock
+                self._persist_jobs(job_id=job_id)
+                return
 
             # Execute the actual operation with frequent cancellation checks
             if "progress_callback" in func_signature.parameters:
@@ -513,7 +539,15 @@ class BackgroundJobManager:
                 else:
                     job.status = JobStatus.CANCELLED
                     job.completed_at = datetime.now(timezone.utc)
-                self._persist_jobs()
+            # Story #267 Component 3-4: Persist outside lock
+            self._persist_jobs(job_id=job_id)
+            # Story #267 Component 8: Remove completed/cancelled jobs from memory
+            # Only when SQLite backend is available (data is preserved in DB)
+            if self._sqlite_backend and job.status in (
+                JobStatus.COMPLETED, JobStatus.CANCELLED
+            ):
+                with self._lock:
+                    self.jobs.pop(job_id, None)
 
             logging.info(f"Background job {job_id} completed successfully")
 
@@ -526,7 +560,12 @@ class BackgroundJobManager:
                 job.completed_at = datetime.now(timezone.utc)
                 job.error = str(e)
                 job.progress = 0
-                self._persist_jobs()
+            # Story #267 Component 3-4: Persist outside lock
+            self._persist_jobs(job_id=job_id)
+            # Story #267 Component 8: Remove from memory after persist (SQLite only)
+            if self._sqlite_backend:
+                with self._lock:
+                    self.jobs.pop(job_id, None)
         except Exception as e:
             # Job failed
             error_msg = str(e)
@@ -538,7 +577,12 @@ class BackgroundJobManager:
                 job.completed_at = datetime.now(timezone.utc)
                 job.error = error_msg
                 job.progress = 0
-                self._persist_jobs()
+            # Story #267 Component 3-4: Persist outside lock
+            self._persist_jobs(job_id=job_id)
+            # Story #267 Component 8: Remove from memory after persist (SQLite only)
+            if self._sqlite_backend:
+                with self._lock:
+                    self.jobs.pop(job_id, None)
 
         finally:
             # Story #26: Release semaphore slot to allow another job to run
@@ -600,7 +644,9 @@ class BackgroundJobManager:
 
     def cleanup_old_jobs(self, max_age_hours: int = 24) -> int:
         """
-        Clean up old completed/failed jobs.
+        Clean up old completed/failed jobs from both memory and SQLite.
+
+        Story #267 Component 5: Wire to sqlite_backend.cleanup_old_jobs().
 
         Args:
             max_age_hours: Maximum age of jobs to keep in hours
@@ -611,6 +657,7 @@ class BackgroundJobManager:
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
         cleaned_count = 0
 
+        # Step 1: Clean in-memory (under lock)
         with self._lock:
             job_ids_to_remove = []
 
@@ -627,8 +674,13 @@ class BackgroundJobManager:
                 del self.jobs[job_id]
                 cleaned_count += 1
 
-            if cleaned_count > 0:
-                self._persist_jobs()
+        # Step 2: Clean SQLite (outside lock) - Story #267 Component 5
+        if self._sqlite_backend:
+            try:
+                db_cleaned = self._sqlite_backend.cleanup_old_jobs(max_age_hours)
+                cleaned_count = max(cleaned_count, db_cleaned)
+            except Exception as e:
+                logging.error(f"Failed to cleanup old jobs from SQLite: {e}")
 
         if cleaned_count > 0:
             logging.info(f"Cleaned up {cleaned_count} old background jobs")
@@ -663,9 +715,22 @@ class BackgroundJobManager:
         """
         Get count of failed jobs.
 
+        Story #267 Component 8: Query SQLite for failed count since failed jobs
+        are removed from memory after persistence.
+
         Returns:
             Number of failed jobs
         """
+        # Story #267 Component 8: Use SQLite for failed count
+        if self._sqlite_backend:
+            try:
+                status_counts = self._sqlite_backend.count_jobs_by_status()
+                return status_counts.get("failed", 0)
+            except Exception as e:
+                logging.error(f"Failed to get failed job count from SQLite: {e}")
+                return 0
+
+        # Fallback: iterate in-memory jobs (for JSON storage or no backend)
         with self._lock:
             return sum(
                 1 for job in self.jobs.values() if job.status == JobStatus.FAILED
@@ -734,11 +799,21 @@ class BackgroundJobManager:
                     job.completed_at = datetime.now(timezone.utc)
                     logging.info(f"Job {job_id} cancelled during shutdown")
 
-            # Persist final job states
-            self._persist_jobs()
+            # Snapshot jobs under lock for persistence
+            jobs_snapshot = {
+                jid: self._snapshot_job(j) for jid, j in self.jobs.items()
+            }
 
             # Get list of threads to wait for
             threads_to_wait = list(self._running_jobs.values())
+
+        # Persist final job states OUTSIDE lock to avoid blocking
+        if self._sqlite_backend:
+            for jid, snapshot in jobs_snapshot.items():
+                try:
+                    self._persist_job_to_sqlite(jid, snapshot)
+                except Exception as e:
+                    logging.error(f"Failed to persist job {jid} during shutdown: {e}")
 
         # Wait for all threads to complete (outside of lock to avoid deadlock)
         for thread in threads_to_wait:
@@ -796,15 +871,102 @@ class BackgroundJobManager:
 
             return matching_jobs
 
-    def _persist_jobs(self) -> None:
+    def _snapshot_job(self, job: "BackgroundJob") -> Dict[str, Any]:
+        """Create a serializable snapshot of job state for persistence outside lock.
+
+        Story #267 Component 4: This snapshot is taken under the lock, then the
+        actual SQLite I/O happens outside the lock using this snapshot.
+        """
+        return {
+            "job_id": job.job_id,
+            "operation_type": job.operation_type,
+            "status": job.status.value if hasattr(job.status, "value") else job.status,
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+            "started_at": job.started_at.isoformat() if job.started_at else None,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+            "result": job.result,
+            "error": job.error,
+            "progress": job.progress,
+            "username": job.username,
+            "is_admin": job.is_admin,
+            "cancelled": job.cancelled,
+            "repo_alias": job.repo_alias,
+            "resolution_attempts": job.resolution_attempts,
+            "claude_actions": job.claude_actions,
+            "failure_reason": job.failure_reason,
+            "extended_error": job.extended_error,
+            "language_resolution_status": job.language_resolution_status,
+        }
+
+    def _persist_job_to_sqlite(self, job_id: str, snapshot: Dict[str, Any]) -> None:
+        """Persist a single job snapshot to SQLite without holding the memory lock.
+
+        Story #267 Component 4: This method does SQLite I/O outside the lock.
+        If the write fails, the in-memory state is still correct.
+        """
+        if not self._sqlite_backend:
+            return
+        try:
+            existing = self._sqlite_backend.get_job(job_id)
+            if existing:
+                self._sqlite_backend.update_job(
+                    job_id=job_id,
+                    status=snapshot["status"],
+                    started_at=snapshot["started_at"],
+                    completed_at=snapshot["completed_at"],
+                    result=snapshot["result"],
+                    error=snapshot["error"],
+                    progress=snapshot["progress"],
+                    cancelled=snapshot["cancelled"],
+                    resolution_attempts=snapshot["resolution_attempts"],
+                    claude_actions=snapshot["claude_actions"],
+                    failure_reason=snapshot["failure_reason"],
+                    extended_error=snapshot["extended_error"],
+                    language_resolution_status=snapshot["language_resolution_status"],
+                )
+            else:
+                self._sqlite_backend.save_job(
+                    job_id=snapshot["job_id"],
+                    operation_type=snapshot["operation_type"],
+                    status=snapshot["status"],
+                    created_at=snapshot["created_at"],
+                    started_at=snapshot["started_at"],
+                    completed_at=snapshot["completed_at"],
+                    result=snapshot["result"],
+                    error=snapshot["error"],
+                    progress=snapshot["progress"],
+                    username=snapshot["username"],
+                    is_admin=snapshot["is_admin"],
+                    cancelled=snapshot["cancelled"],
+                    repo_alias=snapshot["repo_alias"],
+                    resolution_attempts=snapshot["resolution_attempts"],
+                    claude_actions=snapshot["claude_actions"],
+                    failure_reason=snapshot["failure_reason"],
+                    extended_error=snapshot["extended_error"],
+                    language_resolution_status=snapshot["language_resolution_status"],
+                )
+        except Exception as e:
+            logging.error(f"Failed to persist job {job_id} to SQLite: {e}")
+
+    def _persist_jobs(self, job_id: Optional[str] = None) -> None:
         """
         Persist jobs to storage (SQLite or JSON file).
 
-        Note: This method should be called within a lock.
+        Story #267 Components 1-2: When job_id is provided, only that job is persisted
+        (single-job path). When job_id is None, all jobs are persisted (shutdown/bulk).
+
+        Note: For SQLite single-job persist, this method can be called outside the lock
+        since it uses _persist_job_to_sqlite which does its own error handling.
+        For full persist and JSON, this should be called within a lock.
         """
         # Use SQLite backend if enabled
         if self._sqlite_backend:
-            self._persist_jobs_sqlite()
+            if job_id is not None:
+                # Story #267 Component 1: Single-job persist (2 ops instead of 20K)
+                self._persist_single_job_sqlite(job_id)
+            else:
+                # Full persist (shutdown only)
+                self._persist_jobs_sqlite()
             return
 
         # Fall back to JSON file storage
@@ -817,7 +979,7 @@ class BackgroundJobManager:
 
             # Convert jobs to serializable format
             serializable_jobs = {}
-            for job_id, job in self.jobs.items():
+            for jid, job in self.jobs.items():
                 job_dict = asdict(job)
                 # Convert datetime objects to ISO strings
                 for field in ["created_at", "started_at", "completed_at"]:
@@ -829,7 +991,7 @@ class BackgroundJobManager:
                     if hasattr(job_dict["status"], "value")
                     else job_dict["status"]
                 )
-                serializable_jobs[job_id] = job_dict
+                serializable_jobs[jid] = job_dict
 
             with open(storage_file, "w") as f:
                 json.dump(serializable_jobs, f, indent=2)
@@ -838,7 +1000,23 @@ class BackgroundJobManager:
             # Log the error but don't raise - persistence failures shouldn't break the system
             # Jobs should still work in memory even if persistence fails
             logging.error(f"Failed to persist jobs: {e}")
-            # TODO: Consider implementing retry logic for failed persistence attempts
+
+    def _persist_single_job_sqlite(self, job_id: str) -> None:
+        """Persist a single job to SQLite.
+
+        Story #267 Component 1: Instead of iterating all jobs (20K ops),
+        persist only the one job that changed (2 ops: get + save/update).
+        """
+        if not self._sqlite_backend:
+            return
+
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                return  # Job was removed between lock release and persist
+            snapshot = self._snapshot_job(job)
+
+        self._persist_job_to_sqlite(job_id, snapshot)
 
     def _persist_jobs_sqlite(self) -> None:
         """
@@ -903,8 +1081,12 @@ class BackgroundJobManager:
         except Exception as e:
             logging.error(f"Failed to persist jobs to SQLite: {e}")
 
-    # Maximum number of jobs to load from SQLite into memory at startup
+    # Maximum number of jobs to load from SQLite into memory at startup (legacy)
     MAX_JOBS_TO_LOAD = 10000
+
+    # Story #267 Component 8: Safety cap for active jobs loaded per status at startup.
+    # Normally < 20 active jobs, but cap at 500 to prevent unbounded memory usage.
+    MAX_ACTIVE_JOBS_PER_STATUS = 500
 
     def _load_jobs(self) -> None:
         """
@@ -952,6 +1134,9 @@ class BackgroundJobManager:
         Story #723: Clean up orphaned jobs before loading.
         On server restart, any 'running' or 'pending' jobs are orphaned
         since the processes executing them no longer exist.
+
+        Story #267 Component 6: Clean up old completed/failed jobs before loading.
+        Story #267 Component 8: Load only active/pending jobs (not all 10K).
         """
         if not self._sqlite_backend:
             return
@@ -966,25 +1151,50 @@ class BackgroundJobManager:
                     f"Cleaned up {orphan_count} orphaned jobs on server startup"
                 )
 
-            stored_jobs = self._sqlite_backend.list_jobs(limit=self.MAX_JOBS_TO_LOAD)
+            # Story #267 Component 6: Startup cleanup of old completed/failed jobs
+            max_age = self._background_jobs_config.cleanup_max_age_hours
+            old_cleaned = self._sqlite_backend.cleanup_old_jobs(max_age)
+            if old_cleaned > 0:
+                logging.info(
+                    f"Startup cleanup: removed {old_cleaned} old jobs from SQLite "
+                    f"(older than {max_age} hours)"
+                )
 
-            for job_dict in stored_jobs:
-                # Convert ISO strings back to datetime objects
-                for field in ["created_at", "started_at", "completed_at"]:
-                    if job_dict.get(field) is not None:
-                        job_dict[field] = datetime.fromisoformat(job_dict[field])
+            # Story #267 Component 8: Load only active/pending jobs into memory.
+            # After orphan cleanup marks running/pending as failed, there should
+            # be very few active jobs. Historical data is served from SQLite directly.
+            loaded_count = 0
+            for status_value in ["running", "pending"]:
+                status_jobs = self._sqlite_backend.list_jobs(
+                    status=status_value,
+                    limit=self.MAX_ACTIVE_JOBS_PER_STATUS,
+                )
+                for job_dict in status_jobs:
+                    self._deserialize_and_add_job(job_dict)
+                    loaded_count += 1
 
-                # Convert string status back to enum
-                job_dict["status"] = JobStatus(job_dict["status"])
-
-                # Create job object
-                job = BackgroundJob(**job_dict)
-                self.jobs[job_dict["job_id"]] = job
-
-            logging.info(f"Loaded {len(stored_jobs)} jobs from SQLite")
+            logging.info(f"Loaded {loaded_count} active jobs from SQLite into memory")
 
         except Exception as e:
             logging.error(f"Failed to load jobs from SQLite: {e}")
+
+    def _deserialize_and_add_job(self, job_dict: Dict[str, Any]) -> None:
+        """Deserialize a job dictionary from SQLite and add to in-memory dict.
+
+        Story #267 Component 8: Extracted helper to avoid duplicating deserialization
+        logic when loading jobs per-status in _load_jobs_sqlite.
+        """
+        # Convert ISO strings back to datetime objects
+        for field_name in ["created_at", "started_at", "completed_at"]:
+            if job_dict.get(field_name) is not None:
+                job_dict[field_name] = datetime.fromisoformat(job_dict[field_name])
+
+        # Convert string status back to enum
+        job_dict["status"] = JobStatus(job_dict["status"])
+
+        # Create job object
+        job = BackgroundJob(**job_dict)
+        self.jobs[job_dict["job_id"]] = job
 
     def _calculate_cutoff(self, time_filter: str) -> datetime:
         """
@@ -1012,12 +1222,24 @@ class BackgroundJobManager:
         """
         Get job statistics filtered by time period.
 
+        Story #267 Component 8: Query SQLite directly for historical stats since
+        completed/failed jobs are no longer kept in memory.
+
         Args:
             time_filter: Time filter string ("24h", "7d", "30d")
 
         Returns:
             Dictionary with "completed" and "failed" counts
         """
+        # Story #267 Component 8: Use SQLite for stats (completed/failed not in memory)
+        if self._sqlite_backend:
+            try:
+                return self._sqlite_backend.get_job_stats(time_filter)
+            except Exception as e:
+                logging.error(f"Failed to get job stats from SQLite: {e}")
+                return {"completed": 0, "failed": 0}
+
+        # Fallback: iterate in-memory jobs (for JSON storage or no backend)
         cutoff_time = self._calculate_cutoff(time_filter)
 
         with self._lock:
@@ -1043,6 +1265,8 @@ class BackgroundJobManager:
         Story #4 AC1: Includes RUNNING, PENDING, COMPLETED, and FAILED jobs.
         Running/pending jobs appear at the top of the list before completed jobs.
 
+        Story #267 Component 8: Active jobs come from memory, historical from SQLite.
+
         Args:
             time_filter: Time filter string ("24h", "7d", "30d"), default "30d"
             limit: Maximum number of jobs to return, default 20
@@ -1051,22 +1275,18 @@ class BackgroundJobManager:
             List of job dictionaries with running/pending first, then sorted by time
         """
         cutoff_time = self._calculate_cutoff(time_filter)
+        recent_jobs = []
+        seen_job_ids: set = set()
 
+        # Step 1: Get active jobs from memory (running/pending)
         with self._lock:
-            recent_jobs = []
-
             for job in self.jobs.values():
-                # Story #4 AC1: Include RUNNING, PENDING, COMPLETED, FAILED jobs
-                # For running/pending jobs, use created_at for time filter
-                # For completed/failed jobs, use completed_at for time filter
                 include_job = False
 
                 if job.status in [JobStatus.RUNNING, JobStatus.PENDING]:
-                    # Running/pending jobs: filter by created_at
                     if job.created_at >= cutoff_time:
                         include_job = True
                 elif job.status in [JobStatus.COMPLETED, JobStatus.FAILED]:
-                    # Completed/failed jobs: filter by completed_at
                     if job.completed_at and job.completed_at >= cutoff_time:
                         include_job = True
 
@@ -1089,34 +1309,63 @@ class BackgroundJobManager:
                         "repo_alias": job.repo_alias,
                     }
                     recent_jobs.append(job_dict)
+                    seen_job_ids.add(job.job_id)
 
-            # Story #4 AC1: Sort with running/pending jobs first, then by time
-            # Priority: RUNNING (0) > PENDING (1) > COMPLETED/FAILED (2)
-            # Within each priority, sort by relevant time (newest first)
-            def sort_key(x):
-                status = x["status"]
-                if status == "running":
-                    priority = 0
-                    # Use started_at for running jobs, fallback to created_at
-                    time_str = x["started_at"] or x["created_at"]
-                elif status == "pending":
-                    priority = 1
-                    # Use created_at for pending jobs
-                    time_str = x["created_at"]
-                else:
-                    priority = 2
-                    # Use completed_at for completed/failed jobs
-                    time_str = x["completed_at"] or x["created_at"]
+        # Step 2: Story #267 Component 8 - Get historical jobs from SQLite
+        if self._sqlite_backend:
+            try:
+                db_jobs = self._sqlite_backend.list_jobs(limit=limit)
+                for db_job in db_jobs:
+                    if db_job["job_id"] not in seen_job_ids:
+                        # Apply time filter
+                        include_db_job = False
+                        status = db_job.get("status", "")
+                        if status in ("running", "pending"):
+                            created_str = db_job.get("created_at")
+                            if created_str:
+                                created_dt = datetime.fromisoformat(created_str)
+                                if created_dt >= cutoff_time:
+                                    include_db_job = True
+                        elif status in ("completed", "failed"):
+                            completed_str = db_job.get("completed_at")
+                            if completed_str:
+                                completed_dt = datetime.fromisoformat(completed_str)
+                                if completed_dt >= cutoff_time:
+                                    include_db_job = True
 
-                # Parse time for sorting (newest first = reverse, so negate)
-                if time_str:
-                    dt = datetime.fromisoformat(time_str)
-                else:
-                    dt = datetime.min.replace(tzinfo=timezone.utc)
+                        if include_db_job:
+                            recent_jobs.append(db_job)
+                            seen_job_ids.add(db_job["job_id"])
+            except Exception as e:
+                logging.error(f"Failed to get recent jobs from SQLite: {e}")
 
-                return (priority, -dt.timestamp())
+        # Story #4 AC1: Sort with running/pending jobs first, then by time
+        # Priority: RUNNING (0) > PENDING (1) > COMPLETED/FAILED (2)
+        # Within each priority, sort by relevant time (newest first)
+        def sort_key(x):
+            status = x["status"]
+            if status == "running":
+                priority = 0
+                # Use started_at for running jobs, fallback to created_at
+                time_str = x.get("started_at") or x.get("created_at")
+            elif status == "pending":
+                priority = 1
+                # Use created_at for pending jobs
+                time_str = x.get("created_at")
+            else:
+                priority = 2
+                # Use completed_at for completed/failed jobs
+                time_str = x.get("completed_at") or x.get("created_at")
 
-            recent_jobs.sort(key=sort_key)
+            # Parse time for sorting (newest first = reverse, so negate)
+            if time_str:
+                dt = datetime.fromisoformat(time_str)
+            else:
+                dt = datetime.min.replace(tzinfo=timezone.utc)
 
-            # Return up to limit jobs
-            return recent_jobs[:limit]
+            return (priority, -dt.timestamp())
+
+        recent_jobs.sort(key=sort_key)
+
+        # Return up to limit jobs
+        return recent_jobs[:limit]

@@ -2037,18 +2037,15 @@ class BackgroundJobsSqliteBackend:
         params: List[Any] = []
 
         for key, value in kwargs.items():
-            if value is not None:
-                updates.append(f"{key} = ?")
-                if key in json_fields:
-                    params.append(json.dumps(value))
-                elif key in bool_fields:
-                    params.append(1 if value else 0)
-                else:
-                    params.append(value)
-            elif key in json_fields:
-                # Allow setting JSON fields to NULL
-                updates.append(f"{key} = ?")
+            updates.append(f"{key} = ?")
+            if value is None:
                 params.append(None)
+            elif key in json_fields:
+                params.append(json.dumps(value))
+            elif key in bool_fields:
+                params.append(1 if value else 0)
+            else:
+                params.append(value)
 
         if not updates:
             return

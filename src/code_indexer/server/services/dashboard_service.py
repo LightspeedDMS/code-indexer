@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from .health_service import health_service
-from ..models.api_models import HealthCheckResponse, HealthStatus
+from ..models.api_models import (
+    HealthCheckResponse,
+    HealthStatus,
+    ServiceHealthInfo,
+    SystemHealthInfo,
+)
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
@@ -81,8 +86,34 @@ class DashboardService:
         Returns:
             DashboardData containing all sections
         """
-        # Get health data
-        health_data = self._get_health_data()
+        # Bug #266: Return a placeholder HealthCheckResponse instead of calling
+        # _get_health_data(), which triggers 40 uncached SQLite operations.
+        # The real health data is loaded lazily via get_health_partial() by the
+        # HTMX partial at /admin/partials/dashboard-health after page load.
+        # Using DEGRADED (not HEALTHY) avoids false-positive green indicators
+        # before the real check completes.
+        health_data = HealthCheckResponse(
+            status=HealthStatus.DEGRADED,
+            timestamp=datetime.now(timezone.utc),
+            services={
+                "database": ServiceHealthInfo(
+                    status=HealthStatus.DEGRADED,
+                    response_time_ms=0,
+                    error_message="Loading...",
+                ),
+                "storage": ServiceHealthInfo(
+                    status=HealthStatus.DEGRADED,
+                    response_time_ms=0,
+                    error_message="Loading...",
+                ),
+            },
+            system=SystemHealthInfo(
+                memory_usage_percent=0.0,
+                cpu_usage_percent=0.0,
+                active_jobs=0,
+                disk_free_space_gb=0.0,
+            ),
+        )
 
         # Get job statistics
         job_counts = self._get_job_counts(username)
@@ -152,11 +183,6 @@ class DashboardService:
                 )
             )
             # Return degraded status on error
-            from ..models.api_models import (
-                ServiceHealthInfo,
-                SystemHealthInfo,
-            )
-
             return HealthCheckResponse(
                 status=HealthStatus.UNHEALTHY,
                 timestamp=datetime.now(timezone.utc),
