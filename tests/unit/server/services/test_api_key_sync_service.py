@@ -7,14 +7,12 @@ Tests cover:
 - Idempotent sync operations (no-op if already synced)
 - Thread safety with concurrent sync calls
 - Atomic file writes
-- Removal of ~/.claude/.credentials.json
 
 Story #20: API Key Management for Claude CLI and VoyageAI
 """
 
 import json
 import os
-import tempfile
 from pathlib import Path
 
 
@@ -128,73 +126,6 @@ class TestAnthropicApiKeySync:
             )
         finally:
             # Restore original value
-            if original_value is not None:
-                os.environ["ANTHROPIC_API_KEY"] = original_value
-            else:
-                os.environ.pop("ANTHROPIC_API_KEY", None)
-
-
-class TestAnthropicKeyCredentialsRemoval:
-    """Test removal of legacy credentials file during Anthropic key sync."""
-
-    def test_sync_anthropic_key_removes_credentials_file(self, monkeypatch, tmp_path):
-        """AC: Sync removes ~/.claude/.credentials.json if it exists."""
-        # Monkeypatch Path.home() to isolate ~/.bashrc writes
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-
-        credentials_path = tmp_path / ".claude" / ".credentials.json"
-        credentials_path.parent.mkdir(parents=True, exist_ok=True)
-        credentials_path.write_text('{"oauth_token": "old_token"}')
-
-        # Clear env var if set
-        original_value = os.environ.pop("ANTHROPIC_API_KEY", None)
-
-        try:
-            service = ApiKeySyncService(
-                claude_config_path=str(tmp_path / ".claude.json"),
-                systemd_env_path=str(tmp_path / "env"),
-                claude_credentials_path=str(credentials_path),
-            )
-
-            result = service.sync_anthropic_key(
-                "sk-ant-api03-test123456789012345678901234567890123"
-            )
-
-            assert result.success is True
-            assert (
-                not credentials_path.exists()
-            ), "Credentials file should be removed after sync"
-        finally:
-            if original_value is not None:
-                os.environ["ANTHROPIC_API_KEY"] = original_value
-            else:
-                os.environ.pop("ANTHROPIC_API_KEY", None)
-
-    def test_sync_anthropic_key_succeeds_when_credentials_file_missing(
-        self, monkeypatch, tmp_path
-    ):
-        """Sync should succeed even if credentials file doesn't exist."""
-        # Monkeypatch Path.home() to isolate ~/.bashrc writes
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-
-        # Don't create credentials file
-        original_value = os.environ.pop("ANTHROPIC_API_KEY", None)
-
-        try:
-            service = ApiKeySyncService(
-                claude_config_path=str(tmp_path / ".claude.json"),
-                systemd_env_path=str(tmp_path / "env"),
-                claude_credentials_path=str(
-                    tmp_path / ".claude" / ".credentials.json"
-                ),
-            )
-
-            result = service.sync_anthropic_key(
-                "sk-ant-api03-test123456789012345678901234567890123"
-            )
-
-            assert result.success is True
-        finally:
             if original_value is not None:
                 os.environ["ANTHROPIC_API_KEY"] = original_value
             else:

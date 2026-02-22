@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.45] - 2026-02-22
+
+### Fixed
+
+- BackgroundJobManager threading deadlock: single-job persist, lock separation (snapshot under lock, I/O outside), startup cleanup of stale jobs (#267)
+- Dashboard initial load blocking on uncached health check (55-165s): return placeholder HealthCheckResponse(DEGRADED), HTMX lazy-loads real data (#266)
+- RefreshScheduler attempting refresh on uninitialized per-user Langfuse local repos (#268)
+- Local repos (local://, bare filesystem paths) no longer auto-refreshed by scheduler; only explicit triggers from writer services
+- ApiKeySyncService: removed dangerous legacy credentials file deletion that was breaking Claude CLI OAuth sessions
+
 ## [9.3.43] - 2026-02-21
 
 ### Fixed

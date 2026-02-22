@@ -1,12 +1,13 @@
 """
 Unit tests for RefreshScheduler handling of local:// repos (Story #224 updated).
 
-After Story #224 (C1, C2, C3):
-- Local repos ARE submitted to _submit_refresh_job (C1: skip block removed)
+Current behavior (scheduler loop skips local repos):
+- Local repos are NOT submitted to _submit_refresh_job (scheduler loop skips them)
 - Local repos go through reconciliation but use mtime detection, not early return (C2)
 - Local repos use live directory as source_path, not versioned snapshot (C3)
 
-These tests replace the old "skip" tests that verified behavior removed in Story #224.
+These tests verify that local:// repos are excluded from automatic scheduler
+refresh submissions while git repos continue to be submitted normally.
 """
 
 import subprocess
@@ -58,7 +59,7 @@ class TestRefreshSchedulerLocalRepoSkip:
         """Create an AliasManager instance."""
         return AliasManager(str(golden_repos_dir / "aliases"))
 
-    def test_scheduler_loop_submits_both_local_and_remote_repos(
+    def test_scheduler_loop_submits_only_remote_repos(
         self,
         golden_repos_dir,
         config_mgr,
@@ -68,18 +69,17 @@ class TestRefreshSchedulerLocalRepoSkip:
         alias_manager,
     ):
         """
-        C1 (Story #224): _scheduler_loop() must submit BOTH local and remote repos.
+        _scheduler_loop() must submit ONLY remote (git) repos, NOT local:// repos.
 
-        Previously local:// repos were skipped before job submission. After C1
-        that skip is removed — local repos are submitted to _submit_refresh_job()
-        just like remote repos. The RefreshScheduler now handles versioned
-        indexing for local repos via mtime detection.
+        Local:// repos are excluded from the automatic scheduler refresh cycle.
+        Only git repos are submitted to _submit_refresh_job().
 
         Setup:
         - Registry with 2 repos: one local:// (cidx-meta-global), one remote (test-repo-global)
 
         Expected:
-        - _submit_refresh_job() called for BOTH repos
+        - _submit_refresh_job() called for test-repo-global only
+        - _submit_refresh_job() NOT called for cidx-meta-global
         """
         # Setup: Create one local repo and one remote repo
         local_repo_dir = golden_repos_dir / "cidx-meta"
@@ -115,8 +115,8 @@ class TestRefreshSchedulerLocalRepoSkip:
 
         def capture_and_stop(alias_name):
             submitted.append(alias_name)
-            if len(submitted) >= 2:
-                scheduler._running = False
+            # Stop after submitting the remote repo (only one submission expected)
+            scheduler._running = False
 
         with patch.object(
             scheduler, "_submit_refresh_job", side_effect=capture_and_stop
@@ -124,9 +124,9 @@ class TestRefreshSchedulerLocalRepoSkip:
             scheduler._running = True
             scheduler._scheduler_loop()
 
-        assert "cidx-meta-global" in submitted, (
-            "C1 (Story #224): local:// repos must be submitted to _submit_refresh_job. "
-            "The skip block was removed from _scheduler_loop()."
+        assert "cidx-meta-global" not in submitted, (
+            "Local:// repos must NOT be submitted to _submit_refresh_job. "
+            "The scheduler loop skips local:// repos entirely."
         )
         assert "test-repo-global" in submitted, (
             "Remote repos must still be submitted (regression guard)."
@@ -156,6 +156,11 @@ class TestRefreshSchedulerLocalRepoSkip:
         """
         local_repo_dir = golden_repos_dir / "cidx-meta"
         local_repo_dir.mkdir()
+        # Bug #268: create .code-indexer/ so this repo is treated as initialized.
+        # The test verifies C2 behavior (mtime detection) which only runs for
+        # initialized repos. Without .code-indexer/ the repo is skipped before
+        # reaching _has_local_changes() (Bug #268 fix).
+        (local_repo_dir / ".code-indexer").mkdir()
         alias_manager.create_alias("cidx-meta-global", str(local_repo_dir))
         registry.register_global_repo(
             "cidx-meta",

@@ -27,6 +27,25 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Git URL prefixes — any repo_url NOT starting with one of these is treated as
+# a local repo and is completely excluded from the scheduled auto-refresh cycle.
+# Local repos are only refreshed via explicit trigger_refresh_for_repo() calls.
+_GIT_URL_PREFIXES = ("https://", "http://", "git@", "ssh://", "git://")
+
+
+def _is_git_repo_url(repo_url: str) -> bool:
+    """
+    Return True if repo_url represents a remote git repository.
+
+    Remote git repos start with https://, http://, git@, ssh://, or git://.
+    Everything else (local:// aliases, bare filesystem paths, empty strings)
+    is considered a local repo and must be excluded from scheduled refresh.
+    """
+    if not repo_url:
+        return False
+    return any(repo_url.startswith(prefix) for prefix in _GIT_URL_PREFIXES)
+
+
 # TTL for .write_mode/{alias}.json marker files (Bug #240).
 # Markers older than this are treated as orphaned (client disconnected without
 # calling exit_write_mode) and are cleaned up automatically.
@@ -476,13 +495,32 @@ class RefreshScheduler:
                         break
 
                     alias_name = repo.get("alias_name")
-                    if alias_name:
-                        try:
-                            self._submit_refresh_job(alias_name)
-                        except Exception as e:
-                            logger.error(
-                                f"Refresh failed for {alias_name}: {type(e).__name__}: {e}", exc_info=True
-                            )
+                    repo_url = repo.get("repo_url", "")
+
+                    if not alias_name:
+                        continue
+
+                    # Skip local repos completely from the scheduled refresh cycle.
+                    # Local repos (local://, bare filesystem paths, empty URLs) are
+                    # only refreshed via explicit trigger_refresh_for_repo() calls
+                    # from their writer services (DependencyMapService,
+                    # LangfuseTraceSyncService, MetaDescriptionHook).
+                    # Submitting them here causes failures for uninitialized repos
+                    # and wastes background jobs for initialized ones.
+                    if not _is_git_repo_url(repo_url):
+                        logger.info(
+                            f"Skipping local repo {alias_name} from scheduled refresh "
+                            f"(repo_url={repo_url!r}). Local repos are only refreshed "
+                            f"via explicit trigger."
+                        )
+                        continue
+
+                    try:
+                        self._submit_refresh_job(alias_name)
+                    except Exception as e:
+                        logger.error(
+                            f"Refresh failed for {alias_name}: {type(e).__name__}: {e}", exc_info=True
+                        )
 
             except Exception as e:
                 logger.error(f"Error in scheduler loop: {type(e).__name__}: {e}", exc_info=True)
@@ -605,6 +643,25 @@ class RefreshScheduler:
                     # C3: For local repos, source_path is the LIVE directory (where writers put files),
                     # NOT the current alias target which may point to a versioned snapshot.
                     source_path = master_path
+
+                    # Bug #268: Skip uninitialized local repos gracefully.
+                    # Per-user Langfuse repos may not have .code-indexer/ yet when the
+                    # scheduler fires before LangfuseTraceSyncService has written any traces.
+                    # Attempting cidx index on an uninitialized dir fails with:
+                    #   "Command 'index' is not available in no configuration found"
+                    # These repos are only refreshed via explicit trigger from their writers.
+                    code_indexer_dir = Path(source_path) / ".code-indexer"
+                    if not code_indexer_dir.exists():
+                        logger.info(
+                            f"Skipping scheduled refresh for local repo {alias_name}: "
+                            f"not yet initialized (no .code-indexer/ in {source_path}). "
+                            f"Will be refreshed via explicit trigger when writers populate it."
+                        )
+                        return {
+                            "success": True,
+                            "alias": alias_name,
+                            "message": f"Not yet initialized, skipped",
+                        }
 
                     # Story #227: Skip CoW clone if an external writer holds the write lock.
                     # Writers (DependencyMapService, LangfuseTraceSyncService) acquire the lock
@@ -1408,8 +1465,9 @@ class RefreshScheduler:
             repo_url = repo.get("repo_url", "")
             if not alias_name:
                 continue
-            # Skip local repos — no versioned copies to restore from
-            if repo_url.startswith("local://"):
+            # Skip local repos — no versioned copies to restore from.
+            # This covers both local:// aliases and bare filesystem paths.
+            if not _is_git_repo_url(repo_url):
                 continue
 
             repo_name = alias_name.replace("-global", "")

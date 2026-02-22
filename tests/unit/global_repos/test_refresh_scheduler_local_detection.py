@@ -1,7 +1,7 @@
 """
 Unit tests for Story #224: RefreshScheduler local repo handling (C1-C3).
 
-C1: _scheduler_loop() must NOT skip local:// repos (remove the early continue).
+C1: _scheduler_loop() must SKIP local:// repos (local repos excluded from scheduler loop).
 C2: _execute_refresh() uses mtime-based change detection for local repos.
 C3: _execute_refresh() skips GitPullUpdater and uses live source path.
 """
@@ -66,25 +66,25 @@ def scheduler(
 
 
 # ---------------------------------------------------------------------------
-# C1: _scheduler_loop() must NOT skip local:// repos
+# C1: _scheduler_loop() must SKIP local:// repos
 # ---------------------------------------------------------------------------
 
 
-class TestSchedulerLoopIncludesLocalRepos:
-    """C1: local:// repos must reach _submit_refresh_job in the scheduler loop."""
+class TestSchedulerLoopExcludesLocalRepos:
+    """C1: local:// repos must NOT reach _submit_refresh_job in the scheduler loop."""
 
-    def test_scheduler_loop_submits_local_repo(
+    def test_scheduler_loop_skips_local_repo(
         self, scheduler, mock_registry
     ):
         """
-        _scheduler_loop() must call _submit_refresh_job for local:// repos.
+        _scheduler_loop() must NOT call _submit_refresh_job for local:// repos.
 
-        Previously the loop had an early 'continue' that skipped local repos.
-        After C1 that skip is removed, so local repos are submitted for refresh.
+        The scheduler loop skips local:// repos entirely — they are excluded
+        from the automatic refresh cycle. Only git repos are submitted.
 
-        Strategy: run the real _scheduler_loop() in a thread, capture any call
-        to _submit_refresh_job, then immediately stop the scheduler so the loop
-        exits on the next iteration.
+        Strategy: run one full iteration of _scheduler_loop() with a single
+        local:// repo in the registry, stop immediately after the loop body
+        runs once, and assert that _submit_refresh_job was never called.
         """
         mock_registry.list_global_repos.return_value = [
             {
@@ -94,32 +94,47 @@ class TestSchedulerLoopIncludesLocalRepos:
         ]
 
         submitted = []
-        submit_event = threading.Event()
+        loop_iterated = threading.Event()
+
+        # Stop the scheduler after the first list_global_repos call so we get
+        # exactly one iteration without hanging.
+        original_list = mock_registry.list_global_repos.side_effect
+
+        call_count = [0]
+
+        def list_and_stop():
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                scheduler._running = False
+                scheduler._stop_event.set()
+                loop_iterated.set()
+            return [
+                {
+                    "alias_name": "cidx-meta-global",
+                    "repo_url": "local://cidx-meta",
+                }
+            ]
+
+        mock_registry.list_global_repos.side_effect = list_and_stop
 
         def capture_submit(alias_name):
             submitted.append(alias_name)
-            # Signal that we captured a submission, then stop the scheduler
-            submit_event.set()
-            scheduler._running = False
-            scheduler._stop_event.set()
 
         with patch.object(
             scheduler, "_submit_refresh_job", side_effect=capture_submit
-        ):
+        ), patch.object(scheduler, "get_refresh_interval", return_value=0):
             scheduler._running = True
             scheduler._stop_event.clear()
             t = threading.Thread(target=scheduler._scheduler_loop, daemon=True)
             t.start()
-            # Wait up to 5 seconds for the submission
-            submit_event.wait(timeout=5)
+            loop_iterated.wait(timeout=5)
             scheduler._running = False
             scheduler._stop_event.set()
             t.join(timeout=3)
 
-        assert "cidx-meta-global" in submitted, (
-            "Local repo cidx-meta-global must be submitted for refresh. "
-            "C1: the 'if repo_url.startswith(\"local://\"): continue' block "
-            "must be removed from _scheduler_loop()."
+        assert "cidx-meta-global" not in submitted, (
+            "Local repo cidx-meta-global must NOT be submitted for refresh. "
+            "The scheduler loop skips local:// repos entirely."
         )
 
     def test_scheduler_loop_submits_git_repos(
@@ -184,6 +199,9 @@ class TestExecuteRefreshLocalRepoMtimeDetection:
         alias_name = "cidx-meta-global"
         live_dir = Path(temp_golden_repos_dir) / "cidx-meta"
         live_dir.mkdir(parents=True, exist_ok=True)
+        # Bug #268: create .code-indexer/ so repo is treated as initialized.
+        # _has_local_changes() is only called for initialized local repos.
+        (live_dir / ".code-indexer").mkdir(exist_ok=True)
 
         repo_info = {
             "alias_name": alias_name,
@@ -225,6 +243,8 @@ class TestExecuteRefreshLocalRepoMtimeDetection:
         alias_name = "cidx-meta-global"
         live_dir = Path(temp_golden_repos_dir) / "cidx-meta"
         live_dir.mkdir(parents=True, exist_ok=True)
+        # Bug #268: create .code-indexer/ so repo is treated as initialized.
+        (live_dir / ".code-indexer").mkdir(exist_ok=True)
 
         repo_info = {
             "alias_name": alias_name,
@@ -345,6 +365,9 @@ class TestExecuteRefreshLocalRepoSourcePath:
         alias_name = "cidx-meta-global"
         live_dir = Path(temp_golden_repos_dir) / "cidx-meta"
         live_dir.mkdir(parents=True, exist_ok=True)
+        # Bug #268: create .code-indexer/ so repo is treated as initialized.
+        # The initialization check uses the live source dir, not the alias target.
+        (live_dir / ".code-indexer").mkdir(exist_ok=True)
 
         # Alias points to versioned snapshot (NOT the live dir)
         versioned_target = (
