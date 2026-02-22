@@ -15,7 +15,34 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+import bleach
 import markdown
+
+# Allowlist of HTML tags that markdown rendering may produce (safe for display).
+_SAFE_TAGS = [
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "p", "br", "hr",
+    "strong", "em", "b", "i", "u", "s", "del",
+    "a", "img",
+    "ul", "ol", "li",
+    "table", "thead", "tbody", "tr", "th", "td",
+    "pre", "code", "blockquote",
+    "div", "span",
+    "dl", "dt", "dd",
+    "sup", "sub",
+]
+
+# Allowlist of HTML attributes per tag.
+_SAFE_ATTRIBUTES: Dict[str, List[str]] = {
+    "a": ["href", "title"],
+    "img": ["src", "alt", "title"],
+    "th": ["align"],
+    "td": ["align"],
+    "code": ["class"],  # syntax-highlighting classes added by fenced_code extension
+}
+
+# Only http, https, and mailto are permitted in href/src attributes.
+_SAFE_PROTOCOLS = ["http", "https", "mailto"]
 
 logger = logging.getLogger(__name__)
 
@@ -363,22 +390,16 @@ class DependencyMapDomainService:
 
         try:
             html = markdown.markdown(content, extensions=["tables", "fenced_code"])
-            # Sanitize: strip script/style/iframe/object tags (defense-in-depth)
-            html = re.sub(
-                r'<(script|style|iframe|object|embed|form|input)[^>]*>.*?</\1>',
-                '',
+            # Sanitize using bleach allowlist: strips all tags/attributes/protocols
+            # not in the allowlists, blocking XSS vectors such as javascript: URLs,
+            # unquoted event handlers, data: URIs, style attributes, and exotic tags.
+            html = bleach.clean(
                 html,
-                flags=re.IGNORECASE | re.DOTALL,
+                tags=_SAFE_TAGS,
+                attributes=_SAFE_ATTRIBUTES,
+                protocols=_SAFE_PROTOCOLS,
+                strip=True,
             )
-            html = re.sub(
-                r'<(script|style|iframe|object|embed|form|input)[^>]*/?\s*>',
-                '',
-                html,
-                flags=re.IGNORECASE,
-            )
-            # Strip on* event handlers from remaining tags
-            html = re.sub(r'\s+on\w+\s*=\s*"[^"]*"', '', html, flags=re.IGNORECASE)
-            html = re.sub(r"\s+on\w+\s*=\s*'[^']*'", '', html, flags=re.IGNORECASE)
             return html
         except Exception as e:
             logger.warning("dependency_map_domain: failed to render markdown for %s: %s", domain_name, e)

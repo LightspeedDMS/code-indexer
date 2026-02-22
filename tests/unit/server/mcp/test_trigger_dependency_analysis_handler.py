@@ -35,7 +35,8 @@ def admin_user():
 def mock_app_state():
     """Mock app.state with dependency_map_service."""
     mock_service = Mock()
-    mock_service.is_available.return_value = True
+    mock_service.try_start_analysis.return_value = True
+    mock_service.finish_analysis = Mock()
     mock_service.run_full_analysis = Mock()
     mock_service.run_delta_analysis = Mock()
 

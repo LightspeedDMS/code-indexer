@@ -11,7 +11,7 @@ AC4: Default Mode
 import json
 import pytest
 import time
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, MagicMock, patch
 from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
 from code_indexer.server.mcp.tools import TOOL_REGISTRY
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -34,10 +34,20 @@ def mock_admin_user():
 def mock_dependency_map_service():
     """Create a mock DependencyMapService."""
     service = Mock()
-    service.is_available = Mock(return_value=True)
+    service.try_start_analysis = Mock(return_value=True)
+    service.finish_analysis = Mock()
     service.run_full_analysis = Mock(return_value={"status": "completed", "domains_count": 5})
     service.run_delta_analysis = Mock(return_value={"status": "completed", "domains_count": 5})
     return service
+
+
+def _make_enabled_config():
+    """Create a mock ServerConfig with dependency_map_enabled=True."""
+    mock_ci_config = Mock()
+    mock_ci_config.dependency_map_enabled = True
+    mock_server_config = Mock()
+    mock_server_config.claude_integration_config = mock_ci_config
+    return mock_server_config
 
 
 class TestAC1_ToolRegistration:
@@ -71,9 +81,9 @@ class TestAC1_ToolRegistration:
         assert mode_prop.get("default") == "delta"
 
     def test_tool_requires_admin_permission(self):
-        """Verify tool requires manage_repos permission."""
+        """Verify tool requires manage_golden_repos permission."""
         tool = TOOL_REGISTRY["trigger_dependency_analysis"]
-        assert tool["required_permission"] == "manage_repos"
+        assert tool["required_permission"] == "manage_golden_repos"
 
     def test_handler_registered(self):
         """Verify handler function is registered."""
@@ -84,14 +94,15 @@ class TestAC1_ToolRegistration:
 class TestAC2_FullAnalysisMode:
     """AC2: Full Analysis Mode."""
 
+    @patch("code_indexer.server.utils.config_manager.ServerConfigManager")
     @patch("code_indexer.server.mcp.handlers.app_module")
-    def test_full_mode_returns_job_id(self, mock_app, mock_admin_user, mock_dependency_map_service):
+    def test_full_mode_returns_job_id(self, mock_app, mock_scm_cls, mock_admin_user, mock_dependency_map_service):
         """Test full mode returns job_id immediately."""
-        # Setup mocks
-        mock_app.dependency_map_service = mock_dependency_map_service
-        mock_config = Mock()
-        mock_config.dependency_map_enabled = True
-        mock_app.config = mock_config
+        # Setup config mock so dependency_map_enabled check passes
+        mock_scm_cls.return_value.load_config.return_value = _make_enabled_config()
+
+        # Setup service on app.state so handler finds it
+        mock_app.app.state.dependency_map_service = mock_dependency_map_service
 
         # Call handler
         handler = HANDLER_REGISTRY["trigger_dependency_analysis"]
@@ -111,14 +122,15 @@ class TestAC2_FullAnalysisMode:
         assert data["mode"] == "full"
         assert "status" in data
 
+    @patch("code_indexer.server.utils.config_manager.ServerConfigManager")
     @patch("code_indexer.server.mcp.handlers.app_module")
-    def test_full_mode_calls_run_full_analysis(self, mock_app, mock_admin_user, mock_dependency_map_service):
+    def test_full_mode_calls_run_full_analysis(self, mock_app, mock_scm_cls, mock_admin_user, mock_dependency_map_service):
         """Test that background job calls run_full_analysis."""
-        # Setup mocks
-        mock_app.dependency_map_service = mock_dependency_map_service
-        mock_config = Mock()
-        mock_config.dependency_map_enabled = True
-        mock_app.config = mock_config
+        # Setup config mock so dependency_map_enabled check passes
+        mock_scm_cls.return_value.load_config.return_value = _make_enabled_config()
+
+        # Setup service on app.state so handler finds it
+        mock_app.app.state.dependency_map_service = mock_dependency_map_service
 
         # Call handler
         handler = HANDLER_REGISTRY["trigger_dependency_analysis"]
@@ -134,14 +146,15 @@ class TestAC2_FullAnalysisMode:
 class TestAC3_DeltaAnalysisMode:
     """AC3: Delta Analysis Mode."""
 
+    @patch("code_indexer.server.utils.config_manager.ServerConfigManager")
     @patch("code_indexer.server.mcp.handlers.app_module")
-    def test_delta_mode_returns_job_id(self, mock_app, mock_admin_user, mock_dependency_map_service):
+    def test_delta_mode_returns_job_id(self, mock_app, mock_scm_cls, mock_admin_user, mock_dependency_map_service):
         """Test delta mode returns job_id immediately."""
-        # Setup mocks
-        mock_app.dependency_map_service = mock_dependency_map_service
-        mock_config = Mock()
-        mock_config.dependency_map_enabled = True
-        mock_app.config = mock_config
+        # Setup config mock so dependency_map_enabled check passes
+        mock_scm_cls.return_value.load_config.return_value = _make_enabled_config()
+
+        # Setup service on app.state so handler finds it
+        mock_app.app.state.dependency_map_service = mock_dependency_map_service
 
         # Call handler
         handler = HANDLER_REGISTRY["trigger_dependency_analysis"]
@@ -154,14 +167,15 @@ class TestAC3_DeltaAnalysisMode:
         assert data["job_id"] is not None
         assert data["mode"] == "delta"
 
+    @patch("code_indexer.server.utils.config_manager.ServerConfigManager")
     @patch("code_indexer.server.mcp.handlers.app_module")
-    def test_delta_mode_calls_run_delta_analysis(self, mock_app, mock_admin_user, mock_dependency_map_service):
+    def test_delta_mode_calls_run_delta_analysis(self, mock_app, mock_scm_cls, mock_admin_user, mock_dependency_map_service):
         """Test that background job calls run_delta_analysis."""
-        # Setup mocks
-        mock_app.dependency_map_service = mock_dependency_map_service
-        mock_config = Mock()
-        mock_config.dependency_map_enabled = True
-        mock_app.config = mock_config
+        # Setup config mock so dependency_map_enabled check passes
+        mock_scm_cls.return_value.load_config.return_value = _make_enabled_config()
+
+        # Setup service on app.state so handler finds it
+        mock_app.app.state.dependency_map_service = mock_dependency_map_service
 
         # Call handler
         handler = HANDLER_REGISTRY["trigger_dependency_analysis"]
@@ -177,14 +191,15 @@ class TestAC3_DeltaAnalysisMode:
 class TestAC4_DefaultMode:
     """AC4: Default Mode."""
 
+    @patch("code_indexer.server.utils.config_manager.ServerConfigManager")
     @patch("code_indexer.server.mcp.handlers.app_module")
-    def test_no_mode_defaults_to_delta(self, mock_app, mock_admin_user, mock_dependency_map_service):
+    def test_no_mode_defaults_to_delta(self, mock_app, mock_scm_cls, mock_admin_user, mock_dependency_map_service):
         """Test that omitting mode parameter defaults to delta."""
-        # Setup mocks
-        mock_app.dependency_map_service = mock_dependency_map_service
-        mock_config = Mock()
-        mock_config.dependency_map_enabled = True
-        mock_app.config = mock_config
+        # Setup config mock so dependency_map_enabled check passes
+        mock_scm_cls.return_value.load_config.return_value = _make_enabled_config()
+
+        # Setup service on app.state so handler finds it
+        mock_app.app.state.dependency_map_service = mock_dependency_map_service
 
         # Call handler without mode
         handler = HANDLER_REGISTRY["trigger_dependency_analysis"]
@@ -195,14 +210,15 @@ class TestAC4_DefaultMode:
         assert data.get("success") is True
         assert data["mode"] == "delta"
 
+    @patch("code_indexer.server.utils.config_manager.ServerConfigManager")
     @patch("code_indexer.server.mcp.handlers.app_module")
-    def test_empty_mode_defaults_to_delta(self, mock_app, mock_admin_user, mock_dependency_map_service):
+    def test_empty_mode_defaults_to_delta(self, mock_app, mock_scm_cls, mock_admin_user, mock_dependency_map_service):
         """Test that empty mode parameter defaults to delta."""
-        # Setup mocks
-        mock_app.dependency_map_service = mock_dependency_map_service
-        mock_config = Mock()
-        mock_config.dependency_map_enabled = True
-        mock_app.config = mock_config
+        # Setup config mock so dependency_map_enabled check passes
+        mock_scm_cls.return_value.load_config.return_value = _make_enabled_config()
+
+        # Setup service on app.state so handler finds it
+        mock_app.app.state.dependency_map_service = mock_dependency_map_service
 
         # Call handler with empty mode
         handler = HANDLER_REGISTRY["trigger_dependency_analysis"]
@@ -217,15 +233,16 @@ class TestAC4_DefaultMode:
 class TestAC5_ConcurrentRunRejection:
     """AC5: Concurrent Run Rejection."""
 
+    @patch("code_indexer.server.utils.config_manager.ServerConfigManager")
     @patch("code_indexer.server.mcp.handlers.app_module")
-    def test_concurrent_run_rejected_immediately(self, mock_app, mock_admin_user, mock_dependency_map_service):
+    def test_concurrent_run_rejected_immediately(self, mock_app, mock_scm_cls, mock_admin_user, mock_dependency_map_service):
         """Test that concurrent run is rejected when lock is held."""
+        # Setup config mock so dependency_map_enabled check passes
+        mock_scm_cls.return_value.load_config.return_value = _make_enabled_config()
+
         # Setup mocks - service reports unavailable (lock held)
-        mock_dependency_map_service.is_available = Mock(return_value=False)
-        mock_app.dependency_map_service = mock_dependency_map_service
-        mock_config = Mock()
-        mock_config.dependency_map_enabled = True
-        mock_app.config = mock_config
+        mock_dependency_map_service.try_start_analysis = Mock(return_value=False)
+        mock_app.app.state.dependency_map_service = mock_dependency_map_service
 
         # Call handler
         handler = HANDLER_REGISTRY["trigger_dependency_analysis"]
@@ -237,15 +254,16 @@ class TestAC5_ConcurrentRunRejection:
         assert "error" in data
         assert "already in progress" in data["error"].lower()
 
+    @patch("code_indexer.server.utils.config_manager.ServerConfigManager")
     @patch("code_indexer.server.mcp.handlers.app_module")
-    def test_no_job_created_when_concurrent(self, mock_app, mock_admin_user, mock_dependency_map_service):
+    def test_no_job_created_when_concurrent(self, mock_app, mock_scm_cls, mock_admin_user, mock_dependency_map_service):
         """Test that no job is created when analysis already running."""
+        # Setup config mock so dependency_map_enabled check passes
+        mock_scm_cls.return_value.load_config.return_value = _make_enabled_config()
+
         # Setup mocks - service unavailable
-        mock_dependency_map_service.is_available = Mock(return_value=False)
-        mock_app.dependency_map_service = mock_dependency_map_service
-        mock_config = Mock()
-        mock_config.dependency_map_enabled = True
-        mock_app.config = mock_config
+        mock_dependency_map_service.try_start_analysis = Mock(return_value=False)
+        mock_app.app.state.dependency_map_service = mock_dependency_map_service
 
         # Call handler
         handler = HANDLER_REGISTRY["trigger_dependency_analysis"]
@@ -259,14 +277,18 @@ class TestAC5_ConcurrentRunRejection:
 class TestAC6_DisabledFeatureRejection:
     """AC6: Disabled Feature Rejection."""
 
+    @patch("code_indexer.server.utils.config_manager.ServerConfigManager")
     @patch("code_indexer.server.mcp.handlers.app_module")
-    def test_disabled_feature_rejected(self, mock_app, mock_admin_user, mock_dependency_map_service):
+    def test_disabled_feature_rejected(self, mock_app, mock_scm_cls, mock_admin_user, mock_dependency_map_service):
         """Test that tool returns error when dependency_map_enabled is False."""
-        # Setup mocks - feature disabled
-        mock_app.dependency_map_service = mock_dependency_map_service
-        mock_config = Mock()
-        mock_config.dependency_map_enabled = False
-        mock_app.config = mock_config
+        # Setup config mock with feature disabled
+        mock_ci_config = Mock()
+        mock_ci_config.dependency_map_enabled = False
+        mock_server_config = Mock()
+        mock_server_config.claude_integration_config = mock_ci_config
+        mock_scm_cls.return_value.load_config.return_value = mock_server_config
+
+        mock_app.app.state.dependency_map_service = mock_dependency_map_service
 
         # Call handler
         handler = HANDLER_REGISTRY["trigger_dependency_analysis"]
@@ -278,14 +300,18 @@ class TestAC6_DisabledFeatureRejection:
         assert "error" in data
         assert "disabled" in data["error"].lower()
 
+    @patch("code_indexer.server.utils.config_manager.ServerConfigManager")
     @patch("code_indexer.server.mcp.handlers.app_module")
-    def test_no_job_when_disabled(self, mock_app, mock_admin_user, mock_dependency_map_service):
+    def test_no_job_when_disabled(self, mock_app, mock_scm_cls, mock_admin_user, mock_dependency_map_service):
         """Test that no job is created when feature is disabled."""
-        # Setup mocks - feature disabled
-        mock_app.dependency_map_service = mock_dependency_map_service
-        mock_config = Mock()
-        mock_config.dependency_map_enabled = False
-        mock_app.config = mock_config
+        # Setup config mock with feature disabled
+        mock_ci_config = Mock()
+        mock_ci_config.dependency_map_enabled = False
+        mock_server_config = Mock()
+        mock_server_config.claude_integration_config = mock_ci_config
+        mock_scm_cls.return_value.load_config.return_value = mock_server_config
+
+        mock_app.app.state.dependency_map_service = mock_dependency_map_service
 
         # Call handler
         handler = HANDLER_REGISTRY["trigger_dependency_analysis"]
@@ -302,11 +328,8 @@ class TestAC8_InvalidModeHandling:
     @patch("code_indexer.server.mcp.handlers.app_module")
     def test_invalid_mode_rejected(self, mock_app, mock_admin_user, mock_dependency_map_service):
         """Test that invalid mode parameter is rejected."""
-        # Setup mocks
-        mock_app.dependency_map_service = mock_dependency_map_service
-        mock_config = Mock()
-        mock_config.dependency_map_enabled = True
-        mock_app.config = mock_config
+        # No config patch needed - mode validation happens before enabled check
+        mock_app.app.state.dependency_map_service = mock_dependency_map_service
 
         # Call handler with invalid mode
         handler = HANDLER_REGISTRY["trigger_dependency_analysis"]
@@ -321,11 +344,8 @@ class TestAC8_InvalidModeHandling:
     @patch("code_indexer.server.mcp.handlers.app_module")
     def test_invalid_mode_error_message_specifies_options(self, mock_app, mock_admin_user, mock_dependency_map_service):
         """Test that error message specifies valid mode options."""
-        # Setup mocks
-        mock_app.dependency_map_service = mock_dependency_map_service
-        mock_config = Mock()
-        mock_config.dependency_map_enabled = True
-        mock_app.config = mock_config
+        # No config patch needed - mode validation happens before enabled check
+        mock_app.app.state.dependency_map_service = mock_dependency_map_service
 
         # Call handler with invalid mode
         handler = HANDLER_REGISTRY["trigger_dependency_analysis"]
@@ -339,11 +359,8 @@ class TestAC8_InvalidModeHandling:
     @patch("code_indexer.server.mcp.handlers.app_module")
     def test_no_job_created_for_invalid_mode(self, mock_app, mock_admin_user, mock_dependency_map_service):
         """Test that no job is created for invalid mode."""
-        # Setup mocks
-        mock_app.dependency_map_service = mock_dependency_map_service
-        mock_config = Mock()
-        mock_config.dependency_map_enabled = True
-        mock_app.config = mock_config
+        # No config patch needed - mode validation happens before enabled check
+        mock_app.app.state.dependency_map_service = mock_dependency_map_service
 
         # Call handler with invalid mode
         handler = HANDLER_REGISTRY["trigger_dependency_analysis"]

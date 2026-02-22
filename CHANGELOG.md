@@ -216,6 +216,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Refresh path resolution for local repos** - `refresh_golden_repo()` now uses `clone_path` (source directory) instead of `get_actual_repo_path()` (versioned CoW path) when refreshing local repos, ensuring source files are copied correctly.
 - **Redundant `cidx init` on existing repos** - `_execute_post_clone_workflow()` skips `cidx init` when configuration already exists and `force_init=False`, avoiding unnecessary re-initialization during versioned refresh.
 
+### Removed
+
+- **gh_actions_* MCP tool aliases (Story #222, Breaking Change)** - Removed 6 shorthand MCP tool registrations: `gh_actions_list_runs`, `gh_actions_get_run`, `gh_actions_search_logs`, `gh_actions_get_job_logs`, `gh_actions_retry_run`, `gh_actions_cancel_run`. MCP clients using these tool names will receive "tool not found" errors. Use the canonical `github_actions_*` equivalents instead (e.g., `github_actions_list_runs`). Handler functions are preserved for REST routes in cicd.py.
+
 ## [9.3.23] - 2026-02-18
 
 ### Fixed

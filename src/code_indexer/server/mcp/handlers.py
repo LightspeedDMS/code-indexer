@@ -1153,7 +1153,7 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     user_repos=mock_user_repos,
                     query_text=params["query_text"],
                     limit=_coerce_int(params.get("limit"), 10),
-                    min_score=_coerce_float(params.get("min_score"), 0.5),
+                    min_score=_coerce_float(params.get("min_score"), 0.0) if params.get("min_score") is not None else None,
                     file_extensions=params.get("file_extensions"),
                     language=params.get("language"),
                     exclude_language=params.get("exclude_language"),
@@ -1266,7 +1266,7 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             query_text=params["query_text"],
             repository_alias=params.get("repository_alias"),
             limit=_coerce_int(params.get("limit"), 10),
-            min_score=_coerce_float(params.get("min_score"), 0.5),
+            min_score=_coerce_float(params.get("min_score"), 0.0) if params.get("min_score") is not None else None,
             file_extensions=params.get("file_extensions"),
             language=params.get("language"),
             exclude_language=params.get("exclude_language"),
@@ -5831,10 +5831,21 @@ def _build_dependency_map_section(cidx_meta_path: Path) -> str:
     ]
     domain_count = len(domain_files)
 
-    # Return compact single-line string (Story #222 TODO 11)
+    # Count repo description files in cidx_meta_path root (non-hidden .md files)
+    repo_files = [
+        f for f in cidx_meta_path.glob("*.md")
+        if not f.name.startswith("_")
+    ]
+    repo_count = len(repo_files)
+
     return (
-        f"Dependency map: cidx-meta/dependency-map/ ({domain_count} domains). "
-        "Read _index.md first for structure."
+        "For architectural/cross-repo questions (blast radius, integration chains, "
+        "domain ownership): READ don't search. "
+        f"get_file_content('dependency-map/_index.md', 'cidx-meta-global') -> "
+        "full domain catalog + cross-domain dependency graph with code evidence. "
+        "Then get_file_content('dependency-map/{Domain Name}.md') for deep-dive "
+        f"on a domain's incoming/outgoing wiring. {domain_count} domains, "
+        f"{repo_count} repos mapped."
     )
 
 
@@ -11689,7 +11700,9 @@ def handle_trigger_dependency_analysis(
                 }
             )
 
-        if not dependency_map_service.is_available():
+        # Bug #256: use try_start_analysis() instead of is_available() to atomically
+        # claim the guard, eliminating the TOCTOU race between check and thread start.
+        if not dependency_map_service.try_start_analysis(mode):
             return _mcp_response(
                 {
                     "success": False,
@@ -11717,10 +11730,17 @@ def handle_trigger_dependency_analysis(
                         extra={"correlation_id": get_correlation_id(), "job_id": job_id},
                     )
                 )
+            finally:
+                # Bug #256: always release the guard so the next analysis can start.
+                dependency_map_service.finish_analysis()
 
-        # Start background daemon thread
-        thread = threading.Thread(target=run_analysis_job, daemon=True)
-        thread.start()
+        # Start background daemon thread - guard must be released on failure
+        try:
+            thread = threading.Thread(target=run_analysis_job, daemon=True)
+            thread.start()
+        except Exception:
+            dependency_map_service.finish_analysis()
+            raise
 
         # AC2/AC3: Return job_id immediately
         return _mcp_response(

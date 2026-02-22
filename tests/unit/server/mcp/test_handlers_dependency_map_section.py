@@ -161,8 +161,8 @@ class TestBuildDependencyMapSection:
 
             result = _build_dependency_map_section(cidx_meta_path)
 
-            # Should mention efficiency or similar concept
-            assert "efficient" in result.lower() or "faster" in result.lower() or "first" in result.lower()
+            # Should mention behavioral guidance (read vs search)
+            assert "READ" in result or "don't search" in result
 
     def test_hidden_files_excluded_from_count(self):
         """AC6: Files starting with _ are excluded from domain count."""

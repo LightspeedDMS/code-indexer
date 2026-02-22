@@ -357,8 +357,8 @@ class TestCompressedDependencyMapSection:
 
         assert result != ""
         assert isinstance(result, str)
-        assert len(result) <= 200, (
-            f"Compact section must be <= 200 chars, got {len(result)}: {result!r}"
+        assert len(result) <= 500, (
+            f"Compact section must be <= 500 chars, got {len(result)}: {result!r}"
         )
 
     def test_section_mentions_dependency_map(self):

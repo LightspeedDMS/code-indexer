@@ -159,3 +159,114 @@ class TestToolDocLoaderPermissionAndParams:
         missing = loader.validate_against_registry(TOOL_REGISTRY)
         assert len(missing) == len(TOOL_REGISTRY) - 1
         assert "search_code" not in missing
+
+
+class TestSingletonThreadSafety:
+    """Thread-safety of the _get_tool_doc_loader() singleton."""
+
+    def test_singleton_lock_variable_exists(self):
+        """_singleton_lock must exist at module level and be a lock object."""
+        import threading
+        import code_indexer.server.mcp.tool_doc_loader as module
+
+        assert hasattr(module, "_singleton_lock"), (
+            "_singleton_lock module variable is missing"
+        )
+        # threading.Lock() returns a _thread.lock (or _thread.RLock) instance;
+        # the public API guarantees it has acquire/release methods.
+        lock = module._singleton_lock
+        assert hasattr(lock, "acquire") and hasattr(lock, "release"), (
+            "_singleton_lock does not look like a threading.Lock"
+        )
+        # Verify it is one of the standard lock types
+        assert isinstance(lock, type(threading.Lock())), (
+            f"_singleton_lock is {type(lock)}, expected threading.Lock type"
+        )
+
+    def test_get_tool_doc_loader_is_thread_safe(self, tmp_path):
+        """Concurrent calls to _get_tool_doc_loader() must create only one loader.
+
+        Strategy: patch the module's _singleton_loader back to None, then replace
+        ToolDocLoader with a counting subclass, fire 20 threads, verify exactly
+        one load_all_docs() call happened.
+        """
+        import threading
+        import code_indexer.server.mcp.tool_doc_loader as module
+        from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
+
+        # Build a minimal but valid tool_docs directory so load_all_docs() succeeds
+        docs_dir = tmp_path / "tool_docs"
+        docs_dir.mkdir()
+        search_dir = docs_dir / "search"
+        search_dir.mkdir()
+        (search_dir / "dummy_tool.md").write_text(
+            "---\nname: dummy_tool\ncategory: search\n"
+            "required_permission: query_repos\ntl_dr: Dummy.\n---\n\nDescription."
+        )
+
+        load_call_count = [0]
+        count_lock = threading.Lock()
+
+        class CountingLoader(ToolDocLoader):
+            def load_all_docs(self):
+                with count_lock:
+                    load_call_count[0] += 1
+                return super().load_all_docs()
+
+        original_loader_class = module.ToolDocLoader
+        original_singleton = module._singleton_loader
+        original_docs_dir_factory = None  # we patch via ToolDocLoader class
+
+        try:
+            # Reset singleton so _get_tool_doc_loader() will create a new one
+            module._singleton_loader = None
+            # Replace the class so the factory instantiates our counter
+            module.ToolDocLoader = CountingLoader  # type: ignore[attr-defined]
+            # Also patch the docs_dir path inside _get_tool_doc_loader by
+            # overriding __file__-based resolution: replace docs_dir inline
+            # via a wrapper that injects our tmp docs_dir.
+            original_get = module._get_tool_doc_loader
+
+            def patched_get():
+                global _singleton_loader  # noqa: F841
+                if module._singleton_loader is None:
+                    with module._singleton_lock:
+                        if module._singleton_loader is None:
+                            loader = CountingLoader(docs_dir)
+                            loader.load_all_docs()
+                            module._singleton_loader = loader
+                return module._singleton_loader
+
+            module._get_tool_doc_loader = patched_get  # type: ignore[attr-defined]
+
+            results = []
+            errors = []
+
+            def call_getter():
+                try:
+                    results.append(module._get_tool_doc_loader())
+                except Exception as exc:
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=call_getter) for _ in range(20)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            assert not errors, f"Threads raised exceptions: {errors}"
+            assert len(results) == 20, "Not all threads got a result"
+            # All threads must have received the SAME singleton instance
+            first = results[0]
+            assert all(r is first for r in results), (
+                "Different loader instances returned - singleton is not thread-safe"
+            )
+            # load_all_docs() must have been called exactly once
+            assert load_call_count[0] == 1, (
+                f"load_all_docs() was called {load_call_count[0]} times, expected 1"
+            )
+        finally:
+            # Restore module state unconditionally
+            module._singleton_loader = original_singleton
+            module.ToolDocLoader = original_loader_class  # type: ignore[attr-defined]
+            module._get_tool_doc_loader = original_get  # type: ignore[attr-defined]

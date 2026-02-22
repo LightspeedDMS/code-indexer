@@ -450,7 +450,7 @@ def trigger_dependency_map(
     POST /admin/dependency-map/trigger
 
     Admin-only. Returns JSON with success or error.
-    Pre-flight availability check via is_available() prevents concurrent run start.
+    Atomic guard via try_start_analysis() prevents concurrent runs (Bug #256).
     Analysis runs in a background daemon thread.
 
     Args:
@@ -477,8 +477,9 @@ def trigger_dependency_map(
             status_code=503,
         )
 
-    # Pre-flight check: prevent concurrent run start using is_available()
-    if not dep_map_service.is_available():
+    # Bug #256: use try_start_analysis() instead of is_available() to atomically
+    # claim the guard, eliminating the TOCTOU race between check and thread start.
+    if not dep_map_service.try_start_analysis(mode):
         return JSONResponse(
             content={"error": "Analysis already in progress"},
             status_code=409,
@@ -490,9 +491,16 @@ def trigger_dependency_map(
                 dep_map_service.run_full_analysis()
             except Exception as e:
                 logger.error("Background full analysis failed: %s", e)
+            finally:
+                # Bug #256: always release the guard so the next analysis can start.
+                dep_map_service.finish_analysis()
 
-        thread = threading.Thread(target=_run_full, daemon=True)
-        thread.start()
+        try:
+            thread = threading.Thread(target=_run_full, daemon=True)
+            thread.start()
+        except Exception:
+            dep_map_service.finish_analysis()
+            raise
         return JSONResponse(
             content={"success": True, "message": "Full analysis triggered"},
             status_code=202,
@@ -503,9 +511,16 @@ def trigger_dependency_map(
                 dep_map_service.run_delta_analysis()
             except Exception as e:
                 logger.error("Background delta analysis failed: %s", e)
+            finally:
+                # Bug #256: always release the guard so the next analysis can start.
+                dep_map_service.finish_analysis()
 
-        thread = threading.Thread(target=_run_delta, daemon=True)
-        thread.start()
+        try:
+            thread = threading.Thread(target=_run_delta, daemon=True)
+            thread.start()
+        except Exception:
+            dep_map_service.finish_analysis()
+            raise
         return JSONResponse(
             content={"success": True, "message": "Delta refresh triggered"},
             status_code=202,

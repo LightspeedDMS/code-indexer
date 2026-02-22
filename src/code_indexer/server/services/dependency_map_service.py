@@ -31,7 +31,9 @@ logger = logging.getLogger(__name__)
 
 # Constants
 SCHEDULER_POLL_INTERVAL_SECONDS = 60  # Story #193: Delta refresh polling interval
+SCHEDULER_ERROR_BACKOFF_SECONDS = 3600  # Bug #249: Backoff on persistent failure
 THREAD_JOIN_TIMEOUT_SECONDS = 5.0  # Story #193: Daemon thread join timeout
+REPO_SIZES_CACHE_TTL = 60  # seconds - cache _enrich_repo_sizes results (Bug #251)
 
 
 class DependencyMapService:
@@ -65,33 +67,67 @@ class DependencyMapService:
         self._tracking_backend = tracking_backend
         self._analyzer = analyzer
         self._lock = threading.Lock()
+        self._analysis_guard = threading.Lock()  # Bug #256: atomic check-and-set guard
         self._refresh_scheduler = refresh_scheduler  # Story #227: write-lock coordination
 
         # Story #193: Scheduler daemon thread state
         self._daemon_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
+        # Bug #251: TTL cache for _enrich_repo_sizes (expensive filesystem walk)
+        self._repo_sizes_cache: Optional[List] = None
+        self._repo_sizes_cache_time: float = 0.0
+
     def is_available(self) -> bool:
         """
         Check if dependency map analysis can be started (Story #195).
 
-        Performs a non-blocking lock probe to determine if the service
-        is available for a new analysis.
+        Performs a non-blocking probe of the analysis guard to determine if
+        the service is available for a new analysis. This is a read-only
+        status query; it does NOT reserve the slot.
 
         Returns:
-            True if no analysis is running (lock available)
-            False if analysis is already in progress (lock held)
+            True if no analysis is running (guard available)
+            False if analysis is already in progress (guard held)
         """
-        # Try to acquire lock without blocking
-        acquired = self._lock.acquire(blocking=False)
-
+        # Bug #256: probe _analysis_guard (not _lock) for status queries
+        acquired = self._analysis_guard.acquire(blocking=False)
         if acquired:
-            # Lock was available - release it immediately and return True
-            self._lock.release()
+            self._analysis_guard.release()
             return True
-        else:
-            # Lock is held by another operation
-            return False
+        return False
+
+    def try_start_analysis(self, mode: Optional[str] = None) -> bool:
+        """
+        Atomically check availability and mark analysis as running (Bug #256).
+
+        This replaces the TOCTOU-prone pattern of is_available() + thread.start().
+        The caller MUST call finish_analysis() (or release_analysis_guard()) in a
+        finally block when done, to prevent permanent deadlock.
+
+        Args:
+            mode: Optional analysis mode string (ignored, accepted for caller convenience)
+
+        Returns:
+            True if analysis can proceed (caller owns the guard)
+            False if another analysis is already running
+        """
+        return self._analysis_guard.acquire(blocking=False)
+
+    def finish_analysis(self) -> None:
+        """
+        Release the analysis guard. Must be called in a finally block.
+
+        Safe to call even if the guard is not currently held (logs a warning).
+        """
+        try:
+            self._analysis_guard.release()
+        except RuntimeError:
+            logger.warning("finish_analysis() called but analysis guard was not held")
+
+    def release_analysis_guard(self) -> None:
+        """Alias for finish_analysis() for caller convenience."""
+        self.finish_analysis()
 
     def run_full_analysis(self) -> Dict[str, Any]:
         """
@@ -179,6 +215,21 @@ class DependencyMapService:
             if _analysis_succeeded and self._refresh_scheduler is not None:
                 self._refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
 
+    def _is_write_mode_active(self) -> bool:
+        """
+        Check if write mode is active for cidx-meta (Bug #245).
+
+        Write-mode marker files are created by enter_write_mode() MCP handler
+        and indicate a user is actively editing files via CRUD operations.
+        Analysis must yield to explicit user intent to prevent data loss.
+
+        Returns:
+            True if write mode marker exists, False otherwise
+        """
+        golden_repos_root = self._golden_repos_manager.golden_repos_dir
+        marker = Path(golden_repos_root) / ".write_mode" / "cidx-meta.json"
+        return marker.exists()
+
     def _setup_analysis(self) -> Dict[str, Any]:
         """
         Setup and validation for analysis run.
@@ -196,6 +247,16 @@ class DependencyMapService:
 
         # Get repo list and paths
         golden_repos_root = self._golden_repos_manager.golden_repos_dir
+
+        # Bug #245: Skip analysis if write mode is active for cidx-meta.
+        if self._is_write_mode_active():
+            logger.info("Write mode active for cidx-meta, skipping dependency map analysis")
+            return {
+                "early_return": True,
+                "status": "skipped",
+                "message": "Write mode active for cidx-meta, skipping analysis",
+            }
+
         cidx_meta_path = Path(golden_repos_root) / "cidx-meta"  # WRITE path (live)
         cidx_meta_read_path = self._get_cidx_meta_read_path()    # READ path (versioned)
         staging_dir = cidx_meta_path / "dependency-map.staging"
@@ -412,7 +473,10 @@ class DependencyMapService:
 
     def _stage_then_swap(self, staging_dir: Path, final_dir: Path) -> None:
         """
-        Perform atomic stage-then-swap operation.
+        Perform atomic stage-then-swap operation with rollback on failure.
+
+        If the swap from staging to final fails (e.g., ENOSPC), the previous
+        final directory is restored from the backup to avoid data loss.
 
         Args:
             staging_dir: Staging directory with new content
@@ -426,14 +490,39 @@ class DependencyMapService:
                 shutil.rmtree(old_dir)
             final_dir.rename(old_dir)
 
-        # Move staging to final
-        staging_dir.rename(final_dir)
+        # Move staging to final (with rollback on failure)
+        try:
+            staging_dir.rename(final_dir)
+        except Exception:
+            if old_dir.exists():
+                logger.warning(
+                    "Stage-then-swap failed, attempting rollback: %s", final_dir
+                )
+                try:
+                    old_dir.rename(final_dir)
+                except Exception:
+                    logger.error(
+                        "Rollback failed — dependency-map directory may be missing: %s",
+                        final_dir,
+                    )
+            else:
+                logger.warning(
+                    "Stage-then-swap failed on first run (no previous state to restore): %s",
+                    final_dir,
+                )
+            raise
 
-        # Cleanup old
+        # Cleanup old (best-effort; leftover is removed on next run at line 460-461)
         if old_dir.exists():
-            shutil.rmtree(old_dir)
+            try:
+                shutil.rmtree(old_dir)
+            except Exception:
+                logger.warning(
+                    "Failed to clean up old backup directory: %s (will be removed on next run)",
+                    old_dir,
+                )
 
-        logger.info(f"Stage-then-swap completed: {final_dir}")
+        logger.info("Stage-then-swap completed: %s", final_dir)
 
     def _record_run_metrics(
         self,
@@ -752,6 +841,11 @@ class DependencyMapService:
         Returns:
             Enriched and sorted repo list
         """
+        # Bug #251: TTL cache to avoid repeated expensive filesystem walks
+        now = time.monotonic()
+        if self._repo_sizes_cache is not None and (now - self._repo_sizes_cache_time) < REPO_SIZES_CACHE_TTL:
+            return self._repo_sizes_cache
+
         for repo in repo_list:
             clone_path = Path(repo.get("clone_path", ""))
             if clone_path.exists():
@@ -784,6 +878,10 @@ class DependencyMapService:
 
         # Sort descending by total_bytes
         non_empty.sort(key=lambda r: r.get("total_bytes", 0), reverse=True)
+
+        # Bug #251: populate cache for subsequent calls within TTL
+        self._repo_sizes_cache = non_empty
+        self._repo_sizes_cache_time = time.monotonic()
         return non_empty
 
     def _get_commit_hashes(self, repo_list: List[Dict[str, Any]]) -> Dict[str, str]:
@@ -885,6 +983,16 @@ class DependencyMapService:
 
             except Exception as e:
                 logger.error(f"Error in dependency map scheduler loop: {e}", exc_info=True)
+                # Bug #249: Push next_run forward to avoid retry storm on persistent failure
+                try:
+                    backoff_time = datetime.now(timezone.utc) + timedelta(seconds=SCHEDULER_ERROR_BACKOFF_SECONDS)
+                    self._tracking_backend.update_tracking(
+                        next_run=backoff_time.isoformat(),
+                        error_message=str(e),
+                    )
+                    logger.info("Scheduler backoff: next retry at %s", backoff_time.isoformat())
+                except Exception as backoff_err:
+                    logger.error("Failed to set scheduler backoff: %s", backoff_err)
 
             # Sleep 60 seconds between checks
             self._stop_event.wait(SCHEDULER_POLL_INTERVAL_SECONDS)
@@ -1426,6 +1534,14 @@ class DependencyMapService:
             if not config or not config.dependency_map_enabled:
                 logger.debug("Delta analysis skipped - dependency_map_enabled is False")
                 return None
+
+            # Bug #245: Skip delta analysis if write mode is active for cidx-meta.
+            if self._is_write_mode_active():
+                logger.info("Write mode active for cidx-meta, skipping delta analysis")
+                return {
+                    "status": "skipped",
+                    "message": "Write mode active for cidx-meta, skipping delta analysis",
+                }
 
             # Detect changes (AC2: Change Detection)
             changed_repos, new_repos, removed_repos = self.detect_changes()

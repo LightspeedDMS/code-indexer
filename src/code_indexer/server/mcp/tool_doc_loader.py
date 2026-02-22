@@ -10,6 +10,7 @@ This module provides:
 - FrontmatterValidationError: Raised for invalid frontmatter
 """
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -55,6 +56,7 @@ class ToolDoc:
 # Module-level singleton for ToolDocLoader to avoid per-request disk I/O
 # (Story #222 code review Finding 1: ~650ms latency regression from per-call instantiation)
 _singleton_loader: "Optional[ToolDocLoader]" = None
+_singleton_lock = threading.Lock()
 
 
 def _get_tool_doc_loader() -> "ToolDocLoader":
@@ -62,12 +64,19 @@ def _get_tool_doc_loader() -> "ToolDocLoader":
 
     Tool docs are static files that only change on deployment, not at runtime.
     Caching avoids parsing 127 YAML files from disk on every quick_reference() call.
+
+    Thread-safe via double-check locking: the outer check avoids lock acquisition
+    on every call after initialization; the inner check prevents double initialization
+    when two threads both pass the outer check before either acquires the lock.
     """
     global _singleton_loader
     if _singleton_loader is None:
-        docs_dir = Path(__file__).parent / "tool_docs"
-        _singleton_loader = ToolDocLoader(docs_dir)
-        _singleton_loader.load_all_docs()
+        with _singleton_lock:
+            if _singleton_loader is None:
+                docs_dir = Path(__file__).parent / "tool_docs"
+                loader = ToolDocLoader(docs_dir)
+                loader.load_all_docs()
+                _singleton_loader = loader
     return _singleton_loader
 
 

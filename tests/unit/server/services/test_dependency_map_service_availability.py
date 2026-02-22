@@ -41,18 +41,18 @@ class TestIsAvailable:
             analyzer=Mock(),
         )
 
-        # Acquire lock to simulate running analysis
-        service._lock.acquire()
+        # Acquire analysis guard to simulate running analysis (Bug #256: uses _analysis_guard)
+        service._analysis_guard.acquire()
 
         try:
-            # Should return False when lock is held
+            # Should return False when guard is held
             assert service.is_available() is False
         finally:
             # Clean up
-            service._lock.release()
+            service._analysis_guard.release()
 
     def test_does_not_block_when_lock_held(self):
-        """Test is_available returns immediately even when lock is held."""
+        """Test is_available returns immediately even when guard is held."""
         from code_indexer.server.services.dependency_map_service import DependencyMapService
 
         # Create service
@@ -63,8 +63,8 @@ class TestIsAvailable:
             analyzer=Mock(),
         )
 
-        # Acquire lock
-        service._lock.acquire()
+        # Acquire analysis guard (Bug #256: uses _analysis_guard)
+        service._analysis_guard.acquire()
 
         try:
             # Measure time - should be nearly instantaneous
@@ -76,10 +76,10 @@ class TestIsAvailable:
             assert result is False
             assert elapsed < 0.1, f"is_available blocked for {elapsed}s"
         finally:
-            service._lock.release()
+            service._analysis_guard.release()
 
     def test_does_not_hold_lock_after_checking(self):
-        """Test is_available releases lock immediately after checking."""
+        """Test is_available releases guard immediately after checking."""
         from code_indexer.server.services.dependency_map_service import DependencyMapService
 
         # Create service
@@ -94,12 +94,12 @@ class TestIsAvailable:
         result = service.is_available()
         assert result is True
 
-        # Lock should be immediately available again
-        acquired = service._lock.acquire(blocking=False)
-        assert acquired is True, "Lock was not released after is_available()"
+        # Analysis guard should be immediately available again (Bug #256: _analysis_guard)
+        acquired = service._analysis_guard.acquire(blocking=False)
+        assert acquired is True, "Analysis guard was not released after is_available()"
 
         # Clean up
-        service._lock.release()
+        service._analysis_guard.release()
 
     def test_concurrent_calls_do_not_interfere(self):
         """Test multiple is_available calls work correctly."""
