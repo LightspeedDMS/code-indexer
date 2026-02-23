@@ -10,7 +10,7 @@ eliminating race conditions from concurrent GlobalRegistry instances.
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .database_manager import DatabaseConnectionManager
 
@@ -708,6 +708,49 @@ class UsersSqliteBackend:
 
         result: bool = self._conn_manager.execute_atomic(operation)
         return result
+
+    def get_mcp_credential_by_client_id(
+        self, client_id: str
+    ) -> Optional[Tuple[str, dict]]:
+        """
+        Find MCP credential by client_id using direct SQL (Story #269).
+
+        O(1) lookup via idx_user_mcp_credentials_client_id index instead of
+        the O(users x credentials) Python iteration previously used in
+        MCPCredentialManager.get_credential_by_client_id().
+
+        Args:
+            client_id: The client_id to search for.
+
+        Returns:
+            Tuple of (username, credential_dict) if found, None otherwise.
+            credential_dict contains: credential_id, client_id,
+            client_secret_hash, client_id_prefix, name, created_at,
+            last_used_at.
+        """
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            """SELECT username, credential_id, client_id, client_secret_hash,
+                      client_id_prefix, name, created_at, last_used_at
+               FROM user_mcp_credentials
+               WHERE client_id = ?""",
+            (client_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+
+        username = row[0]
+        credential = {
+            "credential_id": row[1],
+            "client_id": row[2],
+            "client_secret_hash": row[3],
+            "client_id_prefix": row[4],
+            "name": row[5],
+            "created_at": row[6],
+            "last_used_at": row[7],
+        }
+        return (username, credential)
 
     def close(self) -> None:
         """Close database connections."""

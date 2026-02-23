@@ -224,71 +224,6 @@ class DatabaseSchema:
         )
     """
 
-    # Performance indexes for background_jobs table
-    CREATE_BACKGROUND_JOBS_STATUS_INDEX = """
-        CREATE INDEX IF NOT EXISTS idx_background_jobs_status
-        ON background_jobs(status)
-    """
-
-    CREATE_BACKGROUND_JOBS_OPERATION_TYPE_INDEX = """
-        CREATE INDEX IF NOT EXISTS idx_background_jobs_operation_type
-        ON background_jobs(operation_type)
-    """
-
-    CREATE_BACKGROUND_JOBS_STATUS_CREATED_INDEX = """
-        CREATE INDEX IF NOT EXISTS idx_background_jobs_status_created
-        ON background_jobs(status, created_at DESC)
-    """
-
-    CREATE_BACKGROUND_JOBS_COMPLETED_STATUS_INDEX = """
-        CREATE INDEX IF NOT EXISTS idx_background_jobs_completed_status
-        ON background_jobs(completed_at, status)
-    """
-
-    # Performance indexes for sync_jobs table
-    CREATE_SYNC_JOBS_USERNAME_STATUS_INDEX = """
-        CREATE INDEX IF NOT EXISTS idx_sync_jobs_username_status
-        ON sync_jobs(username, status)
-    """
-
-    CREATE_SYNC_JOBS_STATUS_INDEX = """
-        CREATE INDEX IF NOT EXISTS idx_sync_jobs_status
-        ON sync_jobs(status)
-    """
-
-    CREATE_SYNC_JOBS_CREATED_AT_INDEX = """
-        CREATE INDEX IF NOT EXISTS idx_sync_jobs_created_at
-        ON sync_jobs(created_at DESC)
-    """
-
-    # Performance indexes for user_api_keys table (auth lookups on every authenticated request)
-    CREATE_USER_API_KEYS_USERNAME_INDEX = """
-        CREATE INDEX IF NOT EXISTS idx_user_api_keys_username
-        ON user_api_keys(username)
-    """
-
-    CREATE_USER_API_KEYS_KEY_HASH_INDEX = """
-        CREATE INDEX IF NOT EXISTS idx_user_api_keys_key_hash
-        ON user_api_keys(key_hash)
-    """
-
-    # Performance indexes for user_mcp_credentials table (MCP auth lookups)
-    CREATE_USER_MCP_CREDENTIALS_USERNAME_INDEX = """
-        CREATE INDEX IF NOT EXISTS idx_user_mcp_credentials_username
-        ON user_mcp_credentials(username)
-    """
-
-    CREATE_USER_MCP_CREDENTIALS_CLIENT_ID_INDEX = """
-        CREATE INDEX IF NOT EXISTS idx_user_mcp_credentials_client_id
-        ON user_mcp_credentials(client_id)
-    """
-
-    # Performance indexes for research_messages table (session message lookups with ordering)
-    CREATE_RESEARCH_MESSAGES_SESSION_ID_INDEX = """
-        CREATE INDEX IF NOT EXISTS idx_research_messages_session_id
-        ON research_messages(session_id, created_at)
-    """
-
     # Indexes for self-monitoring tables
     CREATE_SELF_MONITORING_SCANS_STARTED_AT_INDEX = """
         CREATE INDEX IF NOT EXISTS idx_self_monitoring_scans_started_at
@@ -298,6 +233,47 @@ class DatabaseSchema:
     CREATE_SELF_MONITORING_ISSUES_SCAN_ID_INDEX = """
         CREATE INDEX IF NOT EXISTS idx_self_monitoring_issues_scan_id
         ON self_monitoring_issues(scan_id)
+    """
+
+    # Story #269: Justified performance indexes (7 total)
+    # background_jobs: queried by status and time ranges in dashboard/job-listing queries
+    CREATE_IDX_BACKGROUND_JOBS_STATUS = """
+        CREATE INDEX IF NOT EXISTS idx_background_jobs_status
+        ON background_jobs(status)
+    """
+
+    CREATE_IDX_BACKGROUND_JOBS_STATUS_CREATED = """
+        CREATE INDEX IF NOT EXISTS idx_background_jobs_status_created
+        ON background_jobs(status, created_at DESC)
+    """
+
+    CREATE_IDX_BACKGROUND_JOBS_COMPLETED_STATUS = """
+        CREATE INDEX IF NOT EXISTS idx_background_jobs_completed_status
+        ON background_jobs(completed_at, status)
+    """
+
+    # user_api_keys: looked up by username for user-specific key listing
+    CREATE_IDX_USER_API_KEYS_USERNAME = """
+        CREATE INDEX IF NOT EXISTS idx_user_api_keys_username
+        ON user_api_keys(username)
+    """
+
+    # user_mcp_credentials: looked up by username (listing) and client_id (auth)
+    CREATE_IDX_USER_MCP_CREDENTIALS_USERNAME = """
+        CREATE INDEX IF NOT EXISTS idx_user_mcp_credentials_username
+        ON user_mcp_credentials(username)
+    """
+
+    CREATE_IDX_USER_MCP_CREDENTIALS_CLIENT_ID = """
+        CREATE INDEX IF NOT EXISTS idx_user_mcp_credentials_client_id
+        ON user_mcp_credentials(client_id)
+    """
+
+    # research_messages: looked up by session_id to fetch conversation history
+    # Single-column only — created_at ordering is done in Python, not SQL
+    CREATE_IDX_RESEARCH_MESSAGES_SESSION_ID = """
+        CREATE INDEX IF NOT EXISTS idx_research_messages_session_id
+        ON research_messages(session_id)
     """
 
     # Story #141: Research Assistant tables
@@ -417,19 +393,9 @@ class DatabaseSchema:
             conn.execute(self.CREATE_GLOBAL_REPOS_TABLE)
             conn.execute(self.CREATE_USERS_TABLE)
             conn.execute(self.CREATE_USER_API_KEYS_TABLE)
-            # Performance indexes for user_api_keys
-            conn.execute(self.CREATE_USER_API_KEYS_USERNAME_INDEX)
-            conn.execute(self.CREATE_USER_API_KEYS_KEY_HASH_INDEX)
             conn.execute(self.CREATE_USER_MCP_CREDENTIALS_TABLE)
-            # Performance indexes for user_mcp_credentials
-            conn.execute(self.CREATE_USER_MCP_CREDENTIALS_USERNAME_INDEX)
-            conn.execute(self.CREATE_USER_MCP_CREDENTIALS_CLIENT_ID_INDEX)
             conn.execute(self.CREATE_USER_OIDC_IDENTITIES_TABLE)
             conn.execute(self.CREATE_SYNC_JOBS_TABLE)
-            # Performance indexes for sync_jobs
-            conn.execute(self.CREATE_SYNC_JOBS_USERNAME_STATUS_INDEX)
-            conn.execute(self.CREATE_SYNC_JOBS_STATUS_INDEX)
-            conn.execute(self.CREATE_SYNC_JOBS_CREATED_AT_INDEX)
             conn.execute(self.CREATE_CI_TOKENS_TABLE)
             conn.execute(self.CREATE_INVALIDATED_SESSIONS_TABLE)
             conn.execute(self.CREATE_PASSWORD_CHANGE_TIMESTAMPS_TABLE)
@@ -437,11 +403,6 @@ class DatabaseSchema:
             conn.execute(self.CREATE_SSH_KEY_HOSTS_TABLE)
             conn.execute(self.CREATE_GOLDEN_REPOS_METADATA_TABLE)
             conn.execute(self.CREATE_BACKGROUND_JOBS_TABLE)
-            # Performance indexes for background_jobs
-            conn.execute(self.CREATE_BACKGROUND_JOBS_STATUS_INDEX)
-            conn.execute(self.CREATE_BACKGROUND_JOBS_OPERATION_TYPE_INDEX)
-            conn.execute(self.CREATE_BACKGROUND_JOBS_STATUS_CREATED_INDEX)
-            conn.execute(self.CREATE_BACKGROUND_JOBS_COMPLETED_STATUS_INDEX)
             # Story #72: Self-monitoring tables
             conn.execute(self.CREATE_SELF_MONITORING_SCANS_TABLE)
             conn.execute(self.CREATE_SELF_MONITORING_ISSUES_TABLE)
@@ -451,8 +412,6 @@ class DatabaseSchema:
             # Story #141: Research Assistant tables
             conn.execute(self.CREATE_RESEARCH_SESSIONS_TABLE)
             conn.execute(self.CREATE_RESEARCH_MESSAGES_TABLE)
-            # Performance indexes for research_messages
-            conn.execute(self.CREATE_RESEARCH_MESSAGES_SESSION_ID_INDEX)
             # Diagnostic results persistence
             conn.execute(self.CREATE_DIAGNOSTIC_RESULTS_TABLE)
             # Story #180: Repository Categories
@@ -461,6 +420,14 @@ class DatabaseSchema:
             conn.execute(self.CREATE_DESCRIPTION_REFRESH_TRACKING_TABLE)
             # Story #192: Dependency Map Tracking
             conn.execute(self.CREATE_DEPENDENCY_MAP_TRACKING_TABLE)
+            # Story #269: Justified performance indexes (created on fresh databases)
+            conn.execute(self.CREATE_IDX_BACKGROUND_JOBS_STATUS)
+            conn.execute(self.CREATE_IDX_BACKGROUND_JOBS_STATUS_CREATED)
+            conn.execute(self.CREATE_IDX_BACKGROUND_JOBS_COMPLETED_STATUS)
+            conn.execute(self.CREATE_IDX_USER_API_KEYS_USERNAME)
+            conn.execute(self.CREATE_IDX_USER_MCP_CREDENTIALS_USERNAME)
+            conn.execute(self.CREATE_IDX_USER_MCP_CREDENTIALS_CLIENT_ID)
+            conn.execute(self.CREATE_IDX_RESEARCH_MESSAGES_SESSION_ID)
 
             conn.commit()
 
@@ -469,6 +436,9 @@ class DatabaseSchema:
             self._migrate_global_repos_schema(conn)
             self._migrate_research_sessions_schema(conn)
             self._migrate_golden_repos_metadata_category(conn)
+            # Story #269: Drop unjustified indexes BEFORE creating justified ones
+            # so the old composite research_messages index is dropped first
+            self._migrate_drop_unjustified_indexes(conn)
             self._migrate_performance_indexes(conn)
 
             logger.info(f"Database initialized at {db_path}")
@@ -611,33 +581,60 @@ class DatabaseSchema:
                 f"Migrated golden_repos_metadata schema: added {migrations_applied}"
             )
 
+    def _migrate_drop_unjustified_indexes(self, conn: sqlite3.Connection) -> None:
+        """
+        Drop unjustified performance indexes from existing databases (Story #269).
+
+        These 6 indexes were added in commit 0d5af105 but are not backed by
+        real SQL query patterns. Dropping them reduces write overhead without
+        harming read performance.
+
+        Also drops the old composite idx_research_messages_session_id
+        (session_id, created_at) so it can be re-created as single-column.
+
+        Safe to run multiple times — DROP INDEX IF EXISTS is a no-op when absent.
+        """
+        unjustified = [
+            "idx_background_jobs_operation_type",
+            "idx_sync_jobs_username_status",
+            "idx_sync_jobs_status",
+            "idx_sync_jobs_created_at",
+            "idx_user_api_keys_key_hash",
+            # Drop the old composite research_messages index before re-creating
+            # it as a single-column index in _migrate_performance_indexes
+            "idx_research_messages_session_id",
+        ]
+        dropped = []
+        for idx_name in unjustified:
+            conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
+            dropped.append(idx_name)
+
+        conn.commit()
+        logger.info(
+            f"Story #269: Dropped {len(dropped)} unjustified/stale indexes: {dropped}"
+        )
+
     def _migrate_performance_indexes(self, conn: sqlite3.Connection) -> None:
         """
-        Add performance indexes to multiple tables for existing databases.
+        Create the 7 justified performance indexes for existing databases (Story #269).
 
-        Covers background_jobs, sync_jobs, user_api_keys, user_mcp_credentials,
-        and research_messages. Uses CREATE INDEX IF NOT EXISTS throughout so it
-        is safe to run multiple times (idempotent).
+        These are idempotent (CREATE INDEX IF NOT EXISTS), so re-running on
+        a database that already has them is a no-op.
+
+        Must run AFTER _migrate_drop_unjustified_indexes so the old composite
+        idx_research_messages_session_id is gone before the single-column
+        version is created.
         """
-        # background_jobs indexes (dashboard polling)
-        conn.execute(self.CREATE_BACKGROUND_JOBS_STATUS_INDEX)
-        conn.execute(self.CREATE_BACKGROUND_JOBS_OPERATION_TYPE_INDEX)
-        conn.execute(self.CREATE_BACKGROUND_JOBS_STATUS_CREATED_INDEX)
-        conn.execute(self.CREATE_BACKGROUND_JOBS_COMPLETED_STATUS_INDEX)
-        # sync_jobs indexes (jobs tab polling)
-        conn.execute(self.CREATE_SYNC_JOBS_USERNAME_STATUS_INDEX)
-        conn.execute(self.CREATE_SYNC_JOBS_STATUS_INDEX)
-        conn.execute(self.CREATE_SYNC_JOBS_CREATED_AT_INDEX)
-        # user_api_keys indexes (auth lookups on every authenticated request)
-        conn.execute(self.CREATE_USER_API_KEYS_USERNAME_INDEX)
-        conn.execute(self.CREATE_USER_API_KEYS_KEY_HASH_INDEX)
-        # user_mcp_credentials indexes (MCP auth lookups)
-        conn.execute(self.CREATE_USER_MCP_CREDENTIALS_USERNAME_INDEX)
-        conn.execute(self.CREATE_USER_MCP_CREDENTIALS_CLIENT_ID_INDEX)
-        # research_messages indexes (session message lookups with ordering)
-        conn.execute(self.CREATE_RESEARCH_MESSAGES_SESSION_ID_INDEX)
+        conn.execute(self.CREATE_IDX_BACKGROUND_JOBS_STATUS)
+        conn.execute(self.CREATE_IDX_BACKGROUND_JOBS_STATUS_CREATED)
+        conn.execute(self.CREATE_IDX_BACKGROUND_JOBS_COMPLETED_STATUS)
+        conn.execute(self.CREATE_IDX_USER_API_KEYS_USERNAME)
+        conn.execute(self.CREATE_IDX_USER_MCP_CREDENTIALS_USERNAME)
+        conn.execute(self.CREATE_IDX_USER_MCP_CREDENTIALS_CLIENT_ID)
+        conn.execute(self.CREATE_IDX_RESEARCH_MESSAGES_SESSION_ID)
+
         conn.commit()
-        logger.info("Migrated performance indexes: background_jobs, sync_jobs, user_api_keys, user_mcp_credentials, research_messages")
+        logger.info("Story #269: Ensured 7 justified performance indexes are present")
 
 
 class DatabaseConnectionManager:

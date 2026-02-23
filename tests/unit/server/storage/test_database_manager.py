@@ -18,7 +18,7 @@ class TestDatabaseSchema:
         """
         Given a fresh database path
         When DatabaseSchema.initialize_database() is called
-        Then all 11 tables are created with correct structure.
+        Then all required tables are created with correct structure.
         """
         from code_indexer.server.storage.database_manager import DatabaseSchema
 
@@ -35,10 +35,21 @@ class TestDatabaseSchema:
         conn.close()
 
         expected_tables = [
+            "background_jobs",
             "ci_tokens",
+            "dependency_map_tracking",
+            "description_refresh_tracking",
+            "diagnostic_results",
             "global_repos",
+            "golden_repos_metadata",
             "invalidated_sessions",
             "password_change_timestamps",
+            "repo_categories",
+            "research_messages",
+            "research_sessions",
+            "self_monitoring_issues",
+            "self_monitoring_scans",
+            "sqlite_sequence",
             "ssh_key_hosts",
             "ssh_keys",
             "sync_jobs",
@@ -75,6 +86,7 @@ class TestDatabaseSchema:
             "last_refresh": "TEXT",
             "enable_temporal": "BOOLEAN",
             "temporal_options": "TEXT",
+            "enable_scip": "BOOLEAN",
         }
         assert columns == expected_columns
 
@@ -264,6 +276,227 @@ class TestDatabaseSchema:
         assert cursor.fetchone()[0] == 0
 
         conn.close()
+
+
+class TestDatabaseIndexMigration:
+    """Tests for justified performance indexes and migration of unjustified indexes.
+
+    Story #269: Remove Unjustified SQLite Performance Indexes and Fix MCP Credential
+    Lookup Algorithm.
+
+    7 justified indexes must exist after initialize_database():
+    1. idx_background_jobs_status ON background_jobs(status)
+    2. idx_background_jobs_status_created ON background_jobs(status, created_at DESC)
+    3. idx_background_jobs_completed_status ON background_jobs(completed_at, status)
+    4. idx_user_api_keys_username ON user_api_keys(username)
+    5. idx_user_mcp_credentials_username ON user_mcp_credentials(username)
+    6. idx_user_mcp_credentials_client_id ON user_mcp_credentials(client_id)
+    7. idx_research_messages_session_id ON research_messages(session_id) [single-column]
+
+    5 unjustified indexes that must NOT exist (or must be dropped if found):
+    1. idx_background_jobs_operation_type
+    2. idx_sync_jobs_username_status
+    3. idx_sync_jobs_status
+    4. idx_sync_jobs_created_at
+    5. idx_user_api_keys_key_hash
+    """
+
+    JUSTIFIED_INDEX_NAMES = {
+        "idx_background_jobs_status",
+        "idx_background_jobs_status_created",
+        "idx_background_jobs_completed_status",
+        "idx_user_api_keys_username",
+        "idx_user_mcp_credentials_username",
+        "idx_user_mcp_credentials_client_id",
+        "idx_research_messages_session_id",
+    }
+
+    UNJUSTIFIED_INDEX_NAMES = {
+        "idx_background_jobs_operation_type",
+        "idx_sync_jobs_username_status",
+        "idx_sync_jobs_status",
+        "idx_sync_jobs_created_at",
+        "idx_user_api_keys_key_hash",
+    }
+
+    def _get_all_indexes(self, db_path) -> dict:
+        """Helper: returns dict of {index_name: sql} for all user-created indexes."""
+        conn = sqlite3.connect(str(db_path))
+        try:
+            cursor = conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"
+            )
+            return {row[0]: row[1] for row in cursor.fetchall()}
+        finally:
+            conn.close()
+
+    def test_fresh_database_has_7_justified_indexes_and_no_unjustified(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Scenario 1: Justified indexes are created on fresh database.
+
+        Given a fresh SQLite database with no tables
+        When initialize_database() is called
+        Then exactly 7 justified performance indexes exist
+        And the 5 unjustified indexes do NOT exist.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+
+        db_path = tmp_path / "test_fresh.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        all_indexes = self._get_all_indexes(db_path)
+
+        # All 7 justified indexes must be present
+        for idx_name in self.JUSTIFIED_INDEX_NAMES:
+            assert idx_name in all_indexes, (
+                f"Expected justified index '{idx_name}' not found. "
+                f"Found: {sorted(all_indexes.keys())}"
+            )
+
+        # No unjustified indexes must exist
+        for idx_name in self.UNJUSTIFIED_INDEX_NAMES:
+            assert idx_name not in all_indexes, (
+                f"Unjustified index '{idx_name}' must NOT exist on fresh database. "
+                f"Found: {sorted(all_indexes.keys())}"
+            )
+
+    def test_migration_drops_unjustified_indexes_from_existing_database(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Scenario 2: Unjustified indexes are dropped from existing database.
+
+        Given an existing database that has all 12 original indexes from commit 0d5af105
+        When initialize_database() is called (server restart triggers migration)
+        Then the 5 unjustified indexes are dropped
+        And idx_user_mcp_credentials_client_id remains present.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+
+        db_path = tmp_path / "test_migration.db"
+        schema = DatabaseSchema(str(db_path))
+
+        # First initialize to create all tables
+        schema.initialize_database()
+
+        # Now manually inject all 5 unjustified indexes (simulating existing
+        # staging/production database state from commit 0d5af105)
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_background_jobs_operation_type "
+                "ON background_jobs(operation_type)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sync_jobs_username_status "
+                "ON sync_jobs(username, status)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sync_jobs_status "
+                "ON sync_jobs(status)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sync_jobs_created_at "
+                "ON sync_jobs(created_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_user_api_keys_key_hash "
+                "ON user_api_keys(key_hash)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Verify unjustified indexes are present before migration
+        indexes_before = self._get_all_indexes(db_path)
+        assert "idx_background_jobs_operation_type" in indexes_before
+        assert "idx_sync_jobs_status" in indexes_before
+
+        # Run initialize_database again (as happens on server restart)
+        schema.initialize_database()
+
+        # Verify all unjustified indexes are gone
+        indexes_after = self._get_all_indexes(db_path)
+        for idx_name in self.UNJUSTIFIED_INDEX_NAMES:
+            assert idx_name not in indexes_after, (
+                f"Unjustified index '{idx_name}' should have been dropped by migration. "
+                f"Still present in: {sorted(indexes_after.keys())}"
+            )
+
+        # Verify all 7 justified indexes are present
+        for idx_name in self.JUSTIFIED_INDEX_NAMES:
+            assert idx_name in indexes_after, (
+                f"Justified index '{idx_name}' missing after migration. "
+                f"Found: {sorted(indexes_after.keys())}"
+            )
+
+    def test_research_messages_index_is_single_column_not_composite(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Scenario 2 (detail): Old composite idx_research_messages_session_id is replaced
+        by single-column ON (session_id).
+
+        Given an existing database with old composite research_messages index
+        When initialize_database() is called
+        Then the index covers only session_id (single column) not session_id+created_at.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+
+        db_path = tmp_path / "test_research_idx.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        # Check the SQL definition of the research_messages index
+        all_indexes = self._get_all_indexes(db_path)
+        assert "idx_research_messages_session_id" in all_indexes
+
+        idx_sql = all_indexes["idx_research_messages_session_id"]
+        # The SQL should reference only session_id, NOT created_at
+        assert "session_id" in idx_sql, (
+            f"Index SQL should contain session_id: {idx_sql}"
+        )
+        assert "created_at" not in idx_sql, (
+            f"Index should be single-column (session_id only), "
+            f"but found created_at in: {idx_sql}"
+        )
+
+    def test_index_migration_is_idempotent(self, tmp_path: Path) -> None:
+        """
+        Scenario 3: Migrations are idempotent.
+
+        Given an initialized database with all justified indexes present
+        When initialize_database() is called a second time
+        Then no errors occur and the same 7 justified indexes exist.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+
+        db_path = tmp_path / "test_idempotent.db"
+        schema = DatabaseSchema(str(db_path))
+
+        # First call
+        schema.initialize_database()
+
+        # Second call must not raise and must leave same indexes
+        schema.initialize_database()
+
+        all_indexes = self._get_all_indexes(db_path)
+
+        # All 7 justified indexes must still be present
+        for idx_name in self.JUSTIFIED_INDEX_NAMES:
+            assert idx_name in all_indexes, (
+                f"Justified index '{idx_name}' missing after second initialize_database(). "
+                f"Found: {sorted(all_indexes.keys())}"
+            )
+
+        # No unjustified indexes must exist
+        for idx_name in self.UNJUSTIFIED_INDEX_NAMES:
+            assert idx_name not in all_indexes, (
+                f"Unjustified index '{idx_name}' appeared after second initialize_database()."
+            )
 
 
 class TestDatabaseConnectionManager:
