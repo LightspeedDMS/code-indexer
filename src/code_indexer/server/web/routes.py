@@ -3020,110 +3020,23 @@ def _get_all_jobs(
     """
     Get all jobs with filters and pagination.
 
+    Story #271: Delegates to BackgroundJobManager.get_jobs_for_display() which
+    merges in-memory active jobs with historical SQLite jobs, applies filters
+    at the database level, and handles pagination correctly.
+
     Returns jobs from background job manager with optional filtering.
     """
     job_manager = _get_background_job_manager()
     if not job_manager:
-        return [], 0, 0
+        return [], 0, 1
 
-    # Get all jobs from manager
-    all_jobs = []
-    with job_manager._lock:
-        for job in job_manager.jobs.values():
-            job_dict = {
-                "job_id": job.job_id,
-                "job_type": job.operation_type,
-                "operation_type": job.operation_type,
-                "status": (
-                    job.status.value
-                    if hasattr(job.status, "value")
-                    else str(job.status)
-                ),
-                "progress": job.progress,
-                "created_at": job.created_at.isoformat() if job.created_at else None,
-                "started_at": job.started_at.isoformat() if job.started_at else None,
-                "completed_at": (
-                    job.completed_at.isoformat() if job.completed_at else None
-                ),
-                "error_message": job.error,
-                "username": job.username,
-                "user_alias": getattr(job, "user_alias", None),
-                "repository_name": getattr(job, "repo_alias", None)
-                or (
-                    job.result.get("alias")
-                    if job.result and isinstance(job.result, dict)
-                    else None
-                ),
-                "repository_url": getattr(job, "repository_url", None),
-                "progress_info": getattr(job, "progress_info", None),
-            }
-            # Try to get repository name from result
-            if job.result and isinstance(job.result, dict):
-                job_dict["repository_name"] = job.result.get("alias") or job.result.get(
-                    "repository"
-                )
-            # Calculate duration_seconds for completed jobs (Bug #751)
-            duration_seconds = None
-            if job.completed_at and job.started_at:
-                try:
-                    # Handle potential timezone-aware vs timezone-naive mismatch
-                    completed = job.completed_at
-                    started = job.started_at
-                    completed_aware = (
-                        hasattr(completed, "tzinfo") and completed.tzinfo is not None
-                    )
-                    started_aware = (
-                        hasattr(started, "tzinfo") and started.tzinfo is not None
-                    )
-                    # If one is aware and one is naive, strip timezone info from the aware one
-                    if completed_aware and not started_aware:
-                        completed = completed.replace(tzinfo=None)
-                    elif started_aware and not completed_aware:
-                        started = started.replace(tzinfo=None)
-                    duration = completed - started
-                    duration_seconds = int(duration.total_seconds())
-                except (TypeError, AttributeError):
-                    # If subtraction fails for any reason, leave duration as None
-                    duration_seconds = None
-            job_dict["duration_seconds"] = duration_seconds
-            all_jobs.append(job_dict)
-
-    # Apply filters
-    if status_filter:
-        all_jobs = [j for j in all_jobs if j["status"] == status_filter]
-
-    if type_filter:
-        all_jobs = [
-            j
-            for j in all_jobs
-            if j["job_type"] == type_filter or j["operation_type"] == type_filter
-        ]
-
-    if search:
-        search_lower = search.lower()
-        all_jobs = [
-            j
-            for j in all_jobs
-            if (
-                j.get("repository_name")
-                and search_lower in j["repository_name"].lower()
-            )
-            or (j.get("repository_url") and search_lower in j["repository_url"].lower())
-            or (j.get("user_alias") and search_lower in j["user_alias"].lower())
-        ]
-
-    # Sort by started_at (most recently started first), fall back to created_at
-    all_jobs.sort(
-        key=lambda x: x.get("started_at") or x.get("created_at") or "", reverse=True
+    return job_manager.get_jobs_for_display(
+        status_filter=status_filter,
+        type_filter=type_filter,
+        search_text=search,
+        page=page,
+        page_size=page_size,
     )
-
-    # Pagination
-    total_count = len(all_jobs)
-    total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
-    offset = (page - 1) * page_size
-    paginated_jobs = all_jobs[offset : offset + page_size]
-
-    return paginated_jobs, total_count, total_pages
 
 
 def _get_queue_status() -> dict:

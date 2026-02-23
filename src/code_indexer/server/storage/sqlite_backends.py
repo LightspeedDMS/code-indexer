@@ -2143,6 +2143,89 @@ class BackgroundJobsSqliteBackend:
         cursor = conn.execute(query, params)
         return [self._row_to_dict(row) for row in cursor.fetchall()]
 
+    def list_jobs_filtered(
+        self,
+        status: str = None,
+        operation_type: str = None,
+        search_text: str = None,
+        exclude_ids: set = None,
+        limit: int = None,
+        offset: int = 0,
+    ) -> tuple:
+        """Return (list_of_job_dicts, total_count) with dynamic SQL WHERE filters.
+
+        Story #271: Filtered jobs query with pagination support.
+
+        Args:
+            status: Filter by exact status value (e.g. 'completed', 'failed')
+            operation_type: Filter by exact operation_type value
+            search_text: Case-insensitive LIKE match against repo_alias, username,
+                         operation_type, and error columns
+            exclude_ids: Set of job_ids to exclude (used to skip in-memory active jobs)
+            limit: Maximum number of rows to return (None = no limit)
+            offset: Number of rows to skip for pagination (default 0)
+
+        Returns:
+            Tuple of (jobs: List[Dict], total_count: int) where total_count reflects
+            the full matching set ignoring limit/offset.
+        """
+        conn = self._conn_manager.get_connection()
+
+        base_select = """SELECT job_id, operation_type, status, created_at, started_at,
+                                completed_at, result, error, progress, username, is_admin,
+                                cancelled, repo_alias, resolution_attempts, claude_actions,
+                                failure_reason, extended_error, language_resolution_status
+                         FROM background_jobs"""
+
+        conditions: List[str] = []
+        params: List[Any] = []
+
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+
+        if operation_type:
+            conditions.append("operation_type = ?")
+            params.append(operation_type)
+
+        if search_text:
+            # Case-insensitive LIKE across key text columns
+            like_pattern = f"%{search_text}%"
+            conditions.append(
+                "(LOWER(repo_alias) LIKE LOWER(?)"
+                " OR LOWER(username) LIKE LOWER(?)"
+                " OR LOWER(operation_type) LIKE LOWER(?)"
+                " OR LOWER(COALESCE(error, '')) LIKE LOWER(?))"
+            )
+            params.extend([like_pattern, like_pattern, like_pattern, like_pattern])
+
+        if exclude_ids:
+            placeholders = ",".join("?" * len(exclude_ids))
+            conditions.append(f"job_id NOT IN ({placeholders})")
+            params.extend(list(exclude_ids))
+
+        where_clause = ""
+        if conditions:
+            where_clause = " WHERE " + " AND ".join(conditions)
+
+        # Count query (no LIMIT/OFFSET) for accurate total
+        count_query = f"SELECT COUNT(*) FROM background_jobs{where_clause}"
+        count_cursor = conn.execute(count_query, params)
+        total_count: int = count_cursor.fetchone()[0]
+
+        # Data query with ORDER BY and optional pagination
+        data_query = base_select + where_clause + " ORDER BY created_at DESC"
+        data_params = list(params)
+
+        if limit is not None:
+            data_query += " LIMIT ? OFFSET ?"
+            data_params.extend([limit, offset])
+
+        cursor = conn.execute(data_query, data_params)
+        jobs = [self._row_to_dict(row) for row in cursor.fetchall()]
+
+        return jobs, total_count
+
     def delete_job(self, job_id: str) -> bool:
         """Delete a job by ID."""
 

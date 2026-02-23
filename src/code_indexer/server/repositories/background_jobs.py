@@ -1369,3 +1369,192 @@ class BackgroundJobManager:
 
         # Return up to limit jobs
         return recent_jobs[:limit]
+
+    # ------------------------------------------------------------------
+    # Story #271: Display-layer job retrieval with filtering and pagination
+    # ------------------------------------------------------------------
+
+    def _normalize_job_to_display_dict(self, job) -> Dict[str, Any]:
+        """Convert a BackgroundJob object or SQLite row dict to a display dict.
+
+        Produces a consistent dict shape regardless of source (memory vs DB),
+        matching exactly what the jobs.html template expects.
+
+        Args:
+            job: Either a BackgroundJob dataclass instance or a dict from
+                 BackgroundJobsSqliteBackend._row_to_dict()
+
+        Returns:
+            Dict with all required display keys.
+        """
+        if isinstance(job, BackgroundJob):
+            # --- In-memory BackgroundJob object ---
+            status_str = (
+                job.status.value if hasattr(job.status, "value") else str(job.status)
+            )
+            created_at = job.created_at.isoformat() if job.created_at else None
+            started_at = job.started_at.isoformat() if job.started_at else None
+            completed_at = job.completed_at.isoformat() if job.completed_at else None
+
+            # Determine repository_name: prefer repo_alias, fall back to result dict
+            repository_name = getattr(job, "repo_alias", None)
+            if not repository_name and job.result and isinstance(job.result, dict):
+                repository_name = job.result.get("alias") or job.result.get("repository")
+
+            # Calculate duration_seconds for completed jobs
+            duration_seconds = None
+            if job.completed_at and job.started_at:
+                try:
+                    completed = job.completed_at
+                    started = job.started_at
+                    completed_aware = hasattr(completed, "tzinfo") and completed.tzinfo is not None
+                    started_aware = hasattr(started, "tzinfo") and started.tzinfo is not None
+                    if completed_aware and not started_aware:
+                        completed = completed.replace(tzinfo=None)
+                    elif started_aware and not completed_aware:
+                        started = started.replace(tzinfo=None)
+                    duration_seconds = int((completed - started).total_seconds())
+                except (TypeError, AttributeError):
+                    duration_seconds = None
+
+            return {
+                "job_id": job.job_id,
+                "job_type": job.operation_type,
+                "operation_type": job.operation_type,
+                "status": status_str,
+                "progress": job.progress,
+                "created_at": created_at,
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "error_message": job.error,
+                "username": job.username,
+                "user_alias": getattr(job, "user_alias", None),
+                "repository_name": repository_name,
+                "repository_url": getattr(job, "repository_url", None),
+                "progress_info": getattr(job, "progress_info", None),
+                "duration_seconds": duration_seconds,
+            }
+        else:
+            # --- SQLite row dict (from _row_to_dict) ---
+            started_at_str = job.get("started_at")
+            completed_at_str = job.get("completed_at")
+
+            # Calculate duration_seconds from ISO strings
+            duration_seconds = None
+            if started_at_str and completed_at_str:
+                try:
+                    started_dt = datetime.fromisoformat(started_at_str)
+                    completed_dt = datetime.fromisoformat(completed_at_str)
+                    duration_seconds = int((completed_dt - started_dt).total_seconds())
+                except (ValueError, TypeError):
+                    duration_seconds = None
+
+            operation_type = job.get("operation_type") or ""
+            return {
+                "job_id": job.get("job_id"),
+                "job_type": operation_type,
+                "operation_type": operation_type,
+                "status": job.get("status"),
+                "progress": job.get("progress", 0),
+                "created_at": job.get("created_at"),
+                "started_at": started_at_str,
+                "completed_at": completed_at_str,
+                "error_message": job.get("error"),
+                "username": job.get("username"),
+                "user_alias": job.get("username"),  # DB jobs have no separate user_alias
+                "repository_name": job.get("repo_alias"),
+                "repository_url": None,  # Not stored in DB
+                "progress_info": None,   # Not stored in DB
+                "duration_seconds": duration_seconds,
+            }
+
+    def get_jobs_for_display(
+        self,
+        status_filter: str = None,
+        type_filter: str = None,
+        search_text: str = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> tuple:
+        """Return (jobs_list, total_count, total_pages) merging memory + SQLite.
+
+        Story #271 Component 2: Filtered, paginated jobs for the Web UI jobs page.
+
+        Algorithm:
+        1. Collect active jobs (running/pending) from self.jobs under self._lock.
+        2. Apply filters to active jobs in Python (small set).
+        3. Build seen_ids set from active jobs to avoid duplicates from DB.
+        4. Query SQLite via list_jobs_filtered() with filters + exclude_ids=seen_ids.
+        5. Merge active + DB jobs; compute total_count and total_pages.
+        6. Apply pagination (page, page_size).
+
+        Args:
+            status_filter: Exact status string to filter by (e.g. 'completed').
+            type_filter: Exact operation_type string to filter by.
+            search_text: Case-insensitive substring to search repo name / username.
+            page: 1-based page number.
+            page_size: Number of results per page.
+
+        Returns:
+            Tuple of (jobs: List[Dict], total_count: int, total_pages: int).
+        """
+        # Step 1: Collect active (running/pending) memory jobs
+        active_jobs: List[Dict[str, Any]] = []
+        seen_ids: set = set()
+
+        with self._lock:
+            for job in self.jobs.values():
+                if job.status not in (JobStatus.RUNNING, JobStatus.PENDING):
+                    continue
+
+                # Apply filters to memory jobs in Python
+                status_str = job.status.value if hasattr(job.status, "value") else str(job.status)
+                if status_filter and status_str != status_filter:
+                    continue
+                if type_filter and job.operation_type != type_filter:
+                    continue
+                if search_text:
+                    search_lower = search_text.lower()
+                    repo = (getattr(job, "repo_alias", None) or "").lower()
+                    user = (job.username or "").lower()
+                    op = (job.operation_type or "").lower()
+                    err = (job.error or "").lower()
+                    if not (
+                        search_lower in repo
+                        or search_lower in user
+                        or search_lower in op
+                        or search_lower in err
+                    ):
+                        continue
+
+                active_jobs.append(self._normalize_job_to_display_dict(job))
+                seen_ids.add(job.job_id)
+
+        # Step 2: Query SQLite for historical / non-active jobs with same filters
+        db_jobs_normalized: List[Dict[str, Any]] = []
+        db_total_from_sqlite = 0
+
+        if self._sqlite_backend:
+            try:
+                db_rows, db_count = self._sqlite_backend.list_jobs_filtered(
+                    status=status_filter,
+                    operation_type=type_filter,
+                    search_text=search_text,
+                    exclude_ids=seen_ids if seen_ids else None,
+                )
+                db_total_from_sqlite = db_count
+                for row in db_rows:
+                    db_jobs_normalized.append(self._normalize_job_to_display_dict(row))
+            except Exception as e:
+                logging.error(f"Failed to get jobs for display from SQLite: {e}")
+
+        # Step 3: Merge and compute total_count
+        all_jobs = active_jobs + db_jobs_normalized
+        total_count = len(active_jobs) + db_total_from_sqlite
+
+        # Step 4: Paginate
+        total_pages = max(1, (total_count + page_size - 1) // page_size)
+        offset = (page - 1) * page_size
+        paginated = all_jobs[offset: offset + page_size]
+
+        return paginated, total_count, total_pages
