@@ -155,6 +155,12 @@ function confirmRefresh(alias) {
     }
 }
 
+function confirmForceResync(alias) {
+    if (confirm('Force re-sync repository "' + alias + '"?\n\nThis will reset any local divergence (e.g. after a force-push) and re-index from the remote. Existing index data may be lost. This action cannot be undone.')) {
+        document.getElementById('force-resync-form-' + alias).submit();
+    }
+}
+
 function toggleDetails(alias) {
     const details = document.getElementById('details-' + alias);
     if (details) {

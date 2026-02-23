@@ -87,6 +87,18 @@ DISCOVERY WORKFLOW:
 4. For dependency-map files: read the content to find which repos participate in that domain
 5. search_code(query_text='your topic', repository_alias='auth-service-global', limit=10) -- search the identified repo
 
+DEPENDENCY MAP (cidx-meta-global/dependency-map/):
+When you don't know which repository to search -- or when a topic spans multiple repos -- the dependency map is your best starting point. It contains domain-level architectural analysis that maps which repositories participate in each domain and how they interact (shared APIs, data flows, integration points).
+
+TWO TYPES OF cidx-meta-global RESULTS:
+- Repo description files (e.g., 'auth-service.md'): What a SINGLE repository contains. Use when your topic is likely contained in one repo.
+- Dependency-map files (e.g., 'dependency-map/authentication.md'): How MULTIPLE repositories collaborate in a domain. Use when your topic crosses repo boundaries, you need architectural context, or you don't know where to start.
+
+DEPENDENCY MAP WORKFLOW:
+1. search_code(query_text='your topic', repository_alias='cidx-meta-global', limit=5)
+2. If results include dependency-map/ files, read the snippet -- it lists participating repos and their roles
+3. Search the identified repos together: search_code(query_text='topic', repository_alias=['repo1-global','repo2-global'], aggregation_mode='per_repo')
+
 IF cidx-meta-global IS NOT AVAILABLE: Fall back to list_global_repos() to see all repos, then search the most likely candidates.
 
 CATEGORIES: search, scip, git_exploration, git_operations, files, repo_management, golden_repos, system, user_management, ssh_keys, meta, tracing

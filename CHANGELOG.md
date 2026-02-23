@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.50] - 2026-02-23
+
+### Added
+
+- Golden repo divergent branch auto-recovery: `GitPullUpdater.update()` detects "divergent branches" errors from `git pull` and automatically recovers via `git fetch origin` + `git reset --hard origin/{branch}` (#272)
+- Manual "Force Re-sync" button in golden repo details card UI with confirmation dialog, CSRF-protected POST endpoint at `/admin/golden-repos/{alias}/force-resync` (#272)
+- `force_reset` parameter propagation through `RefreshScheduler.trigger_refresh_for_repo()` → `_submit_refresh_job()` → `_execute_refresh()` → `GitPullUpdater.update()` (#272)
+- Branch detection fallback: uses `git rev-parse --abbrev-ref HEAD` with safe fallback to "main" (#272)
+- Force Re-sync button conditionally hidden for local:// repos (git-backed repos only) (#272)
+
 ## [9.3.49] - 2026-02-23
 
 ### Fixed

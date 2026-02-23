@@ -376,7 +376,12 @@ class RefreshScheduler:
                 return global_name
         raise ValueError(f"Repository '{alias_name}' not found in global registry")
 
-    def trigger_refresh_for_repo(self, alias_name: str, submitter_username: str = "system") -> Optional[str]:
+    def trigger_refresh_for_repo(
+        self,
+        alias_name: str,
+        submitter_username: str = "system",
+        force_reset: bool = False,
+    ) -> Optional[str]:
         """
         Request a refresh for a specific repo after external writes complete.
 
@@ -390,6 +395,9 @@ class RefreshScheduler:
             alias_name: Bare alias (e.g., "my-repo") or global alias (e.g., "cidx-meta-global")
             submitter_username: Username to attribute the job to (default: "system" for
                 background/scheduled refreshes; pass actual username for user-initiated refreshes)
+            force_reset: When True, skip change detection and force-reset the repo to the
+                remote branch before indexing. Used by the manual "Force Re-sync" UI action
+                (Story #272 AC3/AC4).
 
         Returns:
             Job ID string if submitted to BackgroundJobManager, None if executed directly
@@ -400,9 +408,13 @@ class RefreshScheduler:
         """
         global_alias = self._resolve_global_alias(alias_name)
         if self.background_job_manager:
-            return self._submit_refresh_job(global_alias, submitter_username=submitter_username)
+            return self._submit_refresh_job(
+                global_alias,
+                submitter_username=submitter_username,
+                force_reset=force_reset,
+            )
         else:
-            self._execute_refresh(global_alias)
+            self._execute_refresh(global_alias, force_reset=force_reset)
             return None
 
     def get_refresh_interval(self) -> int:
@@ -532,7 +544,12 @@ class RefreshScheduler:
 
         logger.debug("Refresh scheduler loop exited")
 
-    def _submit_refresh_job(self, alias_name: str, submitter_username: str = "system") -> Optional[str]:
+    def _submit_refresh_job(
+        self,
+        alias_name: str,
+        submitter_username: str = "system",
+        force_reset: bool = False,
+    ) -> Optional[str]:
         """
         Submit a refresh job to BackgroundJobManager.
 
@@ -542,18 +559,21 @@ class RefreshScheduler:
         Args:
             alias_name: Global alias name (e.g., "my-repo-global")
             submitter_username: Username to attribute the job to (default: "system")
+            force_reset: When True, skip change detection and force-reset the repo to
+                the remote branch before indexing. Captured in the lambda closure so
+                BackgroundJobManager executes with the correct flag (Story #272 AC3).
 
         Returns:
             Job ID if submitted to BackgroundJobManager, None if executed directly
         """
         if not self.background_job_manager:
             # Fallback to direct execution if no job manager (CLI mode)
-            self._execute_refresh(alias_name)
+            self._execute_refresh(alias_name, force_reset=force_reset)
             return None
 
         job_id: str = self.background_job_manager.submit_job(
             operation_type="global_repo_refresh",
-            func=lambda: self._execute_refresh(alias_name),
+            func=lambda: self._execute_refresh(alias_name, force_reset=force_reset),
             submitter_username=submitter_username,
             is_admin=True,
             repo_alias=alias_name,
@@ -572,14 +592,16 @@ class RefreshScheduler:
         """
         self._execute_refresh(alias_name)
 
-    def _execute_refresh(self, alias_name: str) -> Dict[str, Any]:
+    def _execute_refresh(
+        self, alias_name: str, force_reset: bool = False
+    ) -> Dict[str, Any]:
         """
         Execute refresh for a repository (called by BackgroundJobManager).
 
         Orchestrates the complete refresh cycle:
-        1. Git pull (via updater)
-        2. Change detection
-        3. New index creation (if changes)
+        1. Git pull (via updater) — or force reset when force_reset=True
+        2. Change detection — skipped when force_reset=True (AC4)
+        3. New index creation (if changes, or always when force_reset=True)
         4. Alias swap
         5. Cleanup scheduling
 
@@ -588,6 +610,9 @@ class RefreshScheduler:
 
         Args:
             alias_name: Global alias name (e.g., "my-repo-global")
+            force_reset: When True, skip change detection and call
+                updater.update(force_reset=True) to force-reset the repo to the
+                remote branch before indexing (Story #272 AC3/AC4).
 
         Returns:
             Dict with success status and details for BackgroundJobManager tracking
@@ -709,21 +734,33 @@ class RefreshScheduler:
                     # refresh, but git pull must always operate on the canonical master.
                     updater = GitPullUpdater(master_path)
 
-                    has_changes = updater.has_changes()
-
-                    if not has_changes:
+                    if force_reset:
+                        # AC4 (Story #272): Force reset — skip change detection and force-reset
+                        # the master clone to the remote branch before indexing.
                         logger.info(
-                            f"No changes detected for {alias_name}, skipping refresh"
+                            f"Force reset requested for {alias_name}, "
+                            "skipping change detection and resetting to remote branch"
                         )
-                        return {
-                            "success": True,
-                            "alias": alias_name,
-                            "message": "No changes detected",
-                        }
+                        updater.update(force_reset=True)
+                    else:
+                        has_changes = updater.has_changes()
 
-                    # Pull latest changes into master
-                    logger.info(f"Pulling latest changes for {alias_name} into master: {master_path}")
-                    updater.update()
+                        if not has_changes:
+                            logger.info(
+                                f"No changes detected for {alias_name}, skipping refresh"
+                            )
+                            return {
+                                "success": True,
+                                "alias": alias_name,
+                                "message": "No changes detected",
+                            }
+
+                        # Pull latest changes into master
+                        logger.info(
+                            f"Pulling latest changes for {alias_name} into master: {master_path}"
+                        )
+                        updater.update()
+
                     # Story #236 Fix 3: Always create snapshot from master, not from current_target.
                     source_path = master_path
 

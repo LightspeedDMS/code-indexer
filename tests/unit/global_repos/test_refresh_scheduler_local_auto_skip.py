@@ -327,7 +327,7 @@ class TestLocalRepoExplicitTriggerStillWorks:
             mock_execute.return_value = {"success": True, "message": "Refresh complete"}
             sched.trigger_refresh_for_repo("cidx-meta-global")
 
-        mock_execute.assert_called_once_with("cidx-meta-global"), (
+        mock_execute.assert_called_once_with("cidx-meta-global", force_reset=False), (
             "EXPLICIT TRIGGER: trigger_refresh_for_repo() must call _execute_refresh "
             "for local:// repos. Explicit triggers bypass the scheduled skip."
         )

@@ -226,7 +226,7 @@ class TestRefreshSchedulerTrigger:
         with patch.object(sched, "_submit_refresh_job") as mock_submit:
             sched.trigger_refresh_for_repo("cidx-meta-global")
 
-            mock_submit.assert_called_once_with("cidx-meta-global", submitter_username="system")
+            mock_submit.assert_called_once_with("cidx-meta-global", submitter_username="system", force_reset=False)
 
     def test_trigger_refresh_falls_back_to_direct_execution(
         self,
@@ -256,7 +256,7 @@ class TestRefreshSchedulerTrigger:
             mock_execute.return_value = {"success": True}
             sched.trigger_refresh_for_repo("cidx-meta-global")
 
-            mock_execute.assert_called_once_with("cidx-meta-global")
+            mock_execute.assert_called_once_with("cidx-meta-global", force_reset=False)
 
 
 class TestConcurrentWriterAndRefreshScheduler:

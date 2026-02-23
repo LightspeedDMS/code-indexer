@@ -71,6 +71,9 @@
                 <button class="outline small" onclick="toggleDetails('{{ repo.alias }}')" title="View details">Details</button>
                 <button class="small" onclick="showActivateModal('{{ repo.alias }}')" {% if repo.status == 'indexing' %}disabled title="Currently indexing"{% else %}title="Activate for a user"{% endif %}>Activate</button>
                 <button class="outline small" onclick="confirmRefresh('{{ repo.alias }}')" {% if repo.status == 'indexing' %}disabled title="Currently indexing"{% else %}title="Re-index repository"{% endif %}>Refresh</button>
+                {% if not repo.repo_url.startswith('local://') %}
+                <button class="outline small warning" onclick="confirmForceResync('{{ repo.alias }}')" {% if repo.status == 'indexing' %}disabled title="Currently indexing"{% else %}title="Force reset and re-sync from remote (discards local divergence)"{% endif %}>Force Re-sync</button>
+                {% endif %}
                 <button class="outline small danger" onclick="confirmDelete('{{ repo.alias }}')" title="Delete repository">Delete</button>
             </td>
         </tr>
@@ -365,6 +368,13 @@
         <form id="refresh-form-{{ repo.alias }}" method="post" action="/admin/golden-repos/{{ repo.alias }}/refresh" style="display: none;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         </form>
+
+        <!-- Force Re-sync Form (hidden) - Story #272 -->
+        {% if not repo.repo_url.startswith('local://') %}
+        <form id="force-resync-form-{{ repo.alias }}" method="post" action="/admin/golden-repos/{{ repo.alias }}/force-resync" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        </form>
+        {% endif %}
         {% endfor %}
         {% else %}
         <tr>

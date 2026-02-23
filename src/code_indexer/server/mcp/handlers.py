@@ -5831,10 +5831,13 @@ def _build_dependency_map_section(cidx_meta_path: Path) -> str:
     ]
     domain_count = len(domain_files)
 
-    # Return compact single-line string (Story #222 TODO 11)
+    # Return compact string (Story #222 TODO 11, enhanced Story #194)
     return (
         f"Dependency map: cidx-meta/dependency-map/ ({domain_count} domains). "
-        "Read _index.md first for structure."
+        "Shows which repos collaborate in each domain and how they interact "
+        "(shared APIs, data flows, integration points). "
+        "Best starting point when topic spans multiple repos. "
+        "Search cidx-meta-global or read _index.md for domain list."
     )
 
 
@@ -7125,9 +7128,9 @@ def first_time_user_guide(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {
                 "step_number": 3,
                 "title": "Discover which repository has your topic",
-                "description": "Search cidx-meta-global to find which repository covers your topic. Results are .md files -- the filename (without .md) plus '-global' gives you the repository alias to search next.",
+                "description": "Search cidx-meta-global to find which repository covers your topic. You'll get two types of results: (1) Repo description files like 'auth-service.md' -- strip .md and append '-global' for the repo alias. (2) Dependency-map files like 'dependency-map/authentication.md' -- these show how multiple repos collaborate in a domain and are the best starting point when your topic crosses repo boundaries.",
                 "example_call": "search_code(query_text='authentication', repository_alias='cidx-meta-global', limit=5)",
-                "expected_result": "Results like file_path='auth-service.md' mean search 'auth-service-global' for actual code. dependency-map/ results show cross-repo relationships.",
+                "expected_result": "Results like file_path='auth-service.md' mean search 'auth-service-global' for actual code. dependency-map/ results list participating repos, their roles, and integration points -- use these to search multiple repos together with repository_alias as an array.",
             },
             {
                 "step_number": 4,
