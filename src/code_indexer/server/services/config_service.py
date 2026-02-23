@@ -7,9 +7,11 @@ All settings persist to ~/.cidx-server/config.json via ServerConfigManager.
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 
+import json
 import logging
 from dataclasses import asdict
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from ..utils.config_manager import (
     ServerConfigManager,
@@ -325,6 +327,14 @@ class ConfigService:
                 "max_concurrent_background_jobs": config.background_jobs_config.max_concurrent_background_jobs,
                 "subprocess_max_workers": config.background_jobs_config.subprocess_max_workers,
             },
+            # Story #223 - AC4: Indexing configuration
+            "indexing": {
+                "indexable_extensions": (
+                    config.indexing_config.indexable_extensions
+                    if config.indexing_config is not None
+                    else []
+                ),
+            },
         }
 
         return settings
@@ -412,6 +422,11 @@ class ConfigService:
         # Story #26 - Background jobs
         elif category == "background_jobs":
             self._update_background_jobs_setting(config, key, value)
+        # Story #223 - AC4: Indexing configuration
+        elif category == "indexing":
+            self._update_indexing_setting(key, value)
+            # _update_indexing_setting saves config internally, so skip normal save below
+            return
         else:
             raise ValueError(f"Unknown category: {category}")
 
@@ -964,6 +979,152 @@ class ConfigService:
     def get_config_file_path(self) -> str:
         """Get the path to the configuration file."""
         return str(self.config_manager.config_file_path)
+
+    def _update_indexing_setting(self, key: str, value: Any) -> None:
+        """
+        Update an indexing setting (Story #223 - AC4).
+
+        Handles both list and comma-separated string input for indexable_extensions.
+        Normalizes extensions to ensure leading dot and lowercase.
+        Saves config to disk immediately.
+
+        Args:
+            key: Setting key (only 'indexable_extensions' is supported)
+            value: New value (list or comma-separated string)
+
+        Raises:
+            ValueError: If key is not recognized
+        """
+        if key != "indexable_extensions":
+            raise ValueError(f"Unknown indexing setting: {key}")
+
+        config = self.get_config()
+        indexing = config.indexing_config
+        if indexing is None:
+            from ..utils.config_manager import IndexingConfig
+            indexing = IndexingConfig()
+            config.indexing_config = indexing
+
+        if isinstance(value, list):
+            parsed_list: List[str] = list(value)
+        elif isinstance(value, str):
+            parsed_list = [ext.strip() for ext in value.split(",") if ext.strip()]
+        else:
+            parsed_list = list(value)
+
+        # Normalize: ensure leading dot and lowercase
+        normalized: List[str] = []
+        for ext in parsed_list:
+            ext = str(ext).strip().lower()
+            if ext and not ext.startswith("."):
+                ext = "." + ext
+            if ext:
+                normalized.append(ext)
+
+        indexing.indexable_extensions = normalized
+        self.config_manager.save_config(config)
+        logger.info(
+            "Updated indexing.indexable_extensions with %d extensions",
+            len(normalized),
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+    def cascade_indexable_extensions_to_repos(self) -> None:
+        """
+        Cascade server indexable_extensions to all golden repo config files (Story #223 - AC5).
+
+        Writes CLI-format extensions (no leading dots) to each repo's
+        .code-indexer/config.json. Continues on individual repo failures.
+        """
+        config = self.get_config()
+        if config.indexing_config is None:
+            return
+        server_exts = config.indexing_config.indexable_extensions
+        cli_exts = [ext.lstrip(".") for ext in server_exts]
+
+        from ..repositories.golden_repo_manager import get_golden_repo_manager
+        manager = get_golden_repo_manager()
+        if manager is None:
+            return
+
+        repos = manager.list_golden_repos()
+        for repo in repos:
+            alias = repo.get("alias", "")
+            try:
+                repo_path = manager.get_actual_repo_path(alias)
+                cidx_config_path = Path(repo_path) / ".code-indexer" / "config.json"
+                if not cidx_config_path.exists():
+                    continue
+                with open(cidx_config_path, "r") as f:
+                    repo_config = json.load(f)
+                repo_config["file_extensions"] = cli_exts
+                with open(cidx_config_path, "w") as f:
+                    json.dump(repo_config, f, indent=2)
+                logger.info("Cascaded file_extensions to %s", alias)
+            except Exception as e:
+                logger.warning("Could not cascade extensions to %s: %s", alias, e)
+
+    def seed_repo_extensions_from_server_config(self, repo_path: str) -> None:
+        """
+        Seed a newly cloned repo's config with server indexable_extensions (Story #223 - AC6).
+
+        Called after cidx init creates the config, before cidx index runs.
+        Does nothing if .code-indexer/config.json does not exist.
+
+        Args:
+            repo_path: Filesystem path to the cloned repository
+        """
+        config = self.get_config()
+        if config.indexing_config is None:
+            return
+        server_exts = config.indexing_config.indexable_extensions
+        cli_exts = [ext.lstrip(".") for ext in server_exts]
+
+        cidx_config_path = Path(repo_path) / ".code-indexer" / "config.json"
+        if not cidx_config_path.exists():
+            return
+
+        try:
+            with open(cidx_config_path, "r") as f:
+                repo_config = json.load(f)
+            repo_config["file_extensions"] = cli_exts
+            with open(cidx_config_path, "w") as f:
+                json.dump(repo_config, f, indent=2)
+            logger.info("Seeded file_extensions from server config for %s", repo_path)
+        except Exception as e:
+            logger.warning("Could not seed extensions for %s: %s", repo_path, e)
+
+    def sync_repo_extensions_if_drifted(self, repo_path: str) -> None:
+        """
+        Sync repo config if extensions drifted from server config (Story #223 - AC7).
+
+        Called before refresh indexing. No-op if already in sync or config missing.
+
+        Args:
+            repo_path: Filesystem path to the repository
+        """
+        config = self.get_config()
+        if config.indexing_config is None:
+            return
+        server_exts = config.indexing_config.indexable_extensions
+        cli_exts_sorted = sorted([ext.lstrip(".") for ext in server_exts])
+
+        cidx_config_path = Path(repo_path) / ".code-indexer" / "config.json"
+        if not cidx_config_path.exists():
+            return
+
+        try:
+            with open(cidx_config_path, "r") as f:
+                repo_config = json.load(f)
+            current_exts = sorted(repo_config.get("file_extensions", []))
+            if current_exts == cli_exts_sorted:
+                return  # Already in sync, do not rewrite
+            repo_config["file_extensions"] = [ext.lstrip(".") for ext in server_exts]
+            with open(cidx_config_path, "w") as f:
+                json.dump(repo_config, f, indent=2)
+            logger.info("Synced drifted file_extensions for %s", repo_path)
+        except Exception as e:
+            logger.warning("Could not sync extensions for %s: %s", repo_path, e)
 
     def save_config(self, config: ServerConfig) -> None:
         """

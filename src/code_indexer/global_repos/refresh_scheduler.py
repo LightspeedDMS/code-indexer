@@ -727,6 +727,14 @@ class RefreshScheduler:
                     # Story #236 Fix 3: Always create snapshot from master, not from current_target.
                     source_path = master_path
 
+                # Story #223 AC7: Sync file extensions from server config before indexing
+                try:
+                    from code_indexer.server.services.config_service import get_config_service
+                    config_service = get_config_service()
+                    config_service.sync_repo_extensions_if_drifted(source_path)
+                except Exception as e:
+                    logger.warning("Could not sync extensions before index for %s: %s", alias_name, e)
+
                 # Index source first, then create versioned snapshot (Story #229)
                 self._index_source(alias_name=alias_name, source_path=source_path)
                 new_index_path = self._create_snapshot(

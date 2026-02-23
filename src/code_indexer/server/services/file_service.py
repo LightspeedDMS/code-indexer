@@ -362,9 +362,9 @@ class FileListingService:
         """
         Check if file is likely indexed based on its extension.
 
-        Uses an extension-based check to determine if CIDX would index
-        this file type. This covers the known set of file types that
-        CIDX indexes via VoyageAI embeddings.
+        Uses the server's indexable_extensions configuration (Story #223 - AC3)
+        to determine if CIDX would index this file type. No fallback to any
+        hardcoded set — if the config has no extensions, nothing is indexed.
 
         Args:
             file_path: Path to file
@@ -373,44 +373,11 @@ class FileListingService:
             Whether file is indexed
         """
         extension = file_path.suffix.lower()
-        indexable_extensions = {
-            # Programming languages
-            ".py",
-            ".js",
-            ".ts",
-            ".java",
-            ".c",
-            ".cpp",
-            ".h",
-            ".hpp",
-            ".cs",
-            ".go",
-            ".rs",
-            ".php",
-            ".rb",
-            ".swift",
-            ".kt",
-            ".scala",
-            ".sql",
-            ".html",
-            ".css",
-            ".vue",
-            ".jsx",
-            ".tsx",
-            # Documentation and markup
-            ".md",
-            ".txt",
-            # Configuration files
-            ".json",
-            ".yaml",
-            ".yml",
-            ".toml",
-            ".xml",
-            # Shell scripts
-            ".sh",
-            ".bash",
-        }
-        return extension in indexable_extensions
+        config_service = get_config_service()
+        config = config_service.get_config()
+        if config.indexing_config is None:
+            return False
+        return extension in config.indexing_config.indexable_extensions
 
     def _apply_filters(
         self, files: List[FileInfo], query_params: FileListQueryParams

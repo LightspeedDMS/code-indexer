@@ -177,24 +177,15 @@ class DependencyMapDomainService:
 
         Returns:
             Dict with:
-              - nodes: List[Dict] each with id, name, description, repo_count
+              - nodes: List[Dict] each with id, name, description, repo_count,
+                       incoming_dep_count, outgoing_dep_count
               - edges: List[Dict] each with source, target, relationship
         """
         raw_domains = self._load_domains_json()
         visible_domain_names = self._compute_visible_domain_names(accessible_repos, raw_domains)
 
-        # Build nodes from domain list (apply access filtering)
-        domain_list_data = self.get_domain_list(accessible_repos)
-        nodes = []
-        for domain in domain_list_data["domains"]:
-            nodes.append({
-                "id": domain["name"],
-                "name": domain["name"],
-                "description": (domain.get("description") or "")[:100],
-                "repo_count": domain["repo_count"],
-            })
-
-        # Build edges: only between visible domains
+        # Build edges first: only between visible domains.
+        # Edges must be built before nodes so dep counts can be pre-computed.
         all_deps = self._parse_cross_domain_deps()
         edges = []
         for dep in all_deps:
@@ -205,6 +196,29 @@ class DependencyMapDomainService:
                     "relationship": dep.get("relationship", ""),
                     "dep_type": dep.get("dep_type", ""),
                 })
+
+        # Pre-compute dep counts from visible edges for each node
+        outgoing_counts: Dict[str, int] = {}
+        incoming_counts: Dict[str, int] = {}
+        for edge in edges:
+            src = edge["source"]
+            tgt = edge["target"]
+            outgoing_counts[src] = outgoing_counts.get(src, 0) + 1
+            incoming_counts[tgt] = incoming_counts.get(tgt, 0) + 1
+
+        # Build nodes from domain list (apply access filtering)
+        domain_list_data = self.get_domain_list(accessible_repos)
+        nodes = []
+        for domain in domain_list_data["domains"]:
+            node_id = domain["name"]
+            nodes.append({
+                "id": node_id,
+                "name": node_id,
+                "description": (domain.get("description") or "")[:100],
+                "repo_count": domain["repo_count"],
+                "incoming_dep_count": incoming_counts.get(node_id, 0),
+                "outgoing_dep_count": outgoing_counts.get(node_id, 0),
+            })
 
         return {"nodes": nodes, "edges": edges}
 
