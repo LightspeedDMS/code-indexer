@@ -207,7 +207,7 @@ class TestTriggerRefreshAcceptsBareAlias:
             job_id = scheduler.trigger_refresh_for_repo("my-repo")
 
         # Must call _submit_refresh_job with the resolved global alias
-        mock_submit.assert_called_once_with("my-repo-global", submitter_username="system")
+        mock_submit.assert_called_once_with("my-repo-global", submitter_username="system", force_reset=False)
         assert job_id == "job-bare-001"
 
     def test_trigger_refresh_with_global_alias_passes_through(
@@ -230,7 +230,7 @@ class TestTriggerRefreshAcceptsBareAlias:
         with patch.object(scheduler, "_submit_refresh_job", return_value="job-global-001") as mock_submit:
             job_id = scheduler.trigger_refresh_for_repo("my-repo-global")
 
-        mock_submit.assert_called_once_with("my-repo-global", submitter_username="system")
+        mock_submit.assert_called_once_with("my-repo-global", submitter_username="system", force_reset=False)
         assert job_id == "job-global-001"
 
     def test_trigger_refresh_with_nonexistent_alias_raises_value_error(
@@ -302,5 +302,5 @@ class TestTriggerRefreshAcceptsBareAlias:
         with patch.object(scheduler, "_execute_refresh") as mock_execute:
             result = scheduler.trigger_refresh_for_repo("cli-repo")
 
-        mock_execute.assert_called_once_with("cli-repo-global")
+        mock_execute.assert_called_once_with("cli-repo-global", force_reset=False)
         assert result is None

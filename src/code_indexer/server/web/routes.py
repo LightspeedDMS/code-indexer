@@ -2414,6 +2414,55 @@ def refresh_golden_repo(
         )
 
 
+@web_router.post("/golden-repos/{alias}/force-resync", response_class=HTMLResponse)
+def force_resync_golden_repo(
+    request: Request,
+    alias: str,
+    csrf_token: Optional[str] = Form(None),
+):
+    """Force re-sync (reset and re-index) a golden repository, discarding local divergence."""
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+
+    # Validate CSRF token
+    if not validate_login_csrf_token(request, csrf_token):
+        return _create_golden_repos_page_response(
+            request, session, error_message="Invalid CSRF token"
+        )
+
+    # Try to force re-sync the repository
+    try:
+        manager = _get_golden_repo_manager()
+        # Validate repo exists before scheduling
+        if alias not in manager.golden_repos:
+            raise Exception(f"Repository '{alias}' not found")
+        # Delegate to RefreshScheduler with force_reset=True
+        from code_indexer.server import app as app_module
+
+        lifecycle_manager = getattr(
+            app_module.app.state, "global_lifecycle_manager", None
+        )
+        if not lifecycle_manager or not lifecycle_manager.refresh_scheduler:
+            raise Exception("RefreshScheduler not available")
+        # force_reset=True discards divergent local state before re-indexing
+        job_id = lifecycle_manager.refresh_scheduler.trigger_refresh_for_repo(
+            alias, submitter_username=session.username, force_reset=True
+        )
+        return _create_golden_repos_page_response(
+            request,
+            session,
+            success_message=f"Repository '{alias}' force re-sync job submitted (Job ID: {job_id})",
+        )
+    except Exception as e:
+        error_msg = str(e)
+        if "not found" in error_msg.lower():
+            error_msg = f"Repository '{alias}' not found"
+        return _create_golden_repos_page_response(
+            request, session, error_message=error_msg
+        )
+
+
 @web_router.post("/golden-repos/activate", response_class=HTMLResponse)
 def activate_golden_repo(
     request: Request,
