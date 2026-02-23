@@ -149,6 +149,11 @@ class SimpleWatchHandler(FileSystemEventHandler):
     def _should_ignore_file(self, file_path: Path) -> bool:
         """Check if file should be ignored."""
         file_str = str(file_path)
+        # Ignore atomic write temp files created by _atomic_write_file()
+        # Pattern: prefix=".tmp_", suffix=f"_{filename}" → e.g. .tmp_abc123_somefile.md
+        # Path.suffix returns ".md" for such files, so suffix check alone is insufficient.
+        if file_path.name.startswith(".tmp_"):
+            return True
         ignore_file_patterns = [".tmp", ".swp", ".pyc", "~"]
         for pattern in ignore_file_patterns:
             if file_str.endswith(pattern):

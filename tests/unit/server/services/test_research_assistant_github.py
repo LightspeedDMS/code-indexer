@@ -5,6 +5,7 @@ Tests GitHub token handling, subprocess environment injection,
 and issue_manager.py symlink creation.
 """
 
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -141,30 +142,29 @@ class TestSessionFolderSymlinks:
     """Test session folder creates issue_manager.py symlink (AC4, AC6)."""
 
     def test_session_folder_creates_issue_manager_symlink(self, tmp_path: Path) -> None:
-        """Test _ensure_session_folder_setup creates issue_manager.py symlink."""
+        """Test _ensure_session_folder_setup creates issue_manager.py symlink from bundled copy."""
         # Setup
         db_path = str(tmp_path / "test.db")
         service = ResearchAssistantService(db_path=db_path)
 
-        # Create fake issue_manager.py source
-        fake_home = tmp_path / "fake_home"
-        fake_home.mkdir()
-        issue_manager_source = fake_home / ".claude" / "scripts" / "utils" / "issue_manager.py"
-        issue_manager_source.parent.mkdir(parents=True)
-        issue_manager_source.write_text("# Fake issue_manager.py")
+        # Create fake CIDX repo root with bundled issue_manager.py
+        fake_repo_root = tmp_path / "fake_repo"
+        bundled_script = fake_repo_root / "src" / "code_indexer" / "server" / "scripts" / "issue_manager.py"
+        bundled_script.parent.mkdir(parents=True)
+        bundled_script.write_text("# Bundled issue_manager.py")
 
         # Create session folder
         session_folder = tmp_path / "session_folder"
 
-        # Mock Path.home() to return our fake home
-        with patch("pathlib.Path.home", return_value=fake_home):
+        # Set CIDX_REPO_ROOT to fake repo (prevents walk-up-parents auto-detection)
+        with patch.dict(os.environ, {"CIDX_REPO_ROOT": str(fake_repo_root)}):
             service._ensure_session_folder_setup(str(session_folder))
 
-            # Verify symlink was created
+            # Verify symlink was created pointing to bundled copy
             issue_manager_link = session_folder / "issue_manager.py"
             assert issue_manager_link.exists()
             assert issue_manager_link.is_symlink()
-            assert issue_manager_link.resolve() == issue_manager_source.resolve()
+            assert issue_manager_link.resolve() == bundled_script.resolve()
 
     def test_session_folder_handles_missing_issue_manager(
         self, tmp_path: Path, caplog
@@ -174,6 +174,10 @@ class TestSessionFolderSymlinks:
         db_path = str(tmp_path / "test.db")
         service = ResearchAssistantService(db_path=db_path)
 
+        # Create fake repo root WITHOUT bundled issue_manager.py
+        fake_repo_root = tmp_path / "fake_repo"
+        fake_repo_root.mkdir()
+
         # Create fake home WITHOUT issue_manager.py
         fake_home = tmp_path / "fake_home"
         fake_home.mkdir()
@@ -181,17 +185,48 @@ class TestSessionFolderSymlinks:
         # Create session folder
         session_folder = tmp_path / "session_folder"
 
-        # Mock Path.home() to return our fake home
-        with patch("pathlib.Path.home", return_value=fake_home):
-            # Should not raise exception
-            service._ensure_session_folder_setup(str(session_folder))
+        # Set CIDX_REPO_ROOT to fake repo (no bundled script) and mock home
+        with patch.dict(os.environ, {"CIDX_REPO_ROOT": str(fake_repo_root)}):
+            with patch("pathlib.Path.home", return_value=fake_home):
+                # Should not raise exception
+                service._ensure_session_folder_setup(str(session_folder))
 
-            # Verify symlink was NOT created
-            issue_manager_link = session_folder / "issue_manager.py"
-            assert not issue_manager_link.exists()
+                # Verify symlink was NOT created
+                issue_manager_link = session_folder / "issue_manager.py"
+                assert not issue_manager_link.exists()
 
-            # Verify warning was logged
-            assert any("issue_manager.py not found" in record.message for record in caplog.records)
+                # Verify warning was logged
+                assert any("issue_manager.py not found" in record.message for record in caplog.records)
+
+    def test_session_folder_falls_back_to_home_issue_manager(self, tmp_path: Path) -> None:
+        """Test _ensure_session_folder_setup falls back to ~/.claude/ when bundled copy missing."""
+        # Setup
+        db_path = str(tmp_path / "test.db")
+        service = ResearchAssistantService(db_path=db_path)
+
+        # Create fake repo root WITHOUT bundled issue_manager.py
+        fake_repo_root = tmp_path / "fake_repo"
+        fake_repo_root.mkdir()
+
+        # Create fake home WITH issue_manager.py (fallback)
+        fake_home = tmp_path / "fake_home"
+        issue_manager_source = fake_home / ".claude" / "scripts" / "utils" / "issue_manager.py"
+        issue_manager_source.parent.mkdir(parents=True)
+        issue_manager_source.write_text("# Fallback issue_manager.py")
+
+        # Create session folder
+        session_folder = tmp_path / "session_folder"
+
+        # Set CIDX_REPO_ROOT to fake repo (no bundled script) and mock home
+        with patch.dict(os.environ, {"CIDX_REPO_ROOT": str(fake_repo_root)}):
+            with patch("pathlib.Path.home", return_value=fake_home):
+                service._ensure_session_folder_setup(str(session_folder))
+
+                # Verify symlink was created pointing to fallback copy
+                issue_manager_link = session_folder / "issue_manager.py"
+                assert issue_manager_link.exists()
+                assert issue_manager_link.is_symlink()
+                assert issue_manager_link.resolve() == issue_manager_source.resolve()
 
     def test_session_folder_skips_existing_symlink(self, tmp_path: Path) -> None:
         """Test _ensure_session_folder_setup does not recreate existing symlink."""

@@ -25,13 +25,15 @@ var _tooltip = null;          // Active tooltip element
 var _zoom = null;             // D3 zoom behavior
 
 // Constants
-var BASE_RADIUS = 20, SCALE_FACTOR = 8, MIN_RADIUS = 20, MAX_RADIUS = 105;
+var BASE_RADIUS = 20, SCALE_FACTOR = 8, MIN_RADIUS = 20, MAX_RADIUS = 140;
 var OPACITY_FULL = 1.0, OPACITY_DIM_NODE = 0.15;
 var OPACITY_EDGE = 0.6, OPACITY_DIM_EDGE = 0.05;
 // Node radius sizing factors (Story #260: bubble sizing by repo count + dep count)
 var REPO_SCALE = 3, REPO_MAX_FACTOR = 30;
 var DEP_SCALE = 4, DEP_MAX_FACTOR = 40;
 var SYNERGY_SCALE = 0.5, SYNERGY_MAX = 15;
+// Code mass sizing factor (Story #273: bubble sizing by total file count)
+var CODE_MASS_SCALE = 7, CODE_MASS_MAX = 35;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -379,18 +381,21 @@ function _dragEnd(event, d) {
 // ── Private helpers ───────────────────────────────────────────────────────────
 
 function _nodeRadius(nodeOrCount) {
-    var repoCount, totalDeps;
+    var repoCount, totalDeps, totalFileCount;
     if (typeof nodeOrCount === 'object' && nodeOrCount !== null) {
         repoCount = nodeOrCount.repo_count || 0;
         totalDeps = (nodeOrCount.incoming_dep_count || 0) + (nodeOrCount.outgoing_dep_count || 0);
+        totalFileCount = nodeOrCount.total_file_count || 0;
     } else {
         repoCount = nodeOrCount || 0;
         totalDeps = 0;
+        totalFileCount = 0;
     }
     var repoFactor = Math.min(repoCount * REPO_SCALE, REPO_MAX_FACTOR);
     var depFactor = Math.min(totalDeps * DEP_SCALE, DEP_MAX_FACTOR);
     var synergyBonus = Math.min(repoCount * totalDeps * SYNERGY_SCALE, SYNERGY_MAX);
-    return Math.min(MIN_RADIUS + repoFactor + depFactor + synergyBonus, MAX_RADIUS);
+    var codeMassFactor = totalFileCount > 0 ? Math.min(Math.log10(totalFileCount + 1) * CODE_MASS_SCALE, CODE_MASS_MAX) : 0;
+    return Math.min(MIN_RADIUS + repoFactor + depFactor + synergyBonus + codeMassFactor, MAX_RADIUS);
 }
 function _nodeStrokeColor() { return 'var(--pico-muted-border-color)'; }
 function _truncate(text, max) {
