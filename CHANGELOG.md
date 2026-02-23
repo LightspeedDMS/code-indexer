@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.49] - 2026-02-23
+
+### Fixed
+
+- Jobs tab database-driven queries: fix regression where completed/failed jobs were invisible after memory optimization (#271)
+- `_get_all_jobs()` in routes.py now delegates to `BackgroundJobManager.get_jobs_for_display()` which queries SQLite for historical jobs and merges with memory-resident active jobs
+- Added `list_jobs_filtered()` on `BackgroundJobsSqliteBackend` with status/type/search/exclude/pagination support
+- Job dict normalization bridges template key mismatches between memory BackgroundJob objects and SQLite rows
+
 ## [9.3.48] - 2026-02-22
 
 ### Fixed
