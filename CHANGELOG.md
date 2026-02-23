@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.48] - 2026-02-22
+
+### Fixed
+
+- Local repo indexing lifecycle: `register_local_repo()` now runs `cidx init` idempotently so Langfuse and cidx-meta repos get `.code-indexer/` initialized, enabling the CoW snapshot pipeline (#270)
+- `meta_description_hook.on_repo_added()`/`on_repo_removed()` now trigger `trigger_refresh_for_repo("cidx-meta-global")` after writing/deleting `.md` files, so golden repo descriptions are indexed and searchable (#270)
+- Wired refresh scheduler to `meta_description_hook` at server startup via `set_refresh_scheduler()` (#270)
+
 ## [9.3.47] - 2026-02-22
 
 ### Added

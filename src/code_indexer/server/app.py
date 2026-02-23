@@ -2628,6 +2628,17 @@ def create_app() -> FastAPI:
             meta_description_hook.set_tracking_backend(tracking_backend)
             meta_description_hook.set_scheduler(description_refresh_scheduler)
 
+            # Inject RefreshScheduler for cidx-meta CoW reindex on repo add/remove (Story #270)
+            from code_indexer.global_repos.meta_description_hook import (
+                set_refresh_scheduler,
+            )
+
+            set_refresh_scheduler(
+                global_lifecycle_manager.refresh_scheduler
+                if global_lifecycle_manager is not None
+                else None
+            )
+
             # Start scheduler (internally checks if enabled)
             description_refresh_scheduler.start()
             app.state.description_refresh_scheduler = description_refresh_scheduler

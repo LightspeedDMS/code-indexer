@@ -550,6 +550,30 @@ class GoldenRepoManager:
                 f"Repository registered but not globally accessible."
             )
 
+        # Initialize CIDX index structure for local repos (idempotent)
+        if not (folder_path / ".code-indexer").exists():
+            try:
+                import subprocess
+
+                subprocess.run(
+                    ["cidx", "init"],
+                    cwd=str(folder_path),
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                logging.info(f"Initialized CIDX index structure for local repo '{alias}'")
+            except subprocess.CalledProcessError as e:
+                logging.error(
+                    f"Failed to initialize CIDX for '{alias}': {e.stderr if e.stderr else str(e)}"
+                )
+                # Continue with registration even if init fails
+            except Exception as e:
+                logging.error(
+                    f"Unexpected error during CIDX init for '{alias}': {e}"
+                )
+                # Continue with registration even if init fails
+
         # Lifecycle hooks (controlled by fire_lifecycle_hooks parameter)
         if fire_lifecycle_hooks:
             try:
