@@ -9,7 +9,7 @@ meta directory management code.
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from code_indexer.server.services.claude_cli_manager import (
     get_claude_cli_manager,
@@ -30,6 +30,7 @@ README_NAMES = [
 # Module-level tracking backend (initialized by set_tracking_backend)
 _tracking_backend: Optional["DescriptionRefreshTrackingBackend"] = None  # type: ignore
 _scheduler: Optional["DescriptionRefreshScheduler"] = None  # type: ignore
+_refresh_scheduler: Optional[Any] = None  # type: ignore
 
 
 def set_tracking_backend(backend) -> None:
@@ -60,6 +61,22 @@ def set_scheduler(scheduler) -> None:
     _scheduler = scheduler
 
 
+def set_refresh_scheduler(scheduler) -> None:
+    """
+    Set module-level RefreshScheduler for triggering cidx-meta reindex.
+
+    Args:
+        scheduler: RefreshScheduler instance (from GlobalReposLifecycleManager)
+
+    Note:
+        Called during server startup after global_lifecycle_manager is created.
+        Used by on_repo_added() and on_repo_removed() to trigger versioned
+        CoW reindex of cidx-meta via trigger_refresh_for_repo().
+    """
+    global _refresh_scheduler
+    _refresh_scheduler = scheduler
+
+
 def on_repo_added(
     repo_name: str,
     repo_url: str,
@@ -69,7 +86,7 @@ def on_repo_added(
     """
     Hook called after a golden repository is successfully added.
 
-    Creates a .md description file in cidx-meta and re-indexes cidx-meta.
+    Creates a .md description file in cidx-meta and triggers reindex via RefreshScheduler.
     Also creates a tracking record for periodic description refresh (Story #190).
 
     Args:
@@ -81,7 +98,7 @@ def on_repo_added(
     Note:
         - Skips cidx-meta itself (no self-referential .md file)
         - Handles missing clone paths gracefully (logs warning, no crash)
-        - Re-indexes cidx-meta after creating .md file
+        - Triggers cidx-meta reindex via RefreshScheduler after creating .md file
         - Falls back to README copy when Claude CLI unavailable or fails
         - Creates tracking record for scheduled refresh (if tracking backend available)
     """
@@ -130,41 +147,47 @@ def on_repo_added(
     # This ensures consistent API key handling and avoids creating multiple instances
     cli_manager = get_claude_cli_manager()
 
-    # Fallback when global manager not initialized
+    # Determine whether to use Claude CLI or README fallback
     if cli_manager is None:
         logger.info(
             f"ClaudeCliManager not initialized, using README fallback for {repo_name}"
         )
         _create_readme_fallback(Path(clone_path), repo_name, cidx_meta_path)
-        return
 
-    # Check CLI availability using global manager
-    if not cli_manager.check_cli_available():
+    elif not cli_manager.check_cli_available():
         logger.info(f"Claude CLI unavailable, using README fallback for {repo_name}")
         _create_readme_fallback(Path(clone_path), repo_name, cidx_meta_path)
-        return
 
-    # Generate .md file
-    try:
-        md_content = _generate_repo_description(repo_name, repo_url, clone_path)
-        md_file = cidx_meta_path / f"{repo_name}.md"
-        md_file.write_text(md_content)
-        logger.info(f"Created meta description file: {md_file}")
+    else:
+        # Generate .md file using Claude CLI
+        try:
+            md_content = _generate_repo_description(repo_name, repo_url, clone_path)
+            md_file = cidx_meta_path / f"{repo_name}.md"
+            md_file.write_text(md_content)
+            logger.info(f"Created meta description file: {md_file}")
 
-    except Exception as e:
-        logger.error(
-            f"Failed to create meta description for {repo_name}: {e}", exc_info=True
-        )
-        # Fall back to README copy
-        logger.info(f"Falling back to README copy for {repo_name}")
-        _create_readme_fallback(Path(clone_path), repo_name, cidx_meta_path)
+        except Exception as e:
+            logger.error(
+                f"Failed to create meta description for {repo_name}: {e}", exc_info=True
+            )
+            # Fall back to README copy
+            logger.info(f"Falling back to README copy for {repo_name}")
+            _create_readme_fallback(Path(clone_path), repo_name, cidx_meta_path)
+
+    # Trigger cidx-meta reindex to make the new description searchable
+    if _refresh_scheduler is not None:
+        try:
+            _refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
+            logger.info(f"Triggered cidx-meta refresh after adding {repo_name}")
+        except Exception as e:
+            logger.warning(f"Failed to trigger cidx-meta refresh for {repo_name}: {e}")
 
 
 def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
     """
     Hook called after a golden repository is successfully removed.
 
-    Deletes the .md description file from cidx-meta and re-indexes cidx-meta.
+    Deletes the .md description file from cidx-meta and triggers reindex via RefreshScheduler.
     Also deletes the tracking record for description refresh (Story #190).
 
     Args:
@@ -173,7 +196,7 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
 
     Note:
         - Handles nonexistent .md files gracefully (no crash)
-        - Re-indexes cidx-meta only if file was actually deleted
+        - Triggers cidx-meta reindex via RefreshScheduler if file was actually deleted
         - Deletes tracking record (if tracking backend available)
     """
     cidx_meta_path = Path(golden_repos_dir) / "cidx-meta"
@@ -184,6 +207,18 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
         try:
             md_file.unlink()
             logger.info(f"Deleted meta description file: {md_file}")
+
+            # Trigger cidx-meta reindex after successful deletion
+            if _refresh_scheduler is not None:
+                try:
+                    _refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
+                    logger.info(
+                        f"Triggered cidx-meta refresh after removing {repo_name}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to trigger cidx-meta refresh for {repo_name}: {e}"
+                    )
 
         except Exception as e:
             logger.error(
@@ -244,7 +279,7 @@ def _create_readme_fallback(
     Note:
         - Creates file named <alias>_README.md
         - Preserves original README content exactly
-        - Triggers re-index of cidx-meta after creation
+        - Called from on_repo_added() which triggers cidx-meta reindex
     """
     readme_path = _find_readme(repo_path)
     if readme_path is None:
