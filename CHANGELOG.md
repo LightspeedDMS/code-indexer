@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.46] - 2026-02-22
+
+### Changed
+
+- Remove 6 unjustified SQLite performance indexes that had no backing SQL query patterns; keep only 7 justified indexes with migration to drop stale indexes from existing databases (#269)
+- Replace research_messages composite index (session_id, created_at) with single-column (session_id) to match actual query pattern (#269)
+- MCP credential lookup: O(users x credentials) Python iteration replaced with O(1) indexed SQL query via new get_mcp_credential_by_client_id() method (#269)
+
+### Fixed
+
+- 2 pre-existing stale unit tests in test_database_manager.py (table count 11->22, missing enable_scip column)
+
 ## [9.3.45] - 2026-02-22
 
 ### Fixed

@@ -113,6 +113,11 @@ class MCPCredentialManager:
         """
         Find credential by client_id across all users.
 
+        Story #269: When the user_manager supports direct SQL lookup
+        (i.e. has get_mcp_credential_by_client_id), delegates to it for
+        O(1) indexed lookup instead of O(users x credentials) iteration.
+        Falls back to iteration for non-SQLite backends.
+
         Args:
             client_id: Client ID to search for
 
@@ -122,7 +127,11 @@ class MCPCredentialManager:
         if not self.user_manager:
             return None
 
-        # Search all users using public API
+        # Story #269: Use direct SQL lookup when the backend supports it
+        if hasattr(self.user_manager, "get_mcp_credential_by_client_id"):
+            return self.user_manager.get_mcp_credential_by_client_id(client_id)
+
+        # Fallback: iterate all users (non-SQLite backends)
         # Story #702 SQLite migration: Use get_mcp_credentials_with_secrets
         # instead of internal _load_users() to support SQLite mode.
         users = self.user_manager.get_all_users()
