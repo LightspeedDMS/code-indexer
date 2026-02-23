@@ -389,6 +389,22 @@ class IndexingConfig:
     temporal_stale_threshold_days: int = 7
     # General indexing timeout in seconds (moved from ScipConfig)
     indexing_timeout_seconds: int = 3600
+    # Story #223 - AC1: Configurable file extensions for indexing.
+    # 60 unique extensions with leading dots matching CLI Config.file_extensions defaults.
+    indexable_extensions: List[str] = field(
+        default_factory=lambda: [
+            ".py", ".js", ".jsx", ".ts", ".tsx",
+            ".java", ".scala", ".kt", ".kts", ".groovy",
+            ".c", ".h", ".cpp", ".cxx", ".cc", ".hpp", ".hxx",
+            ".cs", ".go", ".rs", ".rb", ".erb",
+            ".php", ".swift", ".m", ".mm",
+            ".r", ".lua", ".pl", ".pm",
+            ".sh", ".bash", ".zsh", ".fish", ".ps1", ".psm1", ".bat", ".cmd",
+            ".sql", ".html", ".htm", ".css", ".scss", ".sass", ".less",
+            ".xml", ".xsl", ".xsd", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+            ".md", ".mdx", ".rst", ".txt", ".tex",
+        ]
+    )
 
 
 @dataclass

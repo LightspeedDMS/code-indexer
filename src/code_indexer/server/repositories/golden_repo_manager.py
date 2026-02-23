@@ -1298,6 +1298,17 @@ class GoldenRepoManager:
 
                 logging.info(f"Workflow step {i} completed successfully")
 
+                # Story #223 AC6: Seed repo with server-configured file extensions after cidx init
+                # Must run after cidx init creates .code-indexer/config.json, before cidx index
+                if command == init_command:
+                    try:
+                        from ..services.config_service import get_config_service
+                        config_svc = get_config_service()
+                        config_svc.seed_repo_extensions_from_server_config(clone_path)
+                        logging.info("Seeded file_extensions from server config for %s", clone_path)
+                    except Exception as e:
+                        logging.warning("Could not seed extensions for %s: %s", clone_path, e)
+
             logging.info(f"Post-clone workflow completed successfully for {clone_path}")
 
         except subprocess.TimeoutExpired:
@@ -2241,3 +2252,28 @@ class GoldenRepoManager:
                 f"Failed to get last modified time for {dir_path}: {e}"
             )
             return None
+
+
+def get_golden_repo_manager() -> "GoldenRepoManager":
+    """
+    Get the GoldenRepoManager from app state.
+
+    Returns the singleton GoldenRepoManager instance registered on app startup.
+    This module-level function allows other services (e.g. ConfigService) to
+    access the manager without importing routes or creating circular dependencies.
+
+    Returns:
+        GoldenRepoManager instance
+
+    Raises:
+        RuntimeError: If the manager has not been initialized (server not started)
+    """
+    from code_indexer.server import app as app_module
+
+    manager = getattr(app_module.app.state, "golden_repo_manager", None)
+    if manager is None:
+        raise RuntimeError(
+            "golden_repo_manager not initialized. "
+            "Server must set app.state.golden_repo_manager during startup."
+        )
+    return manager

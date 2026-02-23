@@ -4621,6 +4621,8 @@ def _get_current_config() -> dict:
         AuthConfig,
         # Story #32 - Unified content limits configuration
         ContentLimitsConfig,
+        # Story #223 - Indexing configuration
+        IndexingConfig,
     )
     from dataclasses import asdict
 
@@ -4812,6 +4814,8 @@ def _get_current_config() -> dict:
         "omni_search": settings.get("omni_search", {}),
         # Story #32: Unified content limits configuration
         "content_limits": settings.get("content_limits", asdict(ContentLimitsConfig())),
+        # Story #223: Indexing configuration
+        "indexing": settings.get("indexing", asdict(IndexingConfig())),
     }
 
 
@@ -6427,6 +6431,8 @@ async def update_config_section(
         "content_limits",
         # Story #190 - Claude CLI configuration
         "claude_cli",
+        # Story #223 - Indexing configuration
+        "indexing",
     ]
     if section not in valid_sections:
         return _create_config_page_response(
@@ -6509,6 +6515,13 @@ async def update_config_section(
             f"Saved {section} configuration with {len(data)} settings",
             extra={"correlation_id": get_correlation_id()},
         )
+
+        # Story #223: Cascade indexing extensions to all golden repos after save
+        if section == "indexing":
+            try:
+                config_service.cascade_indexable_extensions_to_repos()
+            except Exception as e:
+                logger.warning("Extension cascade failed: %s", e)
 
         return _create_config_page_response(
             request,

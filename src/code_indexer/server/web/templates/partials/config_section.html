@@ -739,6 +739,54 @@
 </details>
 
 
+<!-- Indexing Settings Section (Story #223) -->
+<details class="config-section" id="section-indexing">
+    <summary>
+        <h2>Indexing Settings</h2>
+    </summary>
+    <p class="section-description">
+        Controls which file types are indexed by CIDX across all golden repositories. Changes are automatically cascaded to all registered repos. Extensions must include the leading dot (e.g., .py, .js).
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-indexing">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Indexable File Extensions</td>
+                        <td class="config-value">
+                            <span style="word-break: break-all;">{{ config.indexing.indexable_extensions | join(', ') }}</span>
+                        </td>
+                        <td class="config-note"><small>{{ config.indexing.indexable_extensions | length }} extensions configured</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('indexing')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-indexing" method="post" action="/admin/config/indexing" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.indexing %}
+            <div class="validation-error">{{ validation_errors.indexing }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="indexing-extensions">
+                    Indexable File Extensions
+                    <textarea id="indexing-extensions" name="indexable_extensions" rows="4" style="font-family: monospace; font-size: 0.85em;">{{ config.indexing.indexable_extensions | join(', ') }}</textarea>
+                    <small>Comma-separated list with leading dots (e.g., .py, .js, .ts). Saved changes cascade to all golden repos.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save &amp; Cascade</button>
+                <button type="button" class="secondary" onclick="cancelEdit('indexing')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+
 <details class="config-section" id="section-scip">
     <summary>
         <h2>SCIP Code Intelligence</h2>

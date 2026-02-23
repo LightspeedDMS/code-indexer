@@ -25,9 +25,13 @@ var _tooltip = null;          // Active tooltip element
 var _zoom = null;             // D3 zoom behavior
 
 // Constants
-var BASE_RADIUS = 20, SCALE_FACTOR = 8, MIN_RADIUS = 20, MAX_RADIUS = 60;
+var BASE_RADIUS = 20, SCALE_FACTOR = 8, MIN_RADIUS = 20, MAX_RADIUS = 105;
 var OPACITY_FULL = 1.0, OPACITY_DIM_NODE = 0.15;
 var OPACITY_EDGE = 0.6, OPACITY_DIM_EDGE = 0.05;
+// Node radius sizing factors (Story #260: bubble sizing by repo count + dep count)
+var REPO_SCALE = 3, REPO_MAX_FACTOR = 30;
+var DEP_SCALE = 4, DEP_MAX_FACTOR = 40;
+var SYNERGY_SCALE = 0.5, SYNERGY_MAX = 15;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -178,7 +182,8 @@ function renderTooltip(nodeData, event) {
     if (nodeData.description && nodeData.description.length > 100) desc += '...';
     tip.innerHTML = '<div style="font-weight:600;margin-bottom:0.25rem;">' + _esc(nodeData.label || nodeData.id) + '</div>' +
         (desc ? '<div style="color:var(--pico-muted-color);margin-bottom:0.3rem;">' + _esc(desc) + '</div>' : '') +
-        '<div style="font-size:0.78rem;color:var(--pico-muted-color);">Repos: <strong>' + (nodeData.repo_count || 0) + '</strong></div>';
+        '<div style="font-size:0.78rem;color:var(--pico-muted-color);">Repos: <strong>' + (nodeData.repo_count || 0) + '</strong></div>' +
+        '<div style="font-size:0.78rem;color:var(--pico-muted-color);">Deps in: <strong>' + (nodeData.incoming_dep_count || 0) + '</strong>\u2003Deps out: <strong>' + (nodeData.outgoing_dep_count || 0) + '</strong></div>';
     document.body.appendChild(tip);
     _tooltip = tip;
     _positionTooltip(tip, event);
@@ -298,14 +303,14 @@ function _renderNodeGroups(group, nodes) {
         .on('mousemove', function(event) { if (_tooltip) _positionTooltip(_tooltip, event); })
         .on('mouseout', destroyTooltip);
     ng.append('circle')
-        .attr('r', function(d) { return _nodeRadius(d.repo_count); })
+        .attr('r', function(d) { return _nodeRadius(d); })
         .attr('fill', 'var(--pico-color-azure-500, #3b82f6)')
         .attr('stroke', _nodeStrokeColor).attr('stroke-width', 2)
         .style('opacity', OPACITY_FULL)
         .style('transition', 'opacity 0.25s ease, stroke 0.15s ease');
     ng.append('text')
         .attr('text-anchor', 'middle')
-        .attr('dy', function(d) { return _nodeRadius(d.repo_count) + 14; })
+        .attr('dy', function(d) { return _nodeRadius(d) + 14; })
         .attr('font-size', '11px').attr('fill', 'var(--pico-color)')
         .attr('pointer-events', 'none').attr('user-select', 'none')
         .style('opacity', OPACITY_FULL).style('transition', 'opacity 0.25s ease')
@@ -324,10 +329,10 @@ function _renderNodeGroups(group, nodes) {
  */
 function _setupForceSimulation(nodes, edges, w, h) {
     var sim = d3.forceSimulation(nodes)
-        .force('link', d3.forceLink(edges).id(function(d) { return d.id; }).distance(120))
+        .force('link', d3.forceLink(edges).id(function(d) { return d.id; }).distance(180))
         .force('charge', d3.forceManyBody().strength(-300))
         .force('center', d3.forceCenter(w / 2, h / 2))
-        .force('collide', d3.forceCollide().radius(function(d) { return _nodeRadius(d.repo_count) + 10; }))
+        .force('collide', d3.forceCollide().radius(function(d) { return _nodeRadius(d) + 20; }))
         .alphaDecay(0.04)
         .on('tick', _onTick)
         .on('end', function() { sim.stop(); });
@@ -344,12 +349,12 @@ function _onTick() {
             .attr('x2', function(d) {
                 var dx = d.target.x - d.source.x, dy = d.target.y - d.source.y;
                 var dist = Math.sqrt(dx * dx + dy * dy) || 1;
-                return d.target.x - (dx / dist) * _nodeRadius(d.target.repo_count);
+                return d.target.x - (dx / dist) * _nodeRadius(d.target);
             })
             .attr('y2', function(d) {
                 var dx = d.target.x - d.source.x, dy = d.target.y - d.source.y;
                 var dist = Math.sqrt(dx * dx + dy * dy) || 1;
-                return d.target.y - (dy / dist) * _nodeRadius(d.target.repo_count);
+                return d.target.y - (dy / dist) * _nodeRadius(d.target);
             });
     }
     if (_graphGroup) {
@@ -373,8 +378,19 @@ function _dragEnd(event, d) {
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-function _nodeRadius(repoCount) {
-    return Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, BASE_RADIUS + SCALE_FACTOR * Math.sqrt(repoCount || 0)));
+function _nodeRadius(nodeOrCount) {
+    var repoCount, totalDeps;
+    if (typeof nodeOrCount === 'object' && nodeOrCount !== null) {
+        repoCount = nodeOrCount.repo_count || 0;
+        totalDeps = (nodeOrCount.incoming_dep_count || 0) + (nodeOrCount.outgoing_dep_count || 0);
+    } else {
+        repoCount = nodeOrCount || 0;
+        totalDeps = 0;
+    }
+    var repoFactor = Math.min(repoCount * REPO_SCALE, REPO_MAX_FACTOR);
+    var depFactor = Math.min(totalDeps * DEP_SCALE, DEP_MAX_FACTOR);
+    var synergyBonus = Math.min(repoCount * totalDeps * SYNERGY_SCALE, SYNERGY_MAX);
+    return Math.min(MIN_RADIUS + repoFactor + depFactor + synergyBonus, MAX_RADIUS);
 }
 function _nodeStrokeColor() { return 'var(--pico-muted-border-color)'; }
 function _truncate(text, max) {

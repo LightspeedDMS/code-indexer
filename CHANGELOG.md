@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.47] - 2026-02-22
+
+### Added
+
+- Externalize indexable_extensions to server config: new IndexingConfig with 60 default extensions, Web UI "Indexing Settings" section, cascade to all golden repos on save, seed on registration, sync on refresh (#223)
+- Enhanced dependency graph bubble sizing: nodes include incoming_dep_count and outgoing_dep_count fields, _nodeRadius() combines repo count + dependency connectivity with synergy bonus, increased spacing and collision padding (#260)
+
+### Fixed
+
+- Config page 500 error: _get_current_config() missing "indexing" section in template context
+
 ## [9.3.46] - 2026-02-22
 
 ### Changed
