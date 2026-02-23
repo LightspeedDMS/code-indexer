@@ -132,8 +132,23 @@ You can create GitHub bug reports for issues discovered during investigation.
 
 Your working directory contains an `issue_manager.py` symlink for creating GitHub issues.
 
+1. Write the bug report body to a temporary markdown file:
+
 ```bash
-python3 issue_manager.py create bug "Bug title" --body "Bug description"
+cat > /tmp/bug_body.md << 'BUGEOF'
+## Bug Description
+...description...
+
+## Steps to Reproduce
+1. Step one
+...
+BUGEOF
+```
+
+2. Create the issue:
+
+```bash
+python3 issue_manager.py create bug /tmp/bug_body.md --title "Bug title"
 ```
 
 **Required Bug Report Body Format:**

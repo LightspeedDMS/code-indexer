@@ -178,7 +178,7 @@ class DependencyMapDomainService:
         Returns:
             Dict with:
               - nodes: List[Dict] each with id, name, description, repo_count,
-                       incoming_dep_count, outgoing_dep_count
+                       incoming_dep_count, outgoing_dep_count, total_file_count
               - edges: List[Dict] each with source, target, relationship
         """
         raw_domains = self._load_domains_json()
@@ -206,11 +206,22 @@ class DependencyMapDomainService:
             outgoing_counts[src] = outgoing_counts.get(src, 0) + 1
             incoming_counts[tgt] = incoming_counts.get(tgt, 0) + 1
 
+        # Load repo sizes from journal for code mass bubble sizing (Story #273)
+        repo_sizes = self._load_journal_repo_sizes()
+
         # Build nodes from domain list (apply access filtering)
         domain_list_data = self.get_domain_list(accessible_repos)
         nodes = []
         for domain in domain_list_data["domains"]:
             node_id = domain["name"]
+            # Aggregate file counts only for the participating repos visible to this user.
+            # get_domain_list() already applies access filtering, so participating_repos
+            # contains only the repos the user can see.
+            participating_repos = domain.get("participating_repos", [])
+            total_file_count = sum(
+                repo_sizes.get(repo_alias, {}).get("file_count", 0)
+                for repo_alias in participating_repos
+            )
             nodes.append({
                 "id": node_id,
                 "name": node_id,
@@ -218,6 +229,7 @@ class DependencyMapDomainService:
                 "repo_count": domain["repo_count"],
                 "incoming_dep_count": incoming_counts.get(node_id, 0),
                 "outgoing_dep_count": outgoing_counts.get(node_id, 0),
+                "total_file_count": total_file_count,
             })
 
         return {"nodes": nodes, "edges": edges}
@@ -235,6 +247,29 @@ class DependencyMapDomainService:
         """
         cidx_meta_read_path = self._dependency_map_service.cidx_meta_read_path
         return cidx_meta_read_path / "dependency-map"
+
+    def _load_journal_repo_sizes(self) -> Dict[str, Any]:
+        """
+        Load repo_sizes from _journal.json in the dependency-map directory.
+
+        Returns a dict mapping repo_alias -> {file_count: int, ...}.
+        Returns empty dict if journal is missing, lacks repo_sizes, or is corrupt.
+        """
+        try:
+            journal_path = self._get_depmap_dir() / "_journal.json"
+        except Exception as e:
+            logger.warning("dependency_map_domain: failed to get depmap dir for journal: %s", e)
+            return {}
+
+        if not journal_path.exists():
+            return {}
+
+        try:
+            journal = json.loads(journal_path.read_text())
+            return journal.get("repo_sizes", {})
+        except Exception as e:
+            logger.warning("dependency_map_domain: failed to read _journal.json for repo sizes: %s", e)
+            return {}
 
     def _load_domains_json(self) -> List[Dict[str, Any]]:
         """

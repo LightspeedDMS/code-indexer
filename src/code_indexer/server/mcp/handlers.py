@@ -3242,6 +3242,8 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         # Start auto-watch before file creation (Story #640, Story #197 AC3)
+        # Skip during write mode — write mode manages the full indexing lifecycle
+        # via exit_write_mode / _write_mode_run_refresh (Bug #274 Bug 1).
         try:
             # Check if this is a write exception (e.g., cidx-meta-global)
             if file_crud_service.is_write_exception(repository_alias):
@@ -3253,7 +3255,14 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 repo_path = activated_repo_manager.get_activated_repo_path(
                     username=user.username, user_alias=repository_alias
                 )
-            auto_watch_manager.start_watch(repo_path)
+            golden_repos_dir = getattr(app_module.app.state, "golden_repos_dir", None)
+            if not _is_write_mode_active(repository_alias, golden_repos_dir):
+                auto_watch_manager.start_watch(repo_path)
+            else:
+                logger.debug(
+                    f"Skipping auto-watch start for {repository_alias}: write mode active",
+                    extra={"correlation_id": get_correlation_id()},
+                )
         except Exception as e:
             # Log but don't fail - auto-watch is enhancement, not critical
             logger.warning(
@@ -3374,6 +3383,8 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         # Start auto-watch before file edit (Story #640, Story #197 AC3)
+        # Skip during write mode — write mode manages the full indexing lifecycle
+        # via exit_write_mode / _write_mode_run_refresh (Bug #274 Bug 1).
         try:
             # Check if this is a write exception (e.g., cidx-meta-global)
             if file_crud_service.is_write_exception(repository_alias):
@@ -3385,7 +3396,14 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 repo_path = activated_repo_manager.get_activated_repo_path(
                     username=user.username, user_alias=repository_alias
                 )
-            auto_watch_manager.start_watch(repo_path)
+            golden_repos_dir = getattr(app_module.app.state, "golden_repos_dir", None)
+            if not _is_write_mode_active(repository_alias, golden_repos_dir):
+                auto_watch_manager.start_watch(repo_path)
+            else:
+                logger.debug(
+                    f"Skipping auto-watch start for {repository_alias}: write mode active",
+                    extra={"correlation_id": get_correlation_id()},
+                )
         except Exception as e:
             # Log but don't fail - auto-watch is enhancement, not critical
             logger.warning(
@@ -3502,6 +3520,8 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         # Start auto-watch before file deletion (Story #640, Story #197 AC3)
+        # Skip during write mode — write mode manages the full indexing lifecycle
+        # via exit_write_mode / _write_mode_run_refresh (Bug #274 Bug 1).
         try:
             # Check if this is a write exception (e.g., cidx-meta-global)
             if file_crud_service.is_write_exception(repository_alias):
@@ -3513,7 +3533,14 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 repo_path = activated_repo_manager.get_activated_repo_path(
                     username=user.username, user_alias=repository_alias
                 )
-            auto_watch_manager.start_watch(repo_path)
+            golden_repos_dir = getattr(app_module.app.state, "golden_repos_dir", None)
+            if not _is_write_mode_active(repository_alias, golden_repos_dir):
+                auto_watch_manager.start_watch(repo_path)
+            else:
+                logger.debug(
+                    f"Skipping auto-watch start for {repository_alias}: write mode active",
+                    extra={"correlation_id": get_correlation_id()},
+                )
         except Exception as e:
             # Log but don't fail - auto-watch is enhancement, not critical
             logger.warning(
@@ -3595,6 +3622,27 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 def _write_mode_strip_global(repo_alias: str) -> str:
     """Return alias without trailing '-global' suffix."""
     return repo_alias[: -len("-global")] if repo_alias.endswith("-global") else repo_alias
+
+
+def _is_write_mode_active(repo_alias: str, golden_repos_dir: Optional[str]) -> bool:
+    """Return True if a write-mode marker exists for repo_alias.
+
+    Used by file operation handlers to suppress auto-watch during write mode.
+    During write mode, the caller (enter_write_mode / exit_write_mode) manages
+    the full indexing lifecycle, so auto-watch must not race with it.
+
+    Args:
+        repo_alias: Repository alias (with or without -global suffix)
+        golden_repos_dir: Path to the golden repos root directory (may be None)
+
+    Returns:
+        True if write mode marker file exists for this repo alias, False otherwise
+    """
+    if not golden_repos_dir:
+        return False
+    alias = _write_mode_strip_global(repo_alias)
+    marker_file = Path(golden_repos_dir) / ".write_mode" / f"{alias}.json"
+    return marker_file.exists()
 
 
 def _write_mode_acquire_lock(refresh_scheduler: Any, alias: str) -> Tuple[bool, str]:
@@ -3679,25 +3727,56 @@ def handle_enter_write_mode(params: Dict[str, Any], user: User) -> Dict[str, Any
 def _write_mode_run_refresh(
     refresh_scheduler: Any, repo_alias: str, golden_repos_dir: Path, alias: str
 ) -> None:
-    """Run synchronous refresh, delete marker, release lock.
+    """Run synchronous refresh, delete marker, release lock, stop auto-watch.
 
     The write lock and marker are released BEFORE calling _execute_refresh so
     that _execute_refresh does not see the lock as held and skip the refresh.
     (_execute_refresh checks is_write_locked() and skips for local repos when
     the lock is held — Story #227 guard for external writers.)
 
+    The auto-watch is stopped BEFORE _execute_refresh to prevent the watch
+    handler from racing with the refresh (Bug #274 Bug 3).
+
     The exception from _execute_refresh is re-raised so the caller can return
     an appropriate error response.
     """
-    # Release marker and lock FIRST so _execute_refresh sees no lock
+    import json as _json
+
+    from code_indexer.server.services.auto_watch_manager import auto_watch_manager
+
+    # Read source_path from marker BEFORE deleting it — needed to stop auto-watch
     marker_file = golden_repos_dir / ".write_mode" / f"{alias}.json"
+    source_path: Optional[str] = None
+    try:
+        marker_data = _json.loads(marker_file.read_text())
+        source_path = marker_data.get("source_path")
+    except Exception:
+        pass  # marker may already be gone or unreadable — proceed without source_path
+
+    # Release marker and lock FIRST so _execute_refresh sees no lock
     try:
         marker_file.unlink()
     except FileNotFoundError:
         pass
     refresh_scheduler.release_write_lock(alias, owner_name="mcp_write_mode")
 
-    # Now run the refresh — lock is clear, refresh will proceed
+    # Stop auto-watch for the repo BEFORE running refresh (Bug #274 Bug 3)
+    # This prevents the watch handler from processing events that the refresh
+    # will handle, avoiding hash mismatches and wasted VoyageAI API calls.
+    if source_path:
+        try:
+            auto_watch_manager.stop_watch(source_path)
+            logger.debug(
+                f"Stopped auto-watch for {source_path} before write-mode refresh",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to stop auto-watch for {source_path} before refresh: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+    # Now run the refresh — lock is clear, watch is stopped, refresh will proceed
     refresh_scheduler._execute_refresh(repo_alias)
 
 

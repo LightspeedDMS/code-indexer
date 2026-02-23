@@ -166,6 +166,14 @@ class GitAwareWatchHandler(FileSystemEventHandler):
     def _add_pending_change(self, file_path: Path, change_type: str):
         """Add a file change to pending queue if it should be indexed."""
         try:
+            # Ignore atomic write temp files created by _atomic_write_file().
+            # These have prefix ".tmp_" (e.g. .tmp_abc123_somefile.md).
+            # Path.suffix returns ".md" for such files, so extension checks
+            # alone are insufficient — we must filter by basename prefix.
+            if file_path.name.startswith(".tmp_"):
+                logger.debug(f"Ignoring atomic write temp file: {file_path}")
+                return
+
             # For deletion events, always include the file because we can't check
             # file properties on non-existent files
             if change_type != "deleted":

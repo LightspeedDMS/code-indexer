@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.51] - 2026-02-23
+
+### Fixed
+
+- Watch handler race conditions during MCP write mode file editing (#274):
+  - handle_edit_file, handle_create_file, handle_delete_file no longer start auto-watch when write mode is active (checks marker file existence)
+  - _write_mode_run_refresh() stops auto-watch before executing refresh to prevent racing
+  - GitAwareWatchHandler and SimpleWatchHandler now filter .tmp_ prefixed temp files created by _atomic_write_file()
+- Research assistant issue_manager.py symlink: prefers bundled copy in CIDX codebase over ~/.claude fallback, fixes broken symlinks on production servers
+
+### Added
+
+- Dependency map code mass bubble sizing: graph nodes include total_file_count aggregated from _journal.json repo_sizes, enabling bubble size to reflect actual code mass (#273)
+- Bundled issue_manager.py in src/code_indexer/server/scripts/ for production deployment without ~/.claude dependency
+- MCP tool documentation: expanded dependency map discovery guidance in cidx_quick_reference, search_code, and first_time_user_guide with two result types explanation and workflow steps
+
 ## [9.3.50] - 2026-02-23
 
 ### Added

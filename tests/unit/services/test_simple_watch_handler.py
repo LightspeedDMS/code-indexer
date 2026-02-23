@@ -625,6 +625,128 @@ class TestSimpleWatchHandlerFullLifecycle:
         assert total_time < 5.0, "Full lifecycle should complete quickly"
 
 
+class TestSimpleWatchHandlerTmpPrefixFiltering:
+    """Test that .tmp_ prefixed files (from _atomic_write_file) are filtered.
+
+    Bug #274: _atomic_write_file() creates temp files like .tmp_XXXXXX_filename.md.
+    Path(".tmp_abc_file.md").suffix == ".md" so they pass the extension check.
+    SimpleWatchHandler only filters *.tmp suffix, not .tmp_ prefix.
+    Fix: _should_ignore_file must also ignore files whose basename starts with .tmp_
+    """
+
+    def test_tmp_prefix_file_is_ignored(self):
+        """_should_ignore_file must return True for .tmp_XXXXXX_somefile.md."""
+        from code_indexer.services.simple_watch_handler import SimpleWatchHandler
+        from pathlib import Path
+
+        handler = SimpleWatchHandler(
+            folder_path="/tmp",
+            indexing_callback=lambda f, t: None,
+        )
+
+        # Atomic write temp files: prefix=".tmp_", suffix=f"_{filename}"
+        assert handler._should_ignore_file(
+            Path("/some/dir/.tmp_abc123_somefile.md")
+        ), ".tmp_ prefixed file must be ignored"
+
+    def test_tmp_prefix_with_only_md_extension_is_ignored(self):
+        """Even when the final extension is .md (not .tmp), .tmp_ prefix must be ignored."""
+        from code_indexer.services.simple_watch_handler import SimpleWatchHandler
+        from pathlib import Path
+
+        handler = SimpleWatchHandler(
+            folder_path="/tmp",
+            indexing_callback=lambda f, t: None,
+        )
+
+        # Suffix is .md but basename starts with .tmp_
+        p = Path("/repo/.tmp_XYZ12345_README.md")
+        assert handler._should_ignore_file(p), (
+            f"File {p.name} has .md extension but .tmp_ prefix — must be ignored"
+        )
+
+    def test_regular_md_file_is_not_ignored(self):
+        """Regular .md files without .tmp_ prefix must NOT be ignored."""
+        from code_indexer.services.simple_watch_handler import SimpleWatchHandler
+        from pathlib import Path
+
+        handler = SimpleWatchHandler(
+            folder_path="/tmp",
+            indexing_callback=lambda f, t: None,
+        )
+
+        assert not handler._should_ignore_file(
+            Path("/some/dir/README.md")
+        ), "Regular .md file must not be ignored"
+
+    def test_tmp_suffix_still_ignored(self):
+        """Existing .tmp suffix filter must still work."""
+        from code_indexer.services.simple_watch_handler import SimpleWatchHandler
+        from pathlib import Path
+
+        handler = SimpleWatchHandler(
+            folder_path="/tmp",
+            indexing_callback=lambda f, t: None,
+        )
+
+        assert handler._should_ignore_file(
+            Path("/some/dir/somefile.tmp")
+        ), ".tmp suffix file must still be ignored"
+
+    def test_tmp_prefix_and_tmp_suffix_both_ignored(self):
+        """File that is both .tmp_ prefixed and .tmp suffixed must be ignored."""
+        from code_indexer.services.simple_watch_handler import SimpleWatchHandler
+        from pathlib import Path
+
+        handler = SimpleWatchHandler(
+            folder_path="/tmp",
+            indexing_callback=lambda f, t: None,
+        )
+
+        assert handler._should_ignore_file(
+            Path("/some/dir/.tmp_abc123_somefile.tmp")
+        ), ".tmp_ prefix + .tmp suffix file must be ignored"
+
+    def test_tmp_prefix_watch_does_not_trigger_callback(self, tmp_path):
+        """Live watch: creating a .tmp_ prefixed file must NOT trigger the indexing callback."""
+        import time
+        from code_indexer.services.simple_watch_handler import SimpleWatchHandler
+
+        callback_files: list = []
+
+        def callback(changed_files, event_type):
+            callback_files.extend(changed_files)
+
+        handler = SimpleWatchHandler(
+            folder_path=str(tmp_path),
+            indexing_callback=callback,
+            debounce_seconds=0.2,
+            idle_timeout_seconds=5.0,
+        )
+        handler.start_watching()
+        time.sleep(0.1)
+
+        # Create an atomic write temp file (as _atomic_write_file would)
+        tmp_file = tmp_path / ".tmp_abc123_content.md"
+        tmp_file.write_text("temp content")
+
+        # Create a regular file that SHOULD trigger callback
+        real_file = tmp_path / "real_content.md"
+        real_file.write_text("real content")
+
+        time.sleep(0.5)
+        handler.stop_watching()
+
+        # .tmp_ prefixed file must not appear in any callback
+        assert not any(".tmp_" in f for f in callback_files), (
+            f".tmp_ prefixed file must not trigger callback. Got: {callback_files}"
+        )
+        # The real file should have triggered callback
+        assert any("real_content.md" in f for f in callback_files), (
+            f"real_content.md should have triggered callback. Got: {callback_files}"
+        )
+
+
 class TestSimpleWatchHandlerAdditionalHandlers:
     """Test additional_handlers functionality for attaching extra FileSystemEventHandlers."""
 

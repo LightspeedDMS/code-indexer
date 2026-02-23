@@ -715,25 +715,24 @@ class ResearchAssistantService:
         # Create folder if it doesn't exist
         folder.mkdir(parents=True, exist_ok=True)
 
+        # Detect CIDX repo root (used for both code-indexer and issue_manager symlinks)
+        cidx_repo_root = os.environ.get("CIDX_REPO_ROOT")
+        if not cidx_repo_root:
+            # Try to find repo root from this file's location
+            # This file is in src/code_indexer/server/services/
+            current_file = Path(__file__).resolve()
+
+            # Walk up looking for repo markers (pyproject.toml + src/code_indexer)
+            for parent in [current_file] + list(current_file.parents):
+                if (parent / "pyproject.toml").exists() and (
+                    parent / "src" / "code_indexer"
+                ).exists():
+                    cidx_repo_root = str(parent)
+                    break
+
         # Create softlink to code-indexer source
         softlink = folder / "code-indexer"
         if not softlink.exists():
-            # Find code-indexer source (same pattern as self-monitoring)
-            # Look for CIDX_REPO_ROOT env var, or try to find it from current file
-            cidx_repo_root = os.environ.get("CIDX_REPO_ROOT")
-            if not cidx_repo_root:
-                # Try to find repo root from this file's location
-                # This file is in src/code_indexer/server/services/
-                current_file = Path(__file__).resolve()
-
-                # Walk up looking for repo markers (pyproject.toml + src/code_indexer)
-                for parent in [current_file] + list(current_file.parents):
-                    if (parent / "pyproject.toml").exists() and (
-                        parent / "src" / "code_indexer"
-                    ).exists():
-                        cidx_repo_root = str(parent)
-                        break
-
             if cidx_repo_root:
                 source_path = Path(cidx_repo_root)
                 if source_path.exists():
@@ -748,7 +747,26 @@ class ResearchAssistantService:
                 )
 
         # Create symlink to issue_manager.py for GitHub bug report creation (Story #202 AC4)
-        issue_manager_source = Path.home() / ".claude" / "scripts" / "utils" / "issue_manager.py"
+        # Primary: bundled copy within CIDX codebase
+        # Fallback: ~/.claude/scripts/utils/issue_manager.py (developer environments)
+        issue_manager_source = None
+        if cidx_repo_root:
+            bundled_path = (
+                Path(cidx_repo_root)
+                / "src"
+                / "code_indexer"
+                / "server"
+                / "scripts"
+                / "issue_manager.py"
+            )
+            if bundled_path.exists():
+                issue_manager_source = bundled_path
+
+        if not issue_manager_source:
+            fallback_path = Path.home() / ".claude" / "scripts" / "utils" / "issue_manager.py"
+            if fallback_path.exists():
+                issue_manager_source = fallback_path
+
         issue_manager_link = folder / "issue_manager.py"
 
         # Handle broken symlinks: is_symlink() returns True but exists() returns False
@@ -757,11 +775,15 @@ class ResearchAssistantService:
             logger.info(f"Removed broken symlink: {issue_manager_link}")
 
         if not issue_manager_link.exists():
-            if issue_manager_source.exists():
+            if issue_manager_source:
                 issue_manager_link.symlink_to(issue_manager_source)
-                logger.info(f"Created issue_manager.py symlink: {issue_manager_link} -> {issue_manager_source}")
+                logger.info(
+                    f"Created issue_manager.py symlink: {issue_manager_link} -> {issue_manager_source}"
+                )
             else:
-                logger.warning(f"issue_manager.py not found at {issue_manager_source}, skipping symlink")
+                logger.warning(
+                    "issue_manager.py not found in CIDX codebase or ~/.claude/scripts/utils/, skipping symlink"
+                )
 
     def add_message(self, session_id: str, role: str, content: str) -> Dict[str, Any]:
         """
