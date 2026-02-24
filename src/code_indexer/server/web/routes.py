@@ -2460,6 +2460,55 @@ def force_resync_golden_repo(
         )
 
 
+@web_router.post("/golden-repos/{alias}/wiki-toggle", response_class=HTMLResponse)
+def toggle_wiki_enabled(
+    request: Request,
+    alias: str,
+    wiki_enabled: str = Form(...),
+    csrf_token: Optional[str] = Form(None),
+):
+    """Toggle wiki_enabled for a golden repo (Story #280)."""
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+    if not validate_login_csrf_token(request, csrf_token):
+        return templates.TemplateResponse(
+            "partials/error_message.html",
+            {"request": request, "error": "Invalid CSRF token"},
+            status_code=400,
+        )
+    manager = _get_golden_repo_manager()
+    manager.set_wiki_enabled(alias, wiki_enabled == "1")
+    return _create_golden_repos_page_response(
+        request, session, success_message="Wiki setting updated successfully"
+    )
+
+
+@web_router.post("/golden-repos/{alias}/wiki-refresh", response_class=HTMLResponse)
+def refresh_wiki_cache(
+    request: Request,
+    alias: str,
+    csrf_token: Optional[str] = Form(None),
+):
+    """Clear wiki render cache for a golden repo (Story #283)."""
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+    if not validate_login_csrf_token(request, csrf_token):
+        return templates.TemplateResponse(
+            "partials/error_message.html",
+            {"request": request, "error": "Invalid CSRF token"},
+            status_code=400,
+        )
+    from ..wiki.wiki_cache import WikiCache
+    manager = _get_golden_repo_manager()
+    cache = WikiCache(manager.db_path)
+    cache.invalidate_repo(alias)
+    return _create_golden_repos_page_response(
+        request, session, success_message="Wiki cache cleared"
+    )
+
+
 @web_router.post("/golden-repos/activate", response_class=HTMLResponse)
 def activate_golden_repo(
     request: Request,

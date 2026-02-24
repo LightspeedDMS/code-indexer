@@ -297,6 +297,93 @@ class TestSpanLoggerProperty:
         mock_span_logger_class.assert_called_once()
 
 
+class TestEagerInitialize:
+    """Tests for eager_initialize method on LangfuseService."""
+
+    @patch("code_indexer.server.services.langfuse_service.LangfuseClient")
+    def test_eager_initialize_calls_client_eager_initialize(
+        self, mock_client_class, langfuse_service, mock_config_manager
+    ):
+        """
+        LangfuseService.eager_initialize() must call client.eager_initialize()
+        to pre-initialize the Langfuse SDK during application startup.
+        This moves the one-time SDK import + network I/O cost to startup
+        rather than the first MCP request.
+        """
+        config = Mock(spec=ServerConfig)
+        config.langfuse_config = LangfuseConfig(
+            enabled=True,
+            public_key="test-key",
+            secret_key="test-secret",
+            host="https://example.com",
+        )
+        mock_config_manager.load_config.return_value = config
+
+        mock_client_instance = Mock()
+        mock_client_class.return_value = mock_client_instance
+
+        langfuse_service.eager_initialize()
+
+        mock_client_instance.eager_initialize.assert_called_once_with()
+
+    @patch("code_indexer.server.services.langfuse_service.LangfuseClient")
+    def test_eager_initialize_does_not_raise_on_client_failure(
+        self, mock_client_class, langfuse_service, mock_config_manager
+    ):
+        """
+        If client.eager_initialize() raises, eager_initialize() must swallow
+        the exception and log a warning. Server startup must not be blocked
+        by Langfuse initialization failures.
+        """
+        config = Mock(spec=ServerConfig)
+        config.langfuse_config = LangfuseConfig(
+            enabled=True,
+            public_key="bad-key",
+            secret_key="bad-secret",
+            host="https://example.com",
+        )
+        mock_config_manager.load_config.return_value = config
+
+        mock_client_instance = Mock()
+        mock_client_instance.eager_initialize.side_effect = RuntimeError(
+            "Network unreachable"
+        )
+        mock_client_class.return_value = mock_client_instance
+
+        # Must not raise
+        langfuse_service.eager_initialize()
+
+    @patch("code_indexer.server.services.langfuse_service.LangfuseClient")
+    def test_eager_initialize_initializes_client_first(
+        self, mock_client_class, langfuse_service, mock_config_manager
+    ):
+        """
+        eager_initialize() must first ensure the client is created
+        (by accessing the client property), then call eager_initialize on it.
+        The client must not be None after eager_initialize() returns.
+        """
+        config = Mock(spec=ServerConfig)
+        config.langfuse_config = LangfuseConfig(
+            enabled=True,
+            public_key="test-key",
+            secret_key="test-secret",
+            host="https://example.com",
+        )
+        mock_config_manager.load_config.return_value = config
+
+        mock_client_instance = Mock()
+        mock_client_class.return_value = mock_client_instance
+
+        # Client must be None before eager_initialize
+        assert langfuse_service._client is None
+
+        langfuse_service.eager_initialize()
+
+        # Client must be set after eager_initialize
+        assert langfuse_service._client is not None
+        assert langfuse_service._client is mock_client_instance
+
+
 class TestCleanupSession:
     """Tests for cleanup_session method."""
 

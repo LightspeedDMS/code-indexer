@@ -55,6 +55,24 @@ class LangfuseClient:
         """Check if Langfuse tracing is enabled."""
         return self._config.enabled
 
+    def eager_initialize(self) -> None:
+        """
+        Pre-initialize the Langfuse SDK during application startup.
+
+        Calling this during the lifespan startup function moves the one-time
+        SDK initialization cost (module import + network I/O) to server startup
+        rather than the first request. After eager_initialize() completes, the
+        _langfuse instance is set and subsequent calls use the fast-path in
+        _ensure_initialized() without acquiring the lock.
+
+        Failure is logged but does NOT raise - startup must continue even if
+        Langfuse credentials are invalid or the network is unavailable.
+        """
+        try:
+            self._ensure_initialized()
+        except Exception as e:
+            logger.warning(f"Langfuse eager initialization failed (non-fatal): {e}")
+
     def _ensure_initialized(self) -> bool:
         """
         Ensure Langfuse SDK is initialized (lazy init with thread safety).

@@ -3155,6 +3155,29 @@ def create_app() -> FastAPI:
             )
             app.state.langfuse_sync_service = None
 
+        # Startup: Eagerly initialize Langfuse SDK (Story #278)
+        # Moves the one-time SDK import + network I/O cost to startup rather
+        # than the first MCP request. Failure is non-fatal - server continues.
+        logger.info(
+            "Server startup: Eagerly initializing Langfuse SDK",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.langfuse_service import (
+                get_langfuse_service,
+            )
+
+            get_langfuse_service().eager_initialize()
+            logger.info(
+                "Langfuse SDK eager initialization complete",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                f"Langfuse SDK eager initialization failed (non-fatal): {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
         yield  # Server is now running
 
         # Shutdown: Stop global repos background services BEFORE other cleanup
@@ -8467,6 +8490,17 @@ def create_app() -> FastAPI:
 
     # Include dependency map router with /admin prefix (Story #212)
     app.include_router(dependency_map_router, prefix="/admin", tags=["admin"])
+
+    # Include wiki router (Stories #280-#283)
+    from .wiki.routes import wiki_router
+    wiki_static_dir = PathLib(__file__).parent / "wiki" / "static"
+    if wiki_static_dir.exists():
+        app.mount(
+            "/wiki/_static",
+            StaticFiles(directory=str(wiki_static_dir)),
+            name="wiki_static",
+        )
+    app.include_router(wiki_router, prefix="/wiki", tags=["wiki"])
 
     # Include user router with /user prefix for non-admin self-service
     app.include_router(user_router, prefix="/user", tags=["user"])

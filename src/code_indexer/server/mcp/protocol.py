@@ -19,6 +19,7 @@ from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.config_service import get_config_service
 from sse_starlette.sse import EventSourceResponse
 import asyncio
+import functools
 import uuid
 import json
 import logging
@@ -168,12 +169,16 @@ async def _invoke_handler(
         if is_async:
             return await handler(arguments, user, session_state=session_state)
         else:
-            return handler(arguments, user, session_state=session_state)
+            loop = asyncio.get_running_loop()
+            bound = functools.partial(handler, arguments, user, session_state=session_state)
+            return await loop.run_in_executor(None, bound)
     else:
         if is_async:
             return await handler(arguments, user)
         else:
-            return handler(arguments, user)
+            loop = asyncio.get_running_loop()
+            bound = functools.partial(handler, arguments, user)
+            return await loop.run_in_executor(None, bound)
 
 
 async def handle_tools_call(

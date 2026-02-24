@@ -1,0 +1,309 @@
+/* Wiki styles - Epic #279 refinement */
+
+/* -----------------------------------------------------------------------
+   Override Pico container centering — wiki needs full-width layout
+   ----------------------------------------------------------------------- */
+.wiki-layout {
+    max-width: none;
+    padding: 0;
+    margin: 0;
+}
+
+/* -----------------------------------------------------------------------
+   Persistent top toolbar — always visible
+   ----------------------------------------------------------------------- */
+.wiki-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.75rem;
+    border-bottom: 1px solid var(--pico-muted-border-color);
+    background: var(--pico-background-color);
+    position: sticky;
+    top: 0;
+    z-index: 200;
+}
+
+.toolbar-btn {
+    background: none;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 1.1rem;
+    padding: 0.25rem 0.5rem;
+    color: var(--pico-color);
+    line-height: 1;
+}
+
+.toolbar-btn:hover {
+    background: var(--pico-secondary-background);
+}
+
+.toolbar-home {
+    font-weight: 600;
+    text-decoration: none;
+    font-size: 0.9rem;
+    color: var(--pico-primary);
+}
+
+.toolbar-spacer {
+    flex: 1;
+}
+
+/* Show/hide sun/moon based on current theme */
+[data-theme="dark"] .theme-icon-dark { display: none; }
+[data-theme="dark"] .theme-icon-light { display: inline; }
+[data-theme="light"] .theme-icon-dark { display: inline; }
+[data-theme="light"] .theme-icon-light { display: none; }
+
+/* -----------------------------------------------------------------------
+   Page layout: sidebar + main content
+   ----------------------------------------------------------------------- */
+.wiki-page {
+    display: flex;
+    align-items: stretch;
+    min-height: calc(100vh - 40px);
+}
+
+.wiki-main {
+    flex: 1;
+    min-width: 0;
+    padding: 1rem 2rem 2rem 2rem;
+}
+
+/* -----------------------------------------------------------------------
+   Sidebar
+   ----------------------------------------------------------------------- */
+.wiki-sidebar {
+    width: 280px;
+    min-width: 180px;
+    max-width: 500px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--pico-muted-border-color);
+    padding: 0.5rem 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    background: var(--pico-background-color);
+    position: sticky;
+    top: 40px;
+    max-height: calc(100vh - 40px);
+    resize: horizontal;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Groups */
+.sidebar-group {
+    margin-bottom: 0.25rem;
+}
+
+.sidebar-group-header {
+    padding: 0.35rem 0.75rem;
+    font-weight: 600;
+    font-size: 0.82rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    user-select: none;
+    color: var(--pico-muted-color);
+}
+
+.sidebar-group-header:hover {
+    color: var(--pico-color);
+}
+
+.sidebar-group.collapsed .sidebar-group-items {
+    display: none;
+}
+
+/* Categories within groups */
+.sidebar-category {
+    margin-left: 0.4rem;
+}
+
+.sidebar-category-header {
+    padding: 0.25rem 0.75rem;
+    font-weight: 500;
+    font-size: 0.84rem;
+    cursor: pointer;
+    user-select: none;
+    color: var(--pico-muted-color);
+}
+
+.sidebar-category.collapsed .sidebar-category-items {
+    display: none;
+}
+
+/* Article links */
+.sidebar-item {
+    display: block;
+    padding: 0.25rem 0.75rem 0.25rem 1rem;
+    font-size: 0.8rem;
+    text-decoration: none;
+    color: var(--pico-color);
+    border-left: 3px solid transparent;
+    transition: background 0.1s, border-color 0.1s;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    line-height: 1.3;
+}
+
+.sidebar-item:hover {
+    background: var(--pico-secondary-background);
+    border-left-color: var(--pico-muted-border-color);
+}
+
+.sidebar-item.active {
+    font-weight: 600;
+    border-left-color: var(--pico-primary);
+    color: var(--pico-primary);
+    background: var(--pico-secondary-background);
+}
+
+/* Recently viewed */
+.sidebar-recently-viewed {
+    margin-top: auto;
+    border-top: 1px solid var(--pico-muted-border-color);
+    padding-top: 0.5rem;
+    flex-shrink: 0;
+}
+
+/* Collapsed sidebar (toggled) */
+.wiki-sidebar.collapsed {
+    width: 0 !important;
+    min-width: 0;
+    overflow: hidden;
+    border-right: none;
+    padding: 0;
+    resize: none;
+}
+
+/* -----------------------------------------------------------------------
+   Breadcrumbs
+   ----------------------------------------------------------------------- */
+.wiki-breadcrumbs {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-bottom: 1rem;
+    font-size: 0.8rem;
+    color: var(--pico-muted-color);
+}
+
+.wiki-breadcrumbs a {
+    color: var(--pico-primary);
+    text-decoration: none;
+}
+
+.wiki-breadcrumbs a:hover {
+    text-decoration: underline;
+}
+
+.breadcrumb-sep {
+    color: var(--pico-muted-color);
+}
+
+.breadcrumb-current {
+    color: var(--pico-color);
+    font-weight: 500;
+}
+
+/* -----------------------------------------------------------------------
+   Article content — reduced font sizes
+   ----------------------------------------------------------------------- */
+.wiki-content {
+    line-height: 1.6;
+    font-size: 0.92rem;
+}
+
+.wiki-content h1 {
+    font-size: 1.6rem;
+    margin-top: 0;
+    margin-bottom: 0.75rem;
+}
+
+.wiki-content h2 {
+    font-size: 1.3rem;
+    margin-top: 1.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.wiki-content h3 {
+    font-size: 1.1rem;
+    margin-top: 1.25rem;
+    margin-bottom: 0.4rem;
+}
+
+.wiki-content h4,
+.wiki-content h5,
+.wiki-content h6 {
+    font-size: 0.95rem;
+    margin-top: 1rem;
+    margin-bottom: 0.3rem;
+}
+
+.wiki-content table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+}
+
+.wiki-content table th,
+.wiki-content table td {
+    border: 1px solid var(--pico-muted-border-color);
+    padding: 0.4rem 0.6rem;
+}
+
+.wiki-content img {
+    max-width: 100%;
+    height: auto;
+}
+
+.wiki-content pre {
+    padding: 0.75rem;
+    overflow-x: auto;
+    border-radius: 4px;
+    background: var(--pico-code-background-color);
+    font-size: 0.85rem;
+}
+
+.wiki-content code {
+    font-size: 0.85em;
+}
+
+.wiki-content ul,
+.wiki-content ol {
+    padding-left: 1.5rem;
+}
+
+.wiki-content li {
+    margin-bottom: 0.2rem;
+}
+
+/* -----------------------------------------------------------------------
+   Responsive: collapse sidebar on small viewports
+   ----------------------------------------------------------------------- */
+@media (max-width: 768px) {
+    .wiki-sidebar {
+        position: fixed;
+        left: 0;
+        top: 40px;
+        z-index: 100;
+        height: calc(100vh - 40px);
+        max-height: calc(100vh - 40px);
+        transform: translateX(0);
+        transition: transform 0.2s ease;
+        box-shadow: 2px 0 8px rgba(0, 0, 0, 0.15);
+        resize: none;
+    }
+
+    .wiki-sidebar.collapsed {
+        width: 280px !important;
+        transform: translateX(-100%);
+    }
+
+    .wiki-main {
+        padding: 1rem;
+    }
+}

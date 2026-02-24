@@ -146,6 +146,26 @@
                             <span class="error-text">{{ repo.error_message }}</span>
                         </div>
                         {% endif %}
+                        <div class="detail-item">
+                            <label>Wiki:</label>
+                            <span>
+                                <form method="post" action="/admin/golden-repos/{{ repo.alias }}/wiki-toggle" style="display:inline">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <input type="hidden" name="wiki_enabled" value="{{ '0' if repo.wiki_enabled else '1' }}">
+                                    <label style="display:inline-flex; align-items:center; gap:0.3rem; margin:0; cursor:pointer;">
+                                        <input type="checkbox" {{ 'checked' if repo.wiki_enabled else '' }} onchange="this.form.submit()" style="margin:0;">
+                                        Enabled
+                                    </label>
+                                </form>
+                                {% if repo.wiki_enabled %}
+                                <a href="/wiki/{{ repo.alias }}/" target="_blank" style="font-size:0.85rem;">/wiki/{{ repo.alias }}/</a>
+                                <form method="post" action="/admin/golden-repos/{{ repo.alias }}/wiki-refresh" style="display:inline">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <button class="outline small" type="submit">Clear Wiki Cache</button>
+                                </form>
+                                {% endif %}
+                            </span>
+                        </div>
                     </div>
 
                     <!-- Repository Description Section (Story #218) -->

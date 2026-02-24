@@ -1511,7 +1511,8 @@ class GoldenRepoMetadataSqliteBackend:
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             """SELECT alias, repo_url, default_branch, clone_path, created_at,
-                      enable_temporal, temporal_options, category_id, category_auto_assigned
+                      enable_temporal, temporal_options, category_id, category_auto_assigned,
+                      COALESCE(wiki_enabled, 0)
                FROM golden_repos_metadata WHERE alias = ?""",
             (alias,),
         )
@@ -1530,6 +1531,7 @@ class GoldenRepoMetadataSqliteBackend:
             "temporal_options": json.loads(row[6]) if row[6] else None,
             "category_id": row[7],
             "category_auto_assigned": bool(row[8]),
+            "wiki_enabled": bool(row[9]),
         }
 
     def list_repos(self) -> List[Dict[str, Any]]:
@@ -1542,7 +1544,7 @@ class GoldenRepoMetadataSqliteBackend:
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             """SELECT alias, repo_url, default_branch, clone_path, created_at,
-                      enable_temporal, temporal_options
+                      enable_temporal, temporal_options, COALESCE(wiki_enabled, 0)
                FROM golden_repos_metadata"""
         )
 
@@ -1557,6 +1559,7 @@ class GoldenRepoMetadataSqliteBackend:
                     "created_at": row[4],
                     "enable_temporal": bool(row[5]),
                     "temporal_options": json.loads(row[6]) if row[6] else None,
+                    "wiki_enabled": bool(row[7]),
                 }
             )
 
@@ -1689,6 +1692,18 @@ class GoldenRepoMetadataSqliteBackend:
             )
         return updated
 
+    def update_wiki_enabled(self, alias: str, enabled: bool) -> None:
+        """Update wiki_enabled flag for a golden repo (Story #280)."""
+
+        def operation(conn):
+            conn.execute(
+                "UPDATE golden_repos_metadata SET wiki_enabled = ? WHERE alias = ?",
+                (1 if enabled else 0, alias),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+        logger.info(f"Updated wiki_enabled={enabled} for golden repo: {alias}")
+
     def list_repos_with_categories(self) -> List[Dict[str, Any]]:
         """
         List all golden repositories with category information (Story #181).
@@ -1699,7 +1714,8 @@ class GoldenRepoMetadataSqliteBackend:
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             """SELECT alias, repo_url, default_branch, clone_path, created_at,
-                      enable_temporal, temporal_options, category_id, category_auto_assigned
+                      enable_temporal, temporal_options, category_id, category_auto_assigned,
+                      COALESCE(wiki_enabled, 0)
                FROM golden_repos_metadata"""
         )
 
@@ -1716,6 +1732,7 @@ class GoldenRepoMetadataSqliteBackend:
                     "temporal_options": json.loads(row[6]) if row[6] else None,
                     "category_id": row[7],
                     "category_auto_assigned": bool(row[8]),
+                    "wiki_enabled": bool(row[9]),
                 }
             )
 
