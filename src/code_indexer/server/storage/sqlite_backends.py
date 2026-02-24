@@ -1444,7 +1444,8 @@ class GoldenRepoMetadataSqliteBackend:
                     clone_path TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     enable_temporal INTEGER NOT NULL DEFAULT 0,
-                    temporal_options TEXT
+                    temporal_options TEXT,
+                    wiki_enabled INTEGER DEFAULT 0
                 )
             """)
             conn.commit()
