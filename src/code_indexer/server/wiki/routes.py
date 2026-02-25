@@ -91,8 +91,9 @@ def _check_user_wiki_access(
     Only the repo owner and admin users may access a user wiki (Story #291, AC4).
     """
     access_svc = request.app.state.access_filtering_service
-    if current_user.username != username and not access_svc.is_admin_user(
-        current_user.username
+    if current_user.username != username and not (
+        access_svc.is_admin_user(current_user.username)
+        or current_user.has_permission("manage_users")
     ):
         raise HTTPException(status_code=404, detail="Not found")
 
@@ -111,7 +112,7 @@ def _check_wiki_access(request: Request, repo_alias: str, current_user: User) ->
     """Validate wiki access; return resolved filesystem path. 404 on any failure (invisible repo)."""
     manager = request.app.state.golden_repo_manager
     access_svc = request.app.state.access_filtering_service
-    if not access_svc.is_admin_user(current_user.username):
+    if not (access_svc.is_admin_user(current_user.username) or current_user.has_permission("manage_users")):
         accessible = access_svc.get_accessible_repos(current_user.username)
         if repo_alias not in accessible:
             raise HTTPException(status_code=404, detail="Not found")
