@@ -73,6 +73,8 @@ dependencies = [
     # Markdown rendering for Research Assistant
     "markdown>=3.4.0",
     "bleach>=6.0.0",
+    # Wiki front matter parsing
+    "python-frontmatter>=1.0.0",
 ]
 
 [project.optional-dependencies]
