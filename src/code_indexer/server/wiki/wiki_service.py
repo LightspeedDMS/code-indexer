@@ -337,7 +337,7 @@ class WikiService:
     ) -> List[Dict[str, Any]]:
         """Build breadcrumb trail from article path."""
         crumbs: List[Dict[str, Any]] = [
-            {"label": "Wiki Home", "url": f"/wiki/{repo_alias}/"}
+            {"label": f"{repo_alias} Wiki Home", "url": f"/wiki/{repo_alias}/"}
         ]
         if not article_path:
             return crumbs
