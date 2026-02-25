@@ -83,29 +83,17 @@
         <div class="wiki-content">
             <h1>{{ title }}</h1>
             {% if metadata_panel %}
-            <div class="wiki-metadata-panel">
-                {% if metadata_panel.article_number %}
-                <span class="metadata-field">Article #{{ metadata_panel.article_number }}</span>
-                {% endif %}
-                {% if metadata_panel.publication_status %}
-                <span class="metadata-badge">{{ metadata_panel.publication_status }}</span>
-                {% endif %}
-                {% if metadata_panel.created %}
-                <span class="metadata-field">Created: {{ metadata_panel.created }}</span>
-                {% endif %}
-                {% if metadata_panel.modified %}
-                <span class="metadata-field">Modified: {{ metadata_panel.modified }}</span>
-                {% endif %}
-                {% if metadata_panel.real_views is defined %}
-                <span class="metadata-field">Views: {{ metadata_panel.real_views }}</span>
-                {% endif %}
-                {% if metadata_panel.visibility %}
-                <span class="metadata-badge {{ metadata_panel.visibility_class }}">{{ metadata_panel.visibility }}</span>
-                {% endif %}
-                {% if metadata_panel.category %}
-                <span class="metadata-field">Category: {{ metadata_panel.category }}</span>
-                {% endif %}
-            </div>
+            <details class="wiki-metadata-panel">
+                <summary class="metadata-summary">Article Metadata</summary>
+                <dl class="metadata-list">
+                    {% for label, value in metadata_panel %}
+                    <div class="metadata-row">
+                        <dt>{{ label }}</dt>
+                        <dd>{{ value }}</dd>
+                    </div>
+                    {% endfor %}
+                </dl>
+            </details>
             {% endif %}
             {{ content | safe }}
         </div>
