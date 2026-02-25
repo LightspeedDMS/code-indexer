@@ -1445,9 +1445,27 @@ class GoldenRepoMetadataSqliteBackend:
                     created_at TEXT NOT NULL,
                     enable_temporal INTEGER NOT NULL DEFAULT 0,
                     temporal_options TEXT,
+                    category_id INTEGER,
+                    category_auto_assigned INTEGER DEFAULT 0,
                     wiki_enabled INTEGER DEFAULT 0
                 )
             """)
+            # Migrate existing tables: add columns that may be missing
+            cursor = conn.execute("PRAGMA table_info(golden_repos_metadata)")
+            existing_cols = {row[1] for row in cursor.fetchall()}
+            migrations = [
+                ("category_id", "INTEGER"),
+                ("category_auto_assigned", "INTEGER DEFAULT 0"),
+                ("wiki_enabled", "INTEGER DEFAULT 0"),
+            ]
+            for col_name, col_def in migrations:
+                if col_name not in existing_cols:
+                    conn.execute(
+                        f"ALTER TABLE golden_repos_metadata ADD COLUMN {col_name} {col_def}"
+                    )
+                    logger.info(
+                        "Migrated golden_repos_metadata: added column %s", col_name
+                    )
             conn.commit()
         self._conn_manager.execute_atomic(operation)
 
