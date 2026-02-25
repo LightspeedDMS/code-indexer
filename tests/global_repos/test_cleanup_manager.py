@@ -306,3 +306,243 @@ class TestCleanupManager:
         # Test with different interval
         cleanup_mgr2 = CleanupManager(tracker, check_interval=0.5)
         assert cleanup_mgr2._check_interval == 0.5
+
+    def test_exponential_backoff_on_delete_failure(self, tmp_path):
+        """
+        Test that after a deletion failure, the path gets a next_retry_time
+        that grows with each failure according to exponential backoff.
+
+        Issue #297: Retry storm caused exponential FD exhaustion.
+        """
+        tracker = QueryTracker()
+        cleanup_mgr = CleanupManager(tracker, check_interval=0.1)
+
+        index_path = str(tmp_path / "v_backoff")
+
+        # Record first failure at time 0 (simulated)
+        cleanup_mgr._record_failure(index_path)
+        delay_after_1 = cleanup_mgr._get_backoff_delay(index_path)
+
+        # Record second failure
+        cleanup_mgr._record_failure(index_path)
+        delay_after_2 = cleanup_mgr._get_backoff_delay(index_path)
+
+        # Record third failure
+        cleanup_mgr._record_failure(index_path)
+        delay_after_3 = cleanup_mgr._get_backoff_delay(index_path)
+
+        # Each delay should be larger than the previous (exponential backoff)
+        assert delay_after_1 > 0
+        assert delay_after_2 > delay_after_1
+        assert delay_after_3 > delay_after_2
+
+    def test_circuit_breaker_removes_path_after_max_failures(self, tmp_path, caplog):
+        """
+        Test that after MAX_FAILURES consecutive failures, path is removed
+        from queue and a CRITICAL message is logged.
+
+        Issue #297: Prevent infinite retry loops for permanently stuck paths.
+        """
+        import logging
+
+        tracker = QueryTracker()
+        cleanup_mgr = CleanupManager(tracker, check_interval=10.0)
+
+        # Create index directory
+        index_path = tmp_path / "v_circuit"
+        index_path.mkdir()
+
+        cleanup_mgr.schedule_cleanup(str(index_path))
+
+        caplog.set_level(logging.CRITICAL)
+
+        # Simulate MAX_FAILURES consecutive failures
+        for _ in range(CleanupManager.MAX_FAILURES):
+            cleanup_mgr._record_failure(str(index_path))
+
+        # Process cleanup: circuit breaker should trigger
+        cleanup_mgr._process_cleanup_queue()
+
+        # Path should have been removed from queue (circuit breaker)
+        assert str(index_path) not in cleanup_mgr._cleanup_queue
+
+        # CRITICAL log should have been emitted
+        assert any(
+            r.levelname == "CRITICAL" for r in caplog.records
+        ), "Expected CRITICAL log when circuit breaker trips"
+
+    def test_circuit_breaker_resets_on_success(self, tmp_path):
+        """
+        Test that failure counts are per-path and do not affect other paths.
+
+        Issue #297: Ensure counter is per-path, not global.
+        """
+        tracker = QueryTracker()
+        cleanup_mgr = CleanupManager(tracker, check_interval=10.0)
+
+        path_a = str(tmp_path / "v_path_a")
+        path_b = str(tmp_path / "v_path_b")
+
+        # Record failures for path_a
+        for _ in range(3):
+            cleanup_mgr._record_failure(path_a)
+
+        # path_b should have zero failures
+        assert cleanup_mgr._get_failure_count(path_b) == 0
+
+        # path_a should have 3 failures
+        assert cleanup_mgr._get_failure_count(path_a) == 3
+
+        # After successful deletion of path_a, its failure count should reset
+        cleanup_mgr._reset_failure_count(path_a)
+        assert cleanup_mgr._get_failure_count(path_a) == 0
+
+    def test_fd_check_skips_cleanup_when_fd_usage_high(self, tmp_path, caplog):
+        """
+        Test that cleanup cycle is skipped when FD usage exceeds 80% threshold.
+
+        Issue #297: Prevent making FD exhaustion worse during cleanup.
+        """
+        import logging
+        from unittest.mock import patch
+
+        tracker = QueryTracker()
+        cleanup_mgr = CleanupManager(tracker, check_interval=10.0)
+
+        # Create index directory and schedule cleanup
+        index_path = tmp_path / "v_fd_test"
+        index_path.mkdir()
+        cleanup_mgr.schedule_cleanup(str(index_path))
+
+        caplog.set_level(logging.WARNING)
+
+        # Mock FD check to report high usage (above 80%)
+        with patch.object(cleanup_mgr, "_is_fd_usage_high", return_value=True):
+            cleanup_mgr._process_cleanup_queue()
+
+        # Directory should still exist (cleanup was skipped)
+        assert index_path.exists()
+
+        # Warning should have been logged
+        assert any("fd" in r.message.lower() or "file descriptor" in r.message.lower()
+                   for r in caplog.records if r.levelno >= logging.WARNING)
+
+    def test_robust_deletion_handles_oserror_gracefully(self, tmp_path):
+        """
+        Test that OSError during deletion does not crash the cleanup loop
+        and triggers backoff tracking.
+
+        Issue #297: Deletion errors should be handled without crashing.
+        Note: OSError("Too many open files") does NOT set errno=EMFILE (errno is None),
+        so this test exercises general OSError handling / backoff, NOT the bottom-up
+        fallback path.
+        """
+        from unittest.mock import patch
+
+        tracker = QueryTracker()
+        cleanup_mgr = CleanupManager(tracker, check_interval=10.0)
+
+        # Create index directory
+        index_path = tmp_path / "v_oserror"
+        index_path.mkdir()
+        cleanup_mgr.schedule_cleanup(str(index_path))
+
+        # Make rmtree raise OSError (errno=None, not EMFILE)
+        with patch("code_indexer.global_repos.cleanup_manager.shutil.rmtree",
+                   side_effect=OSError("Too many open files")):
+            # Should not raise
+            cleanup_mgr._process_cleanup_queue()
+
+        # Path should still be in queue (for retry)
+        assert str(index_path) in cleanup_mgr._cleanup_queue
+
+        # Failure count should have been incremented
+        assert cleanup_mgr._get_failure_count(str(index_path)) >= 1
+
+    def test_robust_deletion_emfile_triggers_bottom_up_fallback(self, tmp_path):
+        """
+        Test that when shutil.rmtree raises OSError with errno=EMFILE, the
+        bottom-up os.walk fallback is triggered and successfully deletes the directory.
+
+        Issue #297: EMFILE-specific fallback path must be exercised.
+        """
+        import errno
+        from unittest.mock import patch
+
+        tracker = QueryTracker()
+        cleanup_mgr = CleanupManager(tracker, check_interval=10.0)
+
+        # Create a real directory with files so bottom-up deletion has something to do
+        index_path = tmp_path / "v_emfile_fallback"
+        index_path.mkdir()
+        (index_path / "vectors.json").write_text("data")
+        (index_path / "metadata.json").write_text("meta")
+        sub_dir = index_path / "subdir"
+        sub_dir.mkdir()
+        (sub_dir / "chunk.json").write_text("chunk")
+
+        cleanup_mgr.schedule_cleanup(str(index_path))
+
+        # Make shutil.rmtree raise OSError with errno=EMFILE to trigger bottom-up fallback
+        with patch("code_indexer.global_repos.cleanup_manager.shutil.rmtree",
+                   side_effect=OSError(errno.EMFILE, "Too many open files")):
+            # Should not raise - bottom-up fallback handles the actual deletion
+            cleanup_mgr._process_cleanup_queue()
+
+        # Directory should be gone (bottom-up fallback actually deleted it)
+        assert not index_path.exists()
+
+        # Path should be removed from cleanup queue after successful deletion
+        assert str(index_path) not in cleanup_mgr._cleanup_queue
+
+    def test_backoff_caps_at_max_delay(self, tmp_path):
+        """
+        Test that exponential backoff caps at MAX_BACKOFF_DELAY (60 seconds).
+
+        Issue #297: Prevent excessively long delays.
+        """
+        tracker = QueryTracker()
+        cleanup_mgr = CleanupManager(tracker, check_interval=0.1)
+
+        index_path = str(tmp_path / "v_maxbackoff")
+
+        # Simulate many failures to exceed the cap
+        for _ in range(20):
+            cleanup_mgr._record_failure(index_path)
+
+        delay = cleanup_mgr._get_backoff_delay(index_path)
+
+        # Delay should never exceed MAX_BACKOFF_DELAY
+        assert delay <= CleanupManager.MAX_BACKOFF_DELAY
+        assert delay == CleanupManager.MAX_BACKOFF_DELAY
+
+    def test_cleanup_stats_tracking(self, tmp_path):
+        """
+        Test that failure counts are tracked per-path correctly.
+
+        Issue #297: Per-path failure tracking is required for backoff and
+        circuit breaker.
+        """
+        tracker = QueryTracker()
+        cleanup_mgr = CleanupManager(tracker, check_interval=0.1)
+
+        path_x = str(tmp_path / "v_stats_x")
+        path_y = str(tmp_path / "v_stats_y")
+
+        # Initially no failures
+        assert cleanup_mgr._get_failure_count(path_x) == 0
+        assert cleanup_mgr._get_failure_count(path_y) == 0
+
+        # Record failures independently
+        cleanup_mgr._record_failure(path_x)
+        cleanup_mgr._record_failure(path_x)
+        cleanup_mgr._record_failure(path_y)
+
+        assert cleanup_mgr._get_failure_count(path_x) == 2
+        assert cleanup_mgr._get_failure_count(path_y) == 1
+
+        # Reset path_x
+        cleanup_mgr._reset_failure_count(path_x)
+        assert cleanup_mgr._get_failure_count(path_x) == 0
+        # path_y unchanged
+        assert cleanup_mgr._get_failure_count(path_y) == 1
