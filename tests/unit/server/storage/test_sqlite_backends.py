@@ -2315,3 +2315,56 @@ class TestGoldenRepoMetadataSqliteBackend:
                 clone_path="/data/golden-repos/duplicate-test-2",
                 created_at="2025-01-15T11:00:00Z",
             )
+
+    def test_ensure_table_exists_migrates_missing_columns(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Given an existing database with a golden_repos_metadata table
+            that is missing category_id, category_auto_assigned, and wiki_enabled
+        When ensure_table_exists() is called
+        Then all three columns are added via ALTER TABLE migration.
+        """
+        from code_indexer.server.storage.sqlite_backends import (
+            GoldenRepoMetadataSqliteBackend,
+        )
+
+        db_path = tmp_path / "legacy.db"
+
+        # Create a legacy table that is missing the new columns
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE golden_repos_metadata (
+                alias TEXT PRIMARY KEY NOT NULL,
+                repo_url TEXT NOT NULL,
+                default_branch TEXT NOT NULL,
+                clone_path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                enable_temporal INTEGER NOT NULL DEFAULT 0,
+                temporal_options TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        # Verify the legacy table does NOT have the new columns
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute("PRAGMA table_info(golden_repos_metadata)")
+        cols_before = {row[1] for row in cursor.fetchall()}
+        conn.close()
+        assert "category_id" not in cols_before
+        assert "category_auto_assigned" not in cols_before
+        assert "wiki_enabled" not in cols_before
+
+        # Run migration
+        backend = GoldenRepoMetadataSqliteBackend(str(db_path))
+        backend.ensure_table_exists()
+
+        # Verify all three columns now exist
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute("PRAGMA table_info(golden_repos_metadata)")
+        cols_after = {row[1] for row in cursor.fetchall()}
+        conn.close()
+        assert "category_id" in cols_after
+        assert "category_auto_assigned" in cols_after
+        assert "wiki_enabled" in cols_after
