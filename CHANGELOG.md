@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.54] - 2026-02-25
+
+### Fixed
+
+- Wiki access control: `_check_wiki_access()` and `_check_user_wiki_access()` now check both group membership (groups.db) AND user role (users table) for admin determination. Fixes 404 for users with `role=admin` who are not in the "admins" group, making wiki auth consistent with the admin UI's auth pattern.
+
 ## [9.3.53] - 2026-02-25
 
 ### Fixed
