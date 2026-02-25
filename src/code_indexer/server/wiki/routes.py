@@ -481,9 +481,20 @@ def serve_wiki_root(repo_alias: str, request: Request,
             continue
         stem = md_file.stem.replace("-", " ").replace("_", " ").title()
         articles.append({"path": str(rel.with_suffix("")), "title": stem})
-    return wiki_templates.TemplateResponse("index.html", {
+    if articles:
+        items = "".join(
+            f'<li><a href="/wiki/{repo_alias}/{a["path"]}">{a["title"]}</a></li>'
+            for a in articles
+        )
+        content = f"<ul>{items}</ul>"
+    else:
+        content = "<p>No articles found in this wiki.</p>"
+    breadcrumbs = _wiki_service.build_breadcrumbs("", repo_alias)
+    return wiki_templates.TemplateResponse("article.html", {
         "request": request, "title": f"Wiki: {repo_alias}",
-        "repo_alias": repo_alias, "articles": articles,
+        "content": content, "repo_alias": repo_alias,
+        "sidebar": sidebar, "breadcrumbs": breadcrumbs,
+        "current_path": "", "metadata_panel": None,
     })
 
 
