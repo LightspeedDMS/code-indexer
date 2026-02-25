@@ -22,7 +22,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from threading import RLock
+from threading import Lock
 from typing import Any, Callable, Dict, Optional, Tuple
 from code_indexer.server.logging_utils import format_error_log
 
@@ -250,8 +250,14 @@ class HNSWIndexCache:
         self._cache: Dict[str, HNSWIndexCacheEntry] = {}
 
         # Thread-safe locking (AC5)
-        # Use RLock to allow same thread to acquire lock multiple times
-        self._cache_lock = RLock()
+        # Use Lock (not RLock): no reentrant usage exists; Lock is faster and
+        # catches accidental reentrant acquisition (deadlock = fail-fast).
+        self._cache_lock = Lock()
+
+        # Per-key load-in-progress sentinels (Story #277: non-blocking cache population)
+        # Maps normalized repo_path -> threading.Event signaled when load completes/fails.
+        # Allows concurrent loads for DIFFERENT keys while deduplicating SAME-key loads.
+        self._loading: Dict[str, threading.Event] = {}
 
         # Statistics tracking (AC7)
         self._hit_count = 0
@@ -292,67 +298,101 @@ class HNSWIndexCache:
         # Normalize repo path for consistent cache keys
         repo_path = str(Path(repo_path).resolve())
 
-        with self._cache_lock:
-            # Check if cached
-            if repo_path in self._cache:
-                entry = self._cache[repo_path]
+        # Per-key Event sentinel pattern (Story #277: non-blocking cache population).
+        #
+        # The global _cache_lock is held ONLY for dict operations (microseconds).
+        # Disk I/O (loader()) runs with NO lock held, so concurrent loads for
+        # DIFFERENT keys proceed in parallel.
+        #
+        # Same-key deduplication: the first thread plants a threading.Event sentinel
+        # in _loading[key]. Subsequent threads for the same key wait on that Event
+        # (not on the global lock), then loop back to re-check the cache.
+        #
+        # Failure safety: the finally block always removes the sentinel and signals
+        # the Event, ensuring waiters are never permanently blocked even on errors.
+        while True:
+            with self._cache_lock:
+                # Check if cached (fast path: entry exists and not expired)
+                if repo_path in self._cache:
+                    entry = self._cache[repo_path]
 
-                # Check if expired (AC2)
-                if entry.is_expired():
-                    # Evict expired entry
-                    logger.debug(
-                        f"Cache entry expired for {repo_path}, reloading",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                    del self._cache[repo_path]
-                    self._eviction_count += 1
-                    # Fall through to load
+                    if entry.is_expired():
+                        # Evict expired entry and fall through to load
+                        logger.debug(
+                            f"Cache entry expired for {repo_path}, reloading",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                        del self._cache[repo_path]
+                        self._eviction_count += 1
+                        # Fall through (no return here)
+                    else:
+                        # Cache hit - refresh TTL (AC3)
+                        entry.record_access()
+                        self._hit_count += 1
+                        logger.debug(
+                            f"Cache HIT for {repo_path} (access_count={entry.access_count})",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                        return entry.hnsw_index, entry.id_mapping
+
+                # No ready entry. Check if another thread is already loading this key.
+                if repo_path in self._loading:
+                    # Another thread is loading - become a waiter
+                    event = self._loading[repo_path]
+                    self._miss_count += 1
+                    # Release lock BEFORE waiting - allows other threads to proceed
                 else:
-                    # Cache hit - refresh TTL (AC3)
-                    entry.record_access()
-                    self._hit_count += 1
-                    logger.debug(
-                        f"Cache HIT for {repo_path} (access_count={entry.access_count})",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                    return entry.hnsw_index, entry.id_mapping
+                    event = threading.Event()
+                    self._loading[repo_path] = event
+                    self._miss_count += 1
+                    # Break out of the with-block to perform I/O without lock
+                    break
 
-            # Cache miss - load index (AC1)
-            self._miss_count += 1
+            # We are a waiter: block on the per-key Event (NOT on the global lock)
             logger.debug(
-                f"Cache MISS for {repo_path}, loading index",
+                f"Cache WAIT for {repo_path}, another thread is loading",
                 extra={"correlation_id": get_correlation_id()},
             )
+            event.wait()  # Wakes when the loader thread signals (success or failure)
+            # Loop back: re-check cache (may find cached entry or become new loader)
+            continue
 
-            # Load index outside lock to avoid blocking other queries
-            # But we need to hold lock to prevent duplicate loads
-            # Solution: Hold lock during load (simpler, correct)
+        # --- NO LOCK HELD during disk I/O ---
+        # We are the loader thread (sentinel planted in _loading[repo_path]).
+        # Other threads for this key wait on the Event; other keys proceed freely.
+        logger.debug(
+            f"Cache MISS for {repo_path}, loading index",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
             hnsw_index, id_mapping = loader()
 
-            # Create cache entry with initial access recorded
-            entry = HNSWIndexCacheEntry(
-                hnsw_index=hnsw_index,
-                id_mapping=id_mapping,
-                repo_path=repo_path,
-                ttl_minutes=self.config.ttl_minutes,
-            )
-
-            # Record the initial load as an access
-            entry.record_access()
-
-            # Store in cache
-            self._cache[repo_path] = entry
-
-            # Enforce size limit (AC3A: Cache size limits)
-            # NOTE: Called within _cache_lock, so _enforce_size_limit must not re-acquire lock
-            self._enforce_size_limit()
+            # Store result in cache (acquire lock for dict write)
+            with self._cache_lock:
+                entry = HNSWIndexCacheEntry(
+                    hnsw_index=hnsw_index,
+                    id_mapping=id_mapping,
+                    repo_path=repo_path,
+                    ttl_minutes=self.config.ttl_minutes,
+                )
+                entry.record_access()
+                self._cache[repo_path] = entry
+                # Enforce size limit while holding lock (as documented)
+                self._enforce_size_limit()
 
             logger.info(
                 f"Cached HNSW index for {repo_path}",
                 extra={"correlation_id": get_correlation_id()},
             )
-
             return hnsw_index, id_mapping
+
+        finally:
+            # Always clean up sentinel and wake waiters, even on exception.
+            # event.set() MUST be called OUTSIDE the lock: waiters wake up and
+            # immediately try to re-acquire the lock; holding it here would deadlock.
+            with self._cache_lock:
+                self._loading.pop(repo_path, None)
+            event.set()  # Wake ALL waiters (outside lock)
 
     def invalidate(self, repo_path: str) -> None:
         """

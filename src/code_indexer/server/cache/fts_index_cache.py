@@ -24,7 +24,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from threading import RLock
+from threading import Lock
 from typing import Any, Callable, Dict, Optional, Tuple
 from code_indexer.server.logging_utils import format_error_log
 
@@ -245,8 +245,14 @@ class FTSIndexCache:
         self._cache: Dict[str, FTSIndexCacheEntry] = {}
 
         # Thread-safe locking (AC5)
-        # Use RLock to allow same thread to acquire lock multiple times
-        self._cache_lock = RLock()
+        # Use Lock (not RLock): no reentrant usage exists; Lock is faster and
+        # catches accidental reentrant acquisition (deadlock = fail-fast).
+        self._cache_lock = Lock()
+
+        # Per-key load-in-progress sentinels (Story #277: non-blocking cache population)
+        # Maps normalized index_dir -> threading.Event signaled when load completes/fails.
+        # Allows concurrent loads for DIFFERENT keys while deduplicating SAME-key loads.
+        self._loading: Dict[str, threading.Event] = {}
 
         # Statistics tracking (AC7)
         self._hit_count = 0
@@ -290,80 +296,120 @@ class FTSIndexCache:
         # Normalize path for consistent cache keys
         index_dir = str(Path(index_dir).resolve())
 
-        with self._cache_lock:
-            # Check if cached
-            if index_dir in self._cache:
-                entry = self._cache[index_dir]
+        # Per-key Event sentinel pattern (Story #277: non-blocking cache population).
+        #
+        # The global _cache_lock is held ONLY for dict operations (microseconds).
+        # Disk I/O (loader()) runs with NO lock held, so concurrent loads for
+        # DIFFERENT keys proceed in parallel.
+        #
+        # Same-key deduplication: the first thread plants a threading.Event sentinel
+        # in _loading[key]. Subsequent threads for the same key wait on that Event
+        # (not on the global lock), then loop back to re-check the cache.
+        #
+        # The reload_on_access logic is on the cache-HIT path and remains unchanged
+        # (it runs only when an entry is already cached and not expired).
+        #
+        # Failure safety: the finally block always removes the sentinel and signals
+        # the Event, ensuring waiters are never permanently blocked even on errors.
+        while True:
+            with self._cache_lock:
+                # Check if cached (fast path: entry exists and not expired)
+                if index_dir in self._cache:
+                    entry = self._cache[index_dir]
 
-                # Check if expired (AC2)
-                if entry.is_expired():
-                    # Evict expired entry
-                    logger.debug(
-                        f"FTS cache entry expired for {index_dir}, reloading",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                    del self._cache[index_dir]
-                    self._eviction_count += 1
-                    # Fall through to load
-                else:
-                    # Cache hit - refresh TTL (AC3)
-                    entry.record_access()
-                    self._hit_count += 1
+                    if entry.is_expired():
+                        # Evict expired entry and fall through to load
+                        logger.debug(
+                            f"FTS cache entry expired for {index_dir}, reloading",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                        del self._cache[index_dir]
+                        self._eviction_count += 1
+                        # Fall through (no return here)
+                    else:
+                        # Cache hit - refresh TTL (AC3)
+                        entry.record_access()
+                        self._hit_count += 1
 
-                    # Optionally reload to pick up index changes (AC8)
-                    if self.config.reload_on_access:
-                        try:
-                            entry.tantivy_index.reload()
-                            self._reload_count += 1
-                        except Exception as e:
-                            logger.warning(
-                                format_error_log(
-                                    "GIT-GENERAL-009",
-                                    f"FTS index reload failed: {e}",
-                                    extra={"correlation_id": get_correlation_id()},
+                        # Optionally reload to pick up index changes (AC8).
+                        # This is on the cache-HIT path: unaffected by sentinel pattern.
+                        if self.config.reload_on_access:
+                            try:
+                                entry.tantivy_index.reload()
+                                self._reload_count += 1
+                            except Exception as e:
+                                logger.warning(
+                                    format_error_log(
+                                        "GIT-GENERAL-009",
+                                        f"FTS index reload failed: {e}",
+                                        extra={"correlation_id": get_correlation_id()},
+                                    )
                                 )
-                            )
 
-                    logger.debug(
-                        f"FTS Cache HIT for {index_dir} (access_count={entry.access_count})",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                    return entry.tantivy_index, entry.schema
+                        logger.debug(
+                            f"FTS Cache HIT for {index_dir} (access_count={entry.access_count})",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                        return entry.tantivy_index, entry.schema
 
-            # Cache miss - load index (AC1)
-            self._miss_count += 1
+                # No ready entry. Check if another thread is already loading this key.
+                if index_dir in self._loading:
+                    # Another thread is loading - become a waiter
+                    event = self._loading[index_dir]
+                    self._miss_count += 1
+                    # Release lock BEFORE waiting - allows other threads to proceed
+                else:
+                    event = threading.Event()
+                    self._loading[index_dir] = event
+                    self._miss_count += 1
+                    # Break out of the with-block to perform I/O without lock
+                    break
+
+            # We are a waiter: block on the per-key Event (NOT on the global lock)
             logger.debug(
-                f"FTS Cache MISS for {index_dir}, loading index",
+                f"FTS Cache WAIT for {index_dir}, another thread is loading",
                 extra={"correlation_id": get_correlation_id()},
             )
+            event.wait()  # Wakes when the loader thread signals (success or failure)
+            # Loop back: re-check cache (may find cached entry or become new loader)
+            continue
 
-            # Load index (hold lock to prevent duplicate loads)
+        # --- NO LOCK HELD during disk I/O ---
+        # We are the loader thread (sentinel planted in _loading[index_dir]).
+        # Other threads for this key wait on the Event; other keys proceed freely.
+        logger.debug(
+            f"FTS Cache MISS for {index_dir}, loading index",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
             tantivy_index, schema = loader()
 
-            # Create cache entry with initial access recorded
-            entry = FTSIndexCacheEntry(
-                tantivy_index=tantivy_index,
-                schema=schema,
-                index_dir=index_dir,
-                ttl_minutes=self.config.ttl_minutes,
-            )
-
-            # Record the initial load as an access
-            entry.record_access()
-
-            # Store in cache
-            self._cache[index_dir] = entry
-
-            # Enforce size limit (AC3A: Cache size limits)
-            # NOTE: Called within _cache_lock, so _enforce_size_limit must not re-acquire lock
-            self._enforce_size_limit()
+            # Store result in cache (acquire lock for dict write)
+            with self._cache_lock:
+                entry = FTSIndexCacheEntry(
+                    tantivy_index=tantivy_index,
+                    schema=schema,
+                    index_dir=index_dir,
+                    ttl_minutes=self.config.ttl_minutes,
+                )
+                entry.record_access()
+                self._cache[index_dir] = entry
+                # Enforce size limit while holding lock (as documented)
+                self._enforce_size_limit()
 
             logger.info(
                 f"Cached FTS index for {index_dir}",
                 extra={"correlation_id": get_correlation_id()},
             )
-
             return tantivy_index, schema
+
+        finally:
+            # Always clean up sentinel and wake waiters, even on exception.
+            # event.set() MUST be called OUTSIDE the lock: waiters wake up and
+            # immediately try to re-acquire the lock; holding it here would deadlock.
+            with self._cache_lock:
+                self._loading.pop(index_dir, None)
+            event.set()  # Wake ALL waiters (outside lock)
 
     def invalidate(self, index_dir: str) -> None:
         """

@@ -106,6 +106,60 @@ def _coerce_float(value: Any, default: float) -> float:
         return default
 
 
+def _get_wiki_enabled_repos() -> set:
+    """Build set of wiki-enabled golden repo aliases (Story #292 AC2).
+
+    Called once per MCP request to avoid per-result DB queries.
+    Returns set of alias strings without -global suffix (e.g. {"sf-kb-wiki", "docs-repo"}).
+    Degrades gracefully: returns empty set on any error.
+    """
+    try:
+        grm = getattr(app_module, "golden_repo_manager", None)
+        if grm is None:
+            return set()
+        all_repos = grm._sqlite_backend.list_repos()
+        return {
+            repo["alias"]
+            for repo in all_repos
+            if repo.get("wiki_enabled", False)
+        }
+    except Exception as e:
+        logger.debug("Failed to fetch wiki-enabled repos, degrading gracefully: %s", e)
+        return set()
+
+
+def _enrich_with_wiki_url(
+    result_dict: dict,
+    file_path: Any,
+    repository_alias: Any,
+    wiki_enabled_repos: set,
+) -> None:
+    """Add wiki_url to result dict for .md files from wiki-enabled golden repos (Story #292).
+
+    Modifies result_dict in-place. Only adds wiki_url when ALL conditions are met:
+    - file_path ends with .md
+    - repository_alias (after stripping -global suffix) is in wiki_enabled_repos
+
+    Field is completely omitted (not null, not empty) when conditions are not met (AC4).
+    Wiki URL format: /wiki/{alias_without_global}/{path_without_md_extension}
+    Example: /wiki/sf-kb-wiki/Customer/getting-started
+    """
+    if not file_path or not str(file_path).endswith(".md"):
+        return
+
+    # Strip -global suffix to get golden repo alias for wiki_enabled check
+    wiki_alias = repository_alias
+    if wiki_alias and str(wiki_alias).endswith("-global"):
+        wiki_alias = str(wiki_alias)[:-7]  # Remove "-global" (7 chars)
+
+    if not wiki_alias or wiki_alias not in wiki_enabled_repos:
+        return
+
+    # Strip .md extension and build wiki URL
+    article_path = str(file_path)[:-3]  # Remove ".md"
+    result_dict["wiki_url"] = f"/wiki/{wiki_alias}/{article_path}"
+
+
 def _mcp_response(data: Dict[str, Any]) -> Dict[str, Any]:
     """Wrap response data in MCP-compliant content array format.
 
@@ -962,6 +1016,9 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
         )
 
+    # Story #292: Build wiki-enabled repos set once per request (AC2)
+    wiki_enabled_repos = _get_wiki_enabled_repos()
+
     # Story #36: Convert MultiSearchResponse (grouped by repo) to flat list with source_repo
     all_results = []
     for repo_alias, repo_results in response.results.items():
@@ -977,6 +1034,14 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             if golden_alias:
                 category_info = category_map.get(golden_alias, {})
                 result["repo_category"] = category_info.get("category_name")
+
+            # Story #292: Enrich with wiki_url for .md files from wiki-enabled repos (AC1, AC4)
+            _enrich_with_wiki_url(
+                result,
+                result.get("file_path", ""),
+                repo_alias,
+                wiki_enabled_repos,
+            )
 
             all_results.append(result)
 
@@ -1215,6 +1280,9 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     )
                 )
 
+            # Story #292: Build wiki-enabled repos set once per request (AC2)
+            wiki_enabled_repos = _get_wiki_enabled_repos()
+
             # Build response matching query_user_repositories format
             response_results = []
             for r in results:
@@ -1229,6 +1297,14 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 if golden_alias:
                     category_info = category_map.get(golden_alias, {})
                     result_dict["repo_category"] = category_info.get("category_name")
+
+                # Story #292: Enrich with wiki_url for .md files from wiki-enabled repos (AC1, AC4)
+                _enrich_with_wiki_url(
+                    result_dict,
+                    result_dict.get("file_path", ""),
+                    repository_alias,
+                    wiki_enabled_repos,
+                )
 
                 response_results.append(result_dict)
 
@@ -2098,6 +2174,10 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         metadata["preview_tokens"] = preview_tokens
         metadata["total_pages"] = total_pages
         metadata["has_more"] = has_more
+
+        # Story #292: Enrich metadata with wiki_url for .md files from wiki-enabled repos (AC1, AC4)
+        wiki_enabled_repos = _get_wiki_enabled_repos()
+        _enrich_with_wiki_url(metadata, file_path, repository_alias, wiki_enabled_repos)
 
         return _mcp_response(
             {
@@ -3152,6 +3232,16 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
             }
             for m in result.matches
         ]
+
+        # Story #292: Enrich matches with wiki_url for .md files from wiki-enabled repos (AC1, AC4)
+        wiki_enabled_repos = _get_wiki_enabled_repos()
+        for match in matches:
+            _enrich_with_wiki_url(
+                match,
+                match.get("file_path", ""),
+                repository_alias,
+                wiki_enabled_repos,
+            )
 
         # Story #684: Apply payload truncation to regex search results
         # Story #50: Truncation functions are now sync
@@ -11834,3 +11924,168 @@ HANDLER_REGISTRY["start_trace"] = handle_start_trace
 HANDLER_REGISTRY["end_trace"] = handle_end_trace
 HANDLER_REGISTRY["list_repo_categories"] = list_repo_categories
 HANDLER_REGISTRY["trigger_dependency_analysis"] = handle_trigger_dependency_analysis
+
+
+# ---------------------------------------------------------------------------
+# Wiki Article Analytics (Story #293)
+# ---------------------------------------------------------------------------
+
+# Minimum search query length to trigger CIDX search filter
+_WIKI_ANALYTICS_MIN_QUERY_LENGTH = 2
+# Max CIDX results to use as path filter (100 is sufficient for wiki article lists)
+_WIKI_ANALYTICS_MAX_SEARCH_RESULTS = 100
+
+
+def _get_wiki_cache_for_handler():
+    """Return a WikiCache instance using golden_repo_manager.db_path.
+
+    Instantiates WikiCache on each call (lightweight - no I/O until a method
+    is called). Returns None when golden_repo_manager is unavailable.
+    """
+    from code_indexer.server.wiki.wiki_cache import WikiCache
+
+    grm = getattr(app_module, "golden_repo_manager", None)
+    if grm is None:
+        return None
+    db_path = getattr(grm, "db_path", None)
+    if not db_path:
+        return None
+    return WikiCache(db_path)
+
+
+def _wiki_analytics_filter_by_search(
+    repo_alias: str, search_query: str, search_mode: str, username: str
+) -> Optional[set]:
+    """Filter wiki article paths via CIDX search (AC4).
+
+    Returns a set of matching file_paths, or None if search was not performed.
+    Returns an empty set when search runs but finds no matches.
+    Raises RuntimeError if semantic_query_manager is unavailable.
+    """
+    if not search_query or len(search_query) < _WIKI_ANALYTICS_MIN_QUERY_LENGTH:
+        return None
+    sqm = getattr(app_module, "semantic_query_manager", None)
+    if sqm is None:
+        raise RuntimeError("semantic_query_manager not available for search filter")
+    result = sqm.query_user_repositories(
+        username=username,
+        query_text=search_query,
+        repository_alias=repo_alias,
+        search_mode=search_mode,
+        limit=_WIKI_ANALYTICS_MAX_SEARCH_RESULTS,
+        file_extensions=[".md"],
+    )
+    search_results = result.get("results", [])
+    return {r.get("file_path", "") for r in search_results}
+
+
+def _wiki_analytics_build_articles(all_views: list, wiki_alias: str) -> list:
+    """Transform view count records into article response dicts (AC2).
+
+    Derives human-readable title from filename: hyphens and underscores become
+    spaces, result is title-cased. Strips .md extension from wiki_url path.
+    """
+    articles = []
+    for v in all_views:
+        path = v["article_path"]
+        path_no_ext = path[:-3] if path.endswith(".md") else path
+        last_segment = path_no_ext.rsplit("/", 1)[-1]
+        title = last_segment.replace("-", " ").replace("_", " ").title()
+        articles.append({
+            "title": title,
+            "path": path,
+            "real_views": v["real_views"],
+            "first_viewed_at": v["first_viewed_at"],
+            "last_viewed_at": v["last_viewed_at"],
+            "wiki_url": f"/wiki/{wiki_alias}/{path_no_ext}",
+        })
+    return articles
+
+
+def handle_wiki_article_analytics(
+    params: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Query wiki article view analytics (Story #293).
+
+    AC2: Returns title, path, real_views, first_viewed_at, last_viewed_at, wiki_url.
+    AC3: sort_by most_viewed=DESC, least_viewed=ASC; tie-break alphabetical by path.
+    AC4: Optional search_query filters via CIDX; results still sorted by views.
+    AC5: Returns explicit error for non-wiki-enabled repos.
+    AC6: Permission enforced by MCP middleware via tool doc required_permission.
+    """
+    try:
+        repo_alias = params.get("repo_alias", "")
+        sort_by = params.get("sort_by", "most_viewed")
+        if sort_by not in ("most_viewed", "least_viewed"):
+            sort_by = "most_viewed"
+        limit = _coerce_int(params.get("limit"), 20)
+        limit = max(1, min(limit, 500))
+        search_query = params.get("search_query")
+        search_mode = params.get("search_mode", "semantic")
+
+        # Strip -global suffix to get base alias for wiki_enabled check
+        wiki_alias = repo_alias[:-7] if repo_alias.endswith("-global") else repo_alias
+
+        # AC5: Reject non-wiki-enabled repos with explicit error
+        if wiki_alias not in _get_wiki_enabled_repos():
+            return _mcp_response({
+                "success": False,
+                "error": "Wiki is not enabled for this repository",
+            })
+
+        # AC4: Optional search filter - raises on sqm unavailability
+        article_paths_filter = _wiki_analytics_filter_by_search(
+            repo_alias, search_query or "", search_mode, user.username
+        )
+        if article_paths_filter is not None and not article_paths_filter:
+            return _mcp_response({
+                "success": True,
+                "articles": [],
+                "total_count": 0,
+                "repo_alias": repo_alias,
+                "sort_by": sort_by,
+                "wiki_enabled": True,
+            })
+
+        wiki_cache = _get_wiki_cache_for_handler()
+        if wiki_cache is None:
+            return _mcp_response({
+                "success": False,
+                "error": "Wiki cache not available",
+            })
+
+        all_views = wiki_cache.get_all_view_counts(wiki_alias)
+
+        if article_paths_filter is not None:
+            all_views = [v for v in all_views if v["article_path"] in article_paths_filter]
+
+        # AC3: Sort with alphabetical tie-breaking
+        if sort_by == "least_viewed":
+            all_views.sort(key=lambda x: (x["real_views"], x["article_path"]))
+        else:
+            all_views.sort(key=lambda x: (-x["real_views"], x["article_path"]))
+
+        all_views = all_views[:limit]
+        articles = _wiki_analytics_build_articles(all_views, wiki_alias)
+
+        return _mcp_response({
+            "success": True,
+            "articles": articles,
+            "total_count": len(articles),
+            "repo_alias": repo_alias,
+            "sort_by": sort_by,
+            "wiki_enabled": True,
+        })
+
+    except Exception as e:
+        logger.warning(
+            format_error_log(
+                "WIKI-ANALYTICS-001",
+                f"Error in handle_wiki_article_analytics: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+HANDLER_REGISTRY["wiki_article_analytics"] = handle_wiki_article_analytics

@@ -299,16 +299,36 @@ class RefreshTokenManager:
             TokenReplayAttackError: If replay attack detected
             ConcurrentRefreshError: If concurrent refresh detected
         """
-        with self._lock:
-            token_hash = self._hash_token(refresh_token)
+        # Hash computation happens OUTSIDE the lock - pure CPU work with no shared state.
+        # Only the critical SQLite section (read is_used, mark used, INSERT new token)
+        # needs the lock to prevent replay attacks and maintain atomicity.
+        token_hash = self._hash_token(refresh_token)
 
-            # Find token record
+        # Pre-generate new token materials OUTSIDE the lock - pure computation.
+        # Even if the old token turns out to be invalid the cost is negligible.
+        new_refresh_token = self._generate_refresh_token()
+        new_token_id = self._generate_secure_id()
+        new_token_hash = self._hash_token(new_refresh_token)
+
+        # Variables extracted from the DB inside the lock, used after
+        token_id: str = ""
+        family_id: str = ""
+        username: str = ""
+        now = datetime.now(timezone.utc)
+
+        with self._lock:
+            # All SQLite operations are inside the lock to ensure atomicity:
+            # - SELECT (read is_used)
+            # - UPDATE (mark old token used)
+            # - INSERT (store new token)
+            # A crash between UPDATE and INSERT would leave the family with a
+            # consumed token and no replacement, breaking the rotation chain.
             with sqlite3.connect(self.db_path, timeout=30) as conn:
                 cursor = conn.execute(
                     """
-                    SELECT token_id, family_id, username, created_at, expires_at, 
+                    SELECT token_id, family_id, username, created_at, expires_at,
                            is_used, used_at, parent_token_id
-                    FROM refresh_tokens 
+                    FROM refresh_tokens
                     WHERE token_hash = ?
                 """,
                     (token_hash,),
@@ -353,7 +373,7 @@ class RefreshTokenManager:
                 cursor = conn.execute(
                     """
                     SELECT is_revoked, revocation_reason
-                    FROM token_families 
+                    FROM token_families
                     WHERE family_id = ?
                 """,
                     (family_id,),
@@ -369,12 +389,12 @@ class RefreshTokenManager:
                         ),
                     }
 
-                # Mark current token as used
+                # Mark current token as used (critical write - must be under lock)
                 now = datetime.now(timezone.utc)
                 conn.execute(
                     """
-                    UPDATE refresh_tokens 
-                    SET is_used = 1, used_at = ? 
+                    UPDATE refresh_tokens
+                    SET is_used = 1, used_at = ?
                     WHERE token_id = ?
                 """,
                     (now.isoformat(), token_id),
@@ -383,53 +403,20 @@ class RefreshTokenManager:
                 # Update family last used
                 conn.execute(
                     """
-                    UPDATE token_families 
-                    SET last_used_at = ? 
+                    UPDATE token_families
+                    SET last_used_at = ?
                     WHERE family_id = ?
                 """,
                     (now.isoformat(), family_id),
                 )
 
-                conn.commit()
-
-            # Create new token pair
-            new_refresh_token = self._generate_refresh_token()
-            new_token_id = self._generate_secure_id()
-            new_token_hash = self._hash_token(new_refresh_token)
-
-            # Get user data for new access token
-            if user_manager:
-                # Retrieve actual user role from user manager
-                try:
-                    user = user_manager.get_user(username)
-                    user_role = (
-                        user.role.value
-                        if hasattr(user.role, "value")
-                        else str(user.role)
-                    )
-                    user_data = {
-                        "username": username,
-                        "role": user_role,
-                    }
-                except Exception:
-                    # Fallback if user lookup fails
-                    user_data = {
-                        "username": username,
-                        "role": "normal_user",
-                    }
-            else:
-                # Fallback for backwards compatibility
-                user_data = {
-                    "username": username,
-                    "role": "normal_user",
-                }
-
-            # Store new refresh token
-            expires_at = now + timedelta(days=self.refresh_token_lifetime_days)
-            with sqlite3.connect(self.db_path, timeout=30) as conn:
+                # INSERT new token inside the same lock + transaction as the UPDATE
+                # above.  This keeps UPDATE and INSERT atomic: either both succeed
+                # or neither is committed, preventing a TOCTOU gap.
+                new_expires_at = now + timedelta(days=self.refresh_token_lifetime_days)
                 conn.execute(
                     """
-                    INSERT INTO refresh_tokens 
+                    INSERT INTO refresh_tokens
                     (token_id, family_id, username, token_hash, created_at, expires_at, parent_token_id)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
@@ -439,24 +426,52 @@ class RefreshTokenManager:
                         username,
                         new_token_hash,
                         now.isoformat(),
-                        expires_at.isoformat(),
+                        new_expires_at.isoformat(),
                         token_id,
                     ),
                 )
+
                 conn.commit()
 
-            # Create new access token
-            new_access_token = self.jwt_manager.create_token(user_data)
-
-            return {
-                "valid": True,
-                "user_data": user_data,
-                "new_access_token": new_access_token,
-                "new_refresh_token": new_refresh_token,
-                "family_id": family_id,
-                "token_id": new_token_id,
-                "parent_token_id": token_id,
+        # User lookup and JWT creation happen OUTSIDE the lock - no shared state.
+        if user_manager:
+            # Retrieve actual user role from user manager
+            try:
+                user = user_manager.get_user(username)
+                user_role = (
+                    user.role.value
+                    if hasattr(user.role, "value")
+                    else str(user.role)
+                )
+                user_data = {
+                    "username": username,
+                    "role": user_role,
+                }
+            except Exception:
+                # Fallback if user lookup fails
+                user_data = {
+                    "username": username,
+                    "role": "normal_user",
+                }
+        else:
+            # Fallback for backwards compatibility
+            user_data = {
+                "username": username,
+                "role": "normal_user",
             }
+
+        # Create new access token outside the lock
+        new_access_token = self.jwt_manager.create_token(user_data)
+
+        return {
+            "valid": True,
+            "user_data": user_data,
+            "new_access_token": new_access_token,
+            "new_refresh_token": new_refresh_token,
+            "family_id": family_id,
+            "token_id": new_token_id,
+            "parent_token_id": token_id,
+        }
 
     def _handle_replay_attack(self, family_id: str, username: str, client_ip: str):
         """

@@ -166,7 +166,8 @@ class DatabaseSchema:
             clone_path TEXT NOT NULL,
             created_at TEXT NOT NULL,
             enable_temporal INTEGER NOT NULL DEFAULT 0,
-            temporal_options TEXT
+            temporal_options TEXT,
+            wiki_enabled INTEGER DEFAULT 0
         )
     """
 
@@ -347,6 +348,29 @@ class DatabaseSchema:
         )
     """
 
+    # Story #283: Wiki render cache tables
+    CREATE_WIKI_CACHE_TABLE = """
+        CREATE TABLE IF NOT EXISTS wiki_cache (
+            repo_alias TEXT NOT NULL,
+            article_path TEXT NOT NULL,
+            rendered_html TEXT NOT NULL,
+            title TEXT NOT NULL,
+            file_mtime REAL NOT NULL,
+            file_size INTEGER NOT NULL,
+            rendered_at TEXT NOT NULL,
+            PRIMARY KEY (repo_alias, article_path)
+        )
+    """
+
+    CREATE_WIKI_SIDEBAR_CACHE_TABLE = """
+        CREATE TABLE IF NOT EXISTS wiki_sidebar_cache (
+            repo_alias TEXT PRIMARY KEY,
+            sidebar_json TEXT NOT NULL,
+            max_mtime REAL NOT NULL,
+            built_at TEXT NOT NULL
+        )
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -420,6 +444,9 @@ class DatabaseSchema:
             conn.execute(self.CREATE_DESCRIPTION_REFRESH_TRACKING_TABLE)
             # Story #192: Dependency Map Tracking
             conn.execute(self.CREATE_DEPENDENCY_MAP_TRACKING_TABLE)
+            # Story #283: Wiki render cache tables
+            conn.execute(self.CREATE_WIKI_CACHE_TABLE)
+            conn.execute(self.CREATE_WIKI_SIDEBAR_CACHE_TABLE)
             # Story #269: Justified performance indexes (created on fresh databases)
             conn.execute(self.CREATE_IDX_BACKGROUND_JOBS_STATUS)
             conn.execute(self.CREATE_IDX_BACKGROUND_JOBS_STATUS_CREATED)
@@ -440,6 +467,9 @@ class DatabaseSchema:
             # so the old composite research_messages index is dropped first
             self._migrate_drop_unjustified_indexes(conn)
             self._migrate_performance_indexes(conn)
+            # Story #280/#283: Wiki feature migrations
+            self._migrate_golden_repos_metadata_wiki(conn)
+            self._migrate_wiki_cache_tables(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
@@ -635,6 +665,32 @@ class DatabaseSchema:
 
         conn.commit()
         logger.info("Story #269: Ensured 7 justified performance indexes are present")
+
+    def _migrate_golden_repos_metadata_wiki(self, conn: sqlite3.Connection) -> None:
+        """Migrate golden_repos_metadata for wiki feature (Story #280).
+
+        Adds wiki_enabled column to golden_repos_metadata.
+        Safe to run multiple times - only adds missing columns.
+        """
+        existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(golden_repos_metadata)").fetchall()}
+        migrations_applied = []
+        if "wiki_enabled" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE golden_repos_metadata ADD COLUMN wiki_enabled INTEGER DEFAULT 0"
+            )
+            migrations_applied.append("wiki_enabled")
+        if migrations_applied:
+            conn.commit()
+            logger.info(f"Wiki migration applied to golden_repos_metadata: {migrations_applied}")
+
+    def _migrate_wiki_cache_tables(self, conn: sqlite3.Connection) -> None:
+        """Create wiki cache tables for existing databases (Story #283).
+
+        Idempotent - uses CREATE TABLE IF NOT EXISTS.
+        """
+        conn.execute(self.CREATE_WIKI_CACHE_TABLE)
+        conn.execute(self.CREATE_WIKI_SIDEBAR_CACHE_TABLE)
+        conn.commit()
 
 
 class DatabaseConnectionManager:

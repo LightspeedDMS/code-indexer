@@ -144,6 +144,9 @@ class GoldenRepoManager:
         if db_path is None:
             db_path = os.path.join(self.data_dir, "cidx_server.db")
 
+        # Expose db_path for wiki cache and other consumers
+        self.db_path = db_path
+
         from code_indexer.server.storage.sqlite_backends import (
             GoldenRepoMetadataSqliteBackend,
         )
@@ -776,6 +779,17 @@ class GoldenRepoManager:
                     logging.error(
                         f"Group access hook failed for '{alias}': {hook_error}. "
                         f"Golden repository removed but access records may remain."
+                    )
+
+                # Lifecycle hook: Delete wiki article view records (Story #287, AC4)
+                try:
+                    from code_indexer.server.wiki.wiki_cache import WikiCache
+                    wiki_cache = WikiCache(self.db_path)
+                    wiki_cache.delete_views_for_repo(alias)
+                except Exception as hook_error:
+                    logging.error(
+                        f"Wiki view cleanup hook failed for '{alias}': {hook_error}. "
+                        f"Golden repository removed but view records may remain."
                     )
 
                 # Mark golden repo as deleted
@@ -1684,6 +1698,21 @@ class GoldenRepoManager:
             True if repository exists, False otherwise
         """
         return alias in self.golden_repos
+
+    def get_wiki_enabled(self, alias: str) -> bool:
+        """Check if wiki is enabled for a golden repo (Story #280)."""
+        try:
+            repo = self._sqlite_backend.get_repo(alias)
+            if repo is None:
+                return False
+            return bool(repo.get("wiki_enabled", False))
+        except Exception as e:
+            logger.warning("Failed to get wiki_enabled for alias '%s': %s", alias, e)
+            return False
+
+    def set_wiki_enabled(self, alias: str, enabled: bool) -> None:
+        """Set wiki_enabled flag for a golden repo (Story #280)."""
+        self._sqlite_backend.update_wiki_enabled(alias, enabled)
 
     def get_actual_repo_path(self, alias: str) -> str:
         """

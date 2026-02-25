@@ -5,6 +5,7 @@ Implements constant-time responses to prevent timing-based password guessing.
 Following CLAUDE.md principles: NO MOCKS - Real timing attack prevention.
 """
 
+import asyncio
 import time
 import hashlib
 import secrets
@@ -51,7 +52,15 @@ class TimingAttackPrevention:
         # Calculate elapsed time
         elapsed_time = time.time() - start_time
 
-        # Add delay to reach minimum response time
+        # Add delay to reach minimum response time.
+        # IMPORTANT: time.sleep() is intentional and correct here.
+        # All callers of constant_time_execute (login, register, reset_password,
+        # change_password) are sync def route handlers that FastAPI runs in a
+        # threadpool via run_in_executor. The sleep blocks the threadpool thread
+        # (which is already dedicated to this request), NOT the asyncio event loop.
+        # Do NOT change this to asyncio.sleep() - that would require converting
+        # handlers to async def, which would then make ALL their other sync calls
+        # (bcrypt, SQLite, file I/O) block the event loop directly.
         if elapsed_time < self.minimum_response_time_seconds:
             delay = self.minimum_response_time_seconds - elapsed_time
             time.sleep(delay)
@@ -59,6 +68,49 @@ class TimingAttackPrevention:
         # If result is an exception, re-raise it
         if isinstance(result, Exception):
             raise result
+
+        return result
+
+    async def async_ensure_minimum_time(self, operation: Callable) -> Any:
+        """
+        Execute an async operation with constant timing using asyncio.sleep.
+
+        This is the async-compatible variant of constant_time_execute().
+        Use this from async contexts to avoid blocking the event loop during
+        the timing padding delay. The operation can be an async def function.
+
+        Args:
+            operation: Async function to execute with minimum timing guarantee
+
+        Returns:
+            Result of the operation
+
+        Raises:
+            Any exception raised by the operation (after timing is padded)
+        """
+        start_time = time.time()
+
+        operation_exception = None
+        try:
+            result = operation()
+            if asyncio.iscoroutine(result):
+                result = await result
+        except Exception as e:
+            # Even if operation fails, maintain constant timing
+            operation_exception = e
+            result = None
+
+        # Calculate elapsed time
+        elapsed_time = time.time() - start_time
+
+        # Add async delay to reach minimum response time (does NOT block event loop)
+        if elapsed_time < self.minimum_response_time_seconds:
+            delay = self.minimum_response_time_seconds - elapsed_time
+            await asyncio.sleep(delay)
+
+        # Re-raise any operation exception after timing is padded
+        if operation_exception is not None:
+            raise operation_exception
 
         return result
 

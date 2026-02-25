@@ -1,7 +1,10 @@
 """Langfuse service facade - provides unified access to tracing components."""
 
+import logging
 from typing import Optional
 import threading
+
+logger = logging.getLogger(__name__)
 
 from .langfuse_client import LangfuseClient
 from .trace_state_manager import TraceStateManager
@@ -62,6 +65,29 @@ class LangfuseService:
                         self.trace_manager, self.client, langfuse_config
                     )
         return self._span_logger
+
+    def eager_initialize(self) -> None:
+        """
+        Pre-initialize Langfuse SDK components during application startup.
+
+        Calling this during the lifespan startup function moves the one-time
+        LangfuseClient initialization cost (SDK import + network I/O) to server
+        startup rather than the first MCP request. After this call, the client
+        property fast-path (_client is not None) bypasses the lock on every
+        subsequent access.
+
+        Failure is logged but does NOT raise - server startup must continue
+        even if Langfuse is misconfigured or the network is unavailable.
+        """
+        try:
+            # Access the client property to trigger its creation
+            client = self.client
+            # Then call eager_initialize on the client itself
+            client.eager_initialize()
+        except Exception as e:
+            logger.warning(
+                f"Langfuse service eager initialization failed (non-fatal): {e}"
+            )
 
     def cleanup_session(self, session_id: str) -> None:
         """Clean up trace state for a disconnected session."""

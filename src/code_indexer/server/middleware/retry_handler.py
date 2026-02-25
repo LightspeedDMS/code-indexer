@@ -7,6 +7,7 @@ CLAUDE.md Foundation #1: No mocks - real retry logic with actual timing.
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 
+import asyncio
 import time
 import random
 import logging
@@ -139,6 +140,59 @@ class DatabaseRetryHandler:
                         )
                     )
                     time.sleep(delay)
+
+        # This should not be reached, but provide fallback
+        raise last_exception or Exception("Retry logic error")
+
+    async def async_execute_with_retry(self, operation: Callable[[], T]) -> T:
+        """
+        Execute async database operation with retry logic using asyncio.sleep.
+
+        This is the async-compatible variant of execute_with_retry(). Use this
+        from async contexts (e.g., async middleware) to avoid blocking a
+        threadpool thread during retry delays.
+
+        The operation can be either a coroutine function or a regular function.
+        Retry delays use await asyncio.sleep() instead of time.sleep() so the
+        event loop remains responsive during backoff waits.
+
+        Args:
+            operation: Async or sync function to execute that may raise database errors
+
+        Returns:
+            Result of the operation
+
+        Raises:
+            The final exception if all retries are exhausted
+        """
+        last_exception = None
+
+        for attempt in range(1, self.config.max_attempts + 2):  # +1 for initial attempt
+            try:
+                result = operation()
+                # Support both coroutine functions and regular functions
+                if asyncio.iscoroutine(result):
+                    return await result
+                return result
+            except Exception as e:
+                last_exception = e
+
+                if not self.should_retry(e, attempt):
+                    # Don't retry permanent errors or if max attempts exceeded
+                    raise e
+
+                if (
+                    attempt <= self.config.max_attempts
+                ):  # Don't delay after final attempt
+                    delay = self.calculate_delay(attempt)
+                    logger.warning(
+                        format_error_log(
+                            "REPO-GENERAL-020",
+                            f"Database operation failed on attempt {attempt}, retrying in {delay:.2f}s: {e}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+                    await asyncio.sleep(delay)
 
         # This should not be reached, but provide fallback
         raise last_exception or Exception("Retry logic error")

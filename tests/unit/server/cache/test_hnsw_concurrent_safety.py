@@ -4,7 +4,7 @@ Concurrent stress tests for HNSW cache thread safety verification.
 Story #49: Thread-Safe Cache Infrastructure Verification (AC1)
 
 Validates that HNSW cache is thread-safe:
-- RLock protection prevents data corruption
+- Lock protection prevents data corruption
 - Concurrent get_or_load operations are safe
 - Concurrent invalidate operations are safe
 - Mixed read/write operations don't cause race conditions
@@ -27,7 +27,7 @@ class TestHNSWCacheThreadSafety:
     Test HNSW cache thread safety under concurrent access (AC1).
 
     Thread Safety Guarantees (verified via code analysis):
-    - All cache access protected by RLock (self._cache_lock)
+    - All cache access protected by Lock (self._cache_lock)
     - get_or_load(): Protected by 'with self._cache_lock:'
     - invalidate(): Protected by 'with self._cache_lock:'
     - clear(): Protected by 'with self._cache_lock:'
@@ -87,8 +87,15 @@ class TestHNSWCacheThreadSafety:
             assert mapping is first_mapping, "All queries should return same mapping"
 
         stats = cache.get_stats()
-        assert stats.miss_count == 1, "Should have exactly 1 miss (first query)"
-        assert stats.hit_count == 9, "Should have 9 hits (subsequent queries)"
+        # Story #277: With the per-key sentinel pattern, miss_count counts ALL threads
+        # that did not find a ready cache entry (including waiters). Under the new
+        # semantics miss_count >= 1 (the loader thread always increments it).
+        # Waiters also increment miss_count before waiting, so it can be up to 10.
+        # hit_count == 9 because the 9 waiters loop back after the Event fires
+        # and each find the cached entry (incrementing hit_count).
+        assert stats.miss_count >= 1, "Should have at least 1 miss (loader thread)"
+        assert stats.miss_count <= 10, "miss_count cannot exceed number of threads"
+        assert stats.hit_count == 9, "Should have 9 hits (waiters that looped back to cache)"
 
     def test_concurrent_different_repos(self, tmp_path: Path) -> None:
         """
