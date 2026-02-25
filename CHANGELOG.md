@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.52] - 2026-02-25
+
+### Fixed
+
+- API key seeding startup sync: config API keys (Anthropic, VoyageAI) now always synced to os.environ on server startup, not just when config is blank. Fixes silent semantic search failure when shell environment has a stale/invalid key while server config has the valid one.
+- Semantic search error surfacing: `_perform_search()` now tracks per-repo errors and re-raises when ALL repos fail, instead of silently returning empty results. Wiki search route surfaces actual error messages (e.g., "Invalid VoyageAI API key") to the frontend.
+
+### Added
+
+- Wiki client-side navigation: sidebar article clicks now use AJAX content swap with `history.pushState()` instead of full page reloads. Eliminates TOC flicker/rebuild when navigating between articles -- sidebar stays untouched, only main content and active highlight change. Browser back/forward supported via `popstate` handler.
+- Wiki search defaults to Semantic mode instead of Full Text Search
+
+### Changed
+
+- Wiki search box CSS: input and mode dropdown now render on a single compact row with matched heights, reducing vertical space consumed by the search area
+
 ## [9.3.51] - 2026-02-23
 
 ### Fixed

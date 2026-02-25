@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from code_indexer.server.wiki.routes import wiki_router, get_current_user_hybrid
+from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
 
 
 def _make_user(username):
@@ -32,6 +33,13 @@ def _make_app(authenticated_user, actual_repo_path):
     app.state.golden_repo_manager.get_wiki_enabled.return_value = True
     app.state.golden_repo_manager.get_actual_repo_path.return_value = actual_repo_path
     app.state.golden_repo_manager.db_path = _db_path
+
+    # Create alias infrastructure for AliasManager resolution (Story #286)
+    golden_repos_dir = Path(actual_repo_path).parent / "golden-repos-test"
+    golden_repos_dir.mkdir(parents=True, exist_ok=True)
+    make_aliases_dir(str(golden_repos_dir), "test-repo", actual_repo_path)
+    app.state.golden_repo_manager.golden_repos_dir = str(golden_repos_dir)
+
     app.state.access_filtering_service = MagicMock()
     app.state.access_filtering_service.is_admin_user.return_value = True
     app.state.access_filtering_service.get_accessible_repos.return_value = set()

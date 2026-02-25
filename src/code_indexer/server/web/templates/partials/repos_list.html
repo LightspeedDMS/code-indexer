@@ -124,6 +124,26 @@
                             <span class="error-text">{{ repo.error_message }}</span>
                         </div>
                         {% endif %}
+                        <div class="detail-item">
+                            <label>Wiki:</label>
+                            <span>
+                                <label style="display: inline-flex; align-items: center; gap: 0.3rem;">
+                                    <input type="checkbox"
+                                           class="user-wiki-toggle"
+                                           data-username="{{ repo.username }}"
+                                           data-alias="{{ repo.user_alias }}"
+                                           {% if repo.wiki_enabled %}checked{% endif %}
+                                           onchange="toggleUserWiki(this, '{{ repo.username }}', '{{ repo.user_alias }}')" />
+                                    Enable Wiki
+                                </label>
+                                {% if repo.wiki_enabled %}
+                                <a href="/wiki/u/{{ repo.username }}/{{ repo.user_alias }}/"
+                                   class="wiki-link" target="_blank" style="margin-left: 0.5rem;">
+                                    Open Wiki
+                                </a>
+                                {% endif %}
+                            </span>
+                        </div>
                     </div>
 
                     <!-- Activated Repository Management Section (Story #160) -->
@@ -550,6 +570,24 @@ function restoreOpenActivatedRepoHealthDetails() {
                 console.error('[CIDX] Failed to reload health details for:', userAlias, err);
             });
         }
+    });
+}
+
+function toggleUserWiki(checkbox, username, alias) {
+    fetch('/admin/activated-repos/' + username + '/' + alias + '/wiki-toggle', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'wiki_enabled=' + (checkbox.checked ? '1' : '0') + '&csrf_token={{ csrf_token }}'
+    }).then(function(r) {
+        if (r.ok) {
+            location.reload();
+        } else {
+            console.error('[CIDX] Failed to toggle wiki for', username, alias);
+            checkbox.checked = !checkbox.checked;
+        }
+    }).catch(function(err) {
+        console.error('[CIDX] Wiki toggle error:', err);
+        checkbox.checked = !checkbox.checked;
     });
 }
 </script>

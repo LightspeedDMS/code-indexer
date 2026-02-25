@@ -781,6 +781,17 @@ class GoldenRepoManager:
                         f"Golden repository removed but access records may remain."
                     )
 
+                # Lifecycle hook: Delete wiki article view records (Story #287, AC4)
+                try:
+                    from code_indexer.server.wiki.wiki_cache import WikiCache
+                    wiki_cache = WikiCache(self.db_path)
+                    wiki_cache.delete_views_for_repo(alias)
+                except Exception as hook_error:
+                    logging.error(
+                        f"Wiki view cleanup hook failed for '{alias}': {hook_error}. "
+                        f"Golden repository removed but view records may remain."
+                    )
+
                 # Mark golden repo as deleted
                 cascade_results["golden_repo_deleted"] = True
 

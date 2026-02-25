@@ -35,8 +35,22 @@
     line-height: 1;
 }
 
+.toolbar-btn-compact {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+}
+
 .toolbar-btn:hover {
     background: var(--pico-secondary-background);
+}
+
+[data-theme="light"] .toolbar-btn {
+    color: #333;
 }
 
 .toolbar-home {
@@ -77,7 +91,7 @@
 .wiki-sidebar {
     width: 280px;
     min-width: 180px;
-    max-width: 500px;
+    max-width: 50vw;
     flex-shrink: 0;
     border-right: 1px solid var(--pico-muted-border-color);
     padding: 0.5rem 0;
@@ -87,9 +101,29 @@
     position: sticky;
     top: 40px;
     max-height: calc(100vh - 40px);
-    resize: horizontal;
     display: flex;
     flex-direction: column;
+}
+
+/* Drag handle for sidebar resize (Story #294) */
+.wiki-sidebar-handle {
+    width: 8px;
+    cursor: col-resize;
+    background: rgba(128, 128, 128, 0.15);
+    z-index: 10;
+    flex-shrink: 0;
+    align-self: stretch;
+}
+
+.wiki-sidebar-handle:hover,
+.wiki-sidebar-handle:active {
+    background: var(--pico-primary);
+    opacity: 0.6;
+}
+
+/* Disable text selection while dragging */
+.wiki-sidebar.resizing {
+    user-select: none;
 }
 
 /* Groups */
@@ -128,10 +162,45 @@
     cursor: pointer;
     user-select: none;
     color: var(--pico-muted-color);
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.sidebar-category-header:hover {
+    color: var(--pico-color);
 }
 
 .sidebar-category.collapsed .sidebar-category-items {
     display: none;
+}
+
+/* Story #288: Chevron indicator for collapsible TOC sections (AC1, AC5) */
+/* Uses currentColor so it inherits theme-aware color from parent */
+.toc-chevron {
+    display: inline-block;
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid currentColor;
+    flex-shrink: 0;
+    transition: transform 0.15s ease;
+    /* Default: pointing down = expanded */
+    transform: rotate(0deg);
+}
+
+/* When parent is collapsed, rotate chevron to point right */
+.sidebar-category.collapsed .toc-chevron,
+.sidebar-group.collapsed .toc-chevron {
+    transform: rotate(-90deg);
+}
+
+/* Group-header chevron alignment */
+.sidebar-group-header {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
 }
 
 /* Article links */
@@ -160,6 +229,16 @@
     background: var(--pico-secondary-background);
 }
 
+[data-theme="light"] .sidebar-item.active {
+    background: #e3f2fd;
+    color: #1565c0;
+    border-left-color: #1565c0;
+}
+
+[data-theme="light"] .sidebar-item:hover {
+    background: #f5f5f5;
+}
+
 /* Recently viewed */
 .sidebar-recently-viewed {
     margin-top: auto;
@@ -175,7 +254,6 @@
     overflow: hidden;
     border-right: none;
     padding: 0;
-    resize: none;
 }
 
 /* -----------------------------------------------------------------------
@@ -189,6 +267,8 @@
     margin-bottom: 1rem;
     font-size: 0.8rem;
     color: var(--pico-muted-color);
+    justify-content: flex-start;
+    width: fit-content;
 }
 
 .wiki-breadcrumbs a {
@@ -279,6 +359,196 @@
 
 .wiki-content li {
     margin-bottom: 0.2rem;
+}
+
+/* -----------------------------------------------------------------------
+   Story #289: Article metadata panel
+   ----------------------------------------------------------------------- */
+.wiki-metadata-panel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.75rem;
+    margin-bottom: 1rem;
+    background: var(--pico-secondary-background);
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: 4px;
+    font-size: 0.8rem;
+    color: var(--pico-muted-color);
+}
+
+.metadata-field {
+    white-space: nowrap;
+}
+
+.metadata-badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: capitalize;
+    background: var(--pico-muted-border-color);
+    color: var(--pico-color);
+}
+
+.metadata-badge-published {
+    background: #d4edda;
+    color: #155724;
+}
+
+.metadata-badge-internal {
+    background: #ffeeba;
+    color: #856404;
+}
+
+.metadata-badge-draft {
+    background: #e2e3e5;
+    color: #383d41;
+}
+
+[data-theme="dark"] .metadata-badge-published {
+    background: #1a3a24;
+    color: #75c98b;
+}
+
+[data-theme="dark"] .metadata-badge-internal {
+    background: #3d2e00;
+    color: #f0b429;
+}
+
+[data-theme="dark"] .metadata-badge-draft {
+    background: #2e2e2e;
+    color: #adb5bd;
+}
+
+[data-theme="light"] .wiki-metadata-panel {
+    color: #495057;
+    background: #f0f2f5;
+    border-color: #dee2e6;
+}
+
+[data-theme="light"] .metadata-field {
+    color: #495057;
+}
+
+[data-theme="light"] .metadata-badge {
+    background: #dee2e6;
+    color: #333;
+}
+
+/* -----------------------------------------------------------------------
+   Story #290: Wiki Search Box
+   ----------------------------------------------------------------------- */
+.wiki-search-box {
+    padding: 0.3rem 0.5rem;
+    border-bottom: 1px solid var(--pico-muted-border-color);
+    flex-shrink: 0;
+}
+
+/* Override Pico CSS defaults on form elements inside search box */
+.wiki-search-box input,
+.wiki-search-box select {
+    width: auto;
+    margin-bottom: 0;
+    height: 26px;
+    box-sizing: border-box;
+}
+
+.wiki-search-row {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.wiki-search-box input.wiki-search-input {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.78rem;
+    padding: 0.2rem 0.35rem;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: 4px;
+    background: var(--pico-background-color);
+    color: var(--pico-color);
+    outline: none;
+}
+
+.wiki-search-box input.wiki-search-input:focus {
+    border-color: var(--pico-primary);
+    box-shadow: 0 0 0 2px var(--pico-primary-focus);
+}
+
+.wiki-search-box select.wiki-search-mode {
+    font-size: 0.72rem;
+    padding: 0.2rem 0.3rem;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: 4px;
+    background: var(--pico-background-color);
+    color: var(--pico-color);
+    cursor: pointer;
+    flex-shrink: 0;
+    background-image: none;
+    -webkit-appearance: auto;
+    appearance: auto;
+}
+
+.wiki-search-clear {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    color: var(--pico-muted-color);
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+}
+
+.wiki-search-clear:hover {
+    color: var(--pico-color);
+    background: var(--pico-secondary-background);
+}
+
+.wiki-search-status {
+    margin-top: 0.25rem;
+    font-size: 0.72rem;
+    color: var(--pico-muted-color);
+    padding: 0 0.1rem;
+}
+
+/* Search results list */
+.wiki-search-results {
+    max-height: 300px;
+    overflow-y: auto;
+    padding: 0.25rem 0;
+    border-bottom: 1px solid var(--pico-muted-border-color);
+}
+
+.search-result-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.3rem 0.5rem;
+    font-size: 0.8rem;
+    text-decoration: none;
+    color: var(--pico-color);
+    border-left: 3px solid var(--pico-primary);
+    margin: 0.15rem 0;
+    background: var(--pico-secondary-background);
+    border-radius: 0 3px 3px 0;
+}
+
+.search-result-item:hover {
+    background: var(--pico-primary-focus);
+    color: var(--pico-primary);
+}
+
+.search-result-score {
+    font-size: 0.7rem;
+    color: var(--pico-muted-color);
+    margin-left: 0.5rem;
+    flex-shrink: 0;
 }
 
 /* -----------------------------------------------------------------------

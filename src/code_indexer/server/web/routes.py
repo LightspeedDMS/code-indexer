@@ -2478,7 +2478,29 @@ def toggle_wiki_enabled(
             status_code=400,
         )
     manager = _get_golden_repo_manager()
-    manager.set_wiki_enabled(alias, wiki_enabled == "1")
+    enabling = wiki_enabled == "1"
+    manager.set_wiki_enabled(alias, enabling)
+    if enabling:
+        # Lifecycle hook: Populate initial view counts from front matter (Story #287, AC2)
+        try:
+            import threading
+            from pathlib import Path
+            from ..wiki.wiki_cache import WikiCache
+            from ..wiki.wiki_service import WikiService
+            from ...global_repos.alias_manager import AliasManager
+            cache = WikiCache(manager.db_path)
+            cache.ensure_tables()
+            aliases_dir = str(Path(manager.golden_repos_dir) / "aliases")
+            actual_path = AliasManager(aliases_dir).read_alias(f"{alias}-global")
+            if actual_path:
+                svc = WikiService()
+                threading.Thread(
+                    target=svc.populate_views_from_front_matter,
+                    args=(alias, Path(actual_path), cache),
+                    daemon=True,
+                ).start()
+        except Exception as exc:
+            logger.warning("Failed to trigger view population for %s: %s", alias, exc)
     return _create_golden_repos_page_response(
         request, session, success_message="Wiki setting updated successfully"
     )
@@ -3084,6 +3106,54 @@ def deactivate_repo(
         if "not found" in error_msg.lower():
             error_msg = f"Repository '{user_alias}' not found for user '{username}'"
         return _create_repos_page_response(request, session, error_message=error_msg)
+
+
+@web_router.post(
+    "/activated-repos/{username}/{alias}/wiki-toggle", response_class=JSONResponse
+)
+def toggle_user_wiki_enabled(
+    request: Request,
+    username: str,
+    alias: str,
+    wiki_enabled: str = Form(...),
+    csrf_token: Optional[str] = Form(None),
+):
+    """Toggle wiki_enabled for an activated repo (Story #291, AC1).
+
+    Accepts wiki_enabled="1" to enable or "0" to disable.
+    Returns JSON {"success": true} or {"error": "..."}.
+    Requires admin session.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not validate_login_csrf_token(request, csrf_token):
+        return JSONResponse({"error": "Invalid CSRF token"}, status_code=400)
+
+    try:
+        manager = _get_activated_repo_manager()
+        enabling = wiki_enabled == "1"
+        manager.set_wiki_enabled(username, alias, enabling)
+        if not enabling:
+            try:
+                from ..wiki.wiki_cache import WikiCache
+
+                golden_manager = _get_golden_repo_manager()
+                cache = WikiCache(golden_manager.db_path)
+                cache.invalidate_user_wiki(username, alias)
+            except Exception as cache_exc:
+                logger.warning(
+                    "Failed to invalidate wiki cache for %s/%s: %s",
+                    username,
+                    alias,
+                    cache_exc,
+                )
+        return JSONResponse({"success": True})
+    except Exception as exc:
+        logger.warning(
+            "Failed to toggle wiki for %s/%s: %s", username, alias, exc
+        )
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
 
 def _get_background_job_manager():

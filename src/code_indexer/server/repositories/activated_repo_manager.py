@@ -1343,6 +1343,54 @@ class ActivatedRepoManager:
         """
         return os.path.join(self.activated_repos_dir, username, user_alias)
 
+    def get_wiki_enabled(self, username: str, user_alias: str) -> bool:
+        """Check if wiki is enabled for an activated repo (read-only, no side effects).
+
+        Reads the metadata file directly without updating last_accessed or
+        writing to disk.  Returns False if the repo does not exist or
+        wiki_enabled is not set.
+
+        Args:
+            username: Username
+            user_alias: User's alias for the repository
+
+        Returns:
+            True if wiki is enabled, False otherwise
+        """
+        user_dir = os.path.join(self.activated_repos_dir, username)
+        metadata_file = os.path.join(user_dir, f"{user_alias}_metadata.json")
+        if not os.path.exists(metadata_file):
+            return False
+        try:
+            with open(metadata_file, "r") as f:
+                metadata = json.load(f)
+            return bool(metadata.get("wiki_enabled", False))
+        except (json.JSONDecodeError, IOError):
+            return False
+
+    def set_wiki_enabled(self, username: str, user_alias: str, enabled: bool) -> None:
+        """Set wiki_enabled flag on activated repo metadata.
+
+        Args:
+            username: Username
+            user_alias: User's alias for the repository
+            enabled: True to enable wiki, False to disable
+
+        Raises:
+            ActivatedRepoError: If the repository metadata file does not exist
+        """
+        user_dir = os.path.join(self.activated_repos_dir, username)
+        metadata_file = os.path.join(user_dir, f"{user_alias}_metadata.json")
+        if not os.path.exists(metadata_file):
+            raise ActivatedRepoError(
+                f"Repository '{user_alias}' not found for user '{username}'"
+            )
+        with open(metadata_file, "r") as f:
+            metadata = json.load(f)
+        metadata["wiki_enabled"] = enabled
+        with open(metadata_file, "w") as f:
+            json.dump(metadata, f, indent=2)
+
     def _do_activate_repository(
         self,
         username: str,

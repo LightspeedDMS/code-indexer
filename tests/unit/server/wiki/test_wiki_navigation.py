@@ -21,7 +21,8 @@ class TestBuildSidebarTree:
             tree = svc.build_sidebar_tree(repo_dir, "test-repo")
             assert len(tree) == 1
             root_group = tree[0]
-            titles = [a["title"] for a in root_group["articles"]]
+            # Story #288: all articles normalized into categories; uncategorized → "Uncategorized"
+            titles = [a["title"] for a in root_group["categories"].get("Uncategorized", [])]
             assert "Page 1" in titles
             assert "Page 2" in titles
 
@@ -43,9 +44,11 @@ class TestBuildSidebarTree:
             hidden.mkdir()
             (hidden / "notes.md").write_text("# Hidden")
             tree = svc.build_sidebar_tree(repo_dir, "test-repo")
+            # Story #288: all articles normalized into categories; collect from all categories
             all_titles = []
             for group in tree:
-                all_titles.extend(a["title"] for a in group["articles"])
+                for cat_articles in group["categories"].values():
+                    all_titles.extend(a["title"] for a in cat_articles)
             assert "Notes" not in all_titles
             assert "Visible" in all_titles
 
@@ -56,7 +59,8 @@ class TestBuildSidebarTree:
             (repo_dir / "apple.md").write_text("# Apple")
             (repo_dir / "mango.md").write_text("# Mango")
             tree = svc.build_sidebar_tree(repo_dir, "test-repo")
-            titles = [a["title"] for a in tree[0]["articles"]]
+            # Story #288: uncategorized articles go to "Uncategorized" category
+            titles = [a["title"] for a in tree[0]["categories"].get("Uncategorized", [])]
             assert titles == sorted(titles, key=str.lower)
 
     def test_article_path_has_no_extension(self, svc):
@@ -64,7 +68,8 @@ class TestBuildSidebarTree:
             repo_dir = Path(tmpdir)
             (repo_dir / "my-article.md").write_text("# My Article")
             tree = svc.build_sidebar_tree(repo_dir, "test-repo")
-            paths = [a["path"] for a in tree[0]["articles"]]
+            # Story #288: uncategorized articles go to "Uncategorized" category
+            paths = [a["path"] for a in tree[0]["categories"].get("Uncategorized", [])]
             assert any(".md" not in p for p in paths)
             assert any("my-article" in p for p in paths)
 

@@ -748,6 +748,7 @@ class SemanticQueryManager:
             api_metrics_service.increment_other_index_search()
 
         all_results: List[QueryResult] = []
+        repo_errors: List[str] = []
 
         # Search each repository
         for repo_info in user_repos:
@@ -838,7 +839,13 @@ class SemanticQueryManager:
                     ),
                     extra=get_log_extra("QUERY-MIGRATE-006"),
                 )
+                repo_errors.append(str(e))
                 continue
+
+        # If ALL repos failed and we got zero results, propagate the error
+        # instead of silently returning empty results
+        if not all_results and repo_errors:
+            raise Exception(repo_errors[-1])
 
         # Sort by similarity score (descending) and limit results
         all_results.sort(key=lambda r: r.similarity_score, reverse=True)
@@ -1003,8 +1010,15 @@ class SemanticQueryManager:
                     regex=regex,
                 )
 
-                # For pure FTS mode, return FTS results directly
+                # For pure FTS mode, apply file_extensions filter and return
                 if search_mode == "fts":
+                    if file_extensions is not None:
+                        fts_results = [
+                            r for r in fts_results
+                            if Path(r.file_path).suffix.lower() in [
+                                ext.lower() for ext in file_extensions
+                            ]
+                        ]
                     return fts_results
 
                 # For hybrid mode, continue to semantic search and merge results

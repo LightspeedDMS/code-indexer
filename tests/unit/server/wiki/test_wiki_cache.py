@@ -3,6 +3,7 @@ import os
 import sqlite3
 import tempfile
 import time
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -128,6 +129,32 @@ class TestPutGetArticle:
         result = cache.get_article("repo1", "article", f)
         assert result is not None
         assert result["html"] == "<p>V2</p>"
+
+    def test_put_article_with_datetime_metadata_does_not_raise(self, cache_db, repo_dir):
+        """Story #289: put_article must not raise TypeError when metadata contains datetime/date objects.
+
+        The python-frontmatter library parses YAML date fields as Python datetime/date objects.
+        These must be serialized to ISO strings before JSON storage.
+        """
+        cache, _ = cache_db
+        f = repo_dir / "dated-article.md"
+        f.write_text("# Dated Article")
+        metadata_with_dates = {
+            "title": "Dated Article",
+            "created": date(2024, 1, 15),
+            "modified": datetime(2024, 6, 20, 10, 30, 0),
+            "visibility": "internal",
+        }
+        # Must not raise TypeError: Object of type datetime is not JSON serializable
+        cache.put_article("repo1", "dated-article", "<h1>Dated Article</h1>", "Dated Article", f,
+                          metadata=metadata_with_dates)
+        result = cache.get_article("repo1", "dated-article", f)
+        assert result is not None
+        cached_meta = result.get("metadata") or {}
+        # Dates should be stored as ISO strings and round-trip correctly
+        assert cached_meta.get("created") == "2024-01-15"
+        assert cached_meta.get("modified") == "2024-06-20T10:30:00"
+        assert cached_meta.get("visibility") == "internal"
 
 
 class TestPutGetSidebar:

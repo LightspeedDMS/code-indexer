@@ -1,4 +1,5 @@
 """Tests for WikiService (Stories #281, #282)."""
+
 import tempfile
 from pathlib import Path
 

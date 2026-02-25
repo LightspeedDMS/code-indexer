@@ -8,6 +8,7 @@ Story #20: API Key Management for Claude CLI and VoyageAI
 """
 
 import logging
+import os
 from typing import Any, Dict, Optional
 from code_indexer.server.logging_utils import format_error_log
 
@@ -73,6 +74,10 @@ def seed_api_keys_on_startup(
                     )
                     result["anthropic_seeded"] = True
                     logger.info("Auto-seeded Anthropic API key from environment/config")
+        else:
+            # Config has a key — ensure os.environ matches (config is source of truth)
+            os.environ["ANTHROPIC_API_KEY"] = config.claude_integration_config.anthropic_api_key
+            logger.info("Synced Anthropic API key from server config to process environment")
 
         # Auto-seed VoyageAI key if blank
         if not config.claude_integration_config.voyageai_api_key:
@@ -85,6 +90,10 @@ def seed_api_keys_on_startup(
                     )
                     result["voyageai_seeded"] = True
                     logger.info("Auto-seeded VoyageAI API key from environment")
+        else:
+            # Config has a key — ensure os.environ matches (config is source of truth)
+            os.environ["VOYAGE_API_KEY"] = config.claude_integration_config.voyageai_api_key
+            logger.info("Synced VoyageAI API key from server config to process environment")
 
         # Save config if any keys were seeded
         if result["anthropic_seeded"] or result["voyageai_seeded"]:

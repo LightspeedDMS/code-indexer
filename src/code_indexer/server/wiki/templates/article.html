@@ -2,39 +2,48 @@
 {% block content %}
 <!-- Persistent top toolbar — always visible regardless of sidebar state -->
 <div class="wiki-toolbar" id="wiki-toolbar">
-    <button class="toolbar-btn" id="sidebar-toggle" aria-label="Toggle sidebar" title="Toggle sidebar">&#9776;</button>
-    <a href="/wiki/{{ repo_alias }}/" class="toolbar-home">Wiki Home</a>
-    <div class="toolbar-spacer"></div>
-    <button class="toolbar-btn" id="theme-toggle" aria-label="Toggle dark/light mode" title="Toggle dark/light mode">
+    <button class="toolbar-btn toolbar-btn-compact" id="sidebar-toggle" aria-label="Toggle sidebar" title="Toggle sidebar">&#9776;</button>
+    <button class="toolbar-btn toolbar-btn-compact" id="theme-toggle" aria-label="Toggle dark/light mode" title="Toggle dark/light mode">
         <span class="theme-icon-dark">&#9790;</span>
         <span class="theme-icon-light">&#9728;</span>
     </button>
+    <a href="/wiki/{{ repo_alias }}/" class="toolbar-home">Wiki Home</a>
+    <div class="toolbar-spacer"></div>
 </div>
 <div class="wiki-page">
     <!-- Sidebar -->
-    <nav class="wiki-sidebar" id="wiki-sidebar">
+    <nav class="wiki-sidebar" id="wiki-sidebar" data-current-path="{{ current_path }}">
+        <!-- Search box (Story #290) -->
+        <div class="wiki-search-box" id="wiki-search-box">
+            <div class="wiki-search-row">
+                <input type="text" id="wiki-search-input" class="wiki-search-input"
+                       placeholder="Search articles..." autocomplete="off" />
+                <select id="wiki-search-mode" class="wiki-search-mode">
+                    <option value="fts">Full Text Search</option>
+                    <option value="semantic" selected>Semantic</option>
+                </select>
+                <button id="wiki-search-clear" class="wiki-search-clear" style="display:none"
+                        aria-label="Clear search" title="Clear search">&times;</button>
+            </div>
+            <div id="wiki-search-status" class="wiki-search-status" style="display:none"></div>
+        </div>
         {% if sidebar %}
         {% for group in sidebar %}
         <div class="sidebar-group" data-group="{{ group.name }}">
-            <div class="sidebar-group-header" onclick="this.parentElement.classList.toggle('collapsed')">
-                {{ group.name }}
+            <div class="sidebar-group-header">
+                <span class="toc-chevron"></span>{{ group.name }}
             </div>
             <div class="sidebar-group-items">
-                {% for article in group.articles %}
-                <a href="/wiki/{{ repo_alias }}/{{ article.path }}"
-                   class="sidebar-item {% if article.path == current_path %}active{% endif %}">
-                    {{ article.title }}
-                </a>
-                {% endfor %}
                 {% for cat_name, cat_articles in group.categories.items() %}
-                <div class="sidebar-category">
-                    <div class="sidebar-category-header" onclick="this.parentElement.classList.toggle('collapsed')">
-                        {{ cat_name }}
+                <div class="sidebar-category collapsed" data-section-id="{{ group.name }}-{{ cat_name | replace(' ', '-') | lower }}">
+                    <div class="sidebar-category-header">
+                        <span class="toc-chevron"></span>{{ cat_name }}
                     </div>
                     <div class="sidebar-category-items">
                         {% for article in cat_articles %}
                         <a href="/wiki/{{ repo_alias }}/{{ article.path }}"
-                           class="sidebar-item {% if article.path == current_path %}active{% endif %}">
+                           class="sidebar-item {% if article.path == current_path %}active{% endif %}"
+                           data-path="{{ article.path }}">
                             {{ article.title }}
                         </a>
                         {% endfor %}
@@ -52,6 +61,8 @@
             <div class="sidebar-group-items" id="recently-viewed-items"></div>
         </div>
     </nav>
+    <!-- Drag handle for sidebar resize (Story #294) -->
+    <div class="wiki-sidebar-handle" id="wiki-sidebar-handle"></div>
 
     <!-- Main Content -->
     <div class="wiki-main">
@@ -71,6 +82,31 @@
 
         <div class="wiki-content">
             <h1>{{ title }}</h1>
+            {% if metadata_panel %}
+            <div class="wiki-metadata-panel">
+                {% if metadata_panel.article_number %}
+                <span class="metadata-field">Article #{{ metadata_panel.article_number }}</span>
+                {% endif %}
+                {% if metadata_panel.publication_status %}
+                <span class="metadata-badge">{{ metadata_panel.publication_status }}</span>
+                {% endif %}
+                {% if metadata_panel.created %}
+                <span class="metadata-field">Created: {{ metadata_panel.created }}</span>
+                {% endif %}
+                {% if metadata_panel.modified %}
+                <span class="metadata-field">Modified: {{ metadata_panel.modified }}</span>
+                {% endif %}
+                {% if metadata_panel.real_views is defined %}
+                <span class="metadata-field">Views: {{ metadata_panel.real_views }}</span>
+                {% endif %}
+                {% if metadata_panel.visibility %}
+                <span class="metadata-badge {{ metadata_panel.visibility_class }}">{{ metadata_panel.visibility }}</span>
+                {% endif %}
+                {% if metadata_panel.category %}
+                <span class="metadata-field">Category: {{ metadata_panel.category }}</span>
+                {% endif %}
+            </div>
+            {% endif %}
             {{ content | safe }}
         </div>
     </div>

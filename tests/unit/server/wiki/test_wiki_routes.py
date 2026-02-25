@@ -9,9 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from code_indexer.server.wiki.routes import wiki_router, get_current_user_hybrid
-
-
-from code_indexer.server.repositories.golden_repo_manager import GoldenRepoNotFoundError
+from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
 
 
 def _make_user(username):
@@ -43,6 +41,22 @@ def _make_app(authenticated_user=None, actual_repo_path=None,
     app.state.golden_repo_manager.get_wiki_enabled.return_value = wiki_enabled
     app.state.golden_repo_manager.get_actual_repo_path.return_value = actual_repo_path or "/tmp/test"
     app.state.golden_repo_manager.db_path = _db_path
+
+    # Create alias infrastructure for AliasManager resolution.
+    # Production code uses AliasManager.read_alias("{alias}-global") instead of
+    # get_actual_repo_path(), so golden_repos_dir + aliases/{alias}-global.json must exist.
+    if actual_repo_path:
+        golden_repos_dir = Path(actual_repo_path).parent / "golden-repos-test"
+        golden_repos_dir.mkdir(parents=True, exist_ok=True)
+        make_aliases_dir(str(golden_repos_dir), "test-repo", actual_repo_path)
+        app.state.golden_repo_manager.golden_repos_dir = str(golden_repos_dir)
+    else:
+        # No repo path - create empty aliases dir so AliasManager can be constructed
+        # but will find no alias file -> returns None -> 404 (correct behavior)
+        _tmp_golden = tempfile.mkdtemp(suffix="-golden-repos")
+        (Path(_tmp_golden) / "aliases").mkdir(parents=True, exist_ok=True)
+        app.state.golden_repo_manager.golden_repos_dir = _tmp_golden
+
     app.state.access_filtering_service = MagicMock()
     app.state.access_filtering_service.is_admin_user.return_value = False
     app.state.access_filtering_service.get_accessible_repos.return_value = user_accessible_repos or set()
@@ -88,7 +102,6 @@ class TestAccessControl:
 
     def test_nonexistent_repo_returns_404(self):
         app = _make_app(_make_user("alice"), user_accessible_repos={"test-repo"})
-        app.state.golden_repo_manager.get_actual_repo_path.side_effect = GoldenRepoNotFoundError("x")
         client = TestClient(app, raise_server_exceptions=False)
         assert client.get("/wiki/test-repo/").status_code == 404
 
