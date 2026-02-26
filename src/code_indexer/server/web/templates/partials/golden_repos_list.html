@@ -110,7 +110,6 @@
                                     data-repo-alias="{{ repo.alias }}"
                                     data-current="{{ repo.default_branch or 'main' }}"
                                     data-loaded="false"
-                                    onfocus="loadBranches(this)"
                                     onchange="confirmBranchChange(this)"
                                     style="min-width: 120px; padding: 2px 4px;">
                                 <option value="{{ repo.default_branch or 'main' }}" selected>
