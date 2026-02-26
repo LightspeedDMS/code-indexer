@@ -174,6 +174,11 @@ function toggleDetails(alias) {
             if (typeof loadRepoDescription === 'function') {
                 loadRepoDescription(alias);
             }
+            // Load branches on card expansion (Story #303)
+            var branchSelect = document.getElementById('branch-select-' + alias);
+            if (branchSelect && typeof loadBranches === 'function') {
+                loadBranches(branchSelect);
+            }
         } else {
             openDetailsSet.delete(alias);
             console.log('[CIDX] Closed details for:', alias);
@@ -201,6 +206,12 @@ function restoreOpenDetails() {
                 // Re-fetch description after HTMX content swap (Story #218)
                 if (typeof loadRepoDescription === 'function') {
                     loadRepoDescription(alias);
+                }
+                // Re-load branches after HTMX content swap (Story #303)
+                var branchSelect = document.getElementById('branch-select-' + alias);
+                if (branchSelect && typeof loadBranches === 'function') {
+                    branchSelect.dataset.loaded = 'false';
+                    loadBranches(branchSelect);
                 }
             } else {
                 console.error('[CIDX] ❌ Could not find details element for:', alias);
