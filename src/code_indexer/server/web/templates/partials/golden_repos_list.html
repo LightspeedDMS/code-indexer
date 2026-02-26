@@ -105,7 +105,19 @@
                         </div>
                         <div class="detail-item">
                             <label>Branch:</label>
-                            <span>{{ repo.default_branch or 'main' }}</span>
+                            <select class="branch-select"
+                                    id="branch-select-{{ repo.alias }}"
+                                    data-repo-alias="{{ repo.alias }}"
+                                    data-current="{{ repo.default_branch or 'main' }}"
+                                    data-loaded="false"
+                                    onfocus="loadBranches(this)"
+                                    onchange="confirmBranchChange(this)"
+                                    style="min-width: 120px; padding: 2px 4px;">
+                                <option value="{{ repo.default_branch or 'main' }}" selected>
+                                    {{ repo.default_branch or 'main' }}
+                                </option>
+                            </select>
+                            <span class="branch-spinner" id="branch-spinner-{{ repo.alias }}" style="display:none;">&#8987;</span>
                         </div>
                         <div class="detail-item">
                             <label>Available Indexes:</label>
@@ -999,6 +1011,108 @@ async function refreshGlobalHealthData(repoAlias) {
     // If details are expanded, reload them too
     if (detailsContainer && detailsContainer.style.display !== 'none') {
         await loadGlobalHealthDetails(repoAlias, globalAlias, true);
+    }
+}
+
+/**
+ * Lazy-load branches for a golden repo branch dropdown on first focus.
+ * @param {HTMLSelectElement} selectEl - The branch select element
+ */
+async function loadBranches(selectEl) {
+    if (selectEl.dataset.loaded === 'true') return;
+    selectEl.dataset.loaded = 'true';
+
+    const alias = selectEl.dataset.repoAlias;
+    const currentBranch = selectEl.dataset.current;
+
+    try {
+        const response = await fetch('/golden-repos/' + encodeURIComponent(alias) + '/branches', {
+            credentials: 'include'
+        });
+        if (!response.ok) {
+            console.error('Failed to load branches:', response.status);
+            selectEl.dataset.loaded = 'false';
+            return;
+        }
+        const data = await response.json();
+        const branches = data.branches || [];
+
+        // Clear existing options
+        selectEl.innerHTML = '';
+
+        // Add branches as options
+        branches.forEach(function(b) {
+            const opt = document.createElement('option');
+            opt.value = b.name;
+            opt.textContent = b.name + (b.is_default ? ' (default)' : '') + ' [' + b.branch_type + ']';
+            if (b.name === currentBranch) {
+                opt.selected = true;
+            }
+            selectEl.appendChild(opt);
+        });
+
+        // If no branches returned, restore original
+        if (branches.length === 0) {
+            const opt = document.createElement('option');
+            opt.value = currentBranch;
+            opt.textContent = currentBranch;
+            opt.selected = true;
+            selectEl.appendChild(opt);
+        }
+    } catch (err) {
+        console.error('Error loading branches:', err);
+        selectEl.dataset.loaded = 'false';
+    }
+}
+
+/**
+ * Prompt user to confirm a branch change, then POST to change-branch endpoint.
+ * @param {HTMLSelectElement} selectEl - The branch select element
+ */
+async function confirmBranchChange(selectEl) {
+    const alias = selectEl.dataset.repoAlias;
+    const currentBranch = selectEl.dataset.current;
+    const newBranch = selectEl.value;
+
+    if (newBranch === currentBranch) return;
+
+    const confirmed = confirm(
+        'Change branch from "' + currentBranch + '" to "' + newBranch + '"?\n\n' +
+        'This will re-index the repository on the new branch.'
+    );
+
+    if (!confirmed) {
+        selectEl.value = currentBranch;
+        return;
+    }
+
+    const spinner = document.getElementById('branch-spinner-' + alias);
+    if (spinner) spinner.style.display = 'inline';
+    selectEl.disabled = true;
+
+    try {
+        const response = await fetch('/golden-repos/' + encodeURIComponent(alias) + '/change-branch', {
+            method: 'POST',
+            credentials: 'include',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({branch: newBranch})
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+            selectEl.dataset.current = newBranch;
+            alert('Branch changed to "' + newBranch + '" successfully.\nThe repository has been re-indexed.');
+        } else {
+            selectEl.value = currentBranch;
+            alert('Branch change failed: ' + (data.error || data.message || 'Unknown error'));
+        }
+    } catch (err) {
+        selectEl.value = currentBranch;
+        alert('Branch change failed: ' + err.message);
+    } finally {
+        if (spinner) spinner.style.display = 'none';
+        selectEl.disabled = false;
     }
 }
 

@@ -258,22 +258,25 @@ class WikiCache:
             conn.close()
 
     def get_sidebar(self, repo_alias: str, repo_dir: Path) -> Optional[List]:
-        """Return cached sidebar list if max_mtime of .md files hasn't changed, else None."""
+        """Return cached sidebar list if a cache row exists, else None.
+
+        Story #304: The filesystem poll (_max_mtime_of_md_files) has been removed
+        from this hot path.  Cache coherence is now maintained via event-driven
+        invalidation (WikiCacheInvalidator) rather than polling on every request.
+        The repo_dir parameter is retained for backward compatibility with callers
+        but is no longer used in this method.
+        """
         conn = sqlite3.connect(self._db_path)
         try:
             row = conn.execute(
-                "SELECT sidebar_json, max_mtime FROM wiki_sidebar_cache WHERE repo_alias=?",
+                "SELECT sidebar_json FROM wiki_sidebar_cache WHERE repo_alias=?",
                 (repo_alias,),
             ).fetchone()
         finally:
             conn.close()
         if row is None:
             return None
-        stored_json, stored_max_mtime = row
-        current_max_mtime = _max_mtime_of_md_files(repo_dir)
-        if current_max_mtime != stored_max_mtime:
-            return None
-        return json.loads(stored_json)
+        return json.loads(row[0])
 
     def put_sidebar(self, repo_alias: str, sidebar_data: List, repo_dir: Path) -> None:
         """Store sidebar JSON with current max_mtime of .md files."""

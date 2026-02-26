@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.59] - 2026-02-26
+
+### Added
+
+- MCP group-based access control: tools now enforce group membership permissions via `access_filtering_service` (#300).
+- MCP system credentials management: admin endpoints and MCP tools for managing system-wide MCP credentials (#302).
+- Change active branch for golden repositories: MCP tool, web route, and UI dropdown for switching tracked branch (#303).
+- Event-driven wiki sidebar cache invalidation: replaced filesystem polling (rglob) with 9 mutation hooks for instant cache coherence (#304).
+
+### Fixed
+
+- Wiki search/nav duplicate badge deduplication: category badge suppressed when it duplicates visibility badge (#301).
+
 ## [9.3.58] - 2026-02-25
 
 ### Fixed

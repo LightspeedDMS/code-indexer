@@ -104,17 +104,26 @@ class AccessFilteringService:
 
     def _get_repo_alias(self, result: Any) -> str:
         """
-        Get repository_alias from a result, handling both objects and dicts.
+        Get repository alias from a result, normalized for access checks.
+
+        Handles both dict and object results. Falls back to source_repo when
+        repository_alias is absent (omni-search results). Strips the -global
+        suffix so aliases match stored repo names in get_accessible_repos().
 
         Args:
             result: A QueryResult object or dictionary
 
         Returns:
-            The repository_alias value or empty string if not found
+            The normalized repository alias, or empty string if not found
         """
         if isinstance(result, dict):
-            return str(result.get("repository_alias", ""))
-        return str(getattr(result, "repository_alias", ""))
+            alias = str(result.get("repository_alias", "") or result.get("source_repo", ""))
+        else:
+            alias = str(getattr(result, "repository_alias", "") or getattr(result, "source_repo", ""))
+        # Strip -global suffix to match stored repo names in access control
+        if alias.endswith("-global"):
+            alias = alias[: -len("-global")]
+        return alias
 
     def filter_query_results(self, results: List[Any], user_id: str) -> List[Any]:
         """

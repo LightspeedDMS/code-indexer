@@ -10,6 +10,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 import errno
 import json
 import os
+import re
 import shutil
 import subprocess
 import logging
@@ -32,6 +33,8 @@ if TYPE_CHECKING:
 
 from pydantic import BaseModel
 from code_indexer.server.logging_utils import format_error_log
+
+logger = logging.getLogger(__name__)
 
 
 class GoldenRepoError(Exception):
@@ -1885,6 +1888,224 @@ class GoldenRepoManager:
             branch_service.get_golden_repo_branches(alias)
         )
         return branches
+
+    # ------------------------------------------------------------------
+    # Story #303: Change active branch of golden repository
+    # Default timeouts (seconds) used when resource_config is absent.
+    # ------------------------------------------------------------------
+    _CB_GIT_TIMEOUT: int = 600        # 10 min for fetch / checkout / pull
+    _CB_INDEX_TIMEOUT: int = 3600     # 1 h  for cidx index
+    _CB_COW_TIMEOUT: int = 600        # 10 min for CoW clone
+    _CB_FIX_TIMEOUT: int = 60         # 1 min for cidx fix-config
+
+    def _cb_git_fetch_and_validate(
+        self, base_clone_path: str, target_branch: str, git_timeout: int
+    ) -> None:
+        """Fetch remote and validate that target_branch exists (AC3)."""
+        subprocess.run(
+            ["git", "fetch", "origin"],
+            cwd=base_clone_path,
+            capture_output=True,
+            text=True,
+            timeout=git_timeout,
+            check=True,
+        )
+        result = subprocess.run(
+            ["git", "branch", "-r"],
+            cwd=base_clone_path,
+            capture_output=True,
+            text=True,
+            timeout=git_timeout,
+            check=True,
+        )
+        remote_branches = {b.strip() for b in result.stdout.splitlines() if b.strip()}
+        if f"origin/{target_branch}" not in remote_branches:
+            available = sorted(remote_branches)
+            raise ValueError(
+                f"Branch '{target_branch}' does not exist on remote. "
+                f"Available remote branches: {available}"
+            )
+
+    def _cb_checkout_and_pull(
+        self, base_clone_path: str, target_branch: str, git_timeout: int
+    ) -> None:
+        """Checkout target branch and pull latest commits."""
+        subprocess.run(
+            ["git", "checkout", target_branch],
+            cwd=base_clone_path,
+            capture_output=True,
+            text=True,
+            timeout=git_timeout,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "pull", "origin", target_branch],
+            cwd=base_clone_path,
+            capture_output=True,
+            text=True,
+            timeout=git_timeout,
+            check=True,
+        )
+
+    def _cb_cidx_index(
+        self, base_clone_path: str, cidx_index_timeout: int
+    ) -> None:
+        """Run cidx index on the base clone (no --clear)."""
+        subprocess.run(
+            ["cidx", "index"],
+            cwd=base_clone_path,
+            capture_output=True,
+            text=True,
+            timeout=cidx_index_timeout,
+            check=True,
+        )
+
+    def _cb_cow_snapshot(
+        self,
+        alias: str,
+        base_clone_path: str,
+        cow_timeout: int,
+        cidx_fix_timeout: int,
+    ) -> str:
+        """Create CoW snapshot and return its path."""
+        versioned_base = os.path.join(self.golden_repos_dir, ".versioned", alias)
+        os.makedirs(versioned_base, exist_ok=True)
+        snapshot_path = os.path.join(versioned_base, f"v_{int(time.time())}")
+
+        subprocess.run(
+            ["cp", "--reflink=auto", "-a", base_clone_path, snapshot_path],
+            capture_output=True,
+            text=True,
+            timeout=cow_timeout,
+            check=True,
+        )
+        # fix-config on clone only (non-fatal)
+        try:
+            subprocess.run(
+                ["cidx", "fix-config", "--force"],
+                cwd=snapshot_path,
+                capture_output=True,
+                text=True,
+                timeout=cidx_fix_timeout,
+                check=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[change_branch] cidx fix-config on clone failed (non-fatal): {exc}"
+            )
+        return snapshot_path
+
+    def _cb_swap_alias(self, alias: str, new_snapshot_path: str) -> None:
+        """Atomically swap alias JSON to new snapshot; schedule old snapshot cleanup."""
+        # Import here to avoid circular dependency (alias_manager imports from server)
+        from code_indexer.global_repos.alias_manager import AliasManager
+
+        global_alias = f"{alias}-global"
+        aliases_dir = os.path.join(self.golden_repos_dir, "aliases")
+        os.makedirs(aliases_dir, exist_ok=True)
+        alias_manager = AliasManager(aliases_dir)
+
+        current_target = alias_manager.read_alias(global_alias)
+        alias_manager.create_alias(global_alias, new_snapshot_path, repo_name=alias)
+
+        if current_target and ".versioned" in current_target:
+            try:
+                # Import here to avoid circular dependency (app imports from repos)
+                from code_indexer.server import app as app_module
+
+                lifecycle = getattr(
+                    app_module.app.state, "global_lifecycle_manager", None
+                )
+                if lifecycle and getattr(lifecycle, "refresh_scheduler", None):
+                    cm = getattr(lifecycle.refresh_scheduler, "cleanup_manager", None)
+                    if cm:
+                        cm.schedule_cleanup(current_target)
+            except Exception as exc:
+                logger.warning(
+                    f"[change_branch] Cleanup scheduling failed (non-fatal): {exc}"
+                )
+
+    def change_branch(self, alias: str, target_branch: str) -> Dict[str, Any]:
+        """
+        Change the active branch of a golden repository (Story #303).
+
+        See class docstring and story algorithm for full lifecycle description.
+
+        Args:
+            alias: Golden repository alias (without -global suffix).
+            target_branch: Branch name to switch to.
+
+        Returns:
+            Dict with keys: success (bool), message (str).
+
+        Raises:
+            GoldenRepoNotFoundError: If alias not registered.
+            RuntimeError: If write lock cannot be acquired (repo busy).
+            ValueError: If target branch does not exist on remote.
+            RuntimeError: If any git or indexing step fails.
+        """
+        if not target_branch or not re.match(r"^[a-zA-Z0-9_][a-zA-Z0-9_./-]*$", target_branch):
+            raise ValueError(f"Invalid branch name: '{target_branch}'")
+
+        if alias not in self.golden_repos:
+            raise GoldenRepoNotFoundError(f"Golden repository '{alias}' not found")
+
+        golden_repo = self.golden_repos[alias]
+        if target_branch == golden_repo.default_branch:
+            return {"success": True, "message": f"Already on branch '{target_branch}'"}
+
+        scheduler = getattr(self, "_refresh_scheduler", None)
+        if scheduler is not None:
+            if scheduler.is_write_locked(alias):
+                raise RuntimeError(
+                    f"Repository '{alias}' is currently being indexed or refreshed. "
+                    "Try again later."
+                )
+            if not scheduler.acquire_write_lock(alias, owner_name="branch_change"):
+                raise RuntimeError(
+                    f"Could not acquire write lock for repository '{alias}'."
+                )
+
+        try:
+            rc = self.resource_config
+            git_t = getattr(rc, "git_pull_timeout", self._CB_GIT_TIMEOUT) if rc else self._CB_GIT_TIMEOUT
+            idx_t = getattr(rc, "cidx_index_timeout", self._CB_INDEX_TIMEOUT) if rc else self._CB_INDEX_TIMEOUT
+            cow_t = getattr(rc, "cow_clone_timeout", self._CB_COW_TIMEOUT) if rc else self._CB_COW_TIMEOUT
+            fix_t = getattr(rc, "cidx_fix_config_timeout", self._CB_FIX_TIMEOUT) if rc else self._CB_FIX_TIMEOUT
+
+            base = golden_repo.clone_path
+            self._cb_git_fetch_and_validate(base, target_branch, git_t)
+            self._cb_checkout_and_pull(base, target_branch, git_t)
+            self._cb_cidx_index(base, idx_t)
+            snapshot = self._cb_cow_snapshot(alias, base, cow_t, fix_t)
+            self._cb_swap_alias(alias, snapshot)
+
+            self._sqlite_backend.update_default_branch(alias, target_branch)
+            # Invalidate branch-dependent tracking metadata (AC1, Story #303)
+            self._sqlite_backend.invalidate_description_refresh_tracking(alias)
+            self._sqlite_backend.invalidate_dependency_map_tracking(alias)
+            with self._operation_lock:
+                old = self.golden_repos[alias]
+                self.golden_repos[alias] = GoldenRepo(
+                    alias=old.alias,
+                    repo_url=old.repo_url,
+                    default_branch=target_branch,
+                    clone_path=old.clone_path,
+                    created_at=old.created_at,
+                    enable_temporal=old.enable_temporal,
+                    temporal_options=old.temporal_options,
+                    category_id=old.category_id,
+                    category_auto_assigned=old.category_auto_assigned,
+                )
+
+            logger.info(
+                "[change_branch] Branch changed for '%s' to '%s'", alias, target_branch
+            )
+            return {"success": True, "message": f"Branch changed to '{target_branch}'"}
+
+        finally:
+            if scheduler is not None:
+                scheduler.release_write_lock(alias, owner_name="branch_change")
 
     def add_index_to_golden_repo(
         self,

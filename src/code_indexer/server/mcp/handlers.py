@@ -225,6 +225,15 @@ def _get_app_refresh_scheduler():
     return getattr(lifecycle_manager, "refresh_scheduler", None)
 
 
+def _get_access_filtering_service():
+    """Get the AccessFilteringService if configured, None otherwise (Story #300).
+
+    Returns:
+        AccessFilteringService instance if configured in app.state, None otherwise.
+    """
+    return getattr(app_module.app.state, "access_filtering_service", None)
+
+
 def _get_scip_query_service():
     """Get SCIPQueryService instance for SCIP handlers.
 
@@ -241,9 +250,7 @@ def _get_scip_query_service():
     from code_indexer.server.services.scip_query_service import SCIPQueryService
 
     golden_repos_dir = _get_golden_repos_dir()
-    access_filtering_service = getattr(
-        app_module.app.state, "access_filtering_service", None
-    )
+    access_filtering_service = _get_access_filtering_service()
 
     return SCIPQueryService(
         golden_repos_dir=golden_repos_dir,
@@ -911,7 +918,7 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     repo_aliases = params.get("repository_alias", [])
     repo_aliases = _expand_wildcard_patterns(repo_aliases)
-    limit = _coerce_int(params.get("limit"), 10)
+    requested_limit = _coerce_int(params.get("limit"), 10)
 
     # Smart context-aware defaults: multi-repo (2+) uses per_repo, single repo uses global
     if len(repo_aliases) > 1:
@@ -960,12 +967,21 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         # FTS, temporal, hybrid all go to other_index_searches bucket
         api_metrics_service.increment_other_index_search()
 
+    # Story #300 (Finding 1): Over-fetch to compensate for post-search access filtering.
+    # Non-admin users may have results removed after HNSW search; fetching more upfront
+    # ensures the final result count is closer to what was requested.
+    access_svc = _get_access_filtering_service()
+    if access_svc and not access_svc.is_admin_user(user.username):
+        effective_limit = access_svc.calculate_over_fetch_limit(requested_limit)
+    else:
+        effective_limit = requested_limit
+
     # Story #36: Create MultiSearchRequest from MCP params
     request = MultiSearchRequest(
         repositories=repo_aliases,
         query=params.get("query_text", ""),
         search_type=search_type,
-        limit=limit,
+        limit=effective_limit,
         min_score=_coerce_float(params.get("min_score"), 0.0) if params.get("min_score") is not None else None,
         language=params.get("language"),
         path_filter=params.get("path_filter"),
@@ -1048,7 +1064,7 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     errors = response.errors or {}
     repos_searched = response.metadata.total_repos_searched
 
-    # Aggregate results based on mode
+    # Aggregate results based on mode (use requested_limit for slicing, not effective_limit)
     if aggregation_mode == "per_repo":
         # Per-repo mode: take proportional results from each repo
         results_by_repo = defaultdict(list)
@@ -1064,8 +1080,8 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         # Take proportional results from each repo
         num_repos = len(results_by_repo)
         if num_repos > 0:
-            per_repo_limit = limit // num_repos
-            remainder = limit % num_repos
+            per_repo_limit = requested_limit // num_repos
+            remainder = requested_limit % num_repos
             final_results = []
             for i, (repo, results) in enumerate(results_by_repo.items()):
                 # Give first 'remainder' repos one extra result
@@ -1078,7 +1094,7 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         all_results.sort(
             key=lambda x: x.get("similarity_score", x.get("score", 0)), reverse=True
         )
-        final_results = all_results[:limit]
+        final_results = all_results[:requested_limit]
 
     # Smart context-aware defaults: multi-repo (2+) uses grouped, single repo uses flat
     if len(repo_aliases) > 1:
@@ -1096,6 +1112,16 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             final_results = _apply_temporal_payload_truncation(final_results)
         else:
             final_results = _apply_payload_truncation(final_results)
+
+    # Story #300: Apply group-based access filtering (AC5)
+    access_filtering_service = _get_access_filtering_service()
+    if access_filtering_service:
+        final_results = access_filtering_service.filter_query_results(
+            final_results, user.username
+        )
+        # Story #300 (Finding 1): Truncate back to requested limit after filtering.
+        # Over-fetching may have produced extra results; ensure we return no more than requested.
+        final_results = final_results[:requested_limit]
 
     # Use _format_omni_response helper to format results
     formatted = _format_omni_response(
@@ -1205,6 +1231,14 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             query_tracker = _get_query_tracker()
             index_path = target_path  # Use resolved path for tracking
 
+            # Story #300 (Finding 1): Over-fetch to compensate for post-search access filtering.
+            _requested_limit = _coerce_int(params.get("limit"), 10)
+            _access_svc = _get_access_filtering_service()
+            if _access_svc and not _access_svc.is_admin_user(user.username):
+                _effective_limit = _access_svc.calculate_over_fetch_limit(_requested_limit)
+            else:
+                _effective_limit = _requested_limit
+
             start_time = time.time()
             try:
                 # Increment ref count before query (if QueryTracker available)
@@ -1217,7 +1251,7 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     username=user.username,
                     user_repos=mock_user_repos,
                     query_text=params["query_text"],
-                    limit=_coerce_int(params.get("limit"), 10),
+                    limit=_effective_limit,
                     min_score=_coerce_float(params.get("min_score"), 0.5),
                     file_extensions=params.get("file_extensions"),
                     language=params.get("language"),
@@ -1321,6 +1355,15 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 # Story #679: Semantic truncation for content field
                 response_results = _apply_payload_truncation(response_results)
 
+            # Story #300: Apply group-based access filtering (global repo path)
+            access_filtering_service = _get_access_filtering_service()
+            if access_filtering_service:
+                response_results = access_filtering_service.filter_query_results(
+                    response_results, user.username
+                )
+                # Story #300 (Finding 1): Truncate back to requested limit after filtering.
+                response_results = response_results[:_requested_limit]
+
             result = {
                 "results": response_results,
                 "total_results": len(response_results),
@@ -1336,12 +1379,21 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Activated repository: use semantic_query_manager for activated repositories (matches REST endpoint pattern)
         # Coerce numeric parameters from MCP string types (MCP protocol sends all values as strings)
+
+        # Story #300 (Finding 1): Over-fetch to compensate for post-search access filtering.
+        _act_requested_limit = _coerce_int(params.get("limit"), 10)
+        _act_access_svc = _get_access_filtering_service()
+        if _act_access_svc and not _act_access_svc.is_admin_user(user.username):
+            _act_effective_limit = _act_access_svc.calculate_over_fetch_limit(_act_requested_limit)
+        else:
+            _act_effective_limit = _act_requested_limit
+
         _evolution_limit_activated = params.get("evolution_limit")
         result = app_module.semantic_query_manager.query_user_repositories(
             username=user.username,
             query_text=params["query_text"],
             repository_alias=params.get("repository_alias"),
-            limit=_coerce_int(params.get("limit"), 10),
+            limit=_act_effective_limit,
             min_score=_coerce_float(params.get("min_score"), 0.5),
             file_extensions=params.get("file_extensions"),
             language=params.get("language"),
@@ -1416,6 +1468,18 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 # Story #679: Semantic truncation for content field
                 result["results"] = _apply_payload_truncation(result["results"])
 
+        # Story #300: Apply group-based access filtering (activated repo path)
+        access_filtering_service = _get_access_filtering_service()
+        if access_filtering_service and "results" in result and isinstance(
+            result["results"], list
+        ):
+            result["results"] = access_filtering_service.filter_query_results(
+                result["results"], user.username
+            )
+            # Story #300 (Finding 1): Truncate back to requested limit after filtering.
+            result["results"] = result["results"][:_act_requested_limit]
+            result["total_results"] = len(result["results"])
+
         return _mcp_response({"success": True, "results": result})
     except Exception as e:
         return _mcp_response({"success": False, "error": str(e), "results": []})
@@ -1426,6 +1490,18 @@ def discover_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         # List all golden repositories (source_type filter not currently used)
         repos = app_module.golden_repo_manager.list_golden_repos()
+
+        # Story #300: Apply group-based access filtering (AC3)
+        access_filtering_service = _get_access_filtering_service()
+        if access_filtering_service:
+            repo_aliases = [r.get("alias", r.get("name", "")) for r in repos]
+            accessible_aliases = access_filtering_service.filter_repo_listing(
+                repo_aliases, user.username
+            )
+            repos = [
+                r for r in repos
+                if r.get("alias", r.get("name", "")) in accessible_aliases
+            ]
 
         return _mcp_response({"success": True, "repositories": repos})
     except Exception as e:
@@ -1559,6 +1635,21 @@ def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         all_repos.sort(key=sort_key)
 
+        # Story #300: Apply group-based access filtering (AC2)
+        # Use golden_repo_alias (not user_alias) because get_accessible_repos() returns
+        # golden repo aliases without -global suffix, while user_alias for global repos
+        # carries the -global suffix and would not match.
+        access_filtering_service = _get_access_filtering_service()
+        if access_filtering_service:
+            repo_aliases = [r.get("golden_repo_alias", "") for r in all_repos]
+            accessible_aliases = access_filtering_service.filter_repo_listing(
+                repo_aliases, user.username
+            )
+            all_repos = [
+                r for r in all_repos
+                if r.get("golden_repo_alias", "") in accessible_aliases
+            ]
+
         return _mcp_response({"success": True, "repositories": all_repos})
     except Exception as e:
         return _mcp_response({"success": False, "error": str(e), "repositories": []})
@@ -1567,9 +1658,45 @@ def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 def activate_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Activate a repository for querying (supports single or composite)."""
     try:
+        # Story #300: Check group-based access before activating (AC4)
+        golden_repo_alias = params.get("golden_repo_alias")
+        golden_repo_aliases = params.get("golden_repo_aliases")
+        access_filtering_service = _get_access_filtering_service()
+        if access_filtering_service:
+            if not access_filtering_service.is_admin_user(user.username):
+                accessible_repos = access_filtering_service.get_accessible_repos(
+                    user.username
+                )
+                # Check singular alias
+                if golden_repo_alias and golden_repo_alias not in accessible_repos:
+                    return _mcp_response(
+                        {
+                            "success": False,
+                            "error": (
+                                "Repository not accessible. "
+                                "Contact your administrator for access."
+                            ),
+                            "job_id": None,
+                        }
+                    )
+                # Check composite aliases (plural) to prevent bypass via golden_repo_aliases
+                if golden_repo_aliases:
+                    for alias in golden_repo_aliases:
+                        if alias not in accessible_repos:
+                            return _mcp_response(
+                                {
+                                    "success": False,
+                                    "error": (
+                                        "Repository not accessible. "
+                                        "Contact your administrator for access."
+                                    ),
+                                    "job_id": None,
+                                }
+                            )
+
         job_id = app_module.activated_repo_manager.activate_repository(
             username=user.username,
-            golden_repo_alias=params.get("golden_repo_alias"),
+            golden_repo_alias=golden_repo_alias,
             golden_repo_aliases=params.get("golden_repo_aliases"),
             branch_name=params.get("branch_name"),
             user_alias=params.get("user_alias"),
@@ -2617,6 +2744,26 @@ def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e), "job_id": None})
 
 
+def change_golden_repo_branch(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Change the active branch of a golden repository (Story #303)."""
+    alias = params.get("alias")
+    branch = params.get("branch")
+
+    if not alias or not branch:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "Missing required parameters: 'alias' and 'branch'",
+            }
+        )
+
+    try:
+        result = app_module.golden_repo_manager.change_branch(alias, branch)
+        return _mcp_response(result)
+    except Exception as e:
+        return _mcp_response({"success": False, "error": str(e)})
+
+
 def list_users(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List all users (admin only)."""
     try:
@@ -3371,6 +3518,13 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             username=user.username,
         )
 
+        # Story #304: Invalidate wiki cache for markdown file changes (AC1)
+        try:
+            from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+            wiki_cache_invalidator.invalidate_for_file_change(repository_alias, file_path)
+        except Exception:
+            pass  # Wiki cache invalidation is fire-and-forget
+
         return _mcp_response(result)
 
     except FileExistsError as e:
@@ -3515,6 +3669,13 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             username=user.username,
         )
 
+        # Story #304: Invalidate wiki cache for markdown file changes (AC1)
+        try:
+            from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+            wiki_cache_invalidator.invalidate_for_file_change(repository_alias, file_path)
+        except Exception as e:
+            logger.debug(f"Wiki cache invalidation skipped for edit_file: {e}")
+
         return _mcp_response(result)
 
     except HashMismatchError as e:
@@ -3648,6 +3809,13 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             content_hash=content_hash,
             username=user.username,
         )
+
+        # Story #304: Invalidate wiki cache for markdown file changes (AC1)
+        try:
+            from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+            wiki_cache_invalidator.invalidate_for_file_change(repository_alias, file_path)
+        except Exception as e:
+            logger.debug(f"Wiki cache invalidation skipped for delete_file: {e}")
 
         return _mcp_response(result)
 
@@ -3907,6 +4075,14 @@ def handle_exit_write_mode(params: Dict[str, Any], user: User) -> Dict[str, Any]
         logger.info(f"exit_write_mode: triggering synchronous refresh for '{repo_alias}'")
         _write_mode_run_refresh(refresh_scheduler, repo_alias, golden_repos_dir, alias)
         logger.info(f"exit_write_mode: write mode exited for '{repo_alias}', refresh complete")
+
+        # Story #304: Invalidate wiki cache after write mode exit (AC9)
+        try:
+            from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+            wiki_cache_invalidator.invalidate_repo(repo_alias)
+        except Exception as e:
+            logger.debug(f"Wiki cache invalidation skipped for exit_write_mode: {e}")
+
         return _mcp_response(
             {"success": True, "message": f"Refresh complete, write mode exited for '{repo_alias}'"}
         )
@@ -3936,6 +4112,7 @@ HANDLER_REGISTRY: Dict[str, Any] = {
     "add_golden_repo": add_golden_repo,
     "remove_golden_repo": remove_golden_repo,
     "refresh_golden_repo": refresh_golden_repo,
+    "change_golden_repo_branch": change_golden_repo_branch,
     "list_users": list_users,
     "create_user": create_user,
     "get_repository_statistics": get_repository_statistics,
@@ -6604,6 +6781,14 @@ def git_pull(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             remote=remote,
             branch=branch,
         )
+
+        # Story #304: Invalidate wiki cache after git pull (AC2)
+        try:
+            from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+            wiki_cache_invalidator.invalidate_repo(repository_alias)
+        except Exception as e:
+            logger.debug(f"Wiki cache invalidation skipped for git_pull: {e}")
+
         return _mcp_response(result)
 
     except GitCommandError as e:
@@ -6713,6 +6898,13 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
+        # Story #304: Invalidate wiki cache after git reset (AC2)
+        try:
+            from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+            wiki_cache_invalidator.invalidate_repo(repository_alias)
+        except Exception as e:
+            logger.debug(f"Wiki cache invalidation skipped for git_reset: {e}")
+
         return _mcp_response(result)
 
     except ValueError as e:
@@ -6786,6 +6978,13 @@ def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
+        # Story #304: Invalidate wiki cache after git clean (AC2)
+        try:
+            from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+            wiki_cache_invalidator.invalidate_repo(repository_alias)
+        except Exception as e:
+            logger.debug(f"Wiki cache invalidation skipped for git_clean: {e}")
+
         return _mcp_response(result)
 
     except ValueError as e:
@@ -6841,6 +7040,14 @@ def git_merge_abort(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             return _mcp_response({"success": False, "error": error_msg})
 
         result = git_operations_service.git_merge_abort(Path(repo_path))
+
+        # Story #304: Invalidate wiki cache after git merge abort (AC2)
+        try:
+            from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+            wiki_cache_invalidator.invalidate_repo(repository_alias)
+        except Exception as e:
+            logger.debug(f"Wiki cache invalidation skipped for git_merge_abort: {e}")
+
         return _mcp_response(result)
 
     except GitCommandError as e:
@@ -6890,6 +7097,14 @@ def git_checkout_file(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             return _mcp_response({"success": False, "error": error_msg})
 
         result = git_operations_service.git_checkout_file(Path(repo_path), file_path)
+
+        # Story #304: Invalidate wiki cache after git checkout file (AC2)
+        try:
+            from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+            wiki_cache_invalidator.invalidate_repo(repository_alias)
+        except Exception as e:
+            logger.debug(f"Wiki cache invalidation skipped for git_checkout_file: {e}")
+
         return _mcp_response(result)
 
     except GitCommandError as e:
@@ -7038,6 +7253,14 @@ def git_branch_switch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         # Map current_branch to branch_name for consistent API
         if "current_branch" in result and "branch_name" not in result:
             result["branch_name"] = result["current_branch"]
+
+        # Story #304: Invalidate wiki cache after branch switch (AC2)
+        try:
+            from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+            wiki_cache_invalidator.invalidate_repo(repository_alias)
+        except Exception as e:
+            logger.debug(f"Wiki cache invalidation skipped for git_branch_switch: {e}")
+
         return _mcp_response(result)
 
     except GitCommandError as e:
@@ -11221,6 +11444,48 @@ HANDLER_REGISTRY["admin_delete_user_mcp_credential"] = (
 )
 HANDLER_REGISTRY["admin_list_all_mcp_credentials"] = (
     handle_admin_list_all_mcp_credentials
+)
+
+
+# =============================================================================
+# SYSTEM CREDENTIAL HANDLERS (Story #275)
+# =============================================================================
+
+
+def handle_admin_list_system_mcp_credentials(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """List system-managed MCP credentials owned by the admin user (admin only)."""
+    try:
+        if user.role != UserRole.ADMIN:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Permission denied: admin role required",
+                }
+            )
+
+        system_credentials = dependencies.user_manager.get_system_mcp_credentials()
+        return _mcp_response(
+            {
+                "success": True,
+                "system_credentials": system_credentials,
+                "count": len(system_credentials),
+            }
+        )
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "MCP-CRED-001",
+                f"Error in handle_admin_list_system_mcp_credentials: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+HANDLER_REGISTRY["admin_list_system_mcp_credentials"] = (
+    handle_admin_list_system_mcp_credentials
 )
 
 

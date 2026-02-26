@@ -332,3 +332,27 @@ class GlobalRegistry:
             if alias_name in self._registry_data:
                 self._registry_data[alias_name]["enable_scip"] = enable_scip
                 self._save_registry()
+
+    def update_next_refresh(self, alias_name: str, next_refresh: Optional[float]) -> None:
+        """
+        Update the next_refresh timestamp for a global repo.
+
+        Story #284: Back-propagating jitter scheduling.
+
+        Args:
+            alias_name: Global alias name
+            next_refresh: Unix timestamp (float) for next scheduled refresh,
+                          or None to clear
+
+        Raises:
+            RuntimeError: If save fails
+        """
+        next_refresh_str = str(next_refresh) if next_refresh is not None else None
+        if self._use_sqlite and self._sqlite_backend is not None:
+            # SQLite backend (Story #702)
+            self._sqlite_backend.update_next_refresh(alias_name, next_refresh_str)
+        else:
+            # JSON file storage (backward compatible)
+            if alias_name in self._registry_data:
+                self._registry_data[alias_name]["next_refresh"] = next_refresh_str
+                self._save_registry()

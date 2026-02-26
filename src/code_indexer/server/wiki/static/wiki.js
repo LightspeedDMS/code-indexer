@@ -175,6 +175,13 @@
     }
 
     // ------------------------------------------------------------------
+    // Search state (Story #301 AC1, AC2, AC3): tracks whether the sidebar
+    // is currently showing filtered search results.  Shared between
+    // initSearch() and initClientNavigation() via module-level variable.
+    // ------------------------------------------------------------------
+    var isInSearchMode = false;
+
+    // ------------------------------------------------------------------
     // Search (Story #290): AC1, AC3, AC4, AC5, AC6
     // ------------------------------------------------------------------
     function initSearch() {
@@ -255,6 +262,8 @@
                 var a = document.createElement("a");
                 a.href = "/wiki/" + repoAlias + "/" + r.path;
                 a.className = "search-result-item";
+                // data-path enables initClientNavigation to highlight active result (Story #301 AC1)
+                a.setAttribute("data-path", r.path);
                 a.textContent = r.title;
                 if (r.score !== undefined) {
                     var scoreSpan = document.createElement("span");
@@ -264,9 +273,16 @@
                 }
                 resultsList.appendChild(a);
             });
+
+            // Story #301 AC1/AC2: entering search mode — navigation must preserve
+            // the filtered TOC instead of rebuilding the full sidebar.
+            isInSearchMode = true;
         }
 
         function restoreFullTOC() {
+            // Story #301 AC3: leaving search mode — navigation reverts to normal TOC behavior.
+            isInSearchMode = false;
+
             var sidebar = document.getElementById("wiki-sidebar");
             if (!sidebar) return;
 
@@ -528,6 +544,31 @@
                     window.location.href = url;
                 });
         }
+
+        // Story #301 AC1/AC2: Handle clicks on search result items.
+        // When in search mode, load content without rebuilding the TOC.
+        // The search results list remains intact; only the active highlight moves.
+        sidebar.addEventListener("click", function (e) {
+            var searchTarget = e.target.closest("a.search-result-item");
+            if (searchTarget && isInSearchMode) {
+                var url = searchTarget.getAttribute("href");
+                if (!url || !url.startsWith("/wiki/")) return;
+                if (e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
+
+                e.preventDefault();
+
+                // Move active highlight within the search results list
+                var resultsList = document.getElementById("wiki-search-results");
+                if (resultsList) {
+                    var prevActive = resultsList.querySelector(".search-result-item.active");
+                    if (prevActive) prevActive.classList.remove("active");
+                    searchTarget.classList.add("active");
+                }
+
+                swapContent(url);
+                return;
+            }
+        });
 
         sidebar.addEventListener("click", function (e) {
             // Find the closest .sidebar-item anchor

@@ -1080,6 +1080,32 @@ class UserManager:
 
         return all_credentials
 
+    def get_system_mcp_credentials(self) -> List[Dict[str, Any]]:
+        """
+        Return MCP credentials owned by the 'admin' user (system-managed credentials).
+
+        Story #275: These are credentials created automatically by the CIDX server
+        (e.g. cidx-local-auto, cidx-server-auto). Every record carries is_system=True
+        and owner='admin (system)' so callers can render them distinctly from personal
+        user credentials.
+
+        Returns:
+            List of credential metadata dicts with is_system=True and
+            owner='admin (system)', ordered newest-first.
+        """
+        if self._use_sqlite and self._sqlite_backend is not None:
+            result: List[Dict[str, Any]] = (
+                self._sqlite_backend.get_system_mcp_credentials()
+            )
+            return result
+
+        # JSON file storage: delegate to get_mcp_credentials and annotate
+        credentials = self.get_mcp_credentials("admin")
+        for cred in credentials:
+            cred["is_system"] = True
+            cred["owner"] = "admin (system)"
+        return credentials
+
     def get_user_by_email(self, email: str) -> Optional[User]:
         """Get user by email address (case-insensitive).
 

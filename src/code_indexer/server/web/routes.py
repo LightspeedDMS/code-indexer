@@ -1833,6 +1833,31 @@ def _get_golden_repo_manager():
     return manager
 
 
+def _golden_repo_not_found_error():
+    """Lazy import of GoldenRepoNotFoundError to avoid circular imports."""
+    from code_indexer.server.repositories.golden_repo_manager import (
+        GoldenRepoNotFoundError,
+    )
+    return GoldenRepoNotFoundError
+
+
+# Module-level lazy sentinel for exception matching
+_GoldenRepoNotFoundError = type("_LazyError", (Exception,), {})
+try:
+    from code_indexer.server.repositories.golden_repo_manager import (
+        GoldenRepoNotFoundError as _GoldenRepoNotFoundError,
+    )
+except ImportError:
+    pass
+
+
+def _get_golden_repo_branch_service():
+    """Get golden repo branch service from app state (may return None)."""
+    from code_indexer.server import app as app_module
+
+    return getattr(app_module.app.state, "golden_repo_branch_service", None)
+
+
 def generate_unique_alias(repo_name: str, golden_repo_manager) -> str:
     """
     Generate unique alias from repository name.
@@ -2529,6 +2554,94 @@ def refresh_wiki_cache(
     return _create_golden_repos_page_response(
         request, session, success_message="Wiki cache cleared"
     )
+
+
+@web_router.post("/golden-repos/{alias}/change-branch")
+async def change_golden_repo_branch(
+    request: Request,
+    alias: str,
+):
+    """Change the active branch of a golden repository (Story #303)."""
+    session = _require_admin_session(request)
+    if not session:
+        return JSONResponse(
+            {"success": False, "error": "Authentication required"},
+            status_code=401,
+        )
+
+    try:
+        body = await request.json()
+        branch = body.get("branch")
+        if not branch:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Missing required field: branch"},
+            )
+
+        manager = _get_golden_repo_manager()
+        import asyncio
+        result = await asyncio.to_thread(manager.change_branch, alias, branch)
+        return JSONResponse(content=result)
+
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except (FileNotFoundError, _GoldenRepoNotFoundError) as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+    except RuntimeError as e:
+        error_msg = str(e).lower()
+        if any(kw in error_msg for kw in (
+            "conflict", "locked", "busy", "indexed", "refreshed", "write lock",
+        )):
+            return JSONResponse(status_code=409, content={"error": str(e)})
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    except Exception as e:
+        logger.error(f"Branch change failed for {alias}: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Branch change failed: {e}"},
+        )
+
+
+@web_router.get("/golden-repos/{alias}/branches")
+def get_golden_repo_branches(
+    request: Request,
+    alias: str,
+):
+    """Get list of branches for a golden repository (Story #303, AC5)."""
+    session = _require_admin_session(request)
+    if not session:
+        return JSONResponse(
+            {"success": False, "error": "Authentication required"},
+            status_code=401,
+        )
+
+    try:
+        from code_indexer.server.services.golden_repo_branch_service import (
+            GoldenRepoBranchService,
+        )
+
+        manager = _get_golden_repo_manager()
+        branch_service = GoldenRepoBranchService(manager)
+        branches = branch_service.get_golden_repo_branches(alias)
+        return JSONResponse(
+            content={
+                "branches": [
+                    {
+                        "name": b.name,
+                        "last_commit_hash": b.last_commit_hash,
+                        "last_commit_author": b.last_commit_author,
+                        "branch_type": b.branch_type,
+                        "is_default": b.is_default,
+                    }
+                    for b in branches
+                ]
+            }
+        )
+    except (FileNotFoundError, _GoldenRepoNotFoundError) as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+    except Exception as e:
+        logger.error(f"Failed to get branches for {alias}: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @web_router.post("/golden-repos/activate", response_class=HTMLResponse)
@@ -7136,6 +7249,7 @@ def _create_admin_mcp_credentials_page_response(
     assert dependencies.user_manager is not None  # Initialized at app startup
     username = session.username
     credentials = dependencies.user_manager.get_mcp_credentials(username)
+    system_credentials = dependencies.user_manager.get_system_mcp_credentials()
 
     response = templates.TemplateResponse(
         request,
@@ -7145,6 +7259,7 @@ def _create_admin_mcp_credentials_page_response(
             "current_page": "mcp-credentials",
             "username": username,
             "mcp_credentials": credentials,
+            "system_credentials": system_credentials,
             "success_message": success_message,
             "error_message": error_message,
         },
@@ -7164,13 +7279,34 @@ def admin_mcp_credentials_list_partial(request: Request):
 
     username = session.username
     credentials = dependencies.user_manager.get_mcp_credentials(username)
+    system_credentials = dependencies.user_manager.get_system_mcp_credentials()
 
     response = templates.TemplateResponse(
         request,
         "partials/mcp_credentials_list.html",
-        {"mcp_credentials": credentials},
+        {"mcp_credentials": credentials, "system_credentials": system_credentials},
     )
     return response
+
+
+@web_router.get("/api/system-credentials", response_class=JSONResponse)
+def admin_system_credentials_api(request: Request):
+    """Return system-managed MCP credentials as JSON (Story #275).
+
+    Credentials owned by the built-in admin user that were created automatically
+    by the CIDX server (e.g. cidx-local-auto, cidx-server-auto).
+    Requires an active admin session.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return JSONResponse(
+            content={"error": "Authentication required"},
+            status_code=403,
+        )
+
+    assert dependencies.user_manager is not None  # Initialized at app startup
+    system_credentials = dependencies.user_manager.get_system_mcp_credentials()
+    return JSONResponse(content={"system_credentials": system_credentials})
 
 
 # =============================================================================

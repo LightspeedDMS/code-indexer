@@ -9,6 +9,7 @@ import logging
 import subprocess
 from pathlib import Path
 
+from .git_error_classifier import GitFetchError
 from .update_strategy import UpdateStrategy
 
 
@@ -58,12 +59,21 @@ class GitPullUpdater(UpdateStrategy):
             )
 
             if fetch_result.returncode != 0:
-                # If fetch fails, log warning and return False (can't determine changes)
+                # Story #295: Raise instead of silently returning False so the
+                # refresh scheduler can classify the error and trigger re-clone
+                # for corruption or after repeated transient failures.
+                from .git_error_classifier import classify_fetch_error
+
+                category = classify_fetch_error(fetch_result.stderr)
                 logger.warning(
-                    f"Git fetch failed for {self.repo_path}: {fetch_result.stderr}. "
-                    "Cannot detect remote changes, skipping this refresh cycle."
+                    f"Git fetch failed for {self.repo_path} "
+                    f"(category={category}): {fetch_result.stderr}"
                 )
-                return False
+                raise GitFetchError(
+                    f"Git fetch failed for {self.repo_path}",
+                    category=category,
+                    stderr=fetch_result.stderr,
+                )
 
             # Check for commits on remote not in local using HEAD..@{upstream}
             log_result = subprocess.run(
@@ -92,6 +102,8 @@ class GitPullUpdater(UpdateStrategy):
 
         except subprocess.TimeoutExpired:
             raise RuntimeError(f"Git command timed out for {self.repo_path}")
+        except GitFetchError:
+            raise
         except Exception as e:
             raise RuntimeError(f"Failed to check for remote changes: {e}")
 
