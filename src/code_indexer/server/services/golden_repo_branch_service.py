@@ -146,8 +146,9 @@ class GoldenRepoBranchService:
                     if len(parts) >= 5:
                         raw_name = parts[0]
 
-                        # Skip origin/HEAD symbolic ref (not a real branch)
-                        if raw_name == "origin/HEAD":
+                        # Skip origin/HEAD symbolic ref and bare remote
+                        # name (not real branches)
+                        if raw_name in ("origin/HEAD", "origin"):
                             continue
 
                         # Determine if remote branch, strip origin/ prefix
