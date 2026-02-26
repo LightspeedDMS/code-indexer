@@ -1026,7 +1026,7 @@ async function loadBranches(selectEl) {
     const currentBranch = selectEl.dataset.current;
 
     try {
-        const response = await fetch('/golden-repos/' + encodeURIComponent(alias) + '/branches', {
+        const response = await fetch('/admin/golden-repos/' + encodeURIComponent(alias) + '/branches', {
             credentials: 'include'
         });
         if (!response.ok) {
@@ -1091,7 +1091,7 @@ async function confirmBranchChange(selectEl) {
     selectEl.disabled = true;
 
     try {
-        const response = await fetch('/golden-repos/' + encodeURIComponent(alias) + '/change-branch', {
+        const response = await fetch('/admin/golden-repos/' + encodeURIComponent(alias) + '/change-branch', {
             method: 'POST',
             credentials: 'include',
             headers: {'Content-Type': 'application/json'},
