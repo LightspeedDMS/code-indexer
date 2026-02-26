@@ -992,6 +992,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     collection_name,
                     progress_callback,
                     slot_tracker,
+                    fts_manager=fts_manager,
                 )
 
             result.processing_time = time.time() - start_time
@@ -1352,9 +1353,21 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         collection_name: str,
         progress_callback: Optional[Callable] = None,
         slot_tracker: Optional[CleanSlotTracker] = None,
+        fts_manager: Optional[Any] = None,
     ):
-        """Thread-safe version of hiding files that don't exist in branch."""
+        """Thread-safe version of hiding files that don't exist in branch.
 
+        Args:
+            branch: Current branch name (used for hidden_branches tagging)
+            current_files: List of file paths visible in this branch
+            collection_name: Name of the vector collection
+            progress_callback: Optional progress callback
+            slot_tracker: Optional slot tracker for UI progress
+            fts_manager: Optional FTS (TantivyIndexManager) instance. When provided,
+                        delete_document() is called for each hidden file (best-effort)
+                        and commit() is called once after all deletes. Errors on
+                        individual files are logged but do not stop processing.
+        """
         # Reset progress timers for branch isolation phase transition
         if progress_callback and hasattr(progress_callback, "reset_progress_timers"):
             progress_callback.reset_progress_timers()
@@ -1431,6 +1444,28 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 progress_callback=progress_callback,
                 slot_tracker=slot_tracker,
             )
+
+            # P1: FTS cleanup - delete FTS documents for hidden files (best-effort)
+            if fts_manager is not None:
+                fts_deleted_count = 0
+                for file_path in files_to_hide:
+                    try:
+                        fts_manager.delete_document(file_path)
+                        fts_deleted_count += 1
+                    except Exception as e:
+                        logger.warning(
+                            f"FTS delete failed for '{file_path}' during branch isolation: {e}"
+                        )
+                if fts_deleted_count > 0:
+                    try:
+                        fts_manager.commit()
+                        logger.info(
+                            f"FTS branch isolation: deleted {fts_deleted_count} documents "
+                            f"for branch '{branch}'"
+                        )
+                    except Exception as e:
+                        logger.warning(f"FTS commit failed during branch isolation: {e}")
+
         else:
             logger.info(f"Branch isolation: no files to hide for branch '{branch}'")
             # Report completion when there are no files to hide
@@ -1442,5 +1477,30 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     info="🔒 Branch isolation • 0 files to hide (all files current)",
                     slot_tracker=slot_tracker,
                 )
+
+        # P0: HNSW filtered rebuild - rebuild HNSW index with only visible files
+        # This eliminates ghost vectors from search results without deleting vector files.
+        # Always done after semantic hiding (even when files_to_hide is empty) to ensure
+        # the HNSW index reflects the current branch state.
+        if hasattr(self.vector_store_client, "rebuild_hnsw_filtered"):
+            try:
+                self.vector_store_client.rebuild_hnsw_filtered(
+                    collection_name,
+                    visible_files=current_files_set,
+                    progress_callback=progress_callback,
+                )
+                logger.info(
+                    f"HNSW filtered rebuild complete for branch '{branch}': "
+                    f"{len(current_files_set)} visible files"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"HNSW filtered rebuild failed during branch isolation: {e}"
+                )
+        else:
+            logger.warning(
+                "vector_store_client does not support rebuild_hnsw_filtered - "
+                "ghost vectors may persist after branch isolation"
+            )
 
         return True

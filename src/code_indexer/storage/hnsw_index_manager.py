@@ -7,7 +7,7 @@ algorithm for approximate nearest neighbor search with better query performance.
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -257,7 +257,10 @@ class HNSWIndexManager:
             return None
 
     def rebuild_from_vectors(
-        self, collection_path: Path, progress_callback: Optional[Any] = None
+        self,
+        collection_path: Path,
+        progress_callback: Optional[Any] = None,
+        visible_files: Optional[Set[str]] = None,
     ) -> int:
         """Rebuild HNSW index by scanning all vector JSON files.
 
@@ -267,6 +270,11 @@ class HNSWIndexManager:
         Args:
             collection_path: Path to collection directory
             progress_callback: Optional callback(current, total, file_path, info) for progress tracking
+            visible_files: Optional set of file paths (payload.path values) that should be
+                          included in the rebuilt index. When provided, vectors whose
+                          payload.path is NOT in this set are skipped, enabling ghost
+                          vector elimination during branch isolation.
+                          When None (default), all vectors are included (backward compatible).
 
         Returns:
             Number of vectors indexed
@@ -287,16 +295,29 @@ class HNSWIndexManager:
 
         # Scan all vector JSON files
         vector_files = list(collection_path.rglob("vector_*.json"))
-        total_files = len(vector_files)
+        total_files_on_disk = len(vector_files)
 
-        if total_files == 0:
+        if total_files_on_disk == 0:
+            if visible_files is not None:
+                # Write filtered metadata even when no vectors exist
+                self._update_metadata(
+                    collection_path=collection_path,
+                    vector_count=0,
+                    M=16,
+                    ef_construction=200,
+                    ids=[],
+                    index_file_size=0,
+                    filtered=True,
+                    visible_count=0,
+                    total_on_disk=0,
+                )
             return 0
 
         # Report info message at start
         if progress_callback:
             progress_callback(0, 0, Path(""), info="🔧 Rebuilding HNSW index...")
 
-        # Load all vectors and IDs
+        # Load all vectors and IDs, applying visibility filter if provided
         vectors_list = []
         ids_list = []
 
@@ -312,6 +333,12 @@ class HNSWIndexManager:
                 if len(vector) != expected_dim:
                     continue  # Skip mismatched dimensions
 
+                # Apply visibility filter: skip vectors for hidden files
+                if visible_files is not None:
+                    file_path = data.get("payload", {}).get("path")
+                    if file_path not in visible_files:
+                        continue  # Skip vectors not in visible set
+
                 vectors_list.append(vector)
                 ids_list.append(point_id)
 
@@ -320,6 +347,21 @@ class HNSWIndexManager:
                 continue
 
         if not vectors_list:
+            # No vectors pass the filter - return 0 without building index
+            if visible_files is not None:
+                # Write filtered metadata showing 0 visible vectors
+                index_file = collection_path / self.INDEX_FILENAME
+                self._update_metadata(
+                    collection_path=collection_path,
+                    vector_count=0,
+                    M=16,
+                    ef_construction=200,
+                    ids=[],
+                    index_file_size=index_file.stat().st_size if index_file.exists() else 0,
+                    filtered=True,
+                    visible_count=0,
+                    total_on_disk=total_files_on_disk,
+                )
             return 0
 
         # Convert to numpy array
@@ -351,14 +393,28 @@ class HNSWIndexManager:
         rebuilder.rebuild_with_lock(build_hnsw_index_to_temp, index_file)
 
         # Update metadata AFTER atomic swap
-        self._update_metadata(
-            collection_path=collection_path,
-            vector_count=len(vectors),
-            M=16,
-            ef_construction=200,
-            ids=ids_list,
-            index_file_size=index_file.stat().st_size,
-        )
+        # When visible_files is provided, write filtered metadata fields
+        if visible_files is not None:
+            self._update_metadata(
+                collection_path=collection_path,
+                vector_count=len(vectors),
+                M=16,
+                ef_construction=200,
+                ids=ids_list,
+                index_file_size=index_file.stat().st_size,
+                filtered=True,
+                visible_count=len(vectors),
+                total_on_disk=total_files_on_disk,
+            )
+        else:
+            self._update_metadata(
+                collection_path=collection_path,
+                vector_count=len(vectors),
+                M=16,
+                ef_construction=200,
+                ids=ids_list,
+                index_file_size=index_file.stat().st_size,
+            )
 
         return len(vectors)
 
@@ -448,6 +504,18 @@ class HNSWIndexManager:
             # This catches incremental indexing that bypassed mark_stale()
             # Only perform this check if there are actual vector files (not just HNSW index)
             stored_count = hnsw_info.get("vector_count", 0)
+
+            # Branch isolation fix: When this is a filtered rebuild, compare
+            # HNSW count against visible_count (not total disk count).
+            # This prevents false-positive staleness after filtered rebuilds where
+            # disk has MORE vectors than what's in the HNSW index (that's by design).
+            if hnsw_info.get("filtered", False):
+                visible_count = hnsw_info.get("visible_count", stored_count)
+                if stored_count != visible_count:
+                    return True  # HNSW count doesn't match what was rebuilt
+                return False  # Filtered rebuild is fresh
+
+            # Non-filtered rebuild: use disk-count comparison (existing behavior)
             vector_files = list(collection_path.rglob("vector_*.json"))
             actual_count = len(vector_files)
 
@@ -469,6 +537,9 @@ class HNSWIndexManager:
         ef_construction: int,
         ids: List[str],
         index_file_size: int,
+        filtered: bool = False,
+        visible_count: Optional[int] = None,
+        total_on_disk: Optional[int] = None,
     ) -> None:
         """Update collection metadata with HNSW index information.
 
@@ -479,6 +550,13 @@ class HNSWIndexManager:
             ef_construction: HNSW ef_construction parameter
             ids: List of vector IDs
             index_file_size: Size of index file in bytes
+            filtered: Whether this was a filtered rebuild (branch isolation).
+                      When True, is_stale() will compare HNSW count against
+                      visible_count rather than total disk count.
+            visible_count: Number of visible vectors included in filtered rebuild.
+                          Only meaningful when filtered=True.
+            total_on_disk: Total vector files on disk at rebuild time.
+                          Only meaningful when filtered=True.
         """
         import fcntl
         import uuid
@@ -504,7 +582,7 @@ class HNSWIndexManager:
                 id_mapping = {str(i): ids[i] for i in range(len(ids))}
 
                 # Update HNSW index metadata with staleness tracking + rebuild version (AC12)
-                metadata["hnsw_index"] = {
+                hnsw_meta: Dict[str, Any] = {
                     "version": 1,
                     "index_rebuild_uuid": str(
                         uuid.uuid4()
@@ -521,6 +599,16 @@ class HNSWIndexManager:
                     "is_stale": False,  # Fresh after rebuild
                     "last_marked_stale": None,  # No staleness marking yet
                 }
+
+                # Branch isolation: write filtered rebuild metadata
+                # This allows is_stale() to compare against visible_count instead
+                # of total disk count, preventing false-positive staleness detection.
+                if filtered:
+                    hnsw_meta["filtered"] = True
+                    hnsw_meta["visible_count"] = visible_count
+                    hnsw_meta["total_on_disk"] = total_on_disk
+
+                metadata["hnsw_index"] = hnsw_meta
 
                 # Save metadata
                 with open(meta_file, "w") as f:

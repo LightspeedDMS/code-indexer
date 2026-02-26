@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.60] - 2026-02-26
+
+### Added
+
+- Branch isolation for Semantic (HNSW), FTS, and SCIP indexes (#305). HNSW filtered rebuild eliminates ghost vectors without destroying VoyageAI embeddings (~300-700ms vs 6-7 min with --clear). FTS branch isolation deletes stale Tantivy documents on branch switch. SCIP orphan cleanup removes .scip.db files for projects no longer in codebase.
+
+### Fixed
+
+- Ghost vectors appearing in semantic search after branch switch: HNSW index now rebuilt with only branch-visible vectors.
+- is_stale() false positive after filtered HNSW rebuild: metadata flag prevents unnecessary full rebuilds.
+- end_indexing() overwriting filtered HNSW with full rebuild: ordering flag preserves branch isolation.
+- fts_manager parameter not threaded to all 4 branch isolation call sites (was dead code).
+- Golden repo branch change using --clear unnecessarily: switched to incremental + HNSW filter.
+
 ## [9.3.59] - 2026-02-26
 
 ### Added

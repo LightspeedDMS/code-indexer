@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Dict, Optional, Callable
+from typing import List, Dict, Optional, Callable, Set
 import time
 import logging
 
@@ -77,6 +77,71 @@ class SCIPGenerator:
             "go": GoIndexer(),
         }
 
+    def _cleanup_orphan_scip_databases(
+        self, discovered_projects: List[DiscoveredProject]
+    ) -> int:
+        """Remove SCIP index databases for projects no longer in the codebase.
+
+        Scans .code-indexer/scip/ for index.scip.db files and removes any that
+        do not correspond to a currently-discovered project. This prevents stale
+        SCIP data from accumulating when branches are switched or projects removed.
+
+        Args:
+            discovered_projects: List of projects currently discovered in the repo.
+                                 Only databases matching these projects are kept.
+
+        Returns:
+            Number of orphan databases removed.
+
+        Note:
+            When scip_dir does not exist, returns 0 immediately.
+            Empty parent directories are removed after database deletion (best-effort).
+        """
+        if not self.scip_dir.exists():
+            return 0
+
+        # Build set of relative paths for discovered projects
+        # Database paths are: scip_dir / project.relative_path / "index.scip.db"
+        live_project_paths: Set[Path] = {
+            self.scip_dir / p.relative_path for p in discovered_projects
+        }
+
+        # Scan for all index.scip.db files
+        orphan_count = 0
+        for db_file in list(self.scip_dir.rglob("index.scip.db")):
+            # The project directory is db_file.parent
+            project_dir = db_file.parent
+            if project_dir not in live_project_paths:
+                # This is an orphan - delete it
+                try:
+                    db_file.unlink()
+                    orphan_count += 1
+                    logger.info(f"Removed orphan SCIP database: {db_file}")
+
+                    # Clean up empty parent directories (best-effort)
+                    try:
+                        # Walk up removing empty dirs, but not scip_dir itself
+                        parent = project_dir
+                        while parent != self.scip_dir and parent != self.scip_dir.parent:
+                            if parent.exists() and not any(parent.iterdir()):
+                                parent.rmdir()
+                                logger.debug(f"Removed empty SCIP directory: {parent}")
+                            else:
+                                break
+                            parent = parent.parent
+                    except Exception as e:
+                        logger.debug(
+                            f"Could not clean up directory after orphan removal: {e}"
+                        )
+
+                except Exception as e:
+                    logger.warning(f"Failed to remove orphan SCIP database {db_file}: {e}")
+
+        if orphan_count > 0:
+            logger.info(f"SCIP orphan cleanup: removed {orphan_count} orphan databases")
+
+        return orphan_count
+
     def generate(
         self,
         progress_callback: Optional[Callable[[DiscoveredProject, str], None]] = None,
@@ -96,6 +161,10 @@ class SCIPGenerator:
         # Discover projects
         discovery = ProjectDiscovery(self.repo_root)
         projects = discovery.discover()
+
+        # Clean up orphan SCIP databases before generation
+        # This ensures stale data from deleted/moved projects is removed
+        self._cleanup_orphan_scip_databases(projects)
 
         if not projects:
             return GenerationResult(
@@ -215,6 +284,11 @@ class SCIPGenerator:
         # Load current status
         tracker = StatusTracker(self.scip_dir)
         current_status = tracker.load()
+
+        # Clean up orphan SCIP databases before rebuilding
+        # This ensures stale data from deleted/moved projects is removed
+        discovered_projects = ProjectDiscovery(self.repo_root).discover()
+        self._cleanup_orphan_scip_databases(discovered_projects)
 
         # Determine which projects to rebuild
         if failed_only:
