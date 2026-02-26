@@ -107,6 +107,10 @@ class GoldenRepoBranchService:
         if not repo_path.exists():
             raise GitOperationError(f"Repository path does not exist: {repo_path}")
 
+        # Non-git repos (e.g., cidx-meta local folders) have no branches
+        if not (repo_path / ".git").exists():
+            return []
+
         try:
             # Get all branches using git for-each-ref for efficiency
             cmd = [

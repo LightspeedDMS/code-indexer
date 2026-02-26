@@ -1852,10 +1852,17 @@ except ImportError:
 
 
 def _get_golden_repo_branch_service():
-    """Get golden repo branch service from app state (may return None)."""
-    from code_indexer.server import app as app_module
-
-    return getattr(app_module.app.state, "golden_repo_branch_service", None)
+    """Create golden repo branch service on-demand (may return None)."""
+    manager = _get_golden_repo_manager()
+    if not manager:
+        return None
+    try:
+        from code_indexer.server.services.golden_repo_branch_service import (
+            GoldenRepoBranchService,
+        )
+        return GoldenRepoBranchService(manager)
+    except ImportError:
+        return None
 
 
 def generate_unique_alias(repo_name: str, golden_repo_manager) -> str:
@@ -2616,12 +2623,12 @@ def get_golden_repo_branches(
         )
 
     try:
-        from code_indexer.server.services.golden_repo_branch_service import (
-            GoldenRepoBranchService,
-        )
-
-        manager = _get_golden_repo_manager()
-        branch_service = GoldenRepoBranchService(manager)
+        branch_service = _get_golden_repo_branch_service()
+        if not branch_service:
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Branch service not available"},
+            )
         branches = branch_service.get_golden_repo_branches(alias)
         return JSONResponse(
             content={
