@@ -113,11 +113,15 @@ class GoldenRepoBranchService:
 
         try:
             # Get all branches using git for-each-ref for efficiency
+            # Query both local (refs/heads/) and remote tracking (refs/remotes/origin/)
+            # branches so golden repo clones show all available branches, not just
+            # the single checked-out local branch.
             cmd = [
                 "git",
                 "for-each-ref",
                 "--format=%(refname:short)|%(objectname)|%(committerdate:iso8601)|%(authorname)|%(subject)",
                 "refs/heads/",
+                "refs/remotes/origin/",
             ]
 
             result = subprocess.run(
@@ -130,6 +134,7 @@ class GoldenRepoBranchService:
             )
 
             branches = []
+            seen_names: set = set()  # Track branch names to deduplicate
             default_branch = self._get_default_branch(repo_path)
 
             for line in result.stdout.strip().split("\n"):
@@ -139,7 +144,23 @@ class GoldenRepoBranchService:
                 try:
                     parts = line.split("|")
                     if len(parts) >= 5:
-                        branch_name = parts[0]
+                        raw_name = parts[0]
+
+                        # Skip origin/HEAD symbolic ref (not a real branch)
+                        if raw_name == "origin/HEAD":
+                            continue
+
+                        # Determine if remote branch, strip origin/ prefix
+                        is_remote = raw_name.startswith("origin/")
+                        branch_name = (
+                            raw_name[len("origin/"):] if is_remote else raw_name
+                        )
+
+                        # Deduplicate: local branches take precedence over remote ones
+                        if branch_name in seen_names:
+                            continue
+                        seen_names.add(branch_name)
+
                         commit_hash = parts[1]
                         commit_date_str = parts[2]
                         author_name = parts[3]

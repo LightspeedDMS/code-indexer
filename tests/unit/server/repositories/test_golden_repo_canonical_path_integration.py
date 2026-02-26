@@ -232,9 +232,7 @@ class TestBranchServiceUsesCanonicalPath(BaseCanonicalPathTest):
         assert actual_path == versioned_path
 
         # After fix: Line 104 uses get_actual_repo_path() so this should succeed
-        import asyncio
-
-        branches = asyncio.run(self.branch_service.get_golden_repo_branches("txt-db"))
+        branches = self.branch_service.get_golden_repo_branches("txt-db")
 
         # Verify we got branch information
         assert len(branches) > 0
