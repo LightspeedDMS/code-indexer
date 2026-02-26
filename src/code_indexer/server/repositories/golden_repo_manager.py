@@ -1950,9 +1950,14 @@ class GoldenRepoManager:
     def _cb_cidx_index(
         self, base_clone_path: str, cidx_index_timeout: int
     ) -> None:
-        """Run cidx index on the base clone (no --clear)."""
+        """Run cidx index --clear --fts on the base clone.
+
+        Uses --clear to wipe and rebuild the index from scratch. This is
+        essential for branch changes where files are added/removed wholesale;
+        an incremental index would leave ghost vectors for deleted files.
+        """
         subprocess.run(
-            ["cidx", "index"],
+            ["cidx", "index", "--clear", "--fts"],
             cwd=base_clone_path,
             capture_output=True,
             text=True,

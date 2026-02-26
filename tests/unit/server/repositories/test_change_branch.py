@@ -354,6 +354,38 @@ def sqlite_backend(temp_db):
     return backend
 
 
+# ---------------------------------------------------------------------------
+# _cb_cidx_index subprocess flags
+# ---------------------------------------------------------------------------
+
+
+class TestCbCidxIndex:
+    """Verify _cb_cidx_index passes --clear and --fts flags to cidx index."""
+
+    def test_cb_cidx_index_uses_clear_and_fts_flags(self, manager, tmp_path):
+        """_cb_cidx_index must run cidx index --clear --fts to eliminate ghost vectors."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            manager._cb_cidx_index(str(tmp_path), 300)
+
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ["cidx", "index", "--clear", "--fts"], (
+            f"Expected ['cidx', 'index', '--clear', '--fts'] but got {cmd}. "
+            "Plain 'cidx index' leaves ghost vectors from the old branch."
+        )
+
+    def test_cb_cidx_index_uses_correct_cwd(self, manager, tmp_path):
+        """_cb_cidx_index must run cidx index in the given base_clone_path directory."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            manager._cb_cidx_index(str(tmp_path), 300)
+
+        mock_run.assert_called_once()
+        kwargs = mock_run.call_args[1]
+        assert kwargs["cwd"] == str(tmp_path)
+
+
 class TestUpdateDefaultBranchSqlite:
     """SQLite backend update_default_branch (Story #303)."""
 
