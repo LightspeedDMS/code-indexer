@@ -130,6 +130,45 @@ def execute(self) -> bool:
 
 ---
 
+## CRITICAL: GOLDEN REPO VERSIONED PATH ARCHITECTURE
+
+**Versioned content is IMMUTABLE. NEVER modify files inside `.versioned/` directories.**
+
+### Two-Tier Path Architecture
+
+| Tier | Path | Purpose | Mutable? |
+|------|------|---------|----------|
+| Base clone | `golden-repos/{alias}/` | Working copy for git operations (pull, checkout, fetch) | YES |
+| Versioned snapshot | `.versioned/{alias}/v_{timestamp}/` | Immutable CoW snapshot served to queries | NO - NEVER |
+
+### Correct Workflow for Any Base Repo Change (git pull, branch change, etc.)
+
+1. Perform git operation on the **base clone** (`golden-repos/{alias}/`)
+2. Run `cidx index` on the base clone (NO `--clear` -- handles branch changes natively)
+3. Create new CoW snapshot: `.versioned/{alias}/v_{new_timestamp}/`
+4. Atomic swap: Update alias JSON `target_path` to point to new snapshot
+5. Clean up old versioned directory (previous snapshot)
+
+**This is the same pattern used by RefreshScheduler for regular git pull refreshes.**
+
+### Key Rules
+
+- **Git operations** (pull, checkout, fetch): ONLY on base clone path
+- **Indexing**: ONLY on base clone path, THEN snapshot
+- **Queries**: ONLY served from versioned snapshot (via alias JSON `target_path`)
+- **NEVER** modify, checkout, or index directly in a `.versioned/` path
+- **NEVER** skip the CoW + atomic swap step after modifying the base clone
+
+### Path Resolution
+
+- `golden_repos_metadata.clone_path` (SQLite): Stale after first refresh, points to base clone
+- Alias JSON `target_path`: CURRENT and authoritative, points to active versioned snapshot
+- `GoldenRepoManager.get_actual_repo_path(alias)`: Resolves the correct current path
+
+*Recorded 2026-02-26*
+
+---
+
 ## CIDX SERVER PORT CONFIGURATION - DO NOT CHANGE
 
 **NEVER** change port config for cidx-server, HAProxy, or firewall.

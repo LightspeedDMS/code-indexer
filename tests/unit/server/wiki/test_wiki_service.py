@@ -1,7 +1,9 @@
 """Tests for WikiService (Stories #281, #282)."""
 
+import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -36,6 +38,74 @@ class TestWikiServiceFrontMatter:
         metadata, body = svc._strip_front_matter(content)
         assert metadata == {}
         assert content == body
+
+    def test_returns_empty_metadata_when_frontmatter_module_missing(self, svc):
+        """Bug #302: ModuleNotFoundError must not propagate when frontmatter not installed."""
+        content = "---\ntitle: My Title\n---\n# Body"
+        # Simulate frontmatter module not being installed by removing it from sys.modules
+        # and patching builtins.__import__ to raise ModuleNotFoundError for 'frontmatter'
+        saved = sys.modules.pop("frontmatter", None)
+        try:
+            with patch("builtins.__import__", side_effect=_import_raise_for_frontmatter):
+                metadata, body = svc._strip_front_matter(content)
+            assert metadata == {}, "Expected empty metadata when frontmatter module is missing"
+            assert body == content, "Expected original content returned when frontmatter module is missing"
+        finally:
+            if saved is not None:
+                sys.modules["frontmatter"] = saved
+
+    def test_no_exception_propagates_when_frontmatter_module_missing(self, svc):
+        """Bug #302: _strip_front_matter must never raise when frontmatter is not installed."""
+        content = "# Plain content without front matter"
+        saved = sys.modules.pop("frontmatter", None)
+        try:
+            with patch("builtins.__import__", side_effect=_import_raise_for_frontmatter):
+                # Must not raise any exception
+                metadata, body = svc._strip_front_matter(content)
+            assert metadata == {}
+            assert body == content
+        finally:
+            if saved is not None:
+                sys.modules["frontmatter"] = saved
+
+    def test_strips_front_matter_when_module_available(self, svc):
+        """Bug #302: When frontmatter IS available, metadata must still be parsed correctly."""
+        content = "---\ntitle: Available\nauthor: Tester\n---\nBody text here"
+        metadata, body = svc._strip_front_matter(content)
+        assert metadata.get("title") == "Available"
+        assert metadata.get("author") == "Tester"
+        assert "Body text here" in body
+        assert "---" not in body
+
+    def test_handles_importerror_as_well_as_modulenotfounderror(self, svc):
+        """Bug #302: ImportError (parent of ModuleNotFoundError) must also be caught."""
+        content = "---\ntitle: Test\n---\nContent"
+        saved = sys.modules.pop("frontmatter", None)
+        try:
+            with patch("builtins.__import__", side_effect=_import_raise_importerror_for_frontmatter):
+                metadata, body = svc._strip_front_matter(content)
+            assert metadata == {}
+            assert body == content
+        finally:
+            if saved is not None:
+                sys.modules["frontmatter"] = saved
+
+
+def _import_raise_for_frontmatter(name, *args, **kwargs):
+    """Raise ModuleNotFoundError only for the 'frontmatter' module; delegate everything else."""
+    if name == "frontmatter":
+        raise ModuleNotFoundError("No module named 'frontmatter'")
+    return _real_import(name, *args, **kwargs)
+
+
+def _import_raise_importerror_for_frontmatter(name, *args, **kwargs):
+    """Raise ImportError only for the 'frontmatter' module; delegate everything else."""
+    if name == "frontmatter":
+        raise ImportError("Cannot import frontmatter")
+    return _real_import(name, *args, **kwargs)
+
+
+_real_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
 
 
 class TestWikiServiceHeaderBlock:

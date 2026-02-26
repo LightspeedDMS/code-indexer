@@ -38,7 +38,8 @@ class DatabaseSchema:
             last_refresh TEXT NOT NULL,
             enable_temporal BOOLEAN DEFAULT FALSE,
             temporal_options TEXT,
-            enable_scip BOOLEAN DEFAULT FALSE
+            enable_scip BOOLEAN DEFAULT FALSE,
+            next_refresh TEXT
         )
     """
 
@@ -540,6 +541,13 @@ class DatabaseSchema:
                 "ALTER TABLE global_repos ADD COLUMN enable_scip BOOLEAN DEFAULT FALSE"
             )
             migrations_applied.append("enable_scip")
+
+        # Story #284: next_refresh for back-propagating jitter scheduling
+        if "next_refresh" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE global_repos ADD COLUMN next_refresh TEXT"
+            )
+            migrations_applied.append("next_refresh")
 
         if migrations_applied:
             conn.commit()

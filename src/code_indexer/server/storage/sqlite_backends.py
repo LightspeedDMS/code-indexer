@@ -64,10 +64,18 @@ class GlobalReposSqliteBackend:
 
         def operation(conn):
             conn.execute(
-                """INSERT OR REPLACE INTO global_repos
+                """INSERT INTO global_repos
                    (alias_name, repo_name, repo_url, index_path, created_at,
                     last_refresh, enable_temporal, temporal_options, enable_scip)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(alias_name) DO UPDATE SET
+                    repo_name = excluded.repo_name,
+                    repo_url = excluded.repo_url,
+                    index_path = excluded.index_path,
+                    last_refresh = excluded.last_refresh,
+                    enable_temporal = excluded.enable_temporal,
+                    temporal_options = excluded.temporal_options,
+                    enable_scip = excluded.enable_scip""",
                 (
                     alias_name,
                     repo_name,
@@ -98,7 +106,8 @@ class GlobalReposSqliteBackend:
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             """SELECT alias_name, repo_name, repo_url, index_path, created_at,
-                      last_refresh, enable_temporal, temporal_options, enable_scip
+                      last_refresh, enable_temporal, temporal_options, enable_scip,
+                      next_refresh
                FROM global_repos WHERE alias_name = ?""",
             (alias_name,),
         )
@@ -117,6 +126,7 @@ class GlobalReposSqliteBackend:
             "enable_temporal": bool(row[6]),
             "temporal_options": json.loads(row[7]) if row[7] else None,
             "enable_scip": bool(row[8]),
+            "next_refresh": row[9],
         }
 
     def list_repos(self) -> Dict[str, Dict[str, Any]]:
@@ -129,7 +139,8 @@ class GlobalReposSqliteBackend:
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             """SELECT alias_name, repo_name, repo_url, index_path, created_at,
-                      last_refresh, enable_temporal, temporal_options
+                      last_refresh, enable_temporal, temporal_options, enable_scip,
+                      next_refresh
                FROM global_repos"""
         )
 
@@ -145,6 +156,8 @@ class GlobalReposSqliteBackend:
                 "last_refresh": row[5],
                 "enable_temporal": bool(row[6]),
                 "temporal_options": json.loads(row[7]) if row[7] else None,
+                "enable_scip": bool(row[8]),
+                "next_refresh": row[9],
             }
 
         return result
@@ -246,6 +259,32 @@ class GlobalReposSqliteBackend:
             logger.debug(
                 f"Updated enable_scip={enable_scip} for repo: {alias_name}"
             )
+        return updated
+
+    def update_next_refresh(self, alias_name: str, next_refresh: Optional[str]) -> bool:
+        """
+        Update the next_refresh timestamp for a repository.
+
+        Story #284: Back-propagating jitter scheduling.
+
+        Args:
+            alias_name: Alias of the repository to update (with -global suffix)
+            next_refresh: Unix timestamp as string, or None to clear
+
+        Returns:
+            True if record was updated, False if not found.
+        """
+
+        def operation(conn):
+            cursor = conn.execute(
+                "UPDATE global_repos SET next_refresh = ? WHERE alias_name = ?",
+                (next_refresh, alias_name),
+            )
+            return cursor.rowcount > 0
+
+        updated: bool = self._conn_manager.execute_atomic(operation)
+        if updated:
+            logger.debug(f"Updated next_refresh for repo: {alias_name}")
         return updated
 
     def close(self) -> None:
@@ -681,6 +720,40 @@ class UsersSqliteBackend:
                 "name": r[4],
                 "created_at": r[5],
                 "last_used_at": r[6],
+            }
+            for r in cursor.fetchall()
+        ]
+
+    def get_system_mcp_credentials(self) -> List[Dict[str, Any]]:
+        """
+        Return MCP credentials owned by the 'admin' user (system-managed credentials).
+
+        Story #275: Display system-managed MCP credentials to admin users.
+        System credentials are those belonging to the built-in 'admin' user, which
+        are created automatically by the CIDX server (e.g. cidx-local-auto, cidx-server-auto).
+
+        Returns:
+            List of credential dicts with is_system=True and owner='admin (system)',
+            ordered by created_at DESC (newest first).
+        """
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            """SELECT credential_id, client_id, client_id_prefix,
+                      name, created_at, last_used_at
+               FROM user_mcp_credentials
+               WHERE username = 'admin'
+               ORDER BY created_at DESC""",
+        )
+        return [
+            {
+                "credential_id": r[0],
+                "client_id": r[1],
+                "client_id_prefix": r[2],
+                "name": r[3],
+                "created_at": r[4],
+                "last_used_at": r[5],
+                "owner": "admin (system)",
+                "is_system": True,
             }
             for r in cursor.fetchall()
         ]
@@ -1722,6 +1795,73 @@ class GoldenRepoMetadataSqliteBackend:
 
         self._conn_manager.execute_atomic(operation)
         logger.info(f"Updated wiki_enabled={enabled} for golden repo: {alias}")
+
+    def update_default_branch(self, alias: str, branch: str) -> None:
+        """
+        Update the default_branch for a golden repository (Story #303).
+
+        Args:
+            alias: Repository alias (primary key).
+            branch: New default branch name.
+
+        Notes:
+            If alias does not exist, this is a no-op (no error raised).
+        """
+
+        def operation(conn):
+            conn.execute(
+                "UPDATE golden_repos_metadata SET default_branch = ? WHERE alias = ?",
+                (branch, alias),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+        logger.info(f"Updated default_branch={branch!r} for golden repo: {alias}")
+
+    def invalidate_description_refresh_tracking(self, alias: str) -> None:
+        """
+        Invalidate description refresh tracking for a repo after branch change (Story #303).
+
+        Sets last_known_commit to NULL so the next refresh cycle re-analyzes.
+        No-op if the alias has no tracking record.
+        """
+
+        def operation(conn):
+            conn.execute(
+                "UPDATE description_refresh_tracking SET last_known_commit = NULL WHERE repo_alias = ?",
+                (alias,),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def invalidate_dependency_map_tracking(self, alias: str) -> None:
+        """
+        Remove alias entry from dependency_map_tracking.commit_hashes JSON (Story #303).
+
+        The commit_hashes column stores a JSON object mapping aliases to commit hashes.
+        This removes the entry for the specified alias so the next analysis re-processes it.
+        No-op if no tracking record exists or alias not in commit_hashes.
+        """
+        import json as _json
+
+        def operation(conn):
+            row = conn.execute(
+                "SELECT commit_hashes FROM dependency_map_tracking WHERE id = 1"
+            ).fetchone()
+            if not row or not row[0]:
+                return
+            try:
+                hashes = _json.loads(row[0])
+            except (ValueError, TypeError):
+                return
+            if alias not in hashes:
+                return
+            del hashes[alias]
+            conn.execute(
+                "UPDATE dependency_map_tracking SET commit_hashes = ? WHERE id = 1",
+                (_json.dumps(hashes),),
+            )
+
+        self._conn_manager.execute_atomic(operation)
 
     def list_repos_with_categories(self) -> List[Dict[str, Any]]:
         """

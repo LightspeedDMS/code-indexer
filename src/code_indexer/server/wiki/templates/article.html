@@ -102,7 +102,7 @@
                 {% if metadata_panel.visibility %}
                 <span class="metadata-badge {{ metadata_panel.visibility_class }}">{{ metadata_panel.visibility }}</span>
                 {% endif %}
-                {% if metadata_panel.category %}
+                {% if metadata_panel.category and not metadata_panel.suppress_category_badge %}
                 <span class="metadata-field">Category: {{ metadata_panel.category }}</span>
                 {% endif %}
             </div>

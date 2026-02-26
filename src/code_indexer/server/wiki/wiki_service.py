@@ -39,11 +39,16 @@ class WikiService:
 
     def _strip_front_matter(self, content: str) -> Tuple[Dict[str, Any], str]:
         """Parse YAML front matter, return (metadata, content_without_frontmatter)."""
-        import frontmatter
-
         try:
+            import frontmatter
+
             post = frontmatter.loads(content)
             return dict(post.metadata), post.content
+        except (ModuleNotFoundError, ImportError):
+            logger.debug(
+                "frontmatter module not available, skipping front matter parsing"
+            )
+            return {}, content
         except Exception:
             logger.warning("Failed to parse front matter, treating as plain content")
             return {}, content
@@ -226,12 +231,19 @@ class WikiService:
             ctx["visibility"] = str(visibility)
             ctx["visibility_class"] = _visibility_badge_class(str(visibility))
 
-        # Category (AC4)
+        # Category (AC4) + duplicate-badge deduplication (Story #301 AC4/AC5)
         raw_category = metadata.get("category")
         if raw_category is not None:
             category = str(raw_category).strip()
             if category:
                 ctx["category"] = category
+                # Suppress the separate "Category: X" text when it would duplicate the
+                # visibility badge (same value, case-insensitive comparison — Story #301).
+                # Only set the flag when both visibility and category are present.
+                if ctx.get("visibility"):
+                    visibility_lower = str(ctx["visibility"]).strip().lower()
+                    category_lower = category.lower()
+                    ctx["suppress_category_badge"] = (visibility_lower == category_lower)
 
         # Article number (from YAML 'original_article' or legacy header 'article_number')
         article_number = metadata.get("original_article") or metadata.get("article_number")

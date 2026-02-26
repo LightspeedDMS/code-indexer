@@ -7,15 +7,17 @@ change detection, index creation, alias swap, and cleanup scheduling.
 
 import logging
 import os
+import random
 import shutil
 import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Union, TYPE_CHECKING, cast
+from typing import Any, Dict, List, NoReturn, Optional, Union, TYPE_CHECKING, cast
 
 from code_indexer.config import ConfigManager
 from .alias_manager import AliasManager
+from .git_error_classifier import GitFetchError
 from .git_pull_updater import GitPullUpdater
 from .query_tracker import QueryTracker
 from .cleanup_manager import CleanupManager
@@ -117,6 +119,12 @@ class RefreshScheduler:
         from .write_lock_manager import WriteLockManager
         self.write_lock_manager = WriteLockManager(golden_repos_dir=self.golden_repos_dir)
 
+        # Story #295: Per-alias consecutive fetch failure counters and re-clone
+        # cooldown timestamps.  In-memory only — reset on server restart is fine
+        # since transient counters are ephemeral by nature.
+        self._fetch_failure_counts: Dict[str, int] = {}
+        self._reclone_cooldowns: Dict[str, float] = {}
+
     def _get_repo_lock(self, alias_name: str) -> threading.Lock:
         """
         Get or create a lock for a specific repository.
@@ -133,6 +141,211 @@ class RefreshScheduler:
             if alias_name not in self._repo_locks:
                 self._repo_locks[alias_name] = threading.Lock()
             return self._repo_locks[alias_name]
+
+    # ------------------------------------------------------------------
+    # Story #295: Auto-recovery for corrupted git object databases
+    # ------------------------------------------------------------------
+
+    # After this many consecutive transient failures the scheduler escalates
+    # to a full re-clone.  Corruption always triggers immediate re-clone.
+    MAX_TRANSIENT_FAILURES: int = 3
+
+    # After a re-clone attempt (success or failure) wait at least this long
+    # before trying again.
+    RECLONE_COOLDOWN_SECONDS: int = 3600  # 1 hour
+
+    # Timeout for the git clone subprocess during auto re-clone.
+    CLONE_TIMEOUT_SECONDS: int = 300  # 5 minutes
+
+    # ------------------------------------------------------------------
+    # Story #284: Back-propagating jitter for staggered refresh scheduling
+    # ------------------------------------------------------------------
+
+    # Jitter applied to each back-propagated next_refresh: +/- 10% of interval
+    JITTER_PERCENTAGE: float = 0.10
+
+    # Floor and ceiling for the short poll interval (interval/DIVISOR, clamped)
+    MIN_POLL_SECONDS: int = 10
+    MAX_POLL_SECONDS: int = 30
+
+    # Divisor used to derive base poll interval from the refresh interval.
+    # interval/20 gives a responsive check frequency (e.g., 3600s -> 180s -> clamped to 30s).
+    POLL_INTERVAL_DIVISOR: int = 20
+
+    def _calculate_jitter(self, refresh_interval_seconds: int) -> float:
+        """
+        Calculate random jitter within +/- JITTER_PERCENTAGE of interval.
+
+        Story #284 AC3: jitter stays within +/- (N * 0.10) of refresh_interval.
+
+        Args:
+            refresh_interval_seconds: The configured refresh interval in seconds.
+
+        Returns:
+            Float jitter value in range [-max_jitter, +max_jitter].
+        """
+        max_jitter = refresh_interval_seconds * self.JITTER_PERCENTAGE
+        return random.uniform(-max_jitter, max_jitter)
+
+    def _calculate_poll_interval(self, refresh_interval_seconds: int) -> float:
+        """
+        Calculate the background loop poll interval.
+
+        Uses interval/POLL_INTERVAL_DIVISOR clamped to [MIN_POLL_SECONDS, MAX_POLL_SECONDS].
+        This gives a short, responsive poll interval that avoids burning CPU
+        with too-frequent checks while still detecting due repos promptly.
+
+        Args:
+            refresh_interval_seconds: The configured refresh interval in seconds.
+
+        Returns:
+            Poll interval in seconds.
+        """
+        poll = refresh_interval_seconds / self.POLL_INTERVAL_DIVISOR
+        return max(self.MIN_POLL_SECONDS, min(self.MAX_POLL_SECONDS, poll))
+
+    def _assign_initial_spread(
+        self, repos: List[Dict[str, Any]], refresh_interval_seconds: int
+    ) -> None:
+        """
+        Evenly stagger repos across the interval from now.
+
+        Story #284 AC2: repos with NULL next_refresh get evenly staggered offsets,
+        NOT refreshed on first iteration. Each repo slot = spacing * (i+1) from now,
+        where spacing = interval / count.
+
+        Args:
+            repos: List of repo dicts (must have 'alias_name' key).
+            refresh_interval_seconds: The configured refresh interval in seconds.
+        """
+        count = len(repos)
+        if count == 0:
+            return
+        spacing = refresh_interval_seconds / count
+        now = time.time()
+        for i, repo in enumerate(repos):
+            offset = spacing * (i + 1)
+            next_refresh = now + offset
+            alias_name = repo.get("alias_name")
+            if alias_name:
+                self.registry.update_next_refresh(alias_name, next_refresh)
+
+    def _reset_fetch_failures(self, alias_name: str) -> None:
+        """Reset the consecutive fetch failure counter for an alias."""
+        self._fetch_failure_counts[alias_name] = 0
+
+    def _handle_fetch_error(
+        self,
+        alias_name: str,
+        repo_url: str,
+        master_path: str,
+        error: "GitFetchError",
+    ) -> NoReturn:
+        """
+        Handle a GitFetchError from has_changes().
+
+        Increments the consecutive failure counter for the alias, then decides
+        whether to trigger re-clone based on error category and counter value,
+        respecting the cooldown guard rail.  Always raises RuntimeError so
+        _execute_refresh propagates the failure.
+
+        Args:
+            alias_name: Global alias name (e.g., "my-repo-global")
+            repo_url: Remote git URL for re-clone
+            master_path: Filesystem path of the master clone to delete + re-clone
+            error: The GitFetchError raised by GitPullUpdater.has_changes()
+
+        Raises:
+            RuntimeError: Always raised with failure details after handling
+        """
+        count = self._fetch_failure_counts.get(alias_name, 0) + 1
+        self._fetch_failure_counts[alias_name] = count
+
+        now = time.monotonic()
+        cooldown_until = self._reclone_cooldowns.get(alias_name, 0.0)
+        in_cooldown = now < cooldown_until
+
+        should_reclone = False
+        if in_cooldown:
+            logger.warning(
+                f"Fetch failed for {alias_name} (category={error.category}, "
+                f"consecutive={count}), but re-clone cooldown is active — skipping"
+            )
+        elif error.category == "corruption":
+            logger.error(
+                f"Repo {alias_name} has corrupted git objects, "
+                "initiating auto re-clone"
+            )
+            should_reclone = True
+        elif count >= self.MAX_TRANSIENT_FAILURES:
+            logger.error(
+                f"Repo {alias_name} has {count} consecutive transient fetch failures, "
+                "escalating to auto re-clone"
+            )
+            should_reclone = True
+        else:
+            logger.warning(
+                f"Transient fetch failure #{count} for {alias_name} "
+                f"(threshold={self.MAX_TRANSIENT_FAILURES}): {error.stderr}"
+            )
+
+        if should_reclone:
+            # Set cooldown before attempting — prevents retry storms even if
+            # the attempt raises an exception.
+            self._reclone_cooldowns[alias_name] = now + self.RECLONE_COOLDOWN_SECONDS
+            self._attempt_reclone(alias_name, repo_url, master_path)
+
+        raise RuntimeError(
+            f"Fetch failed for {alias_name} (category={error.category}): {error.stderr}"
+        )
+
+    def _attempt_reclone(
+        self, alias_name: str, repo_url: str, master_path: str
+    ) -> bool:
+        """
+        Delete the master clone and re-clone from the remote URL.
+
+        Only deletes golden-repos/{alias}/ (the master clone).
+        Preserves .versioned/{alias}/ snapshot directories.
+
+        Args:
+            alias_name: Global alias name (for logging)
+            repo_url: Remote git URL to clone from
+            master_path: Absolute path of the master clone directory
+
+        Returns:
+            True on success, False on failure (also logs CRITICAL on failure).
+            Never raises — all exceptions are caught and logged.
+        """
+        master = Path(master_path)
+
+        try:
+            # Safety: only delete the specific master clone directory, never its
+            # parent (golden_repos_dir) which would destroy all repos.
+            if master.exists():
+                logger.info(f"Deleting master clone for re-clone: {master}")
+                shutil.rmtree(str(master))
+
+            clone_result = subprocess.run(
+                ["git", "clone", repo_url, str(master)],
+                capture_output=True,
+                text=True,
+                timeout=self.CLONE_TIMEOUT_SECONDS,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.critical(
+                f"Auto re-clone FAILED for {alias_name}: {type(e).__name__}: {e}"
+            )
+            return False
+
+        if clone_result.returncode != 0:
+            logger.critical(
+                f"Auto re-clone FAILED for {alias_name}: {clone_result.stderr}"
+            )
+            return False
+
+        logger.info(f"Auto re-clone succeeded for {alias_name} into {master}")
+        return True
 
     # ------------------------------------------------------------------
     # Write-lock registry (Story #227, delegating to WriteLockManager Story #230)
@@ -488,8 +701,15 @@ class RefreshScheduler:
         """
         Background thread loop for scheduled refreshes.
 
-        Checks all registered global repos at configured interval
-        and triggers refreshes.
+        Uses per-repo next_refresh timestamps with back-propagating jitter
+        to spread refresh cycles across the interval (Story #284).
+
+        Each iteration:
+        1. Assigns initial spread to repos with NULL next_refresh
+        2. Checks each git repo individually against its next_refresh time
+        3. Submits due repos and back-propagates next_refresh with jitter
+        4. Sleeps for a short poll interval (_calculate_poll_interval) instead
+           of the full refresh interval
         """
         logger.debug("Refresh scheduler loop started")
 
@@ -499,48 +719,84 @@ class RefreshScheduler:
                 # clients that disconnected without calling exit_write_mode.
                 self.cleanup_stale_write_mode_markers()
 
-                # Get all registered global repos
                 repos = self.registry.list_global_repos()
+                refresh_interval = self.get_refresh_interval()
 
-                for repo in repos:
+                # Filter to git repos only — local repos are excluded from
+                # the scheduled refresh cycle and are only refreshed via
+                # explicit trigger_refresh_for_repo() calls.
+                git_repos = [
+                    r for r in repos
+                    if r.get("alias_name") and _is_git_repo_url(r.get("repo_url", ""))
+                ]
+
+                # Story #284 AC2: assign initial spread to repos with no next_refresh
+                unscheduled = [
+                    r for r in git_repos if r.get("next_refresh") is None
+                ]
+                if unscheduled:
+                    self._assign_initial_spread(unscheduled, refresh_interval)
+
+                # Re-read to get freshly assigned next_refresh values
+                if unscheduled:
+                    repos = self.registry.list_global_repos()
+                    git_repos = [
+                        r for r in repos
+                        if r.get("alias_name") and _is_git_repo_url(r.get("repo_url", ""))
+                    ]
+
+                # Check each repo individually against its next_refresh timestamp
+                now = time.time()
+                for repo in git_repos:
                     if not self._running:
                         break
 
                     alias_name = repo.get("alias_name")
-                    repo_url = repo.get("repo_url", "")
+                    next_refresh_str = repo.get("next_refresh")
 
-                    if not alias_name:
+                    if next_refresh_str is None:
+                        # Still unscheduled after spread assignment — skip
                         continue
 
-                    # Skip local repos completely from the scheduled refresh cycle.
-                    # Local repos (local://, bare filesystem paths, empty URLs) are
-                    # only refreshed via explicit trigger_refresh_for_repo() calls
-                    # from their writer services (DependencyMapService,
-                    # LangfuseTraceSyncService, MetaDescriptionHook).
-                    # Submitting them here causes failures for uninitialized repos
-                    # and wastes background jobs for initialized ones.
-                    if not _is_git_repo_url(repo_url):
-                        logger.info(
-                            f"Skipping local repo {alias_name} from scheduled refresh "
-                            f"(repo_url={repo_url!r}). Local repos are only refreshed "
-                            f"via explicit trigger."
+                    try:
+                        next_refresh = float(next_refresh_str)
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            f"Invalid next_refresh value for {alias_name}: "
+                            f"{next_refresh_str!r} — skipping"
                         )
                         continue
 
+                    if now < next_refresh:
+                        continue  # Not due yet
+
+                    # Repo is due for refresh — submit job
                     try:
                         self._submit_refresh_job(alias_name)
                     except Exception as e:
                         logger.error(
-                            f"Refresh failed for {alias_name}: {type(e).__name__}: {e}", exc_info=True
+                            f"Refresh failed for {alias_name}: {type(e).__name__}: {e}",
+                            exc_info=True,
+                        )
+
+                    # Story #284 AC1: back-propagate next_refresh with jitter
+                    jitter = self._calculate_jitter(refresh_interval)
+                    new_next_refresh = now + refresh_interval + jitter
+                    try:
+                        self.registry.update_next_refresh(alias_name, new_next_refresh)
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to persist next_refresh for {alias_name}: {e}"
                         )
 
             except Exception as e:
-                logger.error(f"Error in scheduler loop: {type(e).__name__}: {e}", exc_info=True)
+                logger.error(
+                    f"Error in scheduler loop: {type(e).__name__}: {e}", exc_info=True
+                )
 
-            # Wait using Event.wait() for interruptible sleep
-            # Event.wait() returns True if event is set, False on timeout
-            interval = self.get_refresh_interval()
-            self._stop_event.wait(timeout=interval)
+            # Short poll interval instead of full refresh_interval wait
+            poll_interval = self._calculate_poll_interval(refresh_interval)
+            self._stop_event.wait(timeout=poll_interval)
 
         logger.debug("Refresh scheduler loop exited")
 
@@ -743,23 +999,34 @@ class RefreshScheduler:
                         )
                         updater.update(force_reset=True)
                     else:
-                        has_changes = updater.has_changes()
+                        try:
+                            has_changes = updater.has_changes()
+                            # Story #295: Successful fetch proves healthy repo —
+                            # reset failure counter regardless of whether changes exist.
+                            self._reset_fetch_failures(alias_name)
 
-                        if not has_changes:
+                            if not has_changes:
+                                logger.info(
+                                    f"No changes detected for {alias_name}, skipping refresh"
+                                )
+                                return {
+                                    "success": True,
+                                    "alias": alias_name,
+                                    "message": "No changes detected",
+                                }
+
+                            # Pull latest changes into master
                             logger.info(
-                                f"No changes detected for {alias_name}, skipping refresh"
+                                f"Pulling latest changes for {alias_name} into master: {master_path}"
                             )
-                            return {
-                                "success": True,
-                                "alias": alias_name,
-                                "message": "No changes detected",
-                            }
-
-                        # Pull latest changes into master
-                        logger.info(
-                            f"Pulling latest changes for {alias_name} into master: {master_path}"
-                        )
-                        updater.update()
+                            updater.update()
+                        except GitFetchError as e:
+                            # _handle_fetch_error is typed NoReturn: always raises
+                            # RuntimeError, so execution never continues past this call.
+                            self._handle_fetch_error(
+                                alias_name, repo_url, master_path, e
+                            )
+                            raise  # Unreachable; satisfies static analysis
 
                     # Story #236 Fix 3: Always create snapshot from master, not from current_target.
                     source_path = master_path
