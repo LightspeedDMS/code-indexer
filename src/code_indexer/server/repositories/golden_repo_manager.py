@@ -1950,14 +1950,15 @@ class GoldenRepoManager:
     def _cb_cidx_index(
         self, base_clone_path: str, cidx_index_timeout: int
     ) -> None:
-        """Run cidx index --clear --fts on the base clone.
+        """Run cidx index --fts on the base clone.
 
-        Uses --clear to wipe and rebuild the index from scratch. This is
-        essential for branch changes where files are added/removed wholesale;
-        an incremental index would leave ghost vectors for deleted files.
+        The HNSW filtered rebuild now handles branch isolation by rebuilding
+        the HNSW index with only visible-branch files, eliminating ghost vectors
+        without destroying the underlying vector JSON files. The --clear flag
+        is no longer needed here.
         """
         subprocess.run(
-            ["cidx", "index", "--clear", "--fts"],
+            ["cidx", "index", "--fts"],
             cwd=base_clone_path,
             capture_output=True,
             text=True,

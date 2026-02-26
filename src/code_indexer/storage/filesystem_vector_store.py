@@ -212,6 +212,12 @@ class FilesystemVectorStore:
         # Structure: {collection_name: subdirectory_or_none}
         self._active_subdirectories: Dict[str, Optional[str]] = {}
 
+        # Branch isolation: Flag set by rebuild_hnsw_filtered() to signal that
+        # a filtered HNSW rebuild was already performed during branch isolation.
+        # end_indexing() checks this flag and skips its own full rebuild to avoid
+        # overwriting the filtered rebuild with all-inclusive (ghost-producing) rebuild.
+        self._branch_isolation_did_filtered_rebuild: bool = False
+
     def _get_collection_path(
         self, collection_name: str, subdirectory: Optional[str] = None
     ) -> Path:
@@ -453,7 +459,20 @@ class FilesystemVectorStore:
 
         # Fallback to original logic if no incremental update was applied
         if incremental_update_result is None:
-            if skip_hnsw_rebuild:
+            # Branch isolation check: if a filtered rebuild was already done,
+            # skip the full rebuild to avoid overwriting it with ghost vectors.
+            did_filtered_rebuild = self._branch_isolation_did_filtered_rebuild
+            self._branch_isolation_did_filtered_rebuild = False  # Always reset
+
+            if did_filtered_rebuild:
+                # A filtered HNSW rebuild was performed during branch isolation.
+                # Do NOT overwrite it with a full rebuild (which would restore ghost vectors).
+                hnsw_skipped = True
+                self.logger.info(
+                    f"HNSW rebuild skipped for '{collection_name}' "
+                    f"(filtered rebuild already performed during branch isolation)"
+                )
+            elif skip_hnsw_rebuild:
                 # Watch mode: Mark index as stale, defer rebuild to query time
                 hnsw_manager.mark_stale(collection_path)
                 hnsw_skipped = True
@@ -521,6 +540,64 @@ class FilesystemVectorStore:
             del self._active_subdirectories[collection_name]
 
         return result
+
+    def rebuild_hnsw_filtered(
+        self,
+        collection_name: str,
+        visible_files: Set[str],
+        subdirectory: Optional[str] = None,
+        progress_callback: Optional[Any] = None,
+    ) -> int:
+        """Rebuild HNSW index with only visible files (branch isolation).
+
+        Called during branch isolation to eliminate ghost vectors from the HNSW
+        index WITHOUT deleting the underlying vector JSON files. This preserves
+        expensive VoyageAI embeddings on disk while ensuring only visible-branch
+        vectors appear in search results.
+
+        Sets _branch_isolation_did_filtered_rebuild=True so that end_indexing()
+        skips its own full rebuild (which would restore ghost vectors).
+
+        Args:
+            collection_name: Name of the collection to rebuild
+            visible_files: Set of file paths (payload.path values) to include.
+                          Vectors for files NOT in this set are excluded from HNSW.
+            subdirectory: Optional subdirectory for the collection
+            progress_callback: Optional progress callback
+
+        Returns:
+            Number of vectors included in the filtered index
+
+        Note:
+            NEVER deletes vector JSON files. Only filters which vectors appear
+            in the HNSW index used for search. Vector files remain intact for
+            when those branches are switched back to.
+        """
+        from .hnsw_index_manager import HNSWIndexManager
+
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        vector_size = self._get_vector_size(collection_name)
+
+        hnsw_manager = HNSWIndexManager(vector_dim=vector_size, space="cosine")
+        count = hnsw_manager.rebuild_from_vectors(
+            collection_path=collection_path,
+            progress_callback=progress_callback,
+            visible_files=visible_files,
+        )
+
+        # Signal end_indexing() to skip its own rebuild (would overwrite filtered rebuild)
+        self._branch_isolation_did_filtered_rebuild = True
+
+        # Invalidate HNSW cache if present (server-side cache must be refreshed)
+        if self.hnsw_index_cache is not None:
+            self.hnsw_index_cache.invalidate(str(collection_path))
+
+        self.logger.info(
+            f"Filtered HNSW rebuild complete for '{collection_name}': "
+            f"{count} visible vectors (from {len(visible_files)} visible files)"
+        )
+
+        return count
 
     def _get_vector_size(self, collection_name: str) -> int:
         """Get vector size for collection (cached to avoid repeated file I/O).

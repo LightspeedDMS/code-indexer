@@ -786,7 +786,8 @@ class SmartIndexer(HighThroughputProcessor):
                         0, 0, Path(""), info="Applying branch isolation cleanup..."
                     )
                 self.hide_files_not_in_branch_thread_safe(
-                    current_branch, all_relative_files, collection_name, progress_callback
+                    current_branch, all_relative_files, collection_name, progress_callback,
+                    fts_manager=fts_manager,
                 )
 
             # Use ProcessingStats directly from high-throughput processor
@@ -1118,7 +1119,8 @@ class SmartIndexer(HighThroughputProcessor):
             # Only apply branch isolation for git repositories
             if self.git_topology_service.is_git_available():
                 self.hide_files_not_in_branch_thread_safe(
-                    current_branch, all_relative_files, collection_name, progress_callback
+                    current_branch, all_relative_files, collection_name, progress_callback,
+                    fts_manager=fts_manager,
                 )
 
             # Use ProcessingStats directly from high-throughput processor
@@ -2102,7 +2104,8 @@ class SmartIndexer(HighThroughputProcessor):
                     # Only apply branch isolation for git repositories
                     if self.git_topology_service.is_git_available():
                         self.hide_files_not_in_branch_thread_safe(
-                            current_branch, all_relative_files, collection_name
+                            current_branch, all_relative_files, collection_name,
+                            fts_manager=fts_manager,
                         )
 
                     # Convert BranchIndexingResult to ProcessingStats

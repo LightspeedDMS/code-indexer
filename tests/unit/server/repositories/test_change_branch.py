@@ -360,19 +360,34 @@ def sqlite_backend(temp_db):
 
 
 class TestCbCidxIndex:
-    """Verify _cb_cidx_index passes --clear and --fts flags to cidx index."""
+    """Verify _cb_cidx_index passes --fts flag to cidx index (without --clear).
 
-    def test_cb_cidx_index_uses_clear_and_fts_flags(self, manager, tmp_path):
-        """_cb_cidx_index must run cidx index --clear --fts to eliminate ghost vectors."""
+    The HNSW filtered rebuild now handles branch isolation by rebuilding the
+    HNSW index with only visible-branch files. The --clear flag is no longer
+    needed because filtered rebuild eliminates ghost vectors without destroying
+    the underlying vector JSON files (preserving expensive VoyageAI embeddings).
+    """
+
+    def test_cb_cidx_index_uses_fts_flag_without_clear(self, manager, tmp_path):
+        """_cb_cidx_index must run cidx index --fts (without --clear).
+
+        The HNSW filtered rebuild eliminates ghost vectors without the need
+        to wipe the entire index. Removing --clear preserves VoyageAI embeddings.
+        """
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             manager._cb_cidx_index(str(tmp_path), 300)
 
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
-        assert cmd == ["cidx", "index", "--clear", "--fts"], (
-            f"Expected ['cidx', 'index', '--clear', '--fts'] but got {cmd}. "
-            "Plain 'cidx index' leaves ghost vectors from the old branch."
+        assert cmd == ["cidx", "index", "--fts"], (
+            f"Expected ['cidx', 'index', '--fts'] but got {cmd}. "
+            "The --clear flag should be removed since HNSW filtered rebuild "
+            "handles ghost vector elimination without destroying vector files."
+        )
+        assert "--clear" not in cmd, (
+            "--clear must NOT be in the cidx index command. "
+            "HNSW filtered rebuild handles branch isolation instead."
         )
 
     def test_cb_cidx_index_uses_correct_cwd(self, manager, tmp_path):
