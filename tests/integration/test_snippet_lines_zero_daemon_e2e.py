@@ -26,7 +26,7 @@ def test_project_with_daemon(tmp_path):
 # This file contains voyage references
 from voyage import VoyageClient
 
-client = VoyageClient(api_key="test")
+client = VoyageClient(api_key=None)
 result = client.embed(["test"])
 print(f"Voyage embedding result: {result}")
 """

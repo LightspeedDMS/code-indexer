@@ -80,40 +80,6 @@ class TestConfigServiceNewFields:
                 settings["claude_cli"]["description_refresh_interval_hours"] == 24
             ), "description_refresh_interval_hours should default to 24"
 
-    def test_config_service_masks_anthropic_api_key_when_set(self):
-        """
-        AC3: ConfigService masks anthropic_api_key showing only prefix.
-
-        Given I have a config with anthropic_api_key set
-        When I call get_all_settings()
-        Then anthropic_api_key shows first 10 chars + "***"
-
-        Note: Story #15 moved anthropic_api_key to ClaudeIntegrationConfig.
-        Implementation masks with first 10 chars + ***.
-        """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            service = ConfigService(tmpdir)
-
-            # Set API key
-            # Story #15: anthropic_api_key moved to claude_integration_config
-            config = service.get_config()
-            config.claude_integration_config.anthropic_api_key = (
-                "sk-ant-api03-test-key-123456789"
-            )
-            service.config_manager.save_config(config)
-
-            # Reload to get fresh settings
-            service._config = None
-            settings = service.get_all_settings()
-
-            assert (
-                "anthropic_api_key" in settings["claude_cli"]
-            ), "claude_cli section should include anthropic_api_key"
-            # Implementation masks with first 10 chars + ***
-            assert (
-                settings["claude_cli"]["anthropic_api_key"] == "sk-ant-api***"
-            ), "anthropic_api_key should be masked (first 10 chars + ***)"
-
     def test_config_service_shows_none_when_anthropic_api_key_not_set(self):
         """
         AC3: ConfigService shows None when anthropic_api_key is not set.
@@ -156,38 +122,6 @@ class TestConfigServiceNewFields:
             assert (
                 settings2["claude_cli"]["max_concurrent_claude_cli"] == 8
             ), "max_concurrent_claude_cli should persist after reload"
-
-    def test_config_service_update_setting_accepts_anthropic_api_key(self):
-        """
-        AC3: ConfigService.update_setting() accepts anthropic_api_key updates.
-
-        Given I create a ConfigService
-        When I call update_setting("claude_cli", "anthropic_api_key", "sk-ant-...")
-        Then the API key is updated and persisted (unmasked in storage)
-
-        Note: Story #15 moved anthropic_api_key to ClaudeIntegrationConfig.
-        Implementation masks with first 10 chars + ***.
-        """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            service = ConfigService(tmpdir)
-
-            service.update_setting(
-                "claude_cli", "anthropic_api_key", "sk-ant-api03-test-key-123"
-            )
-
-            # Verify it's stored unmasked
-            # Story #15: anthropic_api_key moved to claude_integration_config
-            config = service.get_config()
-            assert (
-                config.claude_integration_config.anthropic_api_key
-                == "sk-ant-api03-test-key-123"
-            ), "anthropic_api_key should be stored unmasked"
-
-            # Verify get_all_settings masks it (first 10 chars + ***)
-            settings = service.get_all_settings()
-            assert (
-                settings["claude_cli"]["anthropic_api_key"] == "sk-ant-api***"
-            ), "anthropic_api_key should be masked in get_all_settings"
 
     def test_config_service_update_setting_validates_max_concurrent_claude_cli(self):
         """

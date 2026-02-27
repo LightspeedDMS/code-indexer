@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -49,6 +50,7 @@ class DependencyMapService:
         tracking_backend,
         analyzer,
         refresh_scheduler=None,
+        job_tracker=None,
     ):
         """
         Initialize dependency map service.
@@ -59,6 +61,7 @@ class DependencyMapService:
             tracking_backend: DependencyMapTrackingBackend instance
             analyzer: DependencyMapAnalyzer instance
             refresh_scheduler: Optional RefreshScheduler for write-lock coordination (Story #227)
+            job_tracker: Optional JobTracker for unified job tracking (Story #312)
         """
         self._golden_repos_manager = golden_repos_manager
         self._config_manager = config_manager
@@ -66,6 +69,7 @@ class DependencyMapService:
         self._analyzer = analyzer
         self._lock = threading.Lock()
         self._refresh_scheduler = refresh_scheduler  # Story #227: write-lock coordination
+        self._job_tracker = job_tracker  # Story #312: unified job tracking (Epic #261)
 
         # Story #193: Scheduler daemon thread state
         self._daemon_thread: Optional[threading.Thread] = None
@@ -93,18 +97,59 @@ class DependencyMapService:
             # Lock is held by another operation
             return False
 
-    def run_full_analysis(self) -> Dict[str, Any]:
+    def run_full_analysis(self, job_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Orchestrate full dependency map analysis pipeline.
+
+        Args:
+            job_id: Optional caller-provided job ID for unified job tracking.
+                    When None, a new UUID-based ID is generated internally.
+                    MCP handler passes its own job_id for consistency (AC4).
 
         Returns:
             Dict with status, domains_count, repos_analyzed, errors
 
         Raises:
             RuntimeError: If analysis is already in progress
+            DuplicateJobError: If job_tracker detects a concurrent full analysis (AC6)
         """
+        # Story #312: Conflict detection via JobTracker (AC6).
+        # DuplicateJobError propagates to caller; all other tracker errors are absorbed.
+        if self._job_tracker is not None:
+            try:
+                from .job_tracker import DuplicateJobError
+                self._job_tracker.check_operation_conflict("dependency_map_full")
+            except DuplicateJobError:
+                raise  # AC6: Propagate conflict to caller
+            except Exception as tracker_err:
+                logger.warning(f"JobTracker conflict check failed (non-fatal): {tracker_err}")
+
+        # Story #312: Register job with JobTracker (AC2, AC7).
+        # All tracker calls defensive: failure never breaks analysis.
+        _tracked_job_id: Optional[str] = None
+        if self._job_tracker is not None:
+            try:
+                _tracked_job_id = job_id or f"dep-map-full-{uuid.uuid4().hex[:8]}"
+                self._job_tracker.register_job(
+                    _tracked_job_id, "dependency_map_full", username="system"
+                )
+                self._job_tracker.update_status(_tracked_job_id, status="running")
+            except Exception as tracker_err:
+                logger.warning(f"JobTracker registration failed (non-fatal): {tracker_err}")
+                _tracked_job_id = None
+
         # Non-blocking lock acquire (AC7: Concurrency Protection)
         if not self._lock.acquire(blocking=False):
+            # Story #312: Complete the registered job since this run cannot proceed.
+            if _tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.fail_job(
+                        _tracked_job_id, error="Analysis already in progress (lock held)"
+                    )
+                except Exception as tracker_err:
+                    logger.warning(
+                        f"JobTracker fail_job (lock conflict) failed (non-fatal): {tracker_err}"
+                    )
             raise RuntimeError("Dependency map analysis already in progress")
 
         # Story #227: Acquire write lock so RefreshScheduler skips CoW clone during writes.
@@ -114,6 +159,15 @@ class DependencyMapService:
 
         _analysis_succeeded = False
         try:
+            # Story #312 AC5: Progress update during setup
+            if _tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.update_status(
+                        _tracked_job_id, progress=5, progress_info="Setting up analysis"
+                    )
+                except Exception as e:
+                    logger.debug(f"Non-fatal: Failed to update progress (setup): {e}")
+
             # Setup and validation
             setup_result = self._setup_analysis()
             if setup_result.get("early_return"):
@@ -131,10 +185,28 @@ class DependencyMapService:
                 status="running", last_run=datetime.now(timezone.utc).isoformat()
             )
 
+            # Story #312 AC5: Progress update during analysis passes
+            if _tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.update_status(
+                        _tracked_job_id, progress=20, progress_info="Executing analysis passes"
+                    )
+                except Exception as e:
+                    logger.debug(f"Non-fatal: Failed to update progress (analysis passes): {e}")
+
             # Execute analysis passes
             domain_list, errors, pass1_duration_s, pass2_duration_s = self._execute_analysis_passes(
                 config, paths, repo_list
             )
+
+            # Story #312 AC5: Progress update during finalization
+            if _tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.update_status(
+                        _tracked_job_id, progress=80, progress_info="Finalizing analysis"
+                    )
+                except Exception as e:
+                    logger.debug(f"Non-fatal: Failed to update progress (finalization): {e}")
 
             # Finalize and cleanup
             self._finalize_analysis(config, paths, repo_list, domain_list, pass1_duration_s, pass2_duration_s)
@@ -151,6 +223,13 @@ class DependencyMapService:
             self._tracking_backend.update_tracking(
                 status="failed", error_message=str(e)
             )
+            # Story #312: Report failure to JobTracker (AC8). Defensive - never re-raises.
+            if _tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.fail_job(_tracked_job_id, error=str(e))
+                    _tracked_job_id = None  # Prevent double-call in finally
+                except Exception as tracker_err:
+                    logger.warning(f"JobTracker fail_job failed (non-fatal): {tracker_err}")
             raise
         finally:
             # Cleanup CLAUDE.md (paths may not be defined if exception occurred early)
@@ -167,6 +246,13 @@ class DependencyMapService:
                 logger.debug(f"CLAUDE.md cleanup failed (non-fatal): {cleanup_error}")
 
             self._lock.release()
+
+            # Story #312: Complete job in tracker on success (AC7). Defensive - never re-raises.
+            if _analysis_succeeded and _tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.complete_job(_tracked_job_id)
+                except Exception as tracker_err:
+                    logger.warning(f"JobTracker complete_job failed (non-fatal): {tracker_err}")
 
             # Story #227: Release write lock so RefreshScheduler can proceed.
             if _write_lock_acquired and self._refresh_scheduler is not None:
@@ -1402,16 +1488,55 @@ class DependencyMapService:
             error_message=None,
         )
 
-    def run_delta_analysis(self) -> Optional[Dict[str, Any]]:
+    def run_delta_analysis(self, job_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Run delta analysis to refresh only affected domains (Story #193, AC1-8).
 
+        Args:
+            job_id: Optional caller-provided job ID for unified job tracking.
+                    When None, a new UUID-based ID is generated internally.
+                    MCP handler passes its own job_id for consistency (AC4).
+
         Returns:
             Dict with status or None if skipped (lock held or disabled)
+
+        Raises:
+            DuplicateJobError: If job_tracker detects a concurrent delta analysis (AC6)
         """
+        # Story #312: Conflict detection via JobTracker (AC6).
+        # DuplicateJobError propagates to caller; all other tracker errors are absorbed.
+        if self._job_tracker is not None:
+            try:
+                from .job_tracker import DuplicateJobError
+                self._job_tracker.check_operation_conflict("dependency_map_delta")
+            except DuplicateJobError:
+                raise  # AC6: Propagate conflict to caller
+            except Exception as tracker_err:
+                logger.warning(f"JobTracker conflict check failed (non-fatal): {tracker_err}")
+
+        # Story #312: Register job with JobTracker (AC3, AC7).
+        # All tracker calls defensive: failure never breaks analysis.
+        _tracked_job_id: Optional[str] = None
+        if self._job_tracker is not None:
+            try:
+                _tracked_job_id = job_id or f"dep-map-delta-{uuid.uuid4().hex[:8]}"
+                self._job_tracker.register_job(
+                    _tracked_job_id, "dependency_map_delta", username="system"
+                )
+                self._job_tracker.update_status(_tracked_job_id, status="running")
+            except Exception as tracker_err:
+                logger.warning(f"JobTracker registration failed (non-fatal): {tracker_err}")
+                _tracked_job_id = None
+
         # Non-blocking lock acquire (AC7: Concurrency Protection)
         if not self._lock.acquire(blocking=False):
             logger.info("Delta analysis skipped - analysis already in progress")
+            # Story #312: Complete the registered job since this run is skipped.
+            if _tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.complete_job(_tracked_job_id)
+                except Exception as tracker_err:
+                    logger.warning(f"JobTracker complete_job (lock skip) failed (non-fatal): {tracker_err}")
             return None
 
         # Story #227: Acquire write lock so RefreshScheduler skips CoW clone during writes.
@@ -1425,7 +1550,17 @@ class DependencyMapService:
             config = self._config_manager.get_claude_integration_config()
             if not config or not config.dependency_map_enabled:
                 logger.debug("Delta analysis skipped - dependency_map_enabled is False")
+                _delta_succeeded = True  # Story #312: Mark succeeded so finally completes the job
                 return None
+
+            # Story #312 AC5: Progress update before change detection
+            if _tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.update_status(
+                        _tracked_job_id, progress=10, progress_info="Detecting changes"
+                    )
+                except Exception as e:
+                    logger.debug(f"Non-fatal: Failed to update progress (detecting changes): {e}")
 
             # Detect changes (AC2: Change Detection)
             changed_repos, new_repos, removed_repos = self.detect_changes()
@@ -1490,6 +1625,15 @@ class DependencyMapService:
             # (versioned cidx-meta repos have empty live path; content is in .versioned/)
             dependency_map_dir.mkdir(parents=True, exist_ok=True)
 
+            # Story #312 AC5: Progress update before domain updates
+            if _tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.update_status(
+                        _tracked_job_id, progress=40, progress_info="Updating affected domains"
+                    )
+                except Exception as e:
+                    logger.debug(f"Non-fatal: Failed to update progress (updating domains): {e}")
+
             # Update affected domains (AC5: In-Place Updates)
             errors = self._update_affected_domains(
                 affected_domains,
@@ -1499,6 +1643,15 @@ class DependencyMapService:
                 removed_repos,
                 config,
             )
+
+            # Story #312 AC5: Progress update before finalization
+            if _tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.update_status(
+                        _tracked_job_id, progress=80, progress_info="Finalizing delta analysis"
+                    )
+                except Exception as e:
+                    logger.debug(f"Non-fatal: Failed to update progress (finalizing delta): {e}")
 
             # Finalize tracking (AC8)
             # When discovery write failed, exclude new repos from finalization so they
@@ -1528,6 +1681,13 @@ class DependencyMapService:
             self._tracking_backend.update_tracking(
                 status="failed", error_message=str(e)
             )
+            # Story #312: Report failure to JobTracker (AC8). Defensive - never re-raises.
+            if _tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.fail_job(_tracked_job_id, error=str(e))
+                    _tracked_job_id = None  # Prevent double-call in finally
+                except Exception as tracker_err:
+                    logger.warning(f"JobTracker fail_job failed (non-fatal): {tracker_err}")
             raise
 
         finally:
@@ -1542,6 +1702,13 @@ class DependencyMapService:
                 logger.debug(f"CLAUDE.md cleanup failed (non-fatal): {cleanup_error}")
 
             self._lock.release()
+
+            # Story #312: Complete job in tracker on success (AC7). Defensive - never re-raises.
+            if _delta_succeeded and _tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.complete_job(_tracked_job_id)
+                except Exception as tracker_err:
+                    logger.warning(f"JobTracker complete_job failed (non-fatal): {tracker_err}")
 
             # Story #227: Release write lock so RefreshScheduler can proceed.
             if _write_lock_acquired and self._refresh_scheduler is not None:

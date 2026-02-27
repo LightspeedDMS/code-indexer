@@ -226,9 +226,15 @@ class DashboardService:
             # Story #541 AC3: Use time-filtered job stats
             stats = job_manager.get_job_stats_with_filter(time_filter)
 
-            # Get current running and queued counts (not time-filtered)
-            running = job_manager.get_active_job_count()
-            queued = job_manager.get_pending_job_count()
+            # Story #311: Read active/pending counts from JobTracker when available
+            # (AC5) — falls back to job_manager when tracker is None
+            job_tracker = self._get_job_tracker()
+            if job_tracker is not None:
+                running = job_tracker.get_active_job_count()
+                queued = job_tracker.get_pending_job_count()
+            else:
+                running = job_manager.get_active_job_count()
+                queued = job_manager.get_pending_job_count()
 
             return JobCounts(
                 running=running,
@@ -322,10 +328,18 @@ class DashboardService:
             if not job_manager:
                 return []
 
-            # Story #541 AC5/AC6: Use time-filtered recent jobs with limit of 20
-            recent_jobs_data = job_manager.get_recent_jobs_with_filter(
-                time_filter=time_filter, limit=20
-            )
+            # Story #311 AC6: Read recent jobs from JobTracker when available;
+            # fall back to job_manager for backward compatibility when tracker absent.
+            job_tracker = self._get_job_tracker()
+            if job_tracker is not None:
+                recent_jobs_data = job_tracker.get_recent_jobs(
+                    limit=20, time_filter=time_filter
+                )
+            else:
+                # Story #541 AC5/AC6: Use time-filtered recent jobs with limit of 20
+                recent_jobs_data = job_manager.get_recent_jobs_with_filter(
+                    time_filter=time_filter, limit=20
+                )
 
             recent = []
             for job in recent_jobs_data:
@@ -374,6 +388,19 @@ class DashboardService:
             from ..app import background_job_manager
 
             return background_job_manager
+        except Exception:
+            return None
+
+    def _get_job_tracker(self) -> Optional[Any]:
+        """Get the JobTracker instance (Story #311: Epic #261 Story 1B).
+
+        Returns None gracefully when job_tracker is not set in the app module
+        (e.g. in tests or before server lifespan initialises it).
+        """
+        try:
+            from ..app import job_tracker  # type: ignore[attr-defined]
+
+            return job_tracker
         except Exception:
             return None
 

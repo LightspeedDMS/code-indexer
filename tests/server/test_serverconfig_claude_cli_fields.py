@@ -82,20 +82,6 @@ class TestClaudeIntegrationConfigFields:
             config.description_refresh_interval_hours == 24
         ), "description_refresh_interval_hours should default to 24"
 
-    def test_claude_integration_config_accepts_custom_anthropic_api_key(self):
-        """
-        AC1: ClaudeIntegrationConfig accepts custom anthropic_api_key value.
-
-        Given I create a ClaudeIntegrationConfig with custom anthropic_api_key
-        When I inspect the field
-        Then it has the custom value
-        """
-        config = ClaudeIntegrationConfig(anthropic_api_key="sk-ant-test-key-123")
-
-        assert (
-            config.anthropic_api_key == "sk-ant-test-key-123"
-        ), "anthropic_api_key should accept custom value"
-
     def test_claude_integration_config_accepts_custom_max_concurrent_claude_cli(self):
         """
         AC1: ClaudeIntegrationConfig accepts custom max_concurrent_claude_cli value.

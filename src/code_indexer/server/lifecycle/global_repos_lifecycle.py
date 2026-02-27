@@ -13,6 +13,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 
 import logging
 import threading
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -46,6 +47,7 @@ class GlobalReposLifecycleManager:
         golden_repos_dir: str,
         background_job_manager: Optional["BackgroundJobManager"] = None,
         resource_config: Optional["ServerResourceConfig"] = None,
+        job_tracker=None,
     ):
         """
         Initialize the lifecycle manager.
@@ -54,6 +56,7 @@ class GlobalReposLifecycleManager:
             golden_repos_dir: Path to golden repos directory
             background_job_manager: Optional job manager for dashboard visibility (server mode)
             resource_config: Optional resource configuration (timeouts, etc.)
+            job_tracker: Optional JobTracker for dashboard visibility (Story #314)
         """
         self.golden_repos_dir = Path(golden_repos_dir)
 
@@ -67,6 +70,7 @@ class GlobalReposLifecycleManager:
         self.cleanup_manager = CleanupManager(
             query_tracker=self.query_tracker,
             check_interval=1.0,  # Check every second
+            job_tracker=job_tracker,
         )
 
         # Create GlobalRepoOperations for config access
@@ -84,6 +88,7 @@ class GlobalReposLifecycleManager:
 
         # Track running state
         self._running = False
+        self._job_tracker = job_tracker  # Story #314: dashboard visibility
 
         logger.debug(
             f"GlobalReposLifecycleManager initialized for {self.golden_repos_dir}",
@@ -136,6 +141,19 @@ class GlobalReposLifecycleManager:
         # Trigger reconciliation in background thread (non-blocking, Story #236)
         # Failures must not block startup per AC7
         def _run_reconcile() -> None:
+            # Story #314: Register startup_reconcile job for dashboard visibility
+            tracked_job_id = None
+            if self._job_tracker is not None:
+                try:
+                    tracked_job_id = f"startup-reconcile-{uuid.uuid4().hex[:8]}"
+                    self._job_tracker.register_job(
+                        tracked_job_id, "startup_reconcile", username="system"
+                    )
+                    self._job_tracker.update_status(tracked_job_id, status="running")
+                except Exception as e:
+                    logger.debug(f"Failed to register startup_reconcile job: {e}")
+                    tracked_job_id = None
+
             try:
                 logger.info(
                     "Starting golden repos reconciliation",
@@ -146,11 +164,25 @@ class GlobalReposLifecycleManager:
                     "Golden repos reconciliation completed",
                     extra={"correlation_id": get_correlation_id()},
                 )
+                if tracked_job_id and self._job_tracker is not None:
+                    try:
+                        self._job_tracker.complete_job(tracked_job_id)
+                    except Exception as e:
+                        logger.debug(
+                            f"Failed to complete startup_reconcile job {tracked_job_id}: {e}"
+                        )
             except Exception as exc:
                 logger.warning(
                     f"Golden repos reconciliation failed during startup (non-fatal): {exc}",
                     extra={"correlation_id": get_correlation_id()},
                 )
+                if tracked_job_id and self._job_tracker is not None:
+                    try:
+                        self._job_tracker.fail_job(tracked_job_id, error=str(exc))
+                    except Exception as e:
+                        logger.debug(
+                            f"Failed to mark startup_reconcile job {tracked_job_id} as failed: {e}"
+                        )
 
         reconcile_thread = threading.Thread(
             target=_run_reconcile,

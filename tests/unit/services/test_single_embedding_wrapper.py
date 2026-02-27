@@ -34,8 +34,8 @@ class TestSingleEmbeddingWrapper:
 
     @pytest.fixture
     def mock_api_key(self):
-        with patch.dict(os.environ, {"VOYAGE_API_KEY": "test_api_key"}):
-            yield "test_api_key"
+        with patch.dict(os.environ, {"VOYAGE_API_KEY": "PLACEHOLDER"}):
+            yield "PLACEHOLDER"
 
     @pytest.fixture
     def voyage_client(self, voyage_config, console, mock_api_key):
@@ -206,8 +206,8 @@ class TestSingleEmbeddingWrapperIntegration:
 
     @pytest.fixture
     def mock_api_key(self):
-        with patch.dict(os.environ, {"VOYAGE_API_KEY": "test_api_key"}):
-            yield "test_api_key"
+        with patch.dict(os.environ, {"VOYAGE_API_KEY": "PLACEHOLDER"}):
+            yield "PLACEHOLDER"
 
     @pytest.fixture
     def voyage_client(self, voyage_config, console, mock_api_key):

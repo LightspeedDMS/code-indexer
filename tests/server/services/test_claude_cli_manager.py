@@ -9,11 +9,8 @@ Tests cover:
 - Graceful shutdown
 """
 
-import fcntl
-import json
 import queue
 import subprocess
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -29,7 +26,7 @@ class TestClaudeCliManagerInitialization:
 
     def test_initializes_with_correct_number_of_workers(self):
         """AC1: ClaudeCliManager creates specified number of worker threads."""
-        manager = ClaudeCliManager(api_key="test-key", max_workers=4)
+        manager = ClaudeCliManager(api_key=None, max_workers=4)
 
         assert len(manager._worker_threads) == 4
         assert all(t.is_alive() for t in manager._worker_threads)
@@ -38,7 +35,7 @@ class TestClaudeCliManagerInitialization:
 
     def test_worker_threads_are_daemon_threads(self):
         """AC1: Worker threads are daemon threads (don't block shutdown)."""
-        manager = ClaudeCliManager(api_key="test-key", max_workers=2)
+        manager = ClaudeCliManager(api_key=None, max_workers=2)
 
         assert all(t.daemon for t in manager._worker_threads)
 
@@ -46,7 +43,7 @@ class TestClaudeCliManagerInitialization:
 
     def test_creates_work_queue(self):
         """AC1: ClaudeCliManager creates work queue."""
-        manager = ClaudeCliManager(api_key="test-key", max_workers=2)
+        manager = ClaudeCliManager(api_key=None, max_workers=2)
 
         assert isinstance(manager._work_queue, queue.Queue)
 
@@ -54,7 +51,7 @@ class TestClaudeCliManagerInitialization:
 
     def test_default_max_workers(self):
         """Story #24: ClaudeCliManager defaults to 2 workers for resource-constrained systems."""
-        manager = ClaudeCliManager(api_key="test-key")
+        manager = ClaudeCliManager(api_key=None)
 
         assert len(manager._worker_threads) == 2
 
@@ -66,7 +63,7 @@ class TestNonBlockingWorkSubmission:
 
     def test_submit_work_returns_immediately(self):
         """AC2: submit_work() returns immediately (non-blocking)."""
-        manager = ClaudeCliManager(api_key="test-key", max_workers=2)
+        manager = ClaudeCliManager(api_key=None, max_workers=2)
 
         callback_invoked = threading.Event()
 
@@ -92,7 +89,7 @@ class TestNonBlockingWorkSubmission:
 
     def test_submit_work_queues_work_correctly(self):
         """AC2: Work is queued and processed by workers."""
-        manager = ClaudeCliManager(api_key="test-key", max_workers=2)
+        manager = ClaudeCliManager(api_key=None, max_workers=2)
 
         results: List[Tuple[bool, str]] = []
         results_lock = threading.Lock()
@@ -118,7 +115,7 @@ class TestNonBlockingWorkSubmission:
 
     def test_callback_invoked_with_success_result(self):
         """AC2: Callback is invoked with (success, result) on completion."""
-        manager = ClaudeCliManager(api_key="test-key", max_workers=1)
+        manager = ClaudeCliManager(api_key=None, max_workers=1)
 
         callback_result = []
         completion_event = threading.Event()
@@ -147,7 +144,7 @@ class TestNonBlockingWorkSubmission:
         mock_result.returncode = 1
 
         with patch("subprocess.run", return_value=mock_result):
-            manager = ClaudeCliManager(api_key="test-key", max_workers=1)
+            manager = ClaudeCliManager(api_key=None, max_workers=1)
 
             callback_result = []
             completion_event = threading.Event()
@@ -167,131 +164,12 @@ class TestNonBlockingWorkSubmission:
             manager.shutdown()
 
 
-class TestApiKeySync:
-    """Test atomic API key synchronization with file locking."""
-
-    def test_sync_api_key_writes_correct_json(self):
-        """AC3: sync_api_key() writes ~/.claude.json with primaryApiKey field."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            json_path = Path(tmpdir) / ".claude.json"
-
-            manager = ClaudeCliManager(api_key="sk-ant-test-key-12345", max_workers=1)
-
-            # Mock Path.home() to use tmpdir
-            with patch("pathlib.Path.home", return_value=Path(tmpdir)):
-                manager.sync_api_key()
-
-            assert json_path.exists()
-            config = json.loads(json_path.read_text())
-            assert config["primaryApiKey"] == "sk-ant-test-key-12345"
-
-            manager.shutdown()
-
-    def test_sync_api_key_preserves_existing_fields(self):
-        """AC3: sync_api_key() preserves existing fields in ~/.claude.json."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            json_path = Path(tmpdir) / ".claude.json"
-
-            # Create existing config with other fields
-            existing = {
-                "primaryApiKey": "old-key",
-                "otherField": "value123",
-                "nested": {"key": "value"},
-            }
-            json_path.write_text(json.dumps(existing, indent=2))
-
-            manager = ClaudeCliManager(api_key="new-key", max_workers=1)
-
-            # Mock Path.home() to use tmpdir
-            with patch("pathlib.Path.home", return_value=Path(tmpdir)):
-                manager.sync_api_key()
-
-            config = json.loads(json_path.read_text())
-            assert config["primaryApiKey"] == "new-key"
-            assert config["otherField"] == "value123"
-            assert config["nested"] == {"key": "value"}
-
-            manager.shutdown()
-
-    def test_sync_api_key_uses_file_locking(self):
-        """AC3: sync_api_key() uses file locking for atomic writes."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            Path(tmpdir) / ".claude.json.lock"
-
-            manager = ClaudeCliManager(api_key="test-key", max_workers=1)
-
-            lock_acquired = []
-
-            # Patch fcntl.flock to track lock acquisition
-            original_flock = fcntl.flock
-
-            def tracked_flock(fd, operation):
-                lock_acquired.append(operation)
-                return original_flock(fd, operation)
-
-            with patch("pathlib.Path.home", return_value=Path(tmpdir)):
-                with patch("fcntl.flock", side_effect=tracked_flock):
-                    manager.sync_api_key()
-
-            # Should acquire exclusive lock then release
-            assert fcntl.LOCK_EX in lock_acquired
-            assert fcntl.LOCK_UN in lock_acquired
-
-            manager.shutdown()
-
-    def test_sync_api_key_skips_if_no_api_key(self):
-        """AC3: sync_api_key() skips if no API key configured."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            json_path = Path(tmpdir) / ".claude.json"
-
-            manager = ClaudeCliManager(api_key=None, max_workers=1)
-
-            with patch("pathlib.Path.home", return_value=Path(tmpdir)):
-                manager.sync_api_key()
-
-            # Should not create file if no API key
-            assert not json_path.exists()
-
-            manager.shutdown()
-
-    def test_sync_api_key_called_before_cli_invocation(self):
-        """AC3: sync_api_key() is called before Claude CLI invocation."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            sync_called = threading.Event()
-            completion_event = threading.Event()
-
-            def callback(success: bool, result: str):
-                completion_event.set()
-
-            # Mock Path.home and subprocess to allow full execution
-            mock_subprocess = MagicMock()
-            mock_subprocess.returncode = 0
-
-            with patch("pathlib.Path.home", return_value=Path(tmpdir)):
-                with patch("subprocess.run", return_value=mock_subprocess):
-                    manager = ClaudeCliManager(api_key="test-key", max_workers=1)
-
-                    original_sync = manager.sync_api_key
-
-                    def tracked_sync():
-                        sync_called.set()
-                        original_sync()
-
-                    manager.sync_api_key = tracked_sync
-                    manager.submit_work(Path("/tmp/test"), callback)
-                    completion_event.wait(timeout=2.0)
-
-                    assert sync_called.is_set()
-
-                    manager.shutdown()
-
-
 class TestCliAvailabilityCheck:
     """Test CLI availability checking with caching."""
 
     def test_check_cli_available_returns_true_when_installed(self):
         """AC4: check_cli_available() returns True when Claude CLI is installed."""
-        manager = ClaudeCliManager(api_key="test-key", max_workers=1)
+        manager = ClaudeCliManager(api_key=None, max_workers=1)
 
         # Mock subprocess.run to simulate CLI installed
         mock_result = MagicMock()
@@ -306,7 +184,7 @@ class TestCliAvailabilityCheck:
 
     def test_check_cli_available_returns_false_when_not_installed(self):
         """AC4: check_cli_available() returns False when Claude CLI is not installed."""
-        manager = ClaudeCliManager(api_key="test-key", max_workers=1)
+        manager = ClaudeCliManager(api_key=None, max_workers=1)
 
         # Mock subprocess.run to simulate CLI not installed
         mock_result = MagicMock()
@@ -321,7 +199,7 @@ class TestCliAvailabilityCheck:
 
     def test_check_cli_available_handles_timeout(self):
         """AC4: check_cli_available() handles subprocess timeout."""
-        manager = ClaudeCliManager(api_key="test-key", max_workers=1)
+        manager = ClaudeCliManager(api_key=None, max_workers=1)
 
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("which", 5)):
             result = manager.check_cli_available()
@@ -332,7 +210,7 @@ class TestCliAvailabilityCheck:
 
     def test_check_cli_available_caches_result(self):
         """AC4: check_cli_available() caches result to avoid repeated checks."""
-        manager = ClaudeCliManager(api_key="test-key", max_workers=1)
+        manager = ClaudeCliManager(api_key=None, max_workers=1)
 
         call_count = 0
 
@@ -358,7 +236,7 @@ class TestCliAvailabilityCheck:
 
     def test_check_cli_available_cache_expires_after_ttl(self):
         """AC4: check_cli_available() cache expires after TTL."""
-        manager = ClaudeCliManager(api_key="test-key", max_workers=1)
+        manager = ClaudeCliManager(api_key=None, max_workers=1)
         manager._cli_check_ttl = 0.1  # 100ms TTL for testing
 
         call_count = 0
@@ -392,7 +270,7 @@ class TestGracefulShutdown:
 
     def test_shutdown_stops_workers_gracefully(self):
         """AC1: shutdown() stops worker threads gracefully."""
-        manager = ClaudeCliManager(api_key="test-key", max_workers=3)
+        manager = ClaudeCliManager(api_key=None, max_workers=3)
 
         # Verify workers are running
         assert all(t.is_alive() for t in manager._worker_threads)
@@ -411,7 +289,7 @@ class TestGracefulShutdown:
         mock_subprocess.returncode = 0
 
         with patch("subprocess.run", return_value=mock_subprocess):
-            manager = ClaudeCliManager(api_key="test-key", max_workers=1)
+            manager = ClaudeCliManager(api_key=None, max_workers=1)
 
             results = []
             results_lock = threading.Lock()
@@ -432,7 +310,7 @@ class TestGracefulShutdown:
 
     def test_shutdown_sets_shutdown_event(self):
         """shutdown() sets shutdown event to signal workers."""
-        manager = ClaudeCliManager(api_key="test-key", max_workers=2)
+        manager = ClaudeCliManager(api_key=None, max_workers=2)
 
         assert not manager._shutdown_event.is_set()
 
@@ -446,7 +324,7 @@ class TestExternalApiNonBlocking:
 
     def test_submit_work_external_api_returns_immediately(self):
         """AC5: External API endpoints calling submit_work() return immediately."""
-        manager = ClaudeCliManager(api_key="test-key", max_workers=2)
+        manager = ClaudeCliManager(api_key=None, max_workers=2)
 
         # Simulate external API endpoint calling submit_work
         def simulated_api_endpoint():
@@ -471,7 +349,7 @@ class TestConcurrencyControl:
 
     def test_max_workers_limits_concurrent_execution(self):
         """Worker pool limits concurrent CLI invocations to max_workers."""
-        manager = ClaudeCliManager(api_key="test-key", max_workers=2)
+        manager = ClaudeCliManager(api_key=None, max_workers=2)
 
         active_workers = []
         active_workers_lock = threading.Lock()
@@ -507,25 +385,3 @@ class TestConcurrencyControl:
         manager.shutdown()
 
 
-class TestApiKeySyncEdgeCases:
-    """Test edge cases in API key synchronization."""
-
-    def test_sync_api_key_handles_invalid_json(self):
-        """AC3: sync_api_key() handles invalid JSON in ~/.claude.json."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            json_path = Path(tmpdir) / ".claude.json"
-
-            # Create file with invalid JSON
-            json_path.write_text("{invalid json content")
-
-            manager = ClaudeCliManager(api_key="new-key", max_workers=1)
-
-            # Mock Path.home() to use tmpdir
-            with patch("pathlib.Path.home", return_value=Path(tmpdir)):
-                manager.sync_api_key()
-
-            # Should have overwritten invalid JSON with valid config
-            config = json.loads(json_path.read_text())
-            assert config["primaryApiKey"] == "new-key"
-
-            manager.shutdown()

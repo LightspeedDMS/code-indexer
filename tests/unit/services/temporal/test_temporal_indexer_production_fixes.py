@@ -47,7 +47,7 @@ class TestIncrementalCommitDetection:
         config_manager.get_config.return_value = MagicMock(
             embedding_provider="voyage-ai",
             voyage_ai=MagicMock(
-                parallel_requests=4, api_key="test_key", model="voyage-code-3"
+                parallel_requests=4, api_key=None, model="voyage-code-3"
             ),
         )
 
@@ -116,7 +116,7 @@ class TestBeginIndexingCall:
         config_manager.get_config.return_value = MagicMock(
             embedding_provider="voyage-ai",
             voyage_ai=MagicMock(
-                parallel_requests=4, api_key="test_key", model="voyage-code-3"
+                parallel_requests=4, api_key=None, model="voyage-code-3"
             ),
         )
 
@@ -177,7 +177,7 @@ class TestPointExistenceFiltering:
         config_manager.get_config.return_value = MagicMock(
             embedding_provider="voyage-ai",
             voyage_ai=MagicMock(
-                parallel_requests=4, api_key="test_key", model="voyage-code-3"
+                parallel_requests=4, api_key=None, model="voyage-code-3"
             ),
         )
 
@@ -325,7 +325,7 @@ class TestClearFlagSupport:
         config_manager.get_config.return_value = MagicMock(
             embedding_provider="voyage-ai",
             voyage_ai=MagicMock(
-                parallel_requests=4, api_key="test_key", model="voyage-code-3"
+                parallel_requests=4, api_key=None, model="voyage-code-3"
             ),
         )
 

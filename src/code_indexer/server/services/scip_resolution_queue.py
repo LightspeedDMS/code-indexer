@@ -9,6 +9,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 
 import logging
 import asyncio
+import uuid
 from typing import Dict, Optional, Any
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -42,13 +43,14 @@ class SCIPResolutionQueue:
     preventing conflicts and resource contention.
     """
 
-    def __init__(self, self_healing_service):
+    def __init__(self, self_healing_service, job_tracker=None):
         """
         Initialize SCIP Resolution Queue.
 
         Args:
             self_healing_service: SCIPSelfHealingService instance for
                 invoking Claude Code and handling responses
+            job_tracker: Optional JobTracker for dashboard visibility (Story #314)
         """
         self.queue: asyncio.Queue[QueuedProject] = asyncio.Queue()
         self.self_healing_service = self_healing_service
@@ -56,6 +58,7 @@ class SCIPResolutionQueue:
         self.current_project: Optional[QueuedProject] = None
         self.is_running: bool = False
         self._lock = asyncio.Lock()
+        self._job_tracker = job_tracker  # Story #314: dashboard visibility
 
     async def enqueue_project(
         self,
@@ -97,9 +100,23 @@ class SCIPResolutionQueue:
 
         Gets project from queue, sets as current_project, invokes Claude Code,
         and handles the response.
+        Registers a scip_resolution job in JobTracker for dashboard visibility (Story #314).
         """
         project: Optional[QueuedProject] = None
         item_retrieved = False
+
+        # Story #314: Register scip_resolution job for dashboard visibility
+        tracked_job_id = None
+        if self._job_tracker is not None:
+            try:
+                tracked_job_id = f"scip-resolution-{uuid.uuid4().hex[:8]}"
+                self._job_tracker.register_job(
+                    tracked_job_id, "scip_resolution", username="system"
+                )
+                self._job_tracker.update_status(tracked_job_id, status="running")
+            except Exception as e:
+                logger.debug(f"Failed to register scip_resolution job: {e}")
+                tracked_job_id = None
 
         try:
             # Get next project from queue (FIFO order)
@@ -149,6 +166,14 @@ class SCIPResolutionQueue:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+            if tracked_job_id and self._job_tracker is not None:
+                try:
+                    self._job_tracker.complete_job(tracked_job_id)
+                except Exception as e:
+                    logger.debug(
+                        f"Failed to complete scip_resolution job {tracked_job_id}: {e}"
+                    )
+
         except asyncio.CancelledError:
             # Worker is being stopped, re-queue current project if retrieved
             if item_retrieved and project:
@@ -161,6 +186,13 @@ class SCIPResolutionQueue:
                     )
                 )
                 await self.queue.put(project)
+            if tracked_job_id and self._job_tracker is not None:
+                try:
+                    self._job_tracker.fail_job(tracked_job_id, error="Worker cancelled")
+                except Exception as e:
+                    logger.debug(
+                        f"Failed to fail scip_resolution job {tracked_job_id}: {e}"
+                    )
             raise
         except Exception as e:
             # Log error with project info if available
@@ -182,6 +214,13 @@ class SCIPResolutionQueue:
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
+            if tracked_job_id and self._job_tracker is not None:
+                try:
+                    self._job_tracker.fail_job(tracked_job_id, error=str(e))
+                except Exception as e2:
+                    logger.debug(
+                        f"Failed to mark scip_resolution job {tracked_job_id} as failed: {e2}"
+                    )
         finally:
             async with self._lock:
                 self.current_project = None

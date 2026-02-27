@@ -78,7 +78,7 @@ class TestTemporalReconcileMigration:
                     "embedding_provider": "voyage-ai",
                     "voyage_ai": {
                         "api_key": os.environ.get(
-                            "VOYAGE_API_KEY", "test_key_will_fail"
+                            "VOYAGE_API_KEY", "PLACEHOLDER"
                         ),
                         "model": "voyage-code-3",
                         "parallel_requests": 1,

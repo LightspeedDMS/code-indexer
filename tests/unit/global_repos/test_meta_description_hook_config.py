@@ -20,7 +20,7 @@ class TestClaudeCliManagerDefaultWorkers:
         """Story #24: Default max_workers should be 2, not 4."""
         from code_indexer.server.services.claude_cli_manager import ClaudeCliManager
 
-        manager = ClaudeCliManager(api_key="test-key")
+        manager = ClaudeCliManager(api_key=None)
         try:
             # Story #24 AC: Default should be 2 for resource-constrained systems
             assert (
@@ -93,48 +93,6 @@ class TestMetaDescriptionHookConfigIntegration:
         mock_cli_manager.check_cli_available.assert_called_once()
         # The manager's max_workers should be the configured value
         assert mock_cli_manager._max_workers == 7
-
-    def test_on_repo_added_passes_api_key_from_config(
-        self, temp_golden_repos_dir, cidx_meta_path
-    ):
-        """Story #24/23: on_repo_added should use global manager with config API key.
-
-        Story #23 AC4 changed on_repo_added to use the global singleton which is
-        initialized during server startup with the Anthropic API key from config.
-        """
-        from code_indexer.global_repos.meta_description_hook import on_repo_added
-
-        # Setup: Create a mock repository
-        repo_name = "test-repo"
-        repo_url = "https://github.com/test/repo"
-        clone_path = Path(temp_golden_repos_dir) / repo_name
-        clone_path.mkdir(parents=True)
-        (clone_path / "README.md").write_text("# Test Repo\nA test repository")
-
-        # Mock global ClaudeCliManager singleton with configured API key
-        mock_cli_manager = MagicMock()
-        mock_cli_manager._api_key = (
-            "sk-ant-test-key-abc123"  # Config value from server startup
-        )
-        mock_cli_manager.check_cli_available.return_value = False  # Force fallback path
-
-        with patch(
-            "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
-            return_value=mock_cli_manager,
-        ):
-            with patch("subprocess.run"):
-                on_repo_added(
-                    repo_name=repo_name,
-                    repo_url=repo_url,
-                    clone_path=str(clone_path),
-                    golden_repos_dir=temp_golden_repos_dir,
-                )
-
-        # Verify: global manager was used
-        mock_cli_manager.check_cli_available.assert_called_once()
-        # The manager's API key should be the configured value
-        assert mock_cli_manager._api_key == "sk-ant-test-key-abc123"
-
 
 class TestClaudeIntegrationConfigDefault:
     """Test ClaudeIntegrationConfig default value for max_concurrent_claude_cli."""

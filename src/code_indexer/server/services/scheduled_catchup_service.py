@@ -10,10 +10,22 @@ Story #23 AC6: Scheduled Timer-Based Gap Scanning and Catch-Up
 
 import logging
 import threading
+import uuid
 from typing import Optional
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
+
+
+def get_claude_cli_manager():
+    """
+    Get the global ClaudeCliManager instance.
+
+    Module-level wrapper enabling tests to patch
+    ``scheduled_catchup_service.get_claude_cli_manager``.
+    """
+    from .claude_cli_manager import get_claude_cli_manager as _get
+    return _get()
 
 
 class ScheduledCatchupService:
@@ -32,6 +44,7 @@ class ScheduledCatchupService:
         self,
         enabled: bool = False,
         interval_minutes: int = 60,
+        job_tracker=None,
     ):
         """
         Initialize the scheduled catch-up service.
@@ -39,12 +52,14 @@ class ScheduledCatchupService:
         Args:
             enabled: Whether scheduled catch-up is enabled
             interval_minutes: Interval between catch-up runs in minutes
+            job_tracker: Optional JobTracker for dashboard visibility (Story #314)
         """
         self._enabled = enabled
         self._interval_minutes = interval_minutes
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._job_tracker = job_tracker  # Story #314: dashboard visibility
 
     def start(self) -> None:
         """
@@ -150,8 +165,8 @@ class ScheduledCatchupService:
         Process catch-up for repositories with fallback descriptions.
 
         Uses the global ClaudeCliManager to process all fallbacks.
+        Registers a scheduled_catchup job in JobTracker for dashboard visibility (Story #314).
         """
-        from .claude_cli_manager import get_claude_cli_manager
         from ..middleware.correlation import get_correlation_id
 
         manager = get_claude_cli_manager()
@@ -166,8 +181,22 @@ class ScheduledCatchupService:
             extra={"correlation_id": get_correlation_id()},
         )
 
+        # Story #314: Register scheduled_catchup job for dashboard visibility
+        tracked_job_id = None
+        if self._job_tracker is not None:
+            try:
+                tracked_job_id = f"scheduled-catchup-{uuid.uuid4().hex[:8]}"
+                self._job_tracker.register_job(
+                    tracked_job_id, "scheduled_catchup", username="system"
+                )
+                self._job_tracker.update_status(tracked_job_id, status="running")
+            except Exception as e:
+                logger.debug(f"Failed to register scheduled_catchup job: {e}")
+                tracked_job_id = None
+
         try:
-            result = manager.process_all_fallbacks()
+            # Pass skip_tracking=True to avoid double-tracking inside process_all_fallbacks
+            result = manager.process_all_fallbacks(skip_tracking=True)
 
             if result.processed:
                 logger.info(
@@ -188,6 +217,14 @@ class ScheduledCatchupService:
                     extra={"correlation_id": get_correlation_id()},
                 )
 
+            if tracked_job_id and self._job_tracker is not None:
+                try:
+                    self._job_tracker.complete_job(tracked_job_id)
+                except Exception as e:
+                    logger.debug(
+                        f"Failed to complete tracked job {tracked_job_id}: {e}"
+                    )
+
         except Exception as e:
             logger.error(
                 format_error_log(
@@ -197,6 +234,13 @@ class ScheduledCatchupService:
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
+            if tracked_job_id and self._job_tracker is not None:
+                try:
+                    self._job_tracker.fail_job(tracked_job_id, error=str(e))
+                except Exception as e2:
+                    logger.debug(
+                        f"Failed to mark tracked job {tracked_job_id} as failed: {e2}"
+                    )
 
     @property
     def is_running(self) -> bool:

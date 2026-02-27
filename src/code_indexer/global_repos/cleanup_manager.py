@@ -13,6 +13,7 @@ import os
 import shutil
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Dict, Optional, Set
 
@@ -39,13 +40,19 @@ class CleanupManager:
     BASE_BACKOFF_DELAY = 1.0  # seconds
     FD_USAGE_THRESHOLD = 0.80  # 80%
 
-    def __init__(self, query_tracker: QueryTracker, check_interval: float = 1.0):
+    def __init__(
+        self,
+        query_tracker: QueryTracker,
+        check_interval: float = 1.0,
+        job_tracker=None,
+    ):
         """
         Initialize the cleanup manager.
 
         Args:
             query_tracker: QueryTracker instance for ref count monitoring
             check_interval: How often to check for cleanups (seconds)
+            job_tracker: Optional JobTracker for dashboard visibility (Story #314)
         """
         self._query_tracker = query_tracker
         self._check_interval = check_interval
@@ -57,6 +64,7 @@ class CleanupManager:
         self._failure_counts: Dict[str, int] = {}
         self._next_retry_times: Dict[str, float] = {}
         self._stats_lock = threading.Lock()
+        self._job_tracker = job_tracker  # Story #314: dashboard visibility
 
     def schedule_cleanup(self, index_path: str) -> None:
         """Schedule index_path for deletion once its ref count reaches zero."""
@@ -247,6 +255,7 @@ class CleanupManager:
 
         Applies FD monitoring (skip cycle), circuit breaker (remove permanently
         after MAX_FAILURES), and exponential backoff (skip until delay elapses).
+        Registers index_cleanup jobs in JobTracker for dashboard visibility (Story #314).
         """
         if self._is_fd_usage_high():
             logger.warning(
@@ -274,16 +283,45 @@ class CleanupManager:
                 logger.debug(f"Path {path} is in backoff window, skipping")
                 continue
 
+            ref_count = self._query_tracker.get_ref_count(path)
+            if ref_count != 0:
+                logger.debug(f"Skipping cleanup for {path}: {ref_count} active queries")
+                continue
+
+            # Story #314: Register index_cleanup job for dashboard visibility
+            tracked_job_id = None
+            if self._job_tracker is not None:
+                try:
+                    tracked_job_id = f"index-cleanup-{uuid.uuid4().hex[:8]}"
+                    self._job_tracker.register_job(
+                        tracked_job_id, "index_cleanup", username="system"
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to register index_cleanup job: {e}")
+                    tracked_job_id = None
+
             try:
-                ref_count = self._query_tracker.get_ref_count(path)
-                if ref_count == 0:
-                    self._delete_index(path)
-                    with self._queue_lock:
-                        self._cleanup_queue.discard(path)
-                    self._reset_failure_count(path)
-                    logger.info(f"Deleted old index: {path}")
-                else:
-                    logger.debug(f"Skipping cleanup for {path}: {ref_count} active queries")
+                self._delete_index(path)
+                with self._queue_lock:
+                    self._cleanup_queue.discard(path)
+                self._reset_failure_count(path)
+                logger.info(f"Deleted old index: {path}")
+
+                if tracked_job_id and self._job_tracker is not None:
+                    try:
+                        self._job_tracker.complete_job(tracked_job_id)
+                    except Exception as e:
+                        logger.debug(
+                            f"Failed to complete index_cleanup job {tracked_job_id}: {e}"
+                        )
             except Exception as e:
                 logger.error(f"Failed to clean up {path}: {e}", exc_info=True)
                 self._record_failure(path)
+
+                if tracked_job_id and self._job_tracker is not None:
+                    try:
+                        self._job_tracker.fail_job(tracked_job_id, error=str(e))
+                    except Exception as e2:
+                        logger.debug(
+                            f"Failed to mark index_cleanup job {tracked_job_id} as failed: {e2}"
+                        )

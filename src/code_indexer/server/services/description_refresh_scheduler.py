@@ -33,7 +33,13 @@ class DescriptionRefreshScheduler:
     """
 
     def __init__(
-        self, db_path: str, config_manager, claude_cli_manager=None, meta_dir: Optional[Path] = None, analysis_model: str = "opus"
+        self,
+        db_path: str,
+        config_manager,
+        claude_cli_manager=None,
+        meta_dir: Optional[Path] = None,
+        analysis_model: str = "opus",
+        job_tracker=None,
     ) -> None:
         """
         Initialize the scheduler.
@@ -44,12 +50,14 @@ class DescriptionRefreshScheduler:
             claude_cli_manager: Optional ClaudeCliManager instance (for submitting work)
             meta_dir: Path to cidx-meta directory (for reading existing .md files)
             analysis_model: Claude model to use ("opus" or "sonnet", default: "opus")
+            job_tracker: Optional JobTracker instance for unified job tracking (Story #313)
         """
         self._db_path = db_path
         self._config_manager = config_manager
         self._claude_cli_manager = claude_cli_manager
         self._meta_dir = meta_dir
         self._analysis_model = analysis_model
+        self._job_tracker = job_tracker
         self._tracking_backend = DescriptionRefreshTrackingBackend(db_path)
         self._golden_backend = GoldenRepoMetadataSqliteBackend(db_path)
         self._shutdown_event = threading.Event()
@@ -226,17 +234,21 @@ class DescriptionRefreshScheduler:
         repo_path: str,
         success: bool,
         result: Optional[Dict[str, Any]] = None,
+        job_id: Optional[str] = None,
     ) -> None:
         """
         Callback for ClaudeCliManager when refresh completes.
 
         Updates tracking record with success/failure status and change markers.
+        If a job_id is provided and a job_tracker is configured, updates the
+        job status accordingly (AC2, AC7, AC8 - Story #313).
 
         Args:
             repo_alias: Repository alias
             repo_path: Path to repository
             success: Whether refresh succeeded
             result: Result data from Claude CLI (may contain error info)
+            job_id: Optional job ID for unified job tracking (Story #313)
         """
         now = datetime.now(timezone.utc).isoformat()
 
@@ -289,11 +301,25 @@ class DescriptionRefreshScheduler:
             )
             logger.warning(f"Description refresh failed for {repo_alias}: {error_msg}")
 
+        # Update unified job tracker if configured (Story #313, AC2, AC7, AC8)
+        if job_id is not None and self._job_tracker is not None:
+            try:
+                if success:
+                    self._job_tracker.complete_job(job_id)
+                else:
+                    error_message = result.get("error") if result else "Unknown error"
+                    self._job_tracker.fail_job(job_id, error=str(error_message))
+            except Exception as e:
+                logger.warning(
+                    f"Failed to update job tracker for job {job_id}: {e}"
+                )
+
     def _run_loop(self) -> None:
         """
         Main scheduler loop (runs in daemon thread).
 
         Periodically checks for stale repos and submits refresh jobs.
+        Delegates per-iteration logic to _run_loop_single_pass().
         """
         while not self._shutdown_event.is_set():
             try:
@@ -310,67 +336,7 @@ class DescriptionRefreshScheduler:
                     self._shutdown_event.wait(60)
                     continue
 
-                # Get stale repos
-                stale_repos = self.get_stale_repos()
-
-                for repo in stale_repos:
-                    alias = repo["repo_alias"]
-                    clone_path = repo["clone_path"]
-
-                    # Check for changes
-                    if not self.has_changes_since_last_run(clone_path, repo):
-                        # No changes - reschedule without submitting work
-                        now = datetime.now(timezone.utc).isoformat()
-                        self._tracking_backend.upsert_tracking(
-                            repo_alias=alias,
-                            next_run=self.calculate_next_run(alias),
-                            updated_at=now,
-                        )
-                        continue
-
-                    # Submit refresh job (if ClaudeCliManager available)
-                    if self._claude_cli_manager:
-                        logger.info(f"Submitting description refresh for {alias}")
-
-                        # Get refresh prompt using RepoAnalyzer
-                        prompt = self._get_refresh_prompt(alias, clone_path)
-                        if prompt is None:
-                            logger.warning(f"Cannot refresh {alias}: failed to generate prompt, rescheduling")
-                            # Reschedule to next cycle to avoid infinite retry loop (Finding N3)
-                            now = datetime.now(timezone.utc).isoformat()
-                            self._tracking_backend.upsert_tracking(
-                                repo_alias=alias,
-                                next_run=self.calculate_next_run(alias),
-                                updated_at=now,
-                            )
-                            continue
-
-                        # Mark as queued before submitting
-                        now = datetime.now(timezone.utc).isoformat()
-                        self._tracking_backend.upsert_tracking(
-                            repo_alias=alias,
-                            status="queued",
-                            updated_at=now,
-                        )
-
-                        # Invoke Claude CLI directly with the refresh prompt (Finding N2)
-                        # Run in background thread to avoid blocking scheduler loop
-                        def refresh_task(alias=alias, clone_path=clone_path, prompt=prompt):
-                            success, result_str = self._invoke_claude_cli(clone_path, prompt)
-                            if success:
-                                # Update .md file with refreshed content
-                                self._update_description_file(alias, result_str)
-                            # Call completion callback
-                            result_dict = {"error": result_str} if not success else None
-                            self.on_refresh_complete(alias, clone_path, success, result_dict)
-
-                        threading.Thread(target=refresh_task, daemon=True).start()
-                        logger.debug(f"Spawned refresh task for {alias}")
-
-                    else:
-                        logger.debug(
-                            f"ClaudeCliManager not available, skipping {alias}"
-                        )
+                self._run_loop_single_pass()
 
             except Exception as e:
                 logger.error(
@@ -379,6 +345,111 @@ class DescriptionRefreshScheduler:
 
             # Sleep between checks
             self._shutdown_event.wait(60)
+
+    def _run_loop_single_pass(self) -> None:
+        """
+        Execute one pass of the scheduler loop: scan for stale repos and spawn refresh tasks.
+
+        Extracted from _run_loop() to enable unit testing of job registration behavior.
+        For each stale repo with changes, registers a description_refresh job in the
+        job_tracker (if configured) and spawns a background thread (AC2, Story #313).
+        """
+        import uuid
+
+        stale_repos = self.get_stale_repos()
+
+        for repo in stale_repos:
+            alias = repo["repo_alias"]
+            clone_path = repo["clone_path"]
+
+            # Check for changes
+            if not self.has_changes_since_last_run(clone_path, repo):
+                # No changes - reschedule without submitting work
+                now = datetime.now(timezone.utc).isoformat()
+                self._tracking_backend.upsert_tracking(
+                    repo_alias=alias,
+                    next_run=self.calculate_next_run(alias),
+                    updated_at=now,
+                )
+                continue
+
+            # Submit refresh job (if ClaudeCliManager available)
+            if self._claude_cli_manager:
+                logger.info(f"Submitting description refresh for {alias}")
+
+                # Get refresh prompt using RepoAnalyzer
+                prompt = self._get_refresh_prompt(alias, clone_path)
+                if prompt is None:
+                    logger.warning(
+                        f"Cannot refresh {alias}: failed to generate prompt, rescheduling"
+                    )
+                    # Reschedule to next cycle to avoid infinite retry loop (Finding N3)
+                    now = datetime.now(timezone.utc).isoformat()
+                    self._tracking_backend.upsert_tracking(
+                        repo_alias=alias,
+                        next_run=self.calculate_next_run(alias),
+                        updated_at=now,
+                    )
+                    continue
+
+                # Mark as queued before submitting
+                now = datetime.now(timezone.utc).isoformat()
+                self._tracking_backend.upsert_tracking(
+                    repo_alias=alias,
+                    status="queued",
+                    updated_at=now,
+                )
+
+                # Register job in unified tracker before spawning thread (AC2, Story #313)
+                tracked_job_id: Optional[str] = None
+                if self._job_tracker is not None:
+                    try:
+                        tracked_job_id = f"desc-refresh-{alias}-{uuid.uuid4().hex[:8]}"
+                        self._job_tracker.register_job(
+                            tracked_job_id,
+                            "description_refresh",
+                            username="system",
+                            repo_alias=alias,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"JobTracker registration failed for {alias}: {e}"
+                        )
+                        tracked_job_id = None
+
+                # Invoke Claude CLI directly with the refresh prompt (Finding N2)
+                # Run in background thread to avoid blocking scheduler loop
+                def refresh_task(
+                    alias=alias,
+                    clone_path=clone_path,
+                    prompt=prompt,
+                    job_id=tracked_job_id,
+                ):
+                    # Story #313 AC7: Transition to "running" when thread starts
+                    if job_id is not None and self._job_tracker is not None:
+                        try:
+                            self._job_tracker.update_status(job_id, status="running")
+                        except Exception as e:
+                            logger.debug(
+                                f"Non-fatal: Failed to update job {job_id} to running: {e}"
+                            )
+                    success, result_str = self._invoke_claude_cli(clone_path, prompt)
+                    if success:
+                        # Update .md file with refreshed content
+                        self._update_description_file(alias, result_str)
+                    # Call completion callback with job_id for tracker update
+                    result_dict = {"error": result_str} if not success else None
+                    self.on_refresh_complete(
+                        alias, clone_path, success, result_dict, job_id=job_id
+                    )
+
+                threading.Thread(target=refresh_task, daemon=True).start()
+                logger.debug(f"Spawned refresh task for {alias}")
+
+            else:
+                logger.debug(
+                    f"ClaudeCliManager not available, skipping {alias}"
+                )
 
     def _get_interval_hours(self) -> int:
         """Get refresh interval from config."""

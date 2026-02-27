@@ -14,6 +14,7 @@ import re
 import shutil
 import threading
 import time
+import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -72,6 +73,7 @@ class LangfuseTraceSyncService:
         data_dir: str,
         on_sync_complete: Optional[Callable[[], None]] = None,
         refresh_scheduler=None,
+        job_tracker=None,
     ):
         """
         Args:
@@ -79,6 +81,7 @@ class LangfuseTraceSyncService:
             data_dir: Base directory for data (typically ~/.cidx-server/data)
             on_sync_complete: Optional callback invoked after each sync cycle completes
             refresh_scheduler: Optional RefreshScheduler for write-lock coordination (Story #227)
+            job_tracker: Optional JobTracker for dashboard visibility (Story #314)
         """
         self._config_getter = config_getter
         self._data_dir = data_dir
@@ -89,6 +92,7 @@ class LangfuseTraceSyncService:
         self._lock = threading.Lock()  # Metrics lock
         self._sync_lock = threading.Lock()  # Concurrent sync guard (C1/H4)
         self._refresh_scheduler = refresh_scheduler  # Story #227: write-lock coordination
+        self._job_tracker = job_tracker  # Story #314: dashboard visibility
 
     def start(self) -> None:
         """Start background sync thread."""
@@ -162,20 +166,52 @@ class LangfuseTraceSyncService:
 
         logger.info(f"Syncing {len(langfuse.pull_projects)} Langfuse project(s)")
 
-        host = langfuse.pull_host
-        max_concurrent = langfuse.pull_max_concurrent_observations
-        for project_creds in langfuse.pull_projects:
+        # Story #314: Register langfuse_sync job for dashboard visibility
+        tracked_job_id = None
+        if self._job_tracker is not None:
             try:
-                self.sync_project(host, project_creds, langfuse.pull_trace_age_days, max_concurrent)
+                tracked_job_id = f"langfuse-sync-{uuid.uuid4().hex[:8]}"
+                self._job_tracker.register_job(
+                    tracked_job_id, "langfuse_sync", username="system"
+                )
+                self._job_tracker.update_status(tracked_job_id, status="running")
             except Exception as e:
-                logger.error(f"Error syncing project: {e}", exc_info=True)
+                logger.debug(f"Failed to register langfuse_sync job: {e}")
+                tracked_job_id = None
 
-        # After syncing all projects, notify callback for auto-registration
-        if self._on_sync_complete:
-            try:
-                self._on_sync_complete()
-            except Exception as e:
-                logger.warning(f"Post-sync callback failed: {e}")
+        sync_errors: list = []
+        try:
+            host = langfuse.pull_host
+            max_concurrent = langfuse.pull_max_concurrent_observations
+            for project_creds in langfuse.pull_projects:
+                try:
+                    self.sync_project(host, project_creds, langfuse.pull_trace_age_days, max_concurrent)
+                except Exception as e:
+                    logger.error(f"Error syncing project: {e}", exc_info=True)
+                    sync_errors.append(str(e))
+
+            # After syncing all projects, notify callback for auto-registration
+            if self._on_sync_complete:
+                try:
+                    self._on_sync_complete()
+                except Exception as e:
+                    logger.warning(f"Post-sync callback failed: {e}")
+        except Exception as e:
+            sync_errors.append(str(e))
+            raise
+        finally:
+            # Story #314: Complete or fail the tracked job
+            if tracked_job_id and self._job_tracker:
+                try:
+                    if sync_errors:
+                        self._job_tracker.fail_job(
+                            tracked_job_id,
+                            error=f"{len(sync_errors)} project(s) failed: {'; '.join(sync_errors[:3])}"
+                        )
+                    else:
+                        self._job_tracker.complete_job(tracked_job_id)
+                except Exception as e:
+                    logger.debug(f"Failed to update langfuse_sync job status: {e}")
 
     def sync_all_projects(self) -> None:
         """Sync all configured projects. Called by background loop and manual trigger."""
