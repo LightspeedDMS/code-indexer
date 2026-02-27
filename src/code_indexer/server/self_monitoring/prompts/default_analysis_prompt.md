@@ -1,3 +1,5 @@
+[Prompt version: 2]
+
 # CIDX Server Log Analysis Prompt
 
 You are analyzing CIDX server logs to identify issues that require attention. Your task is to query the log database, analyze entries, identify problems, and return a structured JSON response.
@@ -115,16 +117,38 @@ Classify each issue into ONE of these categories:
 
 **IMPORTANT**: Before creating an issue, check if it's a duplicate using the three tiers above. If duplicate, increment `duplicates_skipped` instead of creating.
 
+## Repeating Warning Detection
+
+Before consulting the ignore list, run this frequency query to detect stuck-state patterns:
+
+```bash
+sqlite3 "{log_db_path}" "SELECT SUBSTR(message, 1, 80) as pattern, source, COUNT(*) as count FROM logs WHERE level = 'WARNING' AND id > {last_scan_log_id} GROUP BY SUBSTR(message, 1, 80), source HAVING COUNT(*) >= 5 ORDER BY count DESC"
+```
+
+If any warning pattern appears 5 or more times, treat it as a potential unrecoverable state regardless of its content. High-frequency repetition overrides the ignore list below - a warning that appears 5+ times is no longer "expected" behavior.
+
+**Classification for repeating warnings**: Create a `server_bug` issue with title prefix "Repeating warning: " followed by the pattern.
+
+**Examples of stuck-state warning patterns** (will not self-heal without intervention):
+
+| Pattern | Indicates |
+|---------|-----------|
+| `pack` + `delta` or `packfile` corruption | Git object database in unrecoverable state |
+| `daemon socket` unreachable | Dead daemon process with stale socket |
+| `stale lock file` or `lock` timeout loop | Lock file preventing forward progress |
+| `retry` loop with identical failure | Transient classified as permanent |
+
+**Priority chain**: Run frequency detection FIRST, then apply ignore list to low-frequency warnings (fewer than 5 occurrences).
+
 ## Analysis Guidelines
 
 1. **Query the database** - Use sqlite3 to read log entries directly
 2. **Explore the codebase** - Use Read, Grep, Glob tools to examine source files mentioned in logs
 3. **Verify exception handling** - Check if exceptions are caught and handled gracefully
-4. **Focus on patterns** - Single occurrences may be transient; recurring errors are more significant
-5. **Check error codes** - Look for `[ERROR_CODE]` patterns like `[AUTH-TOKEN-001]` in messages
-6. **Group related errors** - Multiple log entries about the same problem = one issue
-7. **Assess severity** - Crashes and data loss are critical; validation errors may be client issues
-8. **Include context** - Note correlation_id, user patterns, timing patterns
+4. **Check error codes** - Look for `[ERROR_CODE]` patterns like `[AUTH-TOKEN-001]` in messages
+5. **Group related errors** - Multiple log entries about the same problem = one issue
+6. **Assess severity** - Crashes and data loss are critical; validation errors may be client issues
+7. **Include context** - Note correlation_id, user patterns, timing patterns
 
 ## CRITICAL: Focus on Actionable Development Bugs
 
@@ -140,7 +164,7 @@ Classify each issue into ONE of these categories:
 **DO NOT CREATE ISSUES FOR (IGNORE THESE):**
 - Missing environment variables or configuration (e.g., "GITHUB_REPOSITORY not set")
 - Test/mock repositories without git remotes (e.g., "python-mock", "java-mock")
-- Expected warnings during normal operation
+- Expected warnings during normal operation (fewer than 5 occurrences - see Repeating Warning Detection above)
 - Client validation errors (these are client_misuse at most, not bugs)
 - Network timeouts or transient connectivity issues
 - Deployment or infrastructure configuration problems
