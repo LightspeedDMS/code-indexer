@@ -23,6 +23,7 @@ if TYPE_CHECKING:
         BackgroundJobsConfig,
     )
     from code_indexer.server.storage.sqlite_backends import BackgroundJobsSqliteBackend
+    from code_indexer.server.services.job_tracker import JobTracker
 
 
 class JobStatus(str, Enum):
@@ -92,6 +93,7 @@ class BackgroundJobManager:
         use_sqlite: bool = False,
         db_path: Optional[str] = None,
         background_jobs_config: Optional["BackgroundJobsConfig"] = None,
+        job_tracker: Optional["JobTracker"] = None,
     ):
         """Initialize enhanced background job manager.
 
@@ -101,9 +103,14 @@ class BackgroundJobManager:
             use_sqlite: Whether to use SQLite backend instead of JSON file
             db_path: Path to SQLite database file (required if use_sqlite=True)
             background_jobs_config: Background jobs configuration (concurrency limits)
+            job_tracker: Optional JobTracker for unified job tracking (Story #311).
+                When provided, jobs are also registered with the tracker for
+                cross-service visibility. When None, behavior is unchanged.
         """
         self.jobs: Dict[str, BackgroundJob] = {}
         self._lock = threading.Lock()
+        # Story #311: Optional JobTracker for unified tracking (Epic #261 Story 1B)
+        self._job_tracker: Optional["JobTracker"] = job_tracker
         self._executor = None
         self._running_jobs: Dict[str, threading.Thread] = {}
         self._job_queue: queue.PriorityQueue = queue.PriorityQueue()
@@ -264,6 +271,22 @@ class BackgroundJobManager:
 
         # Story #267 Component 3-4: Persist outside lock
         self._persist_jobs(job_id=job_id)
+
+        # Story #311: Register with JobTracker for unified cross-service tracking
+        if self._job_tracker is not None:
+            try:
+                self._job_tracker.register_job(
+                    job_id=job_id,
+                    operation_type=operation_type,
+                    username=submitter_username,
+                    repo_alias=repo_alias,
+                )
+            except Exception:
+                logging.warning(
+                    f"JobTracker.register_job failed for {job_id} — "
+                    "continuing without tracker registration",
+                    exc_info=True,
+                )
 
         # Execute job in background thread
         thread = threading.Thread(
@@ -487,6 +510,16 @@ class BackgroundJobManager:
             # Story #267 Component 3-4: Persist outside lock
             self._persist_jobs(job_id=job_id)
 
+            # Story #311: Notify tracker that job is now running
+            if self._job_tracker is not None:
+                try:
+                    self._job_tracker.update_status(job_id, status="running")
+                except Exception:
+                    logging.warning(
+                        f"JobTracker.update_status(running) failed for {job_id}",
+                        exc_info=True,
+                    )
+
             logging.info(f"Starting background job {job_id}")
 
             # Create progress callback function
@@ -541,6 +574,24 @@ class BackgroundJobManager:
                     job.completed_at = datetime.now(timezone.utc)
             # Story #267 Component 3-4: Persist outside lock
             self._persist_jobs(job_id=job_id)
+
+            # Story #311: Notify tracker of completion (AC3) or cancellation (AC10)
+            if self._job_tracker is not None:
+                try:
+                    if job.status == JobStatus.COMPLETED:
+                        self._job_tracker.complete_job(
+                            job_id,
+                            result=job.result if isinstance(job.result, dict) else None,
+                        )
+                    else:
+                        # CANCELLED — record as failed with cancellation reason
+                        self._job_tracker.fail_job(job_id, error="cancelled")
+                except Exception:
+                    logging.warning(
+                        f"JobTracker completion callback failed for {job_id}",
+                        exc_info=True,
+                    )
+
             # Story #267 Component 8: Remove completed/cancelled jobs from memory
             # Only when SQLite backend is available (data is preserved in DB)
             if self._sqlite_backend and job.status in (
@@ -562,6 +613,15 @@ class BackgroundJobManager:
                 job.progress = 0
             # Story #267 Component 3-4: Persist outside lock
             self._persist_jobs(job_id=job_id)
+            # Story #311 AC10: Notify tracker of cancellation via fail_job
+            if self._job_tracker is not None:
+                try:
+                    self._job_tracker.fail_job(job_id, error=f"cancelled: {e}")
+                except Exception:
+                    logging.warning(
+                        f"JobTracker.fail_job(cancelled) failed for {job_id}",
+                        exc_info=True,
+                    )
             # Story #267 Component 8: Remove from memory after persist (SQLite only)
             if self._sqlite_backend:
                 with self._lock:
@@ -579,6 +639,15 @@ class BackgroundJobManager:
                 job.progress = 0
             # Story #267 Component 3-4: Persist outside lock
             self._persist_jobs(job_id=job_id)
+            # Story #311 AC3: Notify tracker of failure
+            if self._job_tracker is not None:
+                try:
+                    self._job_tracker.fail_job(job_id, error=error_msg)
+                except Exception:
+                    logging.warning(
+                        f"JobTracker.fail_job failed for {job_id}",
+                        exc_info=True,
+                    )
             # Story #267 Component 8: Remove from memory after persist (SQLite only)
             if self._sqlite_backend:
                 with self._lock:

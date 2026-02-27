@@ -471,11 +471,61 @@ class DatabaseSchema:
             # Story #280/#283: Wiki feature migrations
             self._migrate_golden_repos_metadata_wiki(conn)
             self._migrate_wiki_cache_tables(conn)
+            # Epic #261: JobTracker schema additions
+            self._migrate_background_jobs_job_tracker(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
         finally:
             conn.close()
+
+    def _migrate_background_jobs_job_tracker(self, conn: sqlite3.Connection) -> None:
+        """
+        Migrate background_jobs table for JobTracker (Epic #261 Story 1A).
+
+        Adds columns:
+        - progress_info: Human-readable progress description
+        - metadata: JSON metadata for operation-specific context
+
+        Adds indexes:
+        - idx_background_jobs_op_repo_status: Conflict detection
+        - idx_background_jobs_user_created: Per-user job listing
+        - idx_background_jobs_created: Unfiltered recent jobs query
+
+        Safe to run multiple times - idempotent.
+        """
+        cursor = conn.execute("PRAGMA table_info(background_jobs)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        migrations_applied = []
+
+        if "progress_info" not in existing_columns:
+            conn.execute("ALTER TABLE background_jobs ADD COLUMN progress_info TEXT")
+            migrations_applied.append("progress_info")
+
+        if "metadata" not in existing_columns:
+            conn.execute("ALTER TABLE background_jobs ADD COLUMN metadata TEXT")
+            migrations_applied.append("metadata")
+
+        # Indexes use CREATE INDEX IF NOT EXISTS - always safe to run
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_background_jobs_op_repo_status
+               ON background_jobs(operation_type, repo_alias, status)"""
+        )
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_background_jobs_user_created
+               ON background_jobs(username, created_at DESC)"""
+        )
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_background_jobs_created
+               ON background_jobs(created_at DESC)"""
+        )
+
+        if migrations_applied:
+            conn.commit()
+            logger.info(
+                f"Migrated background_jobs schema for JobTracker: added {migrations_applied}"
+            )
 
     def _migrate_self_monitoring_issues_schema(self, conn: sqlite3.Connection) -> None:
         """

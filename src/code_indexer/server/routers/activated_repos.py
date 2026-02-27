@@ -361,10 +361,12 @@ async def trigger_reindex(
             # For now, just a placeholder that the job manager can execute
             pass
 
+        # AC8 (Story #311): fixed submit_job signature (was using wrong kwargs)
         job_id = job_manager.submit_job(
-            job_func=reindex_job,
-            job_name=f"reindex-{user_alias}",
-            metadata={"user_alias": user_alias, "index_types": index_types},
+            "reindex_activated_repo",
+            reindex_job,
+            submitter_username=current_user.username,
+            repo_alias=user_alias,
         )
 
         return ReindexResponse(
@@ -454,10 +456,12 @@ async def add_index_type(
             # For now, just a placeholder that the job manager can execute
             pass
 
+        # AC8 (Story #311): fixed submit_job signature (was using wrong kwargs)
         job_id = job_manager.submit_job(
-            job_func=add_index_job,
-            job_name=f"add-index-{index_type}-{user_alias}",
-            metadata={"user_alias": user_alias, "index_type": index_type},
+            "add_index_activated_repo",
+            add_index_job,
+            submitter_username=current_user.username,
+            repo_alias=user_alias,
         )
 
         return AddIndexResponse(
@@ -692,10 +696,12 @@ async def sync_repository(
             # For now, just a placeholder that the job manager can execute
             pass
 
+        # AC8 (Story #311): fixed submit_job signature (was using wrong kwargs)
         job_id = job_manager.submit_job(
-            job_func=sync_job,
-            job_name=f"sync-{user_alias}",
-            metadata={"user_alias": user_alias, "reindex": request.reindex},
+            "sync_activated_repo",
+            sync_job,
+            submitter_username=current_user.username,
+            repo_alias=user_alias,
         )
 
         return SyncResponse(
@@ -777,10 +783,12 @@ async def switch_branch(
             # For now, just a placeholder that the job manager can execute
             pass
 
+        # AC8 (Story #311): fixed submit_job signature (was using wrong kwargs)
         job_id = job_manager.submit_job(
-            job_func=switch_branch_job,
-            job_name=f"switch-branch-{user_alias}",
-            metadata={"user_alias": user_alias, "branch_name": request.branch_name},
+            "switch_branch_activated_repo",
+            switch_branch_job,
+            submitter_username=current_user.username,
+            repo_alias=user_alias,
         )
 
         return SwitchBranchResponse(

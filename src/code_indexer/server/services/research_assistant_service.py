@@ -88,13 +88,19 @@ class ResearchAssistantService:
     _jobs: Dict[str, Dict[str, Any]] = {}
     _jobs_lock = threading.Lock()
 
-    def __init__(self, db_path: Optional[str] = None, github_token: Optional[str] = None):
+    def __init__(
+        self,
+        db_path: Optional[str] = None,
+        github_token: Optional[str] = None,
+        job_tracker=None,
+    ):
         """
         Initialize ResearchAssistantService.
 
         Args:
             db_path: Path to SQLite database. If None, uses default location.
             github_token: GitHub token for bug report creation (Story #202). If None, no token is set.
+            job_tracker: Optional JobTracker for dashboard visibility (Story #314).
         """
         if db_path is not None:
             self.db_path = db_path
@@ -106,6 +112,8 @@ class ResearchAssistantService:
 
         # Store GitHub token for subprocess environment (Story #202 AC3)
         self._github_token = github_token
+        # Story #314: JobTracker for dashboard visibility (dual tracking with _jobs dict)
+        self._job_tracker = job_tracker
 
     def _detect_repo_root(self) -> Optional[str]:
         """
@@ -890,6 +898,17 @@ class ResearchAssistantService:
                 "error": None,
             }
 
+        # Story #314: Register research_assistant_chat in JobTracker (dual tracking).
+        # Keep existing _jobs dict as primary for poll_job() compatibility.
+        if self._job_tracker is not None:
+            try:
+                self._job_tracker.register_job(
+                    job_id, "research_assistant_chat", username="system"
+                )
+                self._job_tracker.update_status(job_id, status="running")
+            except Exception:
+                pass  # Tracker failure must never break chat execution
+
         # Start background thread to execute Claude (with guardrails if first message)
         thread = threading.Thread(
             target=self._run_claude_background,
@@ -1075,6 +1094,12 @@ class ResearchAssistantService:
                     if job_id in self._jobs:
                         self._jobs[job_id]["status"] = "complete"
                         self._jobs[job_id]["response"] = response
+                # Story #314: Track completion in JobTracker for dashboard
+                if self._job_tracker is not None:
+                    try:
+                        self._job_tracker.complete_job(job_id)
+                    except Exception as e:
+                        logger.debug(f"Failed to mark job {job_id} complete in tracker: {e}")
             else:
                 error = result.stderr.strip()
                 logger.error(f"Claude CLI failed: {error}")
@@ -1083,6 +1108,12 @@ class ResearchAssistantService:
                     if job_id in self._jobs:
                         self._jobs[job_id]["status"] = "error"
                         self._jobs[job_id]["error"] = error
+                # Story #314: Track failure in JobTracker for dashboard
+                if self._job_tracker is not None:
+                    try:
+                        self._job_tracker.fail_job(job_id, error=error)
+                    except Exception as e:
+                        logger.debug(f"Failed to mark job {job_id} failed in tracker: {e}")
 
         except subprocess.TimeoutExpired:
             error = "Claude CLI execution timed out"
@@ -1091,6 +1122,12 @@ class ResearchAssistantService:
                 if job_id in self._jobs:
                     self._jobs[job_id]["status"] = "error"
                     self._jobs[job_id]["error"] = error
+            # Story #314: Track timeout failure in JobTracker for dashboard
+            if self._job_tracker is not None:
+                try:
+                    self._job_tracker.fail_job(job_id, error=error)
+                except Exception as e:
+                    logger.debug(f"Failed to mark job {job_id} failed in tracker: {e}")
 
         except Exception as e:
             error = f"Claude CLI execution failed: {e}"
@@ -1099,6 +1136,12 @@ class ResearchAssistantService:
                 if job_id in self._jobs:
                     self._jobs[job_id]["status"] = "error"
                     self._jobs[job_id]["error"] = str(e)
+            # Story #314: Track generic failure in JobTracker for dashboard
+            if self._job_tracker is not None:
+                try:
+                    self._job_tracker.fail_job(job_id, error=str(e))
+                except Exception as ex:
+                    logger.debug(f"Failed to mark job {job_id} failed in tracker: {ex}")
 
     def sanitize_filename(self, filename: str) -> str:
         """

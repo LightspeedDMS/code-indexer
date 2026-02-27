@@ -12168,9 +12168,9 @@ def handle_trigger_dependency_analysis(
             """Background job to run dependency map analysis."""
             try:
                 if mode == "full":
-                    dependency_map_service.run_full_analysis()
+                    dependency_map_service.run_full_analysis(job_id=job_id)
                 else:
-                    dependency_map_service.run_delta_analysis()
+                    dependency_map_service.run_delta_analysis(job_id=job_id)
             except Exception as e:
                 logger.error(
                     format_error_log(

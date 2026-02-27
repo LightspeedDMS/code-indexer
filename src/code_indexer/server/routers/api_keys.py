@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import json
+import uuid
 from pathlib import Path
 from typing import List, Optional
 
@@ -29,6 +30,30 @@ from code_indexer.server.logging_utils import format_error_log
 logger = logging.getLogger(__name__)
 
 
+def get_job_tracker():
+    """
+    Get the global JobTracker instance from app module.
+
+    Returns None if the tracker is not yet initialized.
+    Story #314: allows patching in tests and accessing the global tracker.
+    """
+    try:
+        from ..app import job_tracker  # type: ignore[attr-defined]
+        return job_tracker
+    except Exception:
+        return None
+
+
+def get_claude_cli_manager():
+    """
+    Get the global ClaudeCliManager instance.
+
+    Wraps the service-level function for module-level patching in tests.
+    """
+    from ..services.claude_cli_manager import get_claude_cli_manager as _get
+    return _get()
+
+
 def trigger_catchup_on_api_key_save(api_key: Optional[str]) -> bool:
     """
     Trigger immediate catch-up processing when API key is saved.
@@ -46,7 +71,6 @@ def trigger_catchup_on_api_key_save(api_key: Optional[str]) -> bool:
     Story #23 AC3: Immediate Catch-Up Trigger on API Key Save
     """
     import threading
-    from ..services.claude_cli_manager import get_claude_cli_manager
     from ..middleware.correlation import get_correlation_id
 
     # Validate key
@@ -71,39 +95,71 @@ def trigger_catchup_on_api_key_save(api_key: Optional[str]) -> bool:
 
     # Trigger catch-up in background thread
     def run_catchup():
+        from ..middleware.correlation import get_correlation_id as _get_cid
+
+        # Story #314: Register immediate_catchup job for dashboard visibility
+        tracker = get_job_tracker()
+        tracked_job_id = None
+        if tracker is not None:
+            try:
+                tracked_job_id = f"immediate-catchup-{uuid.uuid4().hex[:8]}"
+                tracker.register_job(
+                    tracked_job_id, "immediate_catchup", username="system"
+                )
+                tracker.update_status(tracked_job_id, status="running")
+            except Exception as e:
+                logger.debug(f"Failed to register immediate_catchup job: {e}")
+                tracked_job_id = None
+
         try:
             logger.info(
                 "Starting immediate catch-up processing after API key save",
-                extra={"correlation_id": get_correlation_id()},
+                extra={"correlation_id": _get_cid()},
             )
             result = manager.process_all_fallbacks()
             if result.processed:
                 logger.info(
                     f"Catch-up completed: processed {len(result.processed)} repos",
-                    extra={"correlation_id": get_correlation_id()},
+                    extra={"correlation_id": _get_cid()},
                 )
             elif result.error:
                 logger.warning(
                     format_error_log(
                         "STORE-GENERAL-013",
                         f"Catch-up partially completed: {result.error}",
-                        extra={"correlation_id": get_correlation_id()},
+                        extra={"correlation_id": _get_cid()},
                     )
                 )
             else:
                 logger.info(
                     "Catch-up completed: no repos needed processing",
-                    extra={"correlation_id": get_correlation_id()},
+                    extra={"correlation_id": _get_cid()},
                 )
+
+            if tracked_job_id and tracker is not None:
+                try:
+                    tracker.complete_job(tracked_job_id)
+                except Exception as e:
+                    logger.debug(
+                        f"Failed to complete immediate_catchup job {tracked_job_id}: {e}"
+                    )
+
         except Exception as e:
             logger.error(
                 format_error_log(
                     "STORE-GENERAL-014",
                     f"Catch-up processing failed: {e}",
                     exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
+                    extra={"correlation_id": _get_cid()},
                 )
             )
+            if tracked_job_id and tracker is not None:
+                try:
+                    tracker.fail_job(tracked_job_id, error=str(e))
+                except Exception as e2:
+                    logger.debug(
+                        f"Failed to mark immediate_catchup job {tracked_job_id} as failed: {e2}"
+                    )
 
     catchup_thread = threading.Thread(
         target=run_catchup,

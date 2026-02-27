@@ -48,7 +48,13 @@ class ClaudeCliManager:
     - Configurable worker pool for concurrency control
     """
 
-    def __init__(self, api_key: Optional[str] = None, max_workers: int = 2, mcp_registration_service=None):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        max_workers: int = 2,
+        mcp_registration_service=None,
+        job_tracker=None,
+    ):
         """
         Initialize ClaudeCliManager with worker pool.
 
@@ -56,6 +62,7 @@ class ClaudeCliManager:
             api_key: Anthropic API key to sync to ~/.claude.json
             max_workers: Number of worker threads (default 2, Story #24)
             mcp_registration_service: MCPSelfRegistrationService for auto-registering CIDX as MCP server
+            job_tracker: Optional JobTracker instance for unified job tracking (Story #313)
         """
         self._api_key = api_key
         self._max_workers = max_workers
@@ -72,6 +79,7 @@ class ClaudeCliManager:
         self._cli_state_lock = threading.Lock()  # Lock for CLI state management
         self._mcp_registration_service = mcp_registration_service
         self._mcp_registration_attempted = False  # Flag to ensure registration only attempted once per manager
+        self._job_tracker = job_tracker  # Unified job tracking (Story #313)
 
         # Start worker threads
         for i in range(max_workers):
@@ -292,6 +300,14 @@ class ClaudeCliManager:
             extra={"correlation_id": get_correlation_id()},
         )
 
+    def set_job_tracker(self, job_tracker) -> None:
+        """Set the job tracker for unified tracking (Story #313, Epic #261).
+
+        Called after initialization because the singleton factory doesn't
+        have access to the job_tracker at creation time.
+        """
+        self._job_tracker = job_tracker
+
     def scan_for_fallbacks(self) -> List[Tuple[str, Path]]:
         """
         Scan meta directory for fallback files (*_README.md).
@@ -322,20 +338,68 @@ class ClaudeCliManager:
         )
         return fallbacks
 
-    def process_all_fallbacks(self) -> "CatchupResult":
+    def process_all_fallbacks(self, skip_tracking: bool = False) -> "CatchupResult":
         """
         Process all fallback files, replacing with generated descriptions.
+
+        Args:
+            skip_tracking: When True, does not register a job in the job_tracker.
+                Used by ScheduledCatchupService to avoid double-tracking (AC5, Story #313).
 
         Returns:
             CatchupResult with processing status
         """
+        import uuid
+
+        # Register catchup job in unified tracker unless skipped (AC4, AC5, Story #313)
+        tracked_job_id: Optional[str] = None
+        if not skip_tracking and self._job_tracker is not None:
+            try:
+                tracked_job_id = f"catchup-{uuid.uuid4().hex[:8]}"
+                self._job_tracker.register_job(
+                    tracked_job_id,
+                    "catchup_processing",
+                    username="system",
+                )
+                self._job_tracker.update_status(tracked_job_id, status="running")
+            except Exception as e:
+                logger.warning(
+                    f"JobTracker registration failed for catchup: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                tracked_job_id = None
+
+        def _fail_tracked_job(error_msg: str) -> None:
+            """Helper: fail the tracked job defensively."""
+            if tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.fail_job(tracked_job_id, error=error_msg)
+                except Exception as e:
+                    logger.warning(
+                        f"JobTracker fail_job failed: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+
+        def _complete_tracked_job() -> None:
+            """Helper: complete the tracked job defensively."""
+            if tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.complete_job(tracked_job_id)
+                except Exception as e:
+                    logger.warning(
+                        f"JobTracker complete_job failed: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+
         if not self.check_cli_available():
             fallbacks = self.scan_for_fallbacks()
+            error_msg = "CLI not available"
+            _fail_tracked_job(error_msg)
             return CatchupResult(
                 partial=True,
                 processed=[],
                 remaining=[alias for alias, _ in fallbacks],
-                error="CLI not available",
+                error=error_msg,
             )
 
         fallbacks = self.scan_for_fallbacks()
@@ -344,24 +408,41 @@ class ClaudeCliManager:
                 "No fallbacks to process",
                 extra={"correlation_id": get_correlation_id()},
             )
+            _complete_tracked_job()
             return CatchupResult(partial=False, processed=[], remaining=[])
 
+        total = len(fallbacks)
         logger.info(
-            f"Starting catch-up processing for {len(fallbacks)} fallbacks",
+            f"Starting catch-up processing for {total} fallbacks",
             extra={"correlation_id": get_correlation_id()},
         )
         processed: List[str] = []
         remaining = [alias for alias, _ in fallbacks]
 
-        for alias, fallback_path in fallbacks:
+        for i, (alias, fallback_path) in enumerate(fallbacks):
+            # Progress update during batch processing (AC6, Story #313)
+            if tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.update_status(
+                        tracked_job_id,
+                        progress_info=f"Processing repo {i + 1}/{total}",
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"JobTracker progress update failed: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+
             try:
                 success = self._process_single_fallback(alias, fallback_path)
                 if not success:
+                    error_msg = f"CLI failed for {alias}"
+                    _fail_tracked_job(error_msg)
                     return CatchupResult(
                         partial=True,
                         processed=processed,
                         remaining=remaining,
-                        error=f"CLI failed for {alias}",
+                        error=error_msg,
                     )
                 processed.append(alias)
                 remaining.remove(alias)
@@ -373,8 +454,13 @@ class ClaudeCliManager:
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
+                error_msg = str(e)
+                _fail_tracked_job(error_msg)
                 return CatchupResult(
-                    partial=True, processed=processed, remaining=remaining, error=str(e)
+                    partial=True,
+                    processed=processed,
+                    remaining=remaining,
+                    error=error_msg,
                 )
 
         # Single commit and re-index after all swaps
@@ -385,6 +471,7 @@ class ClaudeCliManager:
             f"Catch-up complete: {len(processed)} files processed",
             extra={"correlation_id": get_correlation_id()},
         )
+        _complete_tracked_job()
         return CatchupResult(partial=False, processed=processed, remaining=[])
 
     def _process_single_fallback(self, alias: str, fallback_path: Path) -> bool:

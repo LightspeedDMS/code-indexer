@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.64] - 2026-02-27
+
+### Added
+
+- Unified Job Tracking Subsystem (Epic #261): Standalone JobTracker class with hybrid memory+SQLite architecture providing 100% dashboard visibility for all background operations. Covers 11 new operation types (description_refresh, catchup_processing, dependency_map_full, dependency_map_delta, langfuse_sync, research_assistant_chat, scheduled_catchup, startup_reconcile, scip_resolution, immediate_catchup, index_cleanup) with defensive try/except wrapping, retention policy for high-frequency jobs, dual tracking for research assistant, and skip_tracking coordination to prevent double-counting. 199 new unit tests.
+
 ## [9.3.63] - 2026-02-27
 
 ### Added

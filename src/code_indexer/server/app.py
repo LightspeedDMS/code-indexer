@@ -1382,6 +1382,7 @@ user_manager: Optional[UserManager] = None
 refresh_token_manager: Optional[RefreshTokenManager] = None
 golden_repo_manager: Optional[GoldenRepoManager] = None
 background_job_manager: Optional[BackgroundJobManager] = None
+job_tracker: Optional[Any] = None  # Story #311: JobTracker instance (Epic #261 Story 1B)
 activated_repo_manager: Optional[ActivatedRepoManager] = None
 repository_listing_manager: Optional[RepositoryListingManager] = None
 semantic_query_manager: Optional[SemanticQueryManager] = None
@@ -2034,7 +2035,7 @@ def create_app() -> FastAPI:
     Returns:
         Configured FastAPI app
     """
-    global jwt_manager, user_manager, refresh_token_manager, golden_repo_manager, background_job_manager, activated_repo_manager, repository_listing_manager, semantic_query_manager, _server_start_time, _server_hnsw_cache, _server_fts_cache
+    global jwt_manager, user_manager, refresh_token_manager, golden_repo_manager, background_job_manager, job_tracker, activated_repo_manager, repository_listing_manager, semantic_query_manager, _server_start_time, _server_hnsw_cache, _server_fts_cache
 
     # Story #526: Initialize server-side HNSW cache at bootstrap for 1800x performance
     # Import and initialize global cache instance
@@ -2396,6 +2397,7 @@ def create_app() -> FastAPI:
                 str(golden_repos_dir),
                 background_job_manager=background_job_manager,
                 resource_config=server_config.resource_config,
+                job_tracker=job_tracker,
             )
             global_lifecycle_manager.start()
 
@@ -2564,6 +2566,7 @@ def create_app() -> FastAPI:
             scheduled_catchup_service = ScheduledCatchupService(
                 enabled=claude_config.scheduled_catchup_enabled,
                 interval_minutes=claude_config.scheduled_catchup_interval_minutes,
+                job_tracker=job_tracker,
             )
             scheduled_catchup_service.start()
             app.state.scheduled_catchup_service = scheduled_catchup_service
@@ -2617,6 +2620,7 @@ def create_app() -> FastAPI:
                 claude_cli_manager=get_claude_cli_manager(),
                 meta_dir=meta_dir,
                 analysis_model=server_config.golden_repos_config.analysis_model if server_config.golden_repos_config else "opus",
+                job_tracker=job_tracker,
             )
 
             # Inject into meta_description_hook for tracking on repo add/remove
@@ -2709,6 +2713,7 @@ def create_app() -> FastAPI:
                 tracking_backend=tracking_backend,
                 analyzer=analyzer,
                 refresh_scheduler=global_lifecycle_manager.refresh_scheduler if global_lifecycle_manager else None,
+                job_tracker=job_tracker,  # Story #312: Unified job tracking (Epic #261)
             )
 
             # Start scheduler (internally checks if enabled)
@@ -3123,6 +3128,7 @@ def create_app() -> FastAPI:
                 data_dir=str(Path(server_data_dir) / "data"),
                 on_sync_complete=_on_langfuse_sync_complete,
                 refresh_scheduler=global_lifecycle_manager.refresh_scheduler if global_lifecycle_manager else None,
+                job_tracker=job_tracker,
             )
 
             # Start background sync if pull is enabled
@@ -3471,12 +3477,29 @@ def create_app() -> FastAPI:
         resource_config=server_config.resource_config,
         db_path=db_path_str,
     )
+    # Story #311: Instantiate JobTracker before BackgroundJobManager (Epic #261 Story 1B)
+    from code_indexer.server.services.job_tracker import (
+        JobTracker as _JobTracker,
+    )
+    job_tracker = _JobTracker(db_path_str)
+    job_tracker.cleanup_orphaned_jobs_on_startup()
+
+    # Story #313: Inject job_tracker into ClaudeCliManager singleton
+    try:
+        from code_indexer.server.services.claude_cli_manager import get_claude_cli_manager
+        _cli_manager = get_claude_cli_manager()
+        if _cli_manager is not None:
+            _cli_manager.set_job_tracker(job_tracker)
+    except Exception:
+        pass  # ClaudeCliManager may not be initialized yet
+
     # Initialize BackgroundJobManager with SQLite persistence (Bug fix: Jobs not showing in Dashboard)
     background_job_manager = BackgroundJobManager(
         resource_config=server_config.resource_config,
         use_sqlite=True,
         db_path=db_path_str,
         background_jobs_config=server_config.background_jobs_config,
+        job_tracker=job_tracker,
     )
     # Inject BackgroundJobManager into GoldenRepoManager for async operations
     golden_repo_manager.background_job_manager = background_job_manager
