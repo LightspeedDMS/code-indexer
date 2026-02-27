@@ -1957,14 +1957,31 @@ class GoldenRepoManager:
         without destroying the underlying vector JSON files. The --clear flag
         is no longer needed here.
         """
-        subprocess.run(
-            ["cidx", "index", "--fts"],
-            cwd=base_clone_path,
-            capture_output=True,
-            text=True,
-            timeout=cidx_index_timeout,
-            check=True,
-        )
+        try:
+            result = subprocess.run(
+                ["cidx", "index", "--fts"],
+                cwd=base_clone_path,
+                capture_output=True,
+                text=True,
+                timeout=cidx_index_timeout,
+                check=True,
+            )
+            if result.stdout:
+                logger.debug(
+                    "[change_branch] cidx index stdout:\n%s", result.stdout[-2000:]
+                )
+            if result.stderr:
+                logger.warning(
+                    "[change_branch] cidx index stderr:\n%s", result.stderr[-2000:]
+                )
+        except subprocess.CalledProcessError as e:
+            logger.error(
+                "[change_branch] cidx index failed (exit %d):\nstdout: %s\nstderr: %s",
+                e.returncode,
+                (e.stdout or "")[-2000:],
+                (e.stderr or "")[-2000:],
+            )
+            raise
 
     def _cb_cow_snapshot(
         self,
@@ -2077,6 +2094,71 @@ class GoldenRepoManager:
                 f"[change_branch] FTS post-CoW cleanup failed (non-fatal): {e}"
             )
 
+    def _cb_hnsw_branch_cleanup(self, snapshot_path: str, target_branch: str) -> None:
+        """Rebuild HNSW index on the versioned CoW snapshot for branch isolation.
+
+        Belt-and-suspenders fix: ensures HNSW index only contains vectors for
+        files visible in the target branch, eliminating ghost vectors even if
+        the cidx index subprocess failed to perform the filtered rebuild.
+
+        Args:
+            snapshot_path: Path to the versioned CoW snapshot directory
+            target_branch: The branch that is now active
+        """
+        index_dir = Path(snapshot_path) / ".code-indexer" / "index"
+        if not index_dir.exists():
+            logger.debug(
+                f"[change_branch] No HNSW index dir in snapshot '{snapshot_path}' "
+                "- skipping HNSW cleanup"
+            )
+            return
+
+        try:
+            # Lazy import to keep cidx --help fast (per CLAUDE.md)
+            from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+
+            # Get list of files in target branch via git ls-files on the snapshot
+            result = subprocess.run(
+                ["git", "ls-files"],
+                cwd=snapshot_path,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    f"[change_branch] git ls-files failed on snapshot '{snapshot_path}': "
+                    f"{result.stderr} - skipping HNSW cleanup"
+                )
+                return
+
+            branch_files = set(result.stdout.splitlines())
+
+            store = FilesystemVectorStore(index_dir)
+            collections = store.list_collections()
+
+            for collection_name in collections:
+                try:
+                    store.rebuild_hnsw_filtered(
+                        collection_name,
+                        visible_files=branch_files,
+                        current_branch=target_branch,
+                    )
+                    logger.info(
+                        f"[change_branch] HNSW filtered rebuild complete for collection "
+                        f"'{collection_name}' (branch '{target_branch}')"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[change_branch] HNSW rebuild failed for collection "
+                        f"'{collection_name}' (non-fatal): {e}"
+                    )
+
+        except Exception as e:
+            logger.warning(
+                f"[change_branch] HNSW post-CoW cleanup failed (non-fatal): {e}"
+            )
+
     def _cb_swap_alias(self, alias: str, new_snapshot_path: str) -> None:
         """Atomically swap alias JSON to new snapshot; schedule old snapshot cleanup."""
         # Import here to avoid circular dependency (alias_manager imports from server)
@@ -2161,6 +2243,7 @@ class GoldenRepoManager:
             self._cb_cidx_index(base, idx_t)
             snapshot = self._cb_cow_snapshot(alias, base, cow_t, fix_t)
             self._cb_fts_branch_cleanup(snapshot, target_branch)
+            self._cb_hnsw_branch_cleanup(snapshot, target_branch)
             self._cb_swap_alias(alias, snapshot)
 
             self._sqlite_backend.update_default_branch(alias, target_branch)

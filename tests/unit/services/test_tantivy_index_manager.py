@@ -293,3 +293,139 @@ class TestTantivyIndexManager:
 
             # Count should remain unchanged after rollback
             assert manager.get_document_count() == initial_count
+
+    def test_get_all_indexed_paths_returns_correct_paths(self):
+        """get_all_indexed_paths() returns all paths using searcher.search() (not segment_readers).
+
+        This test verifies the v0.25.0-compatible implementation. The old
+        implementation used segment_readers() which does not exist in tantivy-py
+        v0.25.0. The new implementation must use searcher.search(all_query, num_docs).
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index_dir = Path(tmpdir) / ".code-indexer" / "tantivy_index"
+
+            from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+
+            manager = TantivyIndexManager(index_dir=index_dir)
+            manager.initialize_index()
+
+            # Add documents with distinct paths
+            for i, path in enumerate(["src/auth.py", "src/user.py", "tests/test_auth.py"]):
+                manager.add_document(
+                    {
+                        "path": path,
+                        "content": f"def func{i}(): pass",
+                        "content_raw": f"def func{i}(): pass",
+                        "identifiers": [f"func{i}"],
+                        "line_start": 1,
+                        "line_end": 1,
+                        "language": "python",
+                    }
+                )
+            manager.commit()
+
+            # get_all_indexed_paths() must return all 3 paths without using segment_readers
+            result = manager.get_all_indexed_paths()
+            assert sorted(result) == ["src/auth.py", "src/user.py", "tests/test_auth.py"]
+
+    def test_get_all_indexed_paths_deduplicates(self):
+        """get_all_indexed_paths() returns unique paths even when multiple docs share a path.
+
+        When a file has multiple indexed chunks (line ranges), they all share the
+        same path value. The method must deduplicate and return each path once.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index_dir = Path(tmpdir) / ".code-indexer" / "tantivy_index"
+
+            from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+
+            manager = TantivyIndexManager(index_dir=index_dir)
+            manager.initialize_index()
+
+            # Add multiple docs with the SAME path (simulating multi-chunk file)
+            shared_path = "src/big_module.py"
+            for i in range(3):
+                manager.add_document(
+                    {
+                        "path": shared_path,
+                        "content": f"chunk {i} content",
+                        "content_raw": f"chunk {i} content",
+                        "identifiers": [f"chunk{i}"],
+                        "line_start": i * 50 + 1,
+                        "line_end": i * 50 + 50,
+                        "language": "python",
+                    }
+                )
+            manager.commit()
+
+            # Must return the path exactly once (deduplicated)
+            result = manager.get_all_indexed_paths()
+            assert result == [shared_path], (
+                f"Expected exactly ['{shared_path}'], got {result}"
+            )
+
+    def test_get_all_indexed_paths_empty_index(self):
+        """get_all_indexed_paths() returns empty list when index has no documents."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index_dir = Path(tmpdir) / ".code-indexer" / "tantivy_index"
+
+            from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+
+            manager = TantivyIndexManager(index_dir=index_dir)
+            manager.initialize_index()
+            # No documents added
+
+            result = manager.get_all_indexed_paths()
+            assert result == []
+
+    def test_get_all_indexed_paths_does_not_use_segment_readers(self):
+        """get_all_indexed_paths() must not call segment_readers() - API absent in v0.25.0.
+
+        Uses a MagicMock searcher that raises AttributeError if segment_readers is
+        accessed, simulating the tantivy-py v0.25.0 staging environment. The new
+        implementation must return results using searcher.search() instead.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index_dir = Path(tmpdir) / ".code-indexer" / "tantivy_index"
+
+            from unittest.mock import MagicMock, PropertyMock
+            from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+
+            manager = TantivyIndexManager(index_dir=index_dir)
+            manager.initialize_index()
+
+            manager.add_document(
+                {
+                    "path": "src/foo.py",
+                    "content": "def foo(): pass",
+                    "content_raw": "def foo(): pass",
+                    "identifiers": ["foo"],
+                    "line_start": 1,
+                    "line_end": 1,
+                    "language": "python",
+                }
+            )
+            manager.commit()
+
+            # Reload to get a fresh committed state, then build a mock searcher
+            # that raises AttributeError on segment_readers (v0.25.0 behavior)
+            manager._index.reload()
+            real_searcher = manager._index.searcher()
+
+            mock_searcher = MagicMock(wraps=real_searcher)
+            # Make segment_readers raise AttributeError like v0.25.0
+            type(mock_searcher).segment_readers = PropertyMock(
+                side_effect=AttributeError(
+                    "'tantivy.tantivy.Searcher' object has no attribute 'segment_readers'"
+                )
+            )
+
+            # Patch the index to return our mock searcher
+            original_index = manager._index
+            mock_index = MagicMock(wraps=original_index)
+            mock_index.searcher.return_value = mock_searcher
+            manager._index = mock_index
+
+            # Must NOT raise AttributeError - new impl does not call segment_readers
+            result = manager.get_all_indexed_paths()
+            assert "src/foo.py" in result

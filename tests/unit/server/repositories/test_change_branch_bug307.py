@@ -133,6 +133,7 @@ class TestCbFtsBranchCleanup:
             patch.object(manager, "_cb_cidx_index"),
             patch.object(manager, "_cb_cow_snapshot", side_effect=record_cow),
             patch.object(manager, "_cb_fts_branch_cleanup", side_effect=record_fts),
+            patch.object(manager, "_cb_hnsw_branch_cleanup"),
             patch.object(manager, "_cb_swap_alias"),
         ):
             manager.change_branch("my-repo", "feature-x")
@@ -144,4 +145,109 @@ class TestCbFtsBranchCleanup:
         assert fts_idx > cow_idx, (
             f"_cb_fts_branch_cleanup (idx={fts_idx}) must be called AFTER "
             f"_cb_cow_snapshot (idx={cow_idx})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestCbHnswBranchCleanup: tests for _cb_hnsw_branch_cleanup() method
+# ---------------------------------------------------------------------------
+
+
+class TestCbHnswBranchCleanup:
+    """Tests for GoldenRepoManager._cb_hnsw_branch_cleanup() (belt-and-suspenders fix)."""
+
+    def test_cb_hnsw_branch_cleanup_skips_when_no_index_dir(self, manager, tmp_path):
+        """_cb_hnsw_branch_cleanup() is a no-op when .code-indexer/index/ does not exist."""
+        snapshot_path = str(tmp_path / "snapshot_v1")
+        (tmp_path / "snapshot_v1").mkdir()
+        # No .code-indexer/index/ directory
+
+        # Should not raise - silently skips
+        manager._cb_hnsw_branch_cleanup(snapshot_path, "master")
+
+    def test_cb_hnsw_branch_cleanup_calls_rebuild_hnsw_filtered(
+        self, manager, tmp_path
+    ):
+        """_cb_hnsw_branch_cleanup() calls rebuild_hnsw_filtered for each collection."""
+        snapshot_path = tmp_path / "snapshot_v1"
+        snapshot_path.mkdir()
+        index_dir = snapshot_path / ".code-indexer" / "index"
+        index_dir.mkdir(parents=True)
+
+        # Create a fake collection directory with collection_meta.json
+        collection_dir = index_dir / "my-collection"
+        collection_dir.mkdir()
+        (collection_dir / "collection_meta.json").write_text('{"vector_size": 1024}')
+
+        git_ls_output = "src/auth.py\nsrc/user.py\n"
+        target_branch = "master"
+
+        mock_store = MagicMock()
+        mock_store.list_collections.return_value = ["my-collection"]
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch(
+                "code_indexer.storage.filesystem_vector_store.FilesystemVectorStore",
+                return_value=mock_store,
+            ) as mock_store_cls,
+        ):
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=git_ls_output,
+                stderr="",
+            )
+
+            manager._cb_hnsw_branch_cleanup(str(snapshot_path), target_branch)
+
+        # FilesystemVectorStore created with the index dir
+        mock_store_cls.assert_called_once_with(index_dir)
+        # rebuild_hnsw_filtered called for the collection
+        mock_store.rebuild_hnsw_filtered.assert_called_once_with(
+            "my-collection",
+            visible_files={"src/auth.py", "src/user.py"},
+            current_branch=target_branch,
+        )
+
+    def test_hnsw_branch_cleanup_called_after_fts_cleanup_in_change_branch(
+        self, manager
+    ):
+        """change_branch() calls _cb_hnsw_branch_cleanup() after _cb_fts_branch_cleanup()."""
+        call_order = []
+
+        def record_cow(*args, **kwargs):
+            call_order.append("cow_snapshot")
+            return "/snap/v_1"
+
+        def record_fts(*args, **kwargs):
+            call_order.append("fts_cleanup")
+
+        def record_hnsw(*args, **kwargs):
+            call_order.append("hnsw_cleanup")
+
+        def record_swap(*args, **kwargs):
+            call_order.append("swap_alias")
+
+        with (
+            patch.object(manager, "_cb_git_fetch_and_validate"),
+            patch.object(manager, "_cb_checkout_and_pull"),
+            patch.object(manager, "_cb_cidx_index"),
+            patch.object(manager, "_cb_cow_snapshot", side_effect=record_cow),
+            patch.object(manager, "_cb_fts_branch_cleanup", side_effect=record_fts),
+            patch.object(manager, "_cb_hnsw_branch_cleanup", side_effect=record_hnsw),
+            patch.object(manager, "_cb_swap_alias", side_effect=record_swap),
+        ):
+            manager.change_branch("my-repo", "feature-x")
+
+        assert "hnsw_cleanup" in call_order, "_cb_hnsw_branch_cleanup must be called"
+        fts_idx = call_order.index("fts_cleanup")
+        hnsw_idx = call_order.index("hnsw_cleanup")
+        swap_idx = call_order.index("swap_alias")
+        assert hnsw_idx > fts_idx, (
+            f"_cb_hnsw_branch_cleanup (idx={hnsw_idx}) must be called AFTER "
+            f"_cb_fts_branch_cleanup (idx={fts_idx})"
+        )
+        assert hnsw_idx < swap_idx, (
+            f"_cb_hnsw_branch_cleanup (idx={hnsw_idx}) must be called BEFORE "
+            f"_cb_swap_alias (idx={swap_idx})"
         )
