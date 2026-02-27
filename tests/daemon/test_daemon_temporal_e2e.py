@@ -65,7 +65,7 @@ class TestDaemonTemporalE2E:
             config_file = config_dir / "config.json"
             config_content = {
                 "provider": "voyageai",
-                "api_key": os.environ.get("VOYAGE_API_KEY", "test-key"),
+                "api_key": os.environ.get("VOYAGE_API_KEY", "PLACEHOLDER"),
                 "language_extensions": {"python": [".py"]},
             }
             config_file.write_text(json.dumps(config_content, indent=2))

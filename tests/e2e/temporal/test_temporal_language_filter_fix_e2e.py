@@ -92,7 +92,7 @@ function calculateProduct(a, b) {
             cwd=repo_path,
             capture_output=True,
             text=True,
-            env={**subprocess.os.environ, "VOYAGE_API_KEY": "test-key-12345"},
+            env={**subprocess.os.environ, "VOYAGE_API_KEY": "PLACEHOLDER"},
         )
         assert result.returncode == 0, f"Init failed: {result.stderr}"
 

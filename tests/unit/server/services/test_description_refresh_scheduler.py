@@ -539,7 +539,7 @@ def test_invoke_cli_strips_session_vars_from_env(
         captured_env.update(kwargs.get("env", {}))
         return mock_result
 
-    with patch.dict("os.environ", {"CLAUDECODE": "1", "ANTHROPIC_API_KEY": "test-key"}):
+    with patch.dict("os.environ", {"CLAUDECODE": "1", "ANTHROPIC_API_KEY": "PLACEHOLDER"}):
         with patch("subprocess.run", side_effect=capture_env):
             scheduler._claude_cli_manager = None
             scheduler._invoke_claude_cli(str(tmp_path), "test prompt")
@@ -577,7 +577,7 @@ def test_invoke_cli_preserves_non_session_env_vars(
 
     with patch.dict(
         "os.environ",
-        {"CLAUDECODE": "1", "ANTHROPIC_API_KEY": "my-api-key", "HOME": "/home/user"},
+        {"CLAUDECODE": "1", "ANTHROPIC_API_KEY": "PLACEHOLDER", "HOME": "/home/user"},
         clear=False,
     ):
         with patch("subprocess.run", side_effect=capture_env):

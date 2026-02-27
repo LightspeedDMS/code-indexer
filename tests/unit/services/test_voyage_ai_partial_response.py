@@ -27,8 +27,8 @@ class TestVoyageAIPartialResponse:
     @pytest.fixture
     def mock_api_key(self):
         """Mock API key environment variable."""
-        with patch.dict(os.environ, {"VOYAGE_API_KEY": "test_api_key"}):
-            yield "test_api_key"
+        with patch.dict(os.environ, {"VOYAGE_API_KEY": "PLACEHOLDER"}):
+            yield "PLACEHOLDER"
 
     def test_partial_response_single_batch_detected(self, voyage_config, mock_api_key):
         """

@@ -19,7 +19,7 @@ class TestNoClientThrottling:
         """VoyageAI client should not have any rate limiter."""
         config = VoyageAIConfig()
 
-        with patch.dict("os.environ", {"VOYAGE_API_KEY": "test-key"}):
+        with patch.dict("os.environ", {"VOYAGE_API_KEY": "PLACEHOLDER"}):
             client = VoyageAIClient(config)
 
             # Should not have rate_limiter attribute

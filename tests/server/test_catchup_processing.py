@@ -38,7 +38,7 @@ class TestScanForFallbacks:
             (meta_dir / "repo1.md").write_text("Regular file")
             (meta_dir / "README.md").write_text("README")
 
-            manager = ClaudeCliManager(api_key="test-key", max_workers=1)
+            manager = ClaudeCliManager(api_key=None, max_workers=1)
             manager.set_meta_dir(meta_dir)
 
             fallbacks = manager.scan_for_fallbacks()
@@ -61,7 +61,7 @@ class TestScanForFallbacks:
             fallback_path = meta_dir / "my-repo-name_README.md"
             fallback_path.write_text("Fallback")
 
-            manager = ClaudeCliManager(api_key="test-key", max_workers=1)
+            manager = ClaudeCliManager(api_key=None, max_workers=1)
             manager.set_meta_dir(meta_dir)
 
             fallbacks = manager.scan_for_fallbacks()
@@ -82,7 +82,7 @@ class TestScanForFallbacks:
             (meta_dir / "repo1.md").write_text("Regular file")
             (meta_dir / "repo2.md").write_text("Regular file")
 
-            manager = ClaudeCliManager(api_key="test-key", max_workers=1)
+            manager = ClaudeCliManager(api_key=None, max_workers=1)
             manager.set_meta_dir(meta_dir)
 
             fallbacks = manager.scan_for_fallbacks()
@@ -93,7 +93,7 @@ class TestScanForFallbacks:
 
     def test_scan_handles_nonexistent_meta_dir(self):
         """AC1: scan_for_fallbacks() handles nonexistent meta directory gracefully."""
-        manager = ClaudeCliManager(api_key="test-key", max_workers=1)
+        manager = ClaudeCliManager(api_key=None, max_workers=1)
         manager.set_meta_dir(Path("/nonexistent/directory"))
 
         fallbacks = manager.scan_for_fallbacks()
@@ -104,7 +104,7 @@ class TestScanForFallbacks:
 
     def test_scan_handles_meta_dir_not_set(self):
         """AC1: scan_for_fallbacks() handles meta_dir not being set."""
-        manager = ClaudeCliManager(api_key="test-key", max_workers=1)
+        manager = ClaudeCliManager(api_key=None, max_workers=1)
         # Don't call set_meta_dir()
 
         fallbacks = manager.scan_for_fallbacks()

@@ -12,8 +12,8 @@ from src.code_indexer.config import VoyageAIConfig
 @pytest.fixture
 def mock_api_key():
     """Mock VOYAGE_API_KEY environment variable."""
-    with patch.dict(os.environ, {"VOYAGE_API_KEY": "test_api_key_12345"}):
-        yield "test_api_key_12345"
+    with patch.dict(os.environ, {"VOYAGE_API_KEY": "PLACEHOLDER"}):
+        yield "PLACEHOLDER"
 
 
 @pytest.fixture
@@ -55,7 +55,7 @@ class TestVoyageMultimodalClientInitialization:
         client = VoyageMultimodalClient(voyage_config)
 
         assert client.config == voyage_config
-        assert client.api_key == "test_api_key_12345"
+        assert client.api_key == "PLACEHOLDER"
         assert client.config.model == "voyage-multimodal-3.5"
 
     def test_init_missing_api_key(self, voyage_config):

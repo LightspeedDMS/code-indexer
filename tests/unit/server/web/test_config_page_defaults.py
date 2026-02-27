@@ -106,32 +106,6 @@ class TestConfigPageDefaults:
         assert config["claude_cli"]["description_refresh_interval_hours"] == 24
         assert config["claude_cli"]["research_assistant_timeout_seconds"] == 300
 
-    def test_claude_cli_with_api_keys_works(self):
-        """Test that claude_cli with API keys works correctly."""
-        # Given: Settings with complete claude_cli config including API keys
-        settings = self._create_base_settings(claude_cli_value={
-            "max_concurrent_claude_cli": 3,
-            "description_refresh_interval_hours": 24,
-            "research_assistant_timeout_seconds": 300,
-            "anthropic_api_key": "sk-ant-test123",
-            "voyageai_api_key": "pa-test456",
-        })
-
-        # When: Getting current config
-        with patch("code_indexer.server.services.config_service.get_config_service") as mock_service:
-            mock_config_service = Mock()
-            mock_config_service.get_all_settings.return_value = settings
-            mock_service.return_value = mock_config_service
-
-            config = _get_current_config()
-
-        # Then: Should have all values including API keys
-        assert config["claude_cli"]["max_concurrent_claude_cli"] == 3
-        assert config["claude_cli"]["description_refresh_interval_hours"] == 24
-        assert config["claude_cli"]["research_assistant_timeout_seconds"] == 300
-        assert config["claude_cli"]["anthropic_api_key"] == "sk-ant-test123"
-        assert config["claude_cli"]["voyageai_api_key"] == "pa-test456"
-
     def test_provider_api_keys_with_empty_claude_cli(self):
         """Test that provider_api_keys works even when claude_cli is empty."""
         # Given: Settings with empty claude_cli

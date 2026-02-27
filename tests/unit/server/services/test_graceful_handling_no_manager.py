@@ -47,7 +47,7 @@ class TestGracefulHandlingWhenManagerNotInitialized:
         # Should not raise, should return False
         with caplog.at_level(logging.WARNING):
             result = trigger_catchup_on_api_key_save(
-                "sk-ant-test-key-12345678901234567890"
+                "placeholder-not-a-key"
             )
 
         assert result is False
@@ -128,7 +128,7 @@ class TestGracefulHandlingWhenManagerNotInitialized:
 
         # Use invalid path that can't be created
         mock_config = MagicMock()
-        mock_config.claude_integration_config.anthropic_api_key = "test-key"
+        mock_config.claude_integration_config.anthropic_api_key = None
         mock_config.claude_integration_config.max_concurrent_claude_cli = 2
 
         with caplog.at_level(logging.ERROR):
@@ -164,7 +164,7 @@ class TestGracefulHandlingLogging:
         from code_indexer.server.routers.api_keys import trigger_catchup_on_api_key_save
 
         with caplog.at_level(logging.WARNING):
-            trigger_catchup_on_api_key_save("sk-ant-test-key-12345678901234567890")
+            trigger_catchup_on_api_key_save("placeholder-not-a-key")
 
         # Should have WARNING level log about manager not initialized
         warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]

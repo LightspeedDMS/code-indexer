@@ -24,7 +24,7 @@ def test_user():
     return User(
         username="testuser",
         password_hash="$2b$12$test_hash",  # Required field
-        api_key="test_api_key",
+        api_key=None,
         role=UserRole.ADMIN,
         created_at="2025-01-01T00:00:00Z",
     )

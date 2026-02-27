@@ -43,7 +43,7 @@ class TestEnsureCidxRepoRoot:
         )
 
         service_content = """[Service]
-Environment="VOYAGE_API_KEY=test-key"
+Environment="CIDX_SERVER_MODE=1"
 Environment="CIDX_REPO_ROOT=/home/user/code-indexer"
 ExecStart=/usr/bin/python3 -m uvicorn app:app
 """
@@ -64,13 +64,13 @@ ExecStart=/usr/bin/python3 -m uvicorn app:app
         )
 
         service_content = """[Service]
-Environment="VOYAGE_API_KEY=test-key"
+Environment="CIDX_SERVER_MODE=1"
 Environment="CIDX_SERVER_MODE=1"
 ExecStart=/usr/bin/python3 -m uvicorn app:app
 """
 
         expected_content = """[Service]
-Environment="VOYAGE_API_KEY=test-key"
+Environment="CIDX_SERVER_MODE=1"
 Environment="CIDX_SERVER_MODE=1"
 Environment="CIDX_REPO_ROOT=/home/user/code-indexer"
 ExecStart=/usr/bin/python3 -m uvicorn app:app
@@ -107,7 +107,7 @@ ExecStart=/usr/bin/python3 -m uvicorn app:app
         )
 
         service_content = """[Service]
-Environment="VOYAGE_API_KEY=test-key"
+Environment="CIDX_SERVER_MODE=1"
 ExecStart=/usr/bin/python3 -m uvicorn app:app
 """
 
@@ -202,13 +202,13 @@ WorkingDirectory=/home/user
 
         service_content = """[Service]
 WorkingDirectory=/correct/repo/path
-Environment="VOYAGE_API_KEY=test-key"
+Environment="CIDX_SERVER_MODE=1"
 ExecStart=/usr/bin/python3 -m uvicorn app:app
 """
 
         expected_content = """[Service]
 WorkingDirectory=/correct/repo/path
-Environment="VOYAGE_API_KEY=test-key"
+Environment="CIDX_SERVER_MODE=1"
 Environment="CIDX_REPO_ROOT=/correct/repo/path"
 ExecStart=/usr/bin/python3 -m uvicorn app:app
 """
@@ -235,12 +235,12 @@ ExecStart=/usr/bin/python3 -m uvicorn app:app
         )
 
         service_content = """[Service]
-Environment="VOYAGE_API_KEY=test-key"
+Environment="CIDX_SERVER_MODE=1"
 ExecStart=/usr/bin/python3 -m uvicorn app:app
 """
 
         expected_content = """[Service]
-Environment="VOYAGE_API_KEY=test-key"
+Environment="CIDX_SERVER_MODE=1"
 Environment="CIDX_REPO_ROOT=/home/user/code-indexer"
 ExecStart=/usr/bin/python3 -m uvicorn app:app
 """
