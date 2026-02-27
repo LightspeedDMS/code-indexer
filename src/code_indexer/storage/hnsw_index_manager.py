@@ -261,6 +261,7 @@ class HNSWIndexManager:
         collection_path: Path,
         progress_callback: Optional[Any] = None,
         visible_files: Optional[Set[str]] = None,
+        current_branch: Optional[str] = None,
     ) -> int:
         """Rebuild HNSW index by scanning all vector JSON files.
 
@@ -275,6 +276,11 @@ class HNSWIndexManager:
                           payload.path is NOT in this set are skipped, enabling ghost
                           vector elimination during branch isolation.
                           When None (default), all vectors are included (backward compatible).
+            current_branch: Optional current branch name. When provided and visible_files is None,
+                           vectors whose payload.hidden_branches contains current_branch are
+                           excluded. This makes all rebuilds branch-aware (Bug #306 fix).
+                           Also stored in HNSW metadata when filtered=True for use by
+                           query-time rebuilds after CoW snapshot.
 
         Returns:
             Number of vectors indexed
@@ -310,6 +316,7 @@ class HNSWIndexManager:
                     filtered=True,
                     visible_count=0,
                     total_on_disk=0,
+                    current_branch=current_branch,
                 )
             return 0
 
@@ -338,6 +345,13 @@ class HNSWIndexManager:
                     file_path = data.get("payload", {}).get("path")
                     if file_path not in visible_files:
                         continue  # Skip vectors not in visible set
+                elif current_branch is not None:
+                    # Branch-aware filter: skip vectors hidden for current_branch
+                    # (Bug #306: makes ALL rebuilds branch-aware via hidden_branches metadata)
+                    payload = data.get("payload", {})
+                    hidden_branches = payload.get("hidden_branches", [])
+                    if current_branch in hidden_branches:
+                        continue  # Skip vectors hidden for this branch
 
                 vectors_list.append(vector)
                 ids_list.append(point_id)
@@ -361,6 +375,7 @@ class HNSWIndexManager:
                     filtered=True,
                     visible_count=0,
                     total_on_disk=total_files_on_disk,
+                    current_branch=current_branch,
                 )
             return 0
 
@@ -405,6 +420,7 @@ class HNSWIndexManager:
                 filtered=True,
                 visible_count=len(vectors),
                 total_on_disk=total_files_on_disk,
+                current_branch=current_branch,
             )
         else:
             self._update_metadata(
@@ -540,6 +556,7 @@ class HNSWIndexManager:
         filtered: bool = False,
         visible_count: Optional[int] = None,
         total_on_disk: Optional[int] = None,
+        current_branch: Optional[str] = None,
     ) -> None:
         """Update collection metadata with HNSW index information.
 
@@ -557,6 +574,10 @@ class HNSWIndexManager:
                           Only meaningful when filtered=True.
             total_on_disk: Total vector files on disk at rebuild time.
                           Only meaningful when filtered=True.
+            current_branch: Branch name used for filtering (Bug #306).
+                           Only stored when filtered=True. Allows query-time
+                           rebuilds after CoW snapshot to pass the branch to
+                           rebuild_from_vectors() for hidden_branches filtering.
         """
         import fcntl
         import uuid
@@ -607,6 +628,11 @@ class HNSWIndexManager:
                     hnsw_meta["filtered"] = True
                     hnsw_meta["visible_count"] = visible_count
                     hnsw_meta["total_on_disk"] = total_on_disk
+                    # Bug #306: Store current_branch so query-time rebuilds after
+                    # CoW snapshot can use hidden_branches filtering instead of
+                    # overwriting the filtered HNSW with all vectors.
+                    if current_branch is not None:
+                        hnsw_meta["current_branch"] = current_branch
 
                 metadata["hnsw_index"] = hnsw_meta
 

@@ -2745,7 +2745,7 @@ def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 
 def change_golden_repo_branch(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Change the active branch of a golden repository (Story #303)."""
+    """Change the active branch of a golden repository async (Story #308)."""
     alias = params.get("alias")
     branch = params.get("branch")
 
@@ -2758,9 +2758,34 @@ def change_golden_repo_branch(params: Dict[str, Any], user: User) -> Dict[str, A
         )
 
     try:
-        result = app_module.golden_repo_manager.change_branch(alias, branch)
-        return _mcp_response(result)
+        result = app_module.golden_repo_manager.change_branch_async(
+            alias, branch, user.username
+        )
+        job_id = result.get("job_id")
+        if job_id is None:
+            return _mcp_response(
+                {
+                    "success": True,
+                    "message": f"Already on branch '{branch}'. No action taken.",
+                }
+            )
+        return _mcp_response(
+            {
+                "success": True,
+                "job_id": job_id,
+                "message": "Branch change started. Use get_job_details to poll.",
+            }
+        )
     except Exception as e:
+        from code_indexer.server.repositories.background_jobs import DuplicateJobError
+        if isinstance(e, DuplicateJobError):
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": str(e),
+                    "existing_job_id": e.existing_job_id,
+                }
+            )
         return _mcp_response({"success": False, "error": str(e)})
 
 

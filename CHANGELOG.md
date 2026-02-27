@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.61] - 2026-02-26
+
+### Fixed
+
+- HNSW background rebuilder now respects branch isolation (#306). Query-time rebuild reads `current_branch` from HNSW metadata and filters vectors by `hidden_branches` payload, preventing ghost vectors from reappearing after CoW snapshot.
+- FTS branch isolation cleanup now persists through CoW snapshot (#307). Tantivy document deletions run POST-CoW on the versioned snapshot directory instead of pre-CoW on the base clone.
+- `is_stale()` uses `visible_count` for filtered HNSW indexes, preventing false-positive staleness detection after branch isolation rebuilds (#306).
+
+### Changed
+
+- Branch change is now asynchronous (#308). Web UI and MCP tool return HTTP 202 with job_id; client polls `/api/jobs/{job_id}` for status. Duplicate branch changes blocked with HTTP 409. Removed blocking `confirm()`/`alert()` dialogs from web UI.
+
 ## [9.3.60] - 2026-02-26
 
 ### Added

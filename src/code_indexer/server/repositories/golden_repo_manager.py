@@ -2001,6 +2001,82 @@ class GoldenRepoManager:
             )
         return snapshot_path
 
+    def _cb_fts_branch_cleanup(self, snapshot_path: str, target_branch: str) -> None:
+        """Run FTS branch isolation cleanup on the versioned CoW snapshot (Bug #307).
+
+        The base-clone FTS cleanup may not persist through CoW snapshot due to
+        Tantivy segment file timing. This method runs post-CoW on the snapshot to
+        ensure FTS documents for files not in the target branch are deleted.
+
+        Args:
+            snapshot_path: Path to the versioned CoW snapshot directory
+            target_branch: The branch that is now active (used for log messages)
+        """
+        fts_index_dir = Path(snapshot_path) / ".code-indexer" / "tantivy_index"
+        if not fts_index_dir.exists():
+            logger.debug(
+                f"[change_branch] No FTS index in snapshot '{snapshot_path}' - skipping FTS cleanup"
+            )
+            return
+
+        try:
+            # Lazy import to keep cidx --help fast (per CLAUDE.md)
+            from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+
+            # Get list of files in target branch via git ls-files on the snapshot
+            result = subprocess.run(
+                ["git", "ls-files"],
+                cwd=snapshot_path,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    f"[change_branch] git ls-files failed on snapshot '{snapshot_path}': "
+                    f"{result.stderr} - skipping FTS cleanup"
+                )
+                return
+
+            branch_files = set(result.stdout.splitlines())
+
+            # Open existing FTS index in snapshot (create_new=False to not wipe it)
+            fts_manager = TantivyIndexManager(fts_index_dir)
+            fts_manager.initialize_index(create_new=False)
+
+            # Get all paths currently indexed
+            indexed_paths = fts_manager.get_all_indexed_paths()
+
+            # Delete documents for files not in target branch
+            deleted_count = 0
+            for indexed_path in indexed_paths:
+                if indexed_path not in branch_files:
+                    try:
+                        fts_manager.delete_document(indexed_path)
+                        deleted_count += 1
+                    except Exception as e:
+                        logger.warning(
+                            f"[change_branch] FTS post-CoW delete failed for "
+                            f"'{indexed_path}': {e}"
+                        )
+
+            if deleted_count > 0:
+                fts_manager.commit()
+                logger.info(
+                    f"[change_branch] FTS post-CoW cleanup: deleted {deleted_count} "
+                    f"documents not in branch '{target_branch}'"
+                )
+            else:
+                logger.debug(
+                    f"[change_branch] FTS post-CoW cleanup: no documents to delete "
+                    f"for branch '{target_branch}'"
+                )
+
+        except Exception as e:
+            logger.warning(
+                f"[change_branch] FTS post-CoW cleanup failed (non-fatal): {e}"
+            )
+
     def _cb_swap_alias(self, alias: str, new_snapshot_path: str) -> None:
         """Atomically swap alias JSON to new snapshot; schedule old snapshot cleanup."""
         # Import here to avoid circular dependency (alias_manager imports from server)
@@ -2084,6 +2160,7 @@ class GoldenRepoManager:
             self._cb_checkout_and_pull(base, target_branch, git_t)
             self._cb_cidx_index(base, idx_t)
             snapshot = self._cb_cow_snapshot(alias, base, cow_t, fix_t)
+            self._cb_fts_branch_cleanup(snapshot, target_branch)
             self._cb_swap_alias(alias, snapshot)
 
             self._sqlite_backend.update_default_branch(alias, target_branch)
@@ -2112,6 +2189,56 @@ class GoldenRepoManager:
         finally:
             if scheduler is not None:
                 scheduler.release_write_lock(alias, owner_name="branch_change")
+
+    def change_branch_async(
+        self,
+        alias: str,
+        target_branch: str,
+        submitter_username: str,
+    ) -> Dict[str, Any]:
+        """
+        Submit a branch-change operation as a background job (Story #308).
+
+        Validates inputs eagerly and returns immediately with a job_id.
+        The actual branch change runs in a background thread via BackgroundJobManager.
+
+        Args:
+            alias: Golden repository alias (without -global suffix).
+            target_branch: Branch name to switch to.
+            submitter_username: Username submitting the request (for audit logging).
+
+        Returns:
+            Dict with keys:
+                success (bool): True always on successful submission.
+                job_id (str | None): Background job ID, or None if already on branch.
+
+        Raises:
+            ValueError: If branch name is syntactically invalid.
+            GoldenRepoNotFoundError: If alias is not registered.
+            DuplicateJobError: If a change_branch job is already running for this repo.
+        """
+        if not target_branch or not re.match(r"^[a-zA-Z0-9_][a-zA-Z0-9_./-]*$", target_branch):
+            raise ValueError(f"Invalid branch name: '{target_branch}'")
+
+        if alias not in self.golden_repos:
+            raise GoldenRepoNotFoundError(f"Golden repository '{alias}' not found")
+
+        golden_repo = self.golden_repos[alias]
+        if target_branch == golden_repo.default_branch:
+            return {"success": True, "job_id": None}
+
+        def background_worker() -> Dict[str, Any]:
+            """Execute change_branch in a background thread."""
+            return self.change_branch(alias, target_branch)
+
+        job_id = self.background_job_manager.submit_job(
+            operation_type="change_branch",
+            func=background_worker,
+            submitter_username=submitter_username,
+            is_admin=True,
+            repo_alias=alias,
+        )
+        return {"success": True, "job_id": job_id}
 
     def add_index_to_golden_repo(
         self,

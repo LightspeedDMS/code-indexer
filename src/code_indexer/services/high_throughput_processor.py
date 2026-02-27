@@ -1488,6 +1488,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     collection_name,
                     visible_files=current_files_set,
                     progress_callback=progress_callback,
+                    current_branch=branch,
                 )
                 logger.info(
                     f"HNSW filtered rebuild complete for branch '{branch}': "

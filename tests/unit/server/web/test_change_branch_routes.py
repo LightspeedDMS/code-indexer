@@ -93,14 +93,14 @@ class TestChangeBranchRoute:
 
     @pytest.mark.asyncio
     async def test_change_branch_success(self):
-        """Returns 200 with success message when manager.change_branch succeeds."""
+        """Returns 202 with job_id when manager.change_branch_async succeeds."""
         from src.code_indexer.server.web.routes import change_golden_repo_branch
 
         mock_request = _make_request()
         mock_request.json = AsyncMock(return_value={"branch": "feature/new"})
 
         mock_manager = MagicMock()
-        mock_manager.change_branch.return_value = {"success": True, "message": "Branch changed to feature/new"}
+        mock_manager.change_branch_async.return_value = {"success": True, "job_id": "job-001"}
 
         with (
             patch(
@@ -117,23 +117,23 @@ class TestChangeBranchRoute:
                 alias="my-repo",
             )
 
-        assert result.status_code == 200
+        assert result.status_code == 202
         import json
         body = json.loads(result.body)
         assert body["success"] is True
-        assert "feature/new" in body["message"]
-        mock_manager.change_branch.assert_called_once_with("my-repo", "feature/new")
+        assert body["job_id"] == "job-001"
+        mock_manager.change_branch_async.assert_called_once_with("my-repo", "feature/new", "admin")
 
     @pytest.mark.asyncio
     async def test_change_branch_returns_404_on_not_found(self):
-        """Returns 404 when FileNotFoundError raised."""
+        """Returns 404 when FileNotFoundError raised by change_branch_async."""
         from src.code_indexer.server.web.routes import change_golden_repo_branch
 
         mock_request = _make_request()
         mock_request.json = AsyncMock(return_value={"branch": "main"})
 
         mock_manager = MagicMock()
-        mock_manager.change_branch.side_effect = FileNotFoundError("Repo not found")
+        mock_manager.change_branch_async.side_effect = FileNotFoundError("Repo not found")
 
         with (
             patch(
@@ -156,16 +156,20 @@ class TestChangeBranchRoute:
         assert "not found" in body["error"].lower()
 
     @pytest.mark.asyncio
-    async def test_change_branch_returns_409_on_conflict(self):
-        """Returns 409 when RuntimeError contains 'conflict'."""
+    async def test_change_branch_returns_500_on_runtime_error(self):
+        """Returns 500 when a generic RuntimeError is raised by change_branch_async.
+
+        409 conflict is now exclusively for DuplicateJobError (covered in
+        TestChangeBranchAsyncRoute.test_change_branch_async_returns_409_on_duplicate_job_error).
+        """
         from src.code_indexer.server.web.routes import change_golden_repo_branch
 
         mock_request = _make_request()
         mock_request.json = AsyncMock(return_value={"branch": "main"})
 
         mock_manager = MagicMock()
-        mock_manager.change_branch.side_effect = RuntimeError(
-            "conflict: repo is locked"
+        mock_manager.change_branch_async.side_effect = RuntimeError(
+            "unexpected internal error"
         )
 
         with (
@@ -183,18 +187,18 @@ class TestChangeBranchRoute:
                 alias="busy-repo",
             )
 
-        assert result.status_code == 409
+        assert result.status_code == 500
 
     @pytest.mark.asyncio
     async def test_change_branch_returns_400_on_value_error(self):
-        """Returns 400 when ValueError raised (e.g. invalid branch name)."""
+        """Returns 400 when ValueError raised by change_branch_async (e.g. invalid branch name)."""
         from src.code_indexer.server.web.routes import change_golden_repo_branch
 
         mock_request = _make_request()
         mock_request.json = AsyncMock(return_value={"branch": "invalid branch!"})
 
         mock_manager = MagicMock()
-        mock_manager.change_branch.side_effect = ValueError("Invalid branch name")
+        mock_manager.change_branch_async.side_effect = ValueError("Invalid branch name")
 
         with (
             patch(
@@ -215,6 +219,159 @@ class TestChangeBranchRoute:
         import json
         body = json.loads(result.body)
         assert "Invalid branch" in body["error"]
+
+
+class TestChangeBranchAsyncRoute:
+    """Tests for Story #308: POST change-branch endpoint uses change_branch_async()."""
+
+    @pytest.mark.asyncio
+    async def test_change_branch_async_returns_202_with_job_id(self):
+        """Route calls change_branch_async() and returns HTTP 202 with job_id."""
+        from src.code_indexer.server.web.routes import change_golden_repo_branch
+
+        mock_request = _make_request()
+        mock_request.json = AsyncMock(return_value={"branch": "feature/new"})
+
+        mock_manager = MagicMock()
+        mock_manager.change_branch_async.return_value = {
+            "success": True,
+            "job_id": "job-abc-123",
+        }
+
+        with (
+            patch(
+                "src.code_indexer.server.web.routes._require_admin_session",
+                return_value=_make_session(),
+            ),
+            patch(
+                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                return_value=mock_manager,
+            ),
+        ):
+            result = await change_golden_repo_branch(
+                request=mock_request,
+                alias="my-repo",
+            )
+
+        assert result.status_code == 202, (
+            "Route must return HTTP 202 Accepted when job is submitted"
+        )
+        import json
+        body = json.loads(result.body)
+        assert body.get("job_id") == "job-abc-123", (
+            "Response must include job_id from change_branch_async()"
+        )
+        mock_manager.change_branch_async.assert_called_once_with(
+            "my-repo", "feature/new", "admin"
+        )
+
+    @pytest.mark.asyncio
+    async def test_change_branch_async_returns_200_when_already_on_branch(self):
+        """Route returns HTTP 200 when job_id is None (already on target branch)."""
+        from src.code_indexer.server.web.routes import change_golden_repo_branch
+
+        mock_request = _make_request()
+        mock_request.json = AsyncMock(return_value={"branch": "main"})
+
+        mock_manager = MagicMock()
+        mock_manager.change_branch_async.return_value = {
+            "success": True,
+            "job_id": None,
+        }
+
+        with (
+            patch(
+                "src.code_indexer.server.web.routes._require_admin_session",
+                return_value=_make_session(),
+            ),
+            patch(
+                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                return_value=mock_manager,
+            ),
+        ):
+            result = await change_golden_repo_branch(
+                request=mock_request,
+                alias="my-repo",
+            )
+
+        assert result.status_code == 200, (
+            "Route must return HTTP 200 when already on target branch (job_id=None)"
+        )
+        import json
+        body = json.loads(result.body)
+        assert body.get("success") is True
+
+    @pytest.mark.asyncio
+    async def test_change_branch_async_returns_409_on_duplicate_job_error(self):
+        """Route returns HTTP 409 when DuplicateJobError is raised."""
+        from src.code_indexer.server.web.routes import change_golden_repo_branch
+        from code_indexer.server.repositories.background_jobs import DuplicateJobError
+
+        mock_request = _make_request()
+        mock_request.json = AsyncMock(return_value={"branch": "feature/new"})
+
+        mock_manager = MagicMock()
+        mock_manager.change_branch_async.side_effect = DuplicateJobError(
+            "change_branch", "my-repo", "existing-job-id"
+        )
+
+        with (
+            patch(
+                "src.code_indexer.server.web.routes._require_admin_session",
+                return_value=_make_session(),
+            ),
+            patch(
+                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                return_value=mock_manager,
+            ),
+        ):
+            result = await change_golden_repo_branch(
+                request=mock_request,
+                alias="my-repo",
+            )
+
+        assert result.status_code == 409, (
+            "Route must return HTTP 409 when DuplicateJobError raised"
+        )
+        import json
+        body = json.loads(result.body)
+        assert "existing_job_id" in body, (
+            "Response must include existing_job_id from DuplicateJobError"
+        )
+        assert body["existing_job_id"] == "existing-job-id"
+
+    @pytest.mark.asyncio
+    async def test_change_branch_async_passes_submitter_username(self):
+        """Route passes session username as submitter_username to change_branch_async()."""
+        from src.code_indexer.server.web.routes import change_golden_repo_branch
+
+        mock_request = _make_request()
+        mock_request.json = AsyncMock(return_value={"branch": "feature/new"})
+
+        mock_manager = MagicMock()
+        mock_manager.change_branch_async.return_value = {
+            "success": True,
+            "job_id": "job-xyz",
+        }
+
+        with (
+            patch(
+                "src.code_indexer.server.web.routes._require_admin_session",
+                return_value=_make_session(username="alice"),
+            ),
+            patch(
+                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                return_value=mock_manager,
+            ),
+        ):
+            result = await change_golden_repo_branch(
+                request=mock_request,
+                alias="my-repo",
+            )
+
+        mock_manager.change_branch_async.assert_called_once_with(
+            "my-repo", "feature/new", "alice"
+        )
 
 
 class TestGetBranchesRoute:

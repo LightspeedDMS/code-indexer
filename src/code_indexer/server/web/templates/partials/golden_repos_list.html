@@ -117,6 +117,7 @@
                                 </option>
                             </select>
                             <span class="branch-spinner" id="branch-spinner-{{ repo.alias }}" style="display:none;">&#8987;</span>
+                            <span class="branch-status-msg" id="branch-status-{{ repo.alias }}" style="margin-left:6px;font-size:0.85em;"></span>
                         </div>
                         <div class="detail-item">
                             <label>Available Indexes:</label>
@@ -1065,7 +1066,8 @@ async function loadBranches(selectEl) {
 }
 
 /**
- * Prompt user to confirm a branch change, then POST to change-branch endpoint.
+ * POST to change-branch endpoint and start polling for async job completion.
+ * No confirmation dialog — action is immediate on dropdown change.
  * @param {HTMLSelectElement} selectEl - The branch select element
  */
 async function confirmBranchChange(selectEl) {
@@ -1075,44 +1077,148 @@ async function confirmBranchChange(selectEl) {
 
     if (newBranch === currentBranch) return;
 
-    const confirmed = confirm(
-        'Change branch from "' + currentBranch + '" to "' + newBranch + '"?\n\n' +
-        'This will re-index the repository on the new branch.'
-    );
+    const spinner = document.getElementById('branch-spinner-' + alias);
+    const statusMsg = document.getElementById('branch-status-' + alias);
 
-    if (!confirmed) {
-        selectEl.value = currentBranch;
-        return;
+    function showStatus(msg, color) {
+        if (statusMsg) {
+            statusMsg.textContent = msg;
+            statusMsg.style.color = color || '';
+        }
     }
 
-    const spinner = document.getElementById('branch-spinner-' + alias);
+    function resetDropdown() {
+        selectEl.value = currentBranch;
+        selectEl.disabled = false;
+        if (spinner) spinner.style.display = 'none';
+    }
+
     if (spinner) spinner.style.display = 'inline';
     selectEl.disabled = true;
+    showStatus('Submitting...', '');
 
     try {
-        const response = await fetch('/admin/golden-repos/' + encodeURIComponent(alias) + '/change-branch', {
-            method: 'POST',
-            credentials: 'include',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({branch: newBranch})
-        });
+        const response = await fetch(
+            '/admin/golden-repos/' + encodeURIComponent(alias) + '/change-branch',
+            {
+                method: 'POST',
+                credentials: 'include',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({branch: newBranch})
+            }
+        );
 
         const data = await response.json();
 
-        if (response.ok && data.success) {
-            selectEl.dataset.current = newBranch;
-            alert('Branch changed to "' + newBranch + '" successfully.\nThe repository has been re-indexed.');
-        } else {
-            selectEl.value = currentBranch;
-            alert('Branch change failed: ' + (data.error || data.message || 'Unknown error'));
+        if (response.status === 200 && data.success) {
+            // Already on the target branch — no job needed
+            if (spinner) spinner.style.display = 'none';
+            selectEl.disabled = false;
+            showStatus('Already on this branch.', '#888');
+            setTimeout(() => showStatus('', ''), 4000);
+            return;
         }
+
+        if (response.status === 409) {
+            resetDropdown();
+            showStatus('Branch change already in progress.', 'orange');
+            setTimeout(() => showStatus('', ''), 6000);
+            return;
+        }
+
+        if (response.status === 202 && data.job_id) {
+            // Job accepted — start polling
+            showStatus('Branch change in progress...', '');
+            pollBranchChangeJob(selectEl, alias, newBranch, currentBranch, data.job_id, spinner, statusMsg);
+            return;
+        }
+
+        // Unexpected error response
+        resetDropdown();
+        showStatus('Error: ' + (data.error || 'Unknown error'), 'red');
+        setTimeout(() => showStatus('', ''), 8000);
+
     } catch (err) {
-        selectEl.value = currentBranch;
-        alert('Branch change failed: ' + err.message);
-    } finally {
-        if (spinner) spinner.style.display = 'none';
-        selectEl.disabled = false;
+        resetDropdown();
+        showStatus('Request failed: ' + err.message, 'red');
+        setTimeout(() => showStatus('', ''), 8000);
     }
+}
+
+/**
+ * Poll GET /api/jobs/{jobId} every 3 seconds until the branch change job completes.
+ * @param {HTMLSelectElement} selectEl - The branch select dropdown
+ * @param {string} alias - Repository alias
+ * @param {string} newBranch - Branch being switched to
+ * @param {string} currentBranch - Previous branch (to revert on failure)
+ * @param {string} jobId - Background job ID to poll
+ * @param {Element} spinner - Spinner element
+ * @param {Element} statusMsg - Status message element
+ */
+function pollBranchChangeJob(selectEl, alias, newBranch, currentBranch, jobId, spinner, statusMsg) {
+    const pollInterval = 3000; // 3 seconds
+    let pollCount = 0;
+    const maxPolls = 600; // 30 minutes max
+
+    function showStatus(msg, color) {
+        if (statusMsg) {
+            statusMsg.textContent = msg;
+            statusMsg.style.color = color || '';
+        }
+    }
+
+    function resetDropdown() {
+        selectEl.value = currentBranch;
+        selectEl.disabled = false;
+        if (spinner) spinner.style.display = 'none';
+    }
+
+    const poll = async () => {
+        pollCount++;
+
+        if (pollCount > maxPolls) {
+            resetDropdown();
+            showStatus('Branch change timed out. Refresh to check status.', 'orange');
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/jobs/' + encodeURIComponent(jobId), {
+                credentials: 'include'
+            });
+
+            if (!response.ok) {
+                resetDropdown();
+                showStatus('Failed to check job status (HTTP ' + response.status + ').', 'red');
+                return;
+            }
+
+            const job = await response.json();
+
+            if (job.status === 'pending' || job.status === 'running') {
+                showStatus('Branch change in progress...', '');
+                setTimeout(poll, pollInterval);
+            } else if (job.status === 'completed') {
+                selectEl.dataset.current = newBranch;
+                selectEl.disabled = false;
+                if (spinner) spinner.style.display = 'none';
+                showStatus('Branch changed to "' + newBranch + '".', 'green');
+                setTimeout(() => showStatus('', ''), 6000);
+            } else {
+                // failed, cancelled, or unknown
+                resetDropdown();
+                const errMsg = (job.result && job.result.error) ? job.result.error : job.status;
+                showStatus('Branch change failed: ' + errMsg, 'red');
+                setTimeout(() => showStatus('', ''), 8000);
+            }
+        } catch (err) {
+            resetDropdown();
+            showStatus('Polling error: ' + err.message, 'red');
+        }
+    };
+
+    // Start polling immediately
+    poll();
 }
 
 </script>

@@ -308,6 +308,41 @@ class TantivyIndexManager:
             logger.error(f"Failed to get document count: {e}")
             return 0
 
+    def get_all_indexed_paths(self) -> List[str]:
+        """Return a list of all unique file paths indexed in this FTS index.
+
+        Iterates all segments to collect every stored 'path' field value.
+        Used by Bug #307 fix to determine which FTS documents need cleanup
+        after a branch change CoW snapshot.
+
+        Returns:
+            List of unique file path strings currently in the index.
+            Returns empty list if index is not initialized.
+        """
+        if self._index is None:
+            return []
+
+        try:
+            self._index.reload()
+            searcher = self._index.searcher()
+            paths: set = set()
+            for segment_reader in searcher.segment_readers():
+                store = segment_reader.get_store_reader()
+                num_docs = segment_reader.num_docs()
+                for doc_id in range(num_docs):
+                    try:
+                        doc = store.get(doc_id)
+                        if doc is not None:
+                            path_value = doc.get_first("path")
+                            if path_value:
+                                paths.add(str(path_value))
+                    except Exception:
+                        continue  # Skip docs that can't be read
+            return list(paths)
+        except Exception as e:
+            logger.warning(f"Failed to get all indexed paths: {e}")
+            return []
+
     def _build_search_query(
         self,
         query_text: str,
