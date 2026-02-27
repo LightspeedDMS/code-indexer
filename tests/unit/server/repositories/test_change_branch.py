@@ -400,6 +400,53 @@ class TestCbCidxIndex:
         kwargs = mock_run.call_args[1]
         assert kwargs["cwd"] == str(tmp_path)
 
+    def test_cb_cidx_index_logs_stdout_on_success(self, manager, tmp_path):
+        """_cb_cidx_index logs stdout at DEBUG level after successful subprocess run."""
+        import logging
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch(
+                "code_indexer.server.repositories.golden_repo_manager.logger"
+            ) as mock_logger,
+        ):
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="Indexing 42 files\nDone.",
+                stderr="",
+            )
+            manager._cb_cidx_index(str(tmp_path), 300)
+
+        # Must log stdout at debug level
+        debug_calls = [str(c) for c in mock_logger.debug.call_args_list]
+        assert any("stdout" in c.lower() or "Indexing" in c for c in debug_calls), (
+            f"Expected debug log containing stdout output, got: {debug_calls}"
+        )
+
+    def test_cb_cidx_index_logs_stderr_on_error(self, manager, tmp_path):
+        """_cb_cidx_index logs CalledProcessError details (returncode, stdout, stderr) before re-raising."""
+        with (
+            patch("subprocess.run") as mock_run,
+            patch(
+                "code_indexer.server.repositories.golden_repo_manager.logger"
+            ) as mock_logger,
+        ):
+            mock_run.side_effect = subprocess.CalledProcessError(
+                returncode=1,
+                cmd=["cidx", "index", "--fts"],
+                output="partial output",
+                stderr="ERROR: index locked",
+            )
+
+            with pytest.raises(subprocess.CalledProcessError):
+                manager._cb_cidx_index(str(tmp_path), 300)
+
+        # Must log error with returncode and stderr before re-raising
+        error_calls = [str(c) for c in mock_logger.error.call_args_list]
+        assert any("index locked" in c or "stderr" in c.lower() for c in error_calls), (
+            f"Expected error log containing stderr output, got: {error_calls}"
+        )
+
 
 class TestUpdateDefaultBranchSqlite:
     """SQLite backend update_default_branch (Story #303)."""

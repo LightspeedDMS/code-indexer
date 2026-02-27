@@ -517,6 +517,20 @@ header.admin-header {
     width: 100%;
 }
 
+.golden-repos-table .category-group-header td {
+    position: relative;
+}
+
+.golden-repos-table .category-group-header td::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 100%;
+    width: 500px;
+    background: var(--pico-primary-background);
+}
+
 .golden-repos-table .status-cell {
     min-width: 80px;
     white-space: nowrap;

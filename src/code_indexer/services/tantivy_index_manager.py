@@ -311,13 +311,16 @@ class TantivyIndexManager:
     def get_all_indexed_paths(self) -> List[str]:
         """Return a list of all unique file paths indexed in this FTS index.
 
-        Iterates all segments to collect every stored 'path' field value.
+        Uses searcher.search() with an all-matching query to collect every
+        stored 'path' field value. This API is compatible with tantivy-py v0.25.0
+        which does NOT have segment_readers() on the Searcher object.
+
         Used by Bug #307 fix to determine which FTS documents need cleanup
         after a branch change CoW snapshot.
 
         Returns:
             List of unique file path strings currently in the index.
-            Returns empty list if index is not initialized.
+            Returns empty list if index is not initialized or empty.
         """
         if self._index is None:
             return []
@@ -325,19 +328,29 @@ class TantivyIndexManager:
         try:
             self._index.reload()
             searcher = self._index.searcher()
+            total_docs = searcher.num_docs
+            if total_docs == 0:
+                return []
+
+            # Build a match-all query using tantivy's Query class
+            from tantivy import Query as TantivyQuery
+
+            all_query = TantivyQuery.all_query()
+
+            # Search with limit = total_docs to retrieve every document
+            search_result = searcher.search(all_query, total_docs)
+            hits = search_result.hits
+
             paths: set = set()
-            for segment_reader in searcher.segment_readers():
-                store = segment_reader.get_store_reader()
-                num_docs = segment_reader.num_docs()
-                for doc_id in range(num_docs):
-                    try:
-                        doc = store.get(doc_id)
-                        if doc is not None:
-                            path_value = doc.get_first("path")
-                            if path_value:
-                                paths.add(str(path_value))
-                    except Exception:
-                        continue  # Skip docs that can't be read
+            for _score, doc_address in hits:
+                try:
+                    doc = searcher.doc(doc_address)
+                    path_values = doc.get_all("path")
+                    for path_value in path_values:
+                        if path_value:
+                            paths.add(str(path_value))
+                except Exception:
+                    continue  # Skip docs that can't be read
             return list(paths)
         except Exception as e:
             logger.warning(f"Failed to get all indexed paths: {e}")

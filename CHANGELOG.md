@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.62] - 2026-02-26
+
+### Fixed
+
+- FTS `get_all_indexed_paths()` now uses `searcher.search(Query.all_query())` instead of `segment_readers()` which does not exist in tantivy-py v0.25.0. Fixes silent FTS branch cleanup failure on staging.
+- Added explicit HNSW branch cleanup step (`_cb_hnsw_branch_cleanup`) in `change_branch()` flow. Rebuilds HNSW filtered index directly on CoW snapshot, providing defense-in-depth for branch isolation independent of the `cidx index` subprocess.
+- `_cb_cidx_index` now logs subprocess stdout (DEBUG) and stderr (WARNING) instead of discarding them, making branch-change indexing failures visible in server logs.
+
 ## [9.3.61] - 2026-02-26
 
 ### Fixed
