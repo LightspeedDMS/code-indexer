@@ -2568,7 +2568,7 @@ async def change_golden_repo_branch(
     request: Request,
     alias: str,
 ):
-    """Change the active branch of a golden repository (Story #303)."""
+    """Change the active branch of a golden repository async (Story #308)."""
     session = _require_admin_session(request)
     if not session:
         return JSONResponse(
@@ -2586,22 +2586,34 @@ async def change_golden_repo_branch(
             )
 
         manager = _get_golden_repo_manager()
-        import asyncio
-        result = await asyncio.to_thread(manager.change_branch, alias, branch)
-        return JSONResponse(content=result)
+        result = manager.change_branch_async(alias, branch, session.username)
+        job_id = result.get("job_id")
+        if job_id is None:
+            # Already on the target branch - no background job needed
+            return JSONResponse(
+                status_code=200,
+                content={"success": True, "message": f"Already on branch '{branch}'"},
+            )
+        return JSONResponse(
+            status_code=202,
+            content={"success": True, "job_id": job_id},
+        )
 
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     except (FileNotFoundError, _GoldenRepoNotFoundError) as e:
         return JSONResponse(status_code=404, content={"error": str(e)})
-    except RuntimeError as e:
-        error_msg = str(e).lower()
-        if any(kw in error_msg for kw in (
-            "conflict", "locked", "busy", "indexed", "refreshed", "write lock",
-        )):
-            return JSONResponse(status_code=409, content={"error": str(e)})
-        return JSONResponse(status_code=500, content={"error": str(e)})
     except Exception as e:
+        from code_indexer.server.repositories.background_jobs import DuplicateJobError
+        if isinstance(e, DuplicateJobError):
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "success": False,
+                    "error": str(e),
+                    "existing_job_id": e.existing_job_id,
+                },
+            )
         logger.error(f"Branch change failed for {alias}: {e}")
         return JSONResponse(
             status_code=500,

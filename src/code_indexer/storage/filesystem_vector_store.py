@@ -547,6 +547,7 @@ class FilesystemVectorStore:
         visible_files: Set[str],
         subdirectory: Optional[str] = None,
         progress_callback: Optional[Any] = None,
+        current_branch: Optional[str] = None,
     ) -> int:
         """Rebuild HNSW index with only visible files (branch isolation).
 
@@ -564,6 +565,10 @@ class FilesystemVectorStore:
                           Vectors for files NOT in this set are excluded from HNSW.
             subdirectory: Optional subdirectory for the collection
             progress_callback: Optional progress callback
+            current_branch: Optional branch name (Bug #306). When provided, stored
+                           in HNSW metadata so query-time rebuilds after CoW snapshot
+                           can use hidden_branches filtering instead of rebuilding
+                           from all vectors.
 
         Returns:
             Number of vectors included in the filtered index
@@ -583,6 +588,7 @@ class FilesystemVectorStore:
             collection_path=collection_path,
             progress_callback=progress_callback,
             visible_files=visible_files,
+            current_branch=current_branch,
         )
 
         # Signal end_indexing() to skip its own rebuild (would overwrite filtered rebuild)
@@ -2002,10 +2008,24 @@ class FilesystemVectorStore:
                 f"HNSW index is stale for '{collection_name}', rebuilding..."
             )
 
+            # Bug #306: Read current_branch from stale metadata for branch-aware rebuild.
+            # When metadata has filtered=True + current_branch, use hidden_branches filtering
+            # so the rebuild doesn't overwrite a filtered HNSW with all vectors.
+            stale_meta = hnsw_manager.get_index_stats(collection_path)
+            query_time_branch = None
+            if stale_meta and stale_meta.get("filtered") and stale_meta.get("current_branch"):
+                query_time_branch = stale_meta["current_branch"]
+                self.logger.info(
+                    f"Query-time rebuild for '{collection_name}' will filter by branch "
+                    f"'{query_time_branch}' (hidden_branches)"
+                )
+
             # Rebuild HNSW with locking
             rebuild_start = time.time()
             hnsw_manager.rebuild_from_vectors(
-                collection_path=collection_path, progress_callback=None
+                collection_path=collection_path,
+                progress_callback=None,
+                current_branch=query_time_branch,
             )
             rebuild_ms = (time.time() - rebuild_start) * 1000
 

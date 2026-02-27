@@ -463,6 +463,334 @@ class TestBranchIsolationDidFilteredRebuildFlag:
         )
 
 
+class TestBug306CurrentBranchInMetadata:
+    """Tests for Bug #306: current_branch stored in HNSW metadata during filtered rebuild.
+
+    Root cause: After CoW snapshot + cidx fix-config, the filtered=True metadata
+    may be cleared, causing query-time rebuild to run unfiltered. Fix: store
+    current_branch in HNSW metadata so query-time rebuild can pass it to
+    rebuild_from_vectors() for hidden_branches-based filtering.
+    """
+
+    def test_rebuild_from_vectors_stores_current_branch_in_metadata(
+        self, tmp_path: Path
+    ):
+        """rebuild_from_vectors() stores current_branch in HNSW metadata when filtered=True."""
+        collection_path = tmp_path / "test_coll"
+        collection_path.mkdir()
+        _make_collection_meta(collection_path, vector_dim=128)
+
+        for i in range(5):
+            _write_vector_file(collection_path, f"vec_{i}", f"file_{i}.py")
+
+        visible_paths = {"file_0.py", "file_1.py", "file_2.py"}
+        manager = HNSWIndexManager(vector_dim=128, space="cosine")
+        manager.rebuild_from_vectors(
+            collection_path,
+            visible_files=visible_paths,
+            current_branch="master",
+        )
+
+        meta_file = collection_path / "collection_meta.json"
+        with open(meta_file) as f:
+            metadata = json.load(f)
+
+        hnsw_info = metadata.get("hnsw_index", {})
+        assert hnsw_info.get("current_branch") == "master", (
+            f"Expected current_branch='master' in metadata, got {hnsw_info.get('current_branch')!r}"
+        )
+
+    def test_rebuild_from_vectors_without_current_branch_does_not_store_branch(
+        self, tmp_path: Path
+    ):
+        """rebuild_from_vectors() without current_branch does NOT store current_branch."""
+        collection_path = tmp_path / "test_coll"
+        collection_path.mkdir()
+        _make_collection_meta(collection_path, vector_dim=128)
+
+        for i in range(3):
+            _write_vector_file(collection_path, f"vec_{i}", f"file_{i}.py")
+
+        manager = HNSWIndexManager(vector_dim=128, space="cosine")
+        manager.rebuild_from_vectors(collection_path, visible_files={"file_0.py"})
+
+        meta_file = collection_path / "collection_meta.json"
+        with open(meta_file) as f:
+            metadata = json.load(f)
+
+        hnsw_info = metadata.get("hnsw_index", {})
+        assert "current_branch" not in hnsw_info, (
+            "current_branch should NOT be stored when not provided"
+        )
+
+    def test_rebuild_from_vectors_current_branch_not_stored_for_unfiltered_rebuild(
+        self, tmp_path: Path
+    ):
+        """current_branch not stored for non-filtered rebuild (visible_files=None)."""
+        collection_path = tmp_path / "test_coll"
+        collection_path.mkdir()
+        _make_collection_meta(collection_path, vector_dim=128)
+
+        for i in range(3):
+            _write_vector_file(collection_path, f"vec_{i}", f"file_{i}.py")
+
+        manager = HNSWIndexManager(vector_dim=128, space="cosine")
+        # No visible_files, so this is an unfiltered rebuild
+        manager.rebuild_from_vectors(collection_path, current_branch="master")
+
+        meta_file = collection_path / "collection_meta.json"
+        with open(meta_file) as f:
+            metadata = json.load(f)
+
+        hnsw_info = metadata.get("hnsw_index", {})
+        assert "current_branch" not in hnsw_info, (
+            "current_branch should NOT be stored for non-filtered rebuild"
+        )
+
+
+class TestBug306RebuildFromVectorsHiddenBranchesFilter:
+    """Tests for Bug #306: rebuild_from_vectors() filters by hidden_branches.
+
+    When current_branch is provided (and visible_files is None), vectors whose
+    payload.hidden_branches contains current_branch are excluded.
+    This makes ALL rebuilds branch-aware.
+    """
+
+    def _write_vector_with_hidden_branches(
+        self,
+        collection_path: Path,
+        point_id: str,
+        file_path: str,
+        hidden_branches: Optional[list],
+        vector_dim: int = 128,
+    ) -> Path:
+        """Write a vector JSON file with hidden_branches in payload."""
+        vector_subdir = collection_path / "vectors"
+        vector_subdir.mkdir(parents=True, exist_ok=True)
+        vector_file = vector_subdir / f"vector_{point_id}.json"
+        data = {
+            "id": point_id,
+            "vector": np.random.randn(vector_dim).tolist(),
+            "payload": {"path": file_path, "type": "content"},
+        }
+        if hidden_branches is not None:
+            data["payload"]["hidden_branches"] = hidden_branches
+        with open(vector_file, "w") as f:
+            json.dump(data, f)
+        return vector_file
+
+    def test_rebuild_with_current_branch_skips_vectors_hidden_for_that_branch(
+        self, tmp_path: Path
+    ):
+        """rebuild_from_vectors() with current_branch skips vectors hidden for that branch."""
+        collection_path = tmp_path / "test_coll"
+        collection_path.mkdir()
+        _make_collection_meta(collection_path, vector_dim=128)
+
+        # 3 visible vectors (not hidden for master)
+        for i in range(3):
+            self._write_vector_with_hidden_branches(
+                collection_path, f"vec_{i}", f"file_{i}.py", hidden_branches=None
+            )
+        # 2 hidden vectors (hidden for master)
+        for i in range(3, 5):
+            self._write_vector_with_hidden_branches(
+                collection_path, f"vec_{i}", f"file_{i}.py", hidden_branches=["master"]
+            )
+
+        manager = HNSWIndexManager(vector_dim=128, space="cosine")
+        count = manager.rebuild_from_vectors(collection_path, current_branch="master")
+
+        assert count == 3, (
+            f"Expected 3 visible vectors (hidden_branches doesn't include 'master'), got {count}"
+        )
+
+    def test_rebuild_with_current_branch_includes_vectors_hidden_for_other_branches(
+        self, tmp_path: Path
+    ):
+        """rebuild_from_vectors() includes vectors hidden for OTHER branches."""
+        collection_path = tmp_path / "test_coll"
+        collection_path.mkdir()
+        _make_collection_meta(collection_path, vector_dim=128)
+
+        # 3 vectors hidden for 'development' (NOT master - should be visible on master)
+        for i in range(3):
+            self._write_vector_with_hidden_branches(
+                collection_path, f"vec_{i}", f"file_{i}.py", hidden_branches=["development"]
+            )
+        # 2 vectors with no hidden_branches
+        for i in range(3, 5):
+            self._write_vector_with_hidden_branches(
+                collection_path, f"vec_{i}", f"file_{i}.py", hidden_branches=None
+            )
+
+        manager = HNSWIndexManager(vector_dim=128, space="cosine")
+        count = manager.rebuild_from_vectors(collection_path, current_branch="master")
+
+        # All 5 should be visible on master (none hidden for master)
+        assert count == 5, (
+            f"Expected 5 vectors visible on master (only hidden for development), got {count}"
+        )
+
+    def test_rebuild_with_current_branch_all_hidden_returns_zero(self, tmp_path: Path):
+        """rebuild_from_vectors() with current_branch returns 0 when all vectors hidden."""
+        collection_path = tmp_path / "test_coll"
+        collection_path.mkdir()
+        _make_collection_meta(collection_path, vector_dim=128)
+
+        # All vectors hidden for master
+        for i in range(4):
+            self._write_vector_with_hidden_branches(
+                collection_path, f"vec_{i}", f"file_{i}.py", hidden_branches=["master"]
+            )
+
+        manager = HNSWIndexManager(vector_dim=128, space="cosine")
+        count = manager.rebuild_from_vectors(collection_path, current_branch="master")
+
+        assert count == 0, f"Expected 0 vectors (all hidden for master), got {count}"
+
+    def test_rebuild_visible_files_takes_precedence_over_current_branch(
+        self, tmp_path: Path
+    ):
+        """When both current_branch and visible_files provided, visible_files takes precedence."""
+        collection_path = tmp_path / "test_coll"
+        collection_path.mkdir()
+        _make_collection_meta(collection_path, vector_dim=128)
+
+        # 5 vectors, none hidden for master
+        for i in range(5):
+            self._write_vector_with_hidden_branches(
+                collection_path, f"vec_{i}", f"file_{i}.py", hidden_branches=None
+            )
+
+        manager = HNSWIndexManager(vector_dim=128, space="cosine")
+        # visible_files filters to 2 files, current_branch would allow all 5
+        count = manager.rebuild_from_vectors(
+            collection_path,
+            visible_files={"file_0.py", "file_1.py"},
+            current_branch="master",
+        )
+
+        # visible_files takes precedence (only 2 included)
+        assert count == 2, (
+            f"Expected 2 (visible_files takes precedence over current_branch), got {count}"
+        )
+
+
+class TestBug306QueryTimeRebuildBranchAware:
+    """Tests for Bug #306: query-time rebuild in FilesystemVectorStore uses current_branch.
+
+    When HNSW metadata has filtered=True + current_branch, the query-time
+    stale rebuild must pass current_branch to rebuild_from_vectors() so that
+    hidden_branches filtering is applied (not overwriting with all vectors).
+    """
+
+    def _write_vector_with_hidden_branches(
+        self,
+        collection_path: Path,
+        point_id: str,
+        file_path: str,
+        hidden_branches: Optional[list],
+        vector_dim: int = 128,
+    ) -> Path:
+        """Write a vector JSON file with optional hidden_branches in payload."""
+        vector_subdir = collection_path / "vectors"
+        vector_subdir.mkdir(parents=True, exist_ok=True)
+        vector_file = vector_subdir / f"vector_{point_id}.json"
+        data = {
+            "id": point_id,
+            "vector": np.random.randn(vector_dim).tolist(),
+            "payload": {"path": file_path, "type": "content"},
+        }
+        if hidden_branches is not None:
+            data["payload"]["hidden_branches"] = hidden_branches
+        with open(vector_file, "w") as f:
+            json.dump(data, f)
+        return vector_file
+
+    def test_stale_rebuild_reads_current_branch_from_metadata_and_filters(
+        self, tmp_path: Path
+    ):
+        """Query-time rebuild reads current_branch from stale metadata and applies hidden_branches filter.
+
+        Scenario: filtered=True + current_branch='master' in stale metadata.
+        5 vectors on disk: 3 visible, 2 hidden for 'master'.
+        Query-time rebuild must produce HNSW with only 3 vectors (not 5).
+        """
+        from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
+
+        collection_path = tmp_path / "test_coll"
+        collection_path.mkdir()
+        _make_collection_meta(collection_path, vector_dim=128)
+
+        # 3 visible vectors (not hidden for master)
+        for i in range(3):
+            self._write_vector_with_hidden_branches(
+                collection_path, f"vec_{i}", f"file_{i}.py", hidden_branches=None
+            )
+        # 2 hidden vectors (hidden for master)
+        for i in range(3, 5):
+            self._write_vector_with_hidden_branches(
+                collection_path, f"vec_{i}", f"file_{i}.py", hidden_branches=["master"]
+            )
+
+        # Set metadata: filtered=True, current_branch='master', is_stale=True
+        meta_file = collection_path / "collection_meta.json"
+        with open(meta_file) as f:
+            metadata = json.load(f)
+
+        metadata["vector_size"] = 128
+        metadata["hnsw_index"] = {
+            "version": 1,
+            "vector_count": 3,
+            "vector_dim": 128,
+            "M": 16,
+            "ef_construction": 200,
+            "space": "cosine",
+            "last_rebuild": "2025-01-01T00:00:00Z",
+            "file_size_bytes": 1000,
+            "id_mapping": {"0": "vec_0", "1": "vec_1", "2": "vec_2"},
+            "is_stale": True,  # Forces rebuild
+            "last_marked_stale": None,
+            "filtered": True,
+            "current_branch": "master",  # Stored by previous filtered rebuild
+            "visible_count": 3,
+            "total_on_disk": 5,
+        }
+        with open(meta_file, "w") as f:
+            json.dump(metadata, f)
+
+        # Trigger the query-time rebuild by calling rebuild_from_vectors
+        # with what filesystem_vector_store SHOULD do: read current_branch from metadata
+        hnsw_manager = HNSWIndexManager(vector_dim=128, space="cosine")
+        hnsw_meta = hnsw_manager.get_index_stats(collection_path)
+        assert hnsw_meta is not None, "Metadata should exist"
+
+        # The fix: when filtered=True and current_branch in metadata,
+        # pass current_branch to rebuild_from_vectors for hidden_branches filtering
+        current_branch = hnsw_meta.get("current_branch") if hnsw_meta.get("filtered") else None
+        count = hnsw_manager.rebuild_from_vectors(
+            collection_path=collection_path,
+            progress_callback=None,
+            current_branch=current_branch,
+        )
+
+        # Should only include the 3 vectors not hidden for master
+        assert count == 3, (
+            f"Expected 3 vectors after branch-aware rebuild, got {count}. "
+            "Query-time rebuild must filter by current_branch from metadata."
+        )
+
+        # Verify metadata is updated correctly (still filtered)
+        with open(meta_file) as f:
+            updated_meta = json.load(f)
+        hnsw_info = updated_meta.get("hnsw_index", {})
+        assert hnsw_info.get("is_stale") is False, "HNSW should no longer be stale after rebuild"
+        assert hnsw_info.get("vector_count") == 3, (
+            f"Expected vector_count=3 in metadata, got {hnsw_info.get('vector_count')}"
+        )
+
+
 class TestRebuildHnswFiltered:
     """Tests for rebuild_hnsw_filtered() method on FilesystemVectorStore."""
 
