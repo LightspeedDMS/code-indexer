@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.73
+
+### Bug Fixes
+
+- fix: _resolve_repo_path() now consults alias JSON target_path as highest-priority resolution, fixing regex_search and directory_tree on versioned/local repos like cidx-meta (Bug #340)
+- fix: handle_regex_search error message no longer hardcodes '.*' pattern — uses actual repository_alias
+- refactor: handle_directory_tree unified to use _resolve_repo_path() for both global and non-global repos, removing duplicate AliasManager code
+
 ## [9.3.72] - 2026-02-28
 
 ### Fixed
