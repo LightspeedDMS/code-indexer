@@ -23,6 +23,53 @@ from code_indexer.server.logging_utils import format_error_log
 logger = logging.getLogger(__name__)
 
 
+def _parse_git_date(date_str: str) -> datetime:
+    """
+    Parse git commit date string into a datetime object.
+
+    Git's --format=%(committerdate:iso8601) produces dates like:
+        "2026-02-02 14:37:25 -0600"  (space before timezone offset)
+
+    Python 3.9's datetime.fromisoformat() requires strict ISO 8601 with a
+    colon in the timezone offset (e.g. "-06:00"), so it cannot parse the
+    git format directly.
+
+    This function handles both git %ci format and standard ISO 8601.
+
+    Args:
+        date_str: Date string to parse
+
+    Returns:
+        Parsed datetime object (timezone-aware if timezone present)
+
+    Raises:
+        ValueError: If the date string cannot be parsed
+    """
+    normalized = date_str.strip()
+    if not normalized:
+        raise ValueError(f"Cannot parse git date: {repr(date_str)}")
+
+    # Try fromisoformat first: handles strict ISO 8601 (T separator, colon tz)
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        pass
+
+    # Try git %ci format: "2026-02-02 14:37:25 -0600" (space-separated tz)
+    try:
+        return datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S %z")
+    except ValueError:
+        pass
+
+    # Try without timezone: "2026-02-02 14:37:25"
+    try:
+        return datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        pass
+
+    raise ValueError(f"Cannot parse git date: {repr(date_str)}")
+
+
 def classify_branch_type(branch_name: str) -> str:
     """
     Classify branch based on naming patterns for intelligent matching.
@@ -170,10 +217,7 @@ class GoldenRepoBranchService:
                         # Parse commit timestamp
                         commit_timestamp = None
                         try:
-                            # ISO 8601 format: 2024-01-15 10:30:45 +0000
-                            commit_timestamp = datetime.fromisoformat(
-                                commit_date_str.replace(" +", "+").replace(" -", "-")
-                            )
+                            commit_timestamp = _parse_git_date(commit_date_str)
                             if commit_timestamp.tzinfo is None:
                                 commit_timestamp = commit_timestamp.replace(
                                     tzinfo=timezone.utc
