@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.72] - 2026-02-28
+
+### Fixed
+
+- Bug #330: Git commit date parsing now handles non-ISO format with space before timezone offset (`2026-02-02 14:37:25 -0600`). Replaced fragile `.replace()` hack with proper `_parse_git_date()` function supporting git `%ci` format, ISO 8601, and timezone-less dates.
+
 ## [9.3.71] - 2026-02-28
 
 ### Security
