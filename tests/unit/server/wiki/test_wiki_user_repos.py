@@ -24,7 +24,7 @@ from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
 from code_indexer.server.wiki.wiki_cache import WikiCache
-from code_indexer.server.wiki.routes import wiki_router, get_current_user_hybrid
+from code_indexer.server.wiki.routes import wiki_router, get_current_user_hybrid, get_wiki_user_hybrid
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +34,7 @@ from code_indexer.server.wiki.routes import wiki_router, get_current_user_hybrid
 def _make_user(username: str):
     user = MagicMock()
     user.username = username
+    user.has_permission.return_value = False
     return user
 
 
@@ -75,6 +76,7 @@ def _make_user_wiki_app(
 
     app = FastAPI()
     app.dependency_overrides[get_current_user_hybrid] = lambda: viewer
+    app.dependency_overrides[get_wiki_user_hybrid] = lambda: viewer
     app.include_router(wiki_router, prefix="/wiki")
 
     _db_fd, _db_path = tempfile.mkstemp(suffix=".db")

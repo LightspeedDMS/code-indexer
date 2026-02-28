@@ -145,13 +145,13 @@ class TestBuildBreadcrumbs:
     def test_root_article_path_returns_only_home(self, svc):
         crumbs = svc.build_breadcrumbs("", "my-repo")
         assert len(crumbs) == 1
-        assert crumbs[0]["label"] == "Wiki Home"
+        assert crumbs[0]["label"] == "my-repo Wiki Home"
         assert crumbs[0]["url"] == "/wiki/my-repo/"
 
     def test_single_level_article(self, svc):
         crumbs = svc.build_breadcrumbs("my-article", "my-repo")
         assert len(crumbs) == 2
-        assert crumbs[0]["label"] == "Wiki Home"
+        assert crumbs[0]["label"] == "my-repo Wiki Home"
         assert crumbs[1]["label"] == "My Article"
         assert crumbs[1]["url"] is None
 
@@ -159,7 +159,7 @@ class TestBuildBreadcrumbs:
         crumbs = svc.build_breadcrumbs("guides/intro", "my-repo")
         assert len(crumbs) == 3
         labels = [c["label"] for c in crumbs]
-        assert "Wiki Home" in labels
+        assert "my-repo Wiki Home" in labels
         assert "guides" in labels
         assert "Intro" in labels
 

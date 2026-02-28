@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from code_indexer.server.wiki.routes import wiki_router, get_current_user_hybrid
+from code_indexer.server.wiki.routes import wiki_router, get_wiki_user_hybrid, get_current_user_hybrid
 from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
 
 
@@ -23,6 +23,7 @@ def _make_app(authenticated_user, actual_repo_path):
     _reset_wiki_cache()
 
     app = FastAPI()
+    app.dependency_overrides[get_wiki_user_hybrid] = lambda: authenticated_user
     app.dependency_overrides[get_current_user_hybrid] = lambda: authenticated_user
     app.include_router(wiki_router, prefix="/wiki")
 

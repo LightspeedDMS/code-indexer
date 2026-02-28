@@ -201,6 +201,7 @@ def _make_app_for_toc(actual_repo_path=None, user_accessible_repos=None):
     """Create a test FastAPI app for TOC-related HTML structure tests."""
     from code_indexer.server.wiki.routes import (
         wiki_router,
+        get_wiki_user_hybrid,
         get_current_user_hybrid,
         _reset_wiki_cache,
     )
@@ -210,6 +211,7 @@ def _make_app_for_toc(actual_repo_path=None, user_accessible_repos=None):
     app = FastAPI()
     user = MagicMock()
     user.username = "alice"
+    app.dependency_overrides[get_wiki_user_hybrid] = lambda: user
     app.dependency_overrides[get_current_user_hybrid] = lambda: user
     app.include_router(wiki_router, prefix="/wiki")
 

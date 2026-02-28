@@ -176,7 +176,11 @@ class TestPutGetSidebar:
         result = cache.get_sidebar("repo1", repo_dir)
         assert result is not None
 
-    def test_get_sidebar_returns_none_on_mtime_change(self, cache_db, repo_dir):
+    def test_get_sidebar_returns_cached_after_mtime_change(self, cache_db, repo_dir):
+        """Story #304: get_sidebar no longer polls filesystem mtime.
+        Cache coherence is maintained via event-driven invalidation (WikiCacheInvalidator).
+        Adding a new file does NOT invalidate the sidebar cache - explicit invalidate_repo() must be called.
+        """
         cache, _ = cache_db
         f = repo_dir / "page.md"
         f.write_text("# Page")
@@ -187,8 +191,10 @@ class TestPutGetSidebar:
         new_file = repo_dir / "new-page.md"
         new_file.write_text("# New Page")
         os.utime(new_file, (new_file.stat().st_atime, new_file.stat().st_mtime + 1.0))
+        # Cache is still valid - mtime change does NOT invalidate (event-driven model)
         result = cache.get_sidebar("repo1", repo_dir)
-        assert result is None
+        assert result is not None
+        assert result[0]["name"] == "Root"
 
     def test_get_sidebar_returns_none_for_uncached(self, cache_db, repo_dir):
         cache, _ = cache_db
