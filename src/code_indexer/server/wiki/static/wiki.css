@@ -362,65 +362,98 @@
 }
 
 /* -----------------------------------------------------------------------
-   Story #289: Article metadata panel
+   Story #289: Article metadata panel (collapsible)
    ----------------------------------------------------------------------- */
 .wiki-metadata-panel {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.4rem 0.75rem;
+    display: block;
     margin-bottom: 1rem;
-    background: var(--pico-secondary-background);
     border: 1px solid var(--pico-muted-border-color);
     border-radius: 4px;
+    background: var(--pico-secondary-background);
     font-size: 0.8rem;
     color: var(--pico-muted-color);
 }
 
-.metadata-field {
-    white-space: nowrap;
+.wiki-metadata-panel[open] > .metadata-summary {
+    border-bottom: 1px solid var(--pico-muted-border-color);
 }
 
-.metadata-badge {
-    display: inline-block;
-    padding: 0.15rem 0.5rem;
-    border-radius: 3px;
-    font-size: 0.75rem;
+.metadata-summary {
+    padding: 0.4rem 0.75rem;
+    cursor: pointer;
+    user-select: none;
     font-weight: 600;
-    text-transform: capitalize;
-    background: var(--pico-muted-border-color);
+    font-size: 0.8rem;
+    color: var(--pico-muted-color);
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+/* Custom triangle marker */
+.metadata-summary::before {
+    content: '';
+    display: inline-block;
+    width: 0;
+    height: 0;
+    border-left: 5px solid currentColor;
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+    flex-shrink: 0;
+    transition: transform 0.15s ease;
+}
+
+.wiki-metadata-panel[open] > .metadata-summary::before {
+    transform: rotate(90deg);
+}
+
+/* Hide default browser marker */
+.metadata-summary::-webkit-details-marker {
+    display: none;
+}
+
+.metadata-summary::marker {
+    content: none;
+    display: none;
+}
+
+/* Override Pico's accordion chevron on summary::after */
+.metadata-summary::after {
+    display: none !important;
+    content: none !important;
+}
+
+.metadata-summary:hover {
     color: var(--pico-color);
 }
 
-.metadata-badge-published {
-    background: #d4edda;
-    color: #155724;
+.metadata-list {
+    margin: 0;
+    padding: 0.25rem 0.75rem 0.5rem;
 }
 
-.metadata-badge-internal {
-    background: #ffeeba;
-    color: #856404;
+.metadata-row {
+    display: flex;
+    align-items: center;
+    padding: 0.25rem 0;
 }
 
-.metadata-badge-draft {
-    background: #e2e3e5;
-    color: #383d41;
+.metadata-row + .metadata-row {
+    border-top: 1px solid color-mix(in srgb, var(--pico-muted-border-color) 50%, transparent);
 }
 
-[data-theme="dark"] .metadata-badge-published {
-    background: #1a3a24;
-    color: #75c98b;
+.metadata-row dt {
+    width: 12rem;
+    flex-shrink: 0;
+    font-weight: 600;
+    color: var(--pico-muted-color);
+    margin: 0;
 }
 
-[data-theme="dark"] .metadata-badge-internal {
-    background: #3d2e00;
-    color: #f0b429;
-}
-
-[data-theme="dark"] .metadata-badge-draft {
-    background: #2e2e2e;
-    color: #adb5bd;
+.metadata-row dd {
+    margin: 0;
+    color: var(--pico-color);
 }
 
 [data-theme="light"] .wiki-metadata-panel {
@@ -429,12 +462,11 @@
     border-color: #dee2e6;
 }
 
-[data-theme="light"] .metadata-field {
-    color: #495057;
+[data-theme="light"] .metadata-row dt {
+    color: #6c757d;
 }
 
-[data-theme="light"] .metadata-badge {
-    background: #dee2e6;
+[data-theme="light"] .metadata-row dd {
     color: #333;
 }
 

@@ -12,18 +12,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _visibility_badge_class(visibility: str) -> str:
-    """Return CSS class string for a visibility badge."""
-    v = visibility.lower().strip()
-    if v in ("public", "published"):
-        return "metadata-badge metadata-badge-published"
-    if v == "internal":
-        return "metadata-badge metadata-badge-internal"
-    if v == "draft":
-        return "metadata-badge metadata-badge-draft"
-    return "metadata-badge"
-
-
 class WikiService:
     """Renders markdown articles with front matter parsing and image path rewriting."""
 
@@ -53,9 +41,7 @@ class WikiService:
             logger.warning("Failed to parse front matter, treating as plain content")
             return {}, content
 
-    def _strip_header_block(
-        self, content: str, metadata: Dict[str, Any] = None
-    ) -> str:
+    def _strip_header_block(self, content: str, metadata: Dict[str, Any] = None) -> str:
         """Strip structured header block fields (Article Number/Title/Status) from body.
 
         Summary is preserved in the body. Extracted values are merged into metadata
@@ -187,8 +173,36 @@ class WikiService:
             parsed = datetime.strptime(date_part, "%Y-%m-%d")
             return parsed.strftime("%B %-d, %Y")
         except ValueError:
-            logger.warning("format_date_human_readable: cannot parse date %r", date_value)
+            logger.warning(
+                "format_date_human_readable: cannot parse date %r", date_value
+            )
             return None
+
+    # Keys to exclude from the metadata panel (internal / non-display fields)
+    _METADATA_SKIP_KEYS = frozenset(
+        {
+            "visibility_class",
+        }
+    )
+
+    # Human-friendly labels for well-known frontmatter keys
+    _METADATA_LABELS: Dict[str, str] = {
+        "original_article": "Salesforce Article",
+        "article_number": "Salesforce Article",
+        "publication_status": "Status",
+        "created": "Created",
+        "modified": "Modified",
+        "updated": "Modified",
+        "views": "Salesforce Views",
+        "real_views": "Views",
+        "visibility": "Visibility",
+        "category": "Category",
+        "draft": "Draft",
+        "title": "Title",
+        "author": "Author",
+        "tags": "Tags",
+        "description": "Description",
+    }
 
     def prepare_metadata_context(
         self,
@@ -196,66 +210,70 @@ class WikiService:
         repo_alias: str,
         article_path: str,
         wiki_cache: "WikiCache",
-    ) -> Dict[str, Any]:
-        """Prepare template context dict for the metadata panel (Story #289).
+    ) -> List[tuple]:
+        """Prepare template context for the metadata panel (Story #289).
 
-        Returns an empty dict when no displayable fields are available, which
-        signals to the template not to render the panel (AC5).
+        Returns a list of (label, value) tuples for display.  An empty list
+        signals to the template not to render the panel.
         """
-        ctx: Dict[str, Any] = {}
+        # Build a working dict of all displayable fields
+        fields: Dict[str, Any] = {}
 
-        # real_views from DB — always authoritative (AC2)
+        # Copy all frontmatter keys
+        for key, value in metadata.items():
+            if key in self._METADATA_SKIP_KEYS:
+                continue
+            fields[key] = value
+
+        # Normalise 'updated' → 'modified'
+        if "updated" in fields and "modified" not in fields:
+            fields["modified"] = fields.pop("updated")
+        elif "updated" in fields:
+            del fields["updated"]
+
+        # Normalise 'original_article' → 'article_number'
+        if "original_article" in fields and "article_number" not in fields:
+            fields["article_number"] = fields.pop("original_article")
+        elif "original_article" in fields:
+            del fields["original_article"]
+
+        # Draft flag → visibility
+        if fields.get("draft") is True:
+            fields["visibility"] = "draft"
+        fields.pop("draft", None)
+
+        # Format date fields
+        for date_key in ("created", "modified"):
+            if date_key in fields and fields[date_key] is not None:
+                formatted = self.format_date_human_readable(fields[date_key])
+                if formatted:
+                    fields[date_key] = formatted
+                else:
+                    del fields[date_key]
+
+        # Add view count from DB
         real_views = wiki_cache.get_view_count(repo_alias, article_path)
         if real_views > 0:
-            ctx["real_views"] = real_views
+            fields["real_views"] = real_views
 
-        # Created date (AC3)
-        created = metadata.get("created")
-        if created is not None:
-            formatted = self.format_date_human_readable(created)
-            if formatted:
-                ctx["created"] = formatted
+        # Build (label, value) list — strip empty values
+        # Article number always first
+        result: List[tuple] = []
+        if "article_number" in fields:
+            val = str(fields.pop("article_number")).strip()
+            if val:
+                result.append(
+                    (self._METADATA_LABELS.get("article_number", "Article"), val)
+                )
 
-        # Modified date — also accepts 'updated' as synonym (AC3)
-        modified_raw = metadata.get("modified") or metadata.get("updated")
-        if modified_raw is not None:
-            formatted = self.format_date_human_readable(modified_raw)
-            if formatted:
-                ctx["modified"] = formatted
+        for key, value in fields.items():
+            str_value = str(value).strip() if value is not None else ""
+            if not str_value:
+                continue
+            label = self._METADATA_LABELS.get(key, key.replace("_", " ").title())
+            result.append((label, str_value))
 
-        # Visibility / draft flags (AC4)
-        visibility: Optional[str] = metadata.get("visibility")  # type: ignore[assignment]
-        if metadata.get("draft") is True:
-            visibility = "draft"
-        if visibility:
-            ctx["visibility"] = str(visibility)
-            ctx["visibility_class"] = _visibility_badge_class(str(visibility))
-
-        # Category (AC4) + duplicate-badge deduplication (Story #301 AC4/AC5)
-        raw_category = metadata.get("category")
-        if raw_category is not None:
-            category = str(raw_category).strip()
-            if category:
-                ctx["category"] = category
-                # Suppress the separate "Category: X" text when it would duplicate the
-                # visibility badge (same value, case-insensitive comparison — Story #301).
-                # Only set the flag when both visibility and category are present.
-                if ctx.get("visibility"):
-                    visibility_lower = str(ctx["visibility"]).strip().lower()
-                    category_lower = category.lower()
-                    ctx["suppress_category_badge"] = (visibility_lower == category_lower)
-
-        # Article number (from YAML 'original_article' or legacy header 'article_number')
-        article_number = metadata.get("original_article") or metadata.get("article_number")
-        if article_number:
-            ctx["article_number"] = str(article_number).strip()
-
-        # Publication status (from legacy header extraction by _strip_header_block)
-        pub_status = metadata.get("publication_status")
-        if pub_status:
-            ctx["publication_status"] = str(pub_status).strip()
-
-        return ctx
+        return result
 
     # ------------------------------------------------------------------
     # Story #282: Sidebar navigation, link rewriting, breadcrumbs
@@ -355,7 +373,7 @@ class WikiService:
             return crumbs
         parts = article_path.split("/")
         for i, part in enumerate(parts[:-1]):
-            url = f"/wiki/{repo_alias}/{'/'.join(parts[:i + 1])}/"
+            url = f"/wiki/{repo_alias}/{'/'.join(parts[: i + 1])}/"
             crumbs.append({"label": part, "url": url})
         last = parts[-1].replace("-", " ").replace("_", " ").title()
         crumbs.append({"label": last, "url": None})

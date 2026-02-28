@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from code_indexer.server.wiki.routes import wiki_router, get_current_user_hybrid
+from code_indexer.server.wiki.routes import wiki_router, get_current_user_hybrid, get_wiki_user_hybrid
 from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
 
 
@@ -26,6 +26,7 @@ def _make_app(authenticated_user=None, actual_repo_path=None,
     app = FastAPI()
     if authenticated_user:
         app.dependency_overrides[get_current_user_hybrid] = lambda: authenticated_user
+        app.dependency_overrides[get_wiki_user_hybrid] = lambda: authenticated_user
     app.include_router(wiki_router, prefix="/wiki")
 
     # Mount wiki static for template rendering
@@ -69,9 +70,10 @@ class TestAuthentication:
         app.include_router(wiki_router, prefix="/wiki")
         app.state.golden_repo_manager = MagicMock()
         app.state.access_filtering_service = MagicMock()
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(app, raise_server_exceptions=False, follow_redirects=False)
         resp = client.get("/wiki/test-repo/")
-        assert resp.status_code in (401, 403)
+        # Wiki routes redirect unauthenticated users to login (303) instead of returning 401
+        assert resp.status_code in (303, 401, 403)
 
     def test_authenticated_reaches_route(self):
         with tempfile.TemporaryDirectory() as tmpdir:
