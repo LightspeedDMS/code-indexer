@@ -219,6 +219,68 @@ class AccessFilteringService:
 
         return filtered
 
+    def _get_all_repo_aliases(self) -> Set[str]:
+        """
+        Return the universe of all repo aliases known to the system.
+
+        Collects repo aliases granted to every group. Used to distinguish
+        repo-description .md files from general .md files (e.g. README.md).
+
+        Returns:
+            Set of all repo alias strings across all groups.
+        """
+        all_aliases: Set[str] = set()
+        for grp in self.group_manager.get_all_groups():
+            all_aliases.update(self.group_manager.get_group_repos(grp.id))
+        return all_aliases
+
+    def filter_cidx_meta_files(self, files: List[str], user_id: str) -> List[str]:
+        """
+        Filter a list of cidx-meta filenames to only those the user may access.
+
+        Bug #336: File-level access control for cidx-meta.
+
+        Each repo-description file in cidx-meta is named ``{repo-alias}.md``.
+        General files (e.g. ``README.md``, ``.gitignore``) are always visible.
+
+        A ``.md`` file is treated as a repo-description file only when its stem
+        (name without the ``.md`` extension) matches a known repo alias.
+        Unknown stems pass through unconditionally.
+
+        Admin users receive the full list unchanged.
+
+        Args:
+            files: List of filenames (basenames) from cidx-meta.
+            user_id: The user's unique identifier.
+
+        Returns:
+            Filtered list of filenames the user is allowed to see.
+        """
+        if not files:
+            return []
+
+        # Admin users see everything
+        if self.is_admin_user(user_id):
+            return files
+
+        accessible = self.get_accessible_repos(user_id)
+        all_repo_aliases = self._get_all_repo_aliases()
+
+        result = []
+        for filename in files:
+            if not filename.endswith(".md"):
+                # Non-.md files (e.g. .gitignore, README.txt) always pass through
+                result.append(filename)
+            else:
+                stem = filename[: -len(".md")]
+                if stem not in all_repo_aliases:
+                    # Not a repo-description file (e.g. README.md) – always pass
+                    result.append(filename)
+                elif stem in accessible:
+                    # Repo-description file the user is authorised to see
+                    result.append(filename)
+        return result
+
     def calculate_over_fetch_limit(self, requested_limit: int) -> int:
         """
         Calculate over-fetch limit for HNSW queries.

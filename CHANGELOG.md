@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.70] - 2026-02-28
+
+### Security
+
+- Bug #336: cidx-meta file-level access filtering. Non-admin users browsing cidx-meta via `list_files`, `get_file_content`, `browse_directory`, or `directory_tree` now only see description files for repos they have access to. Repo-description `.md` files are identified by matching their stem against known repo aliases; non-repo files (e.g., README.md) pass through unconditionally. Admin users retain full access.
+
 ## [9.3.69] - 2026-02-28
 
 ### Security
