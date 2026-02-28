@@ -2180,6 +2180,21 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             for f in files_data
         ]
 
+        # Bug #336: Filter cidx-meta files to only show repos the user can access
+        if repository_alias and "cidx-meta" in repository_alias:
+            access_filtering_service = _get_access_filtering_service()
+            if access_filtering_service:
+                filenames = [Path(f["path"]).name for f in serialized_files]
+                allowed = set(
+                    access_filtering_service.filter_cidx_meta_files(
+                        filenames, user.username
+                    )
+                )
+                serialized_files = [
+                    f for f in serialized_files
+                    if Path(f["path"]).name in allowed
+                ]
+
         return _mcp_response({"success": True, "files": serialized_files})
     except Exception as e:
         return _mcp_response({"success": False, "error": str(e), "files": []})
@@ -2200,6 +2215,24 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         repository_alias = params["repository_alias"]
         file_path = params["file_path"]
+
+        # Bug #336: Check cidx-meta file-level access before returning content
+        if repository_alias and "cidx-meta" in repository_alias:
+            access_filtering_svc = _get_access_filtering_service()
+            if access_filtering_svc:
+                basename = Path(file_path).name
+                allowed = access_filtering_svc.filter_cidx_meta_files(
+                    [basename], user.username
+                )
+                if not allowed:
+                    return _mcp_response(
+                        {
+                            "success": False,
+                            "error": f"Access denied: you are not authorized to access '{basename}'",
+                            "content": [],
+                            "metadata": {},
+                        }
+                    )
 
         # Extract optional pagination parameters
         # Coerce from MCP string types (MCP protocol sends all values as strings)
@@ -2512,6 +2545,21 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             f.model_dump(mode="json") if hasattr(f, "model_dump") else f
             for f in files_data
         ]
+
+        # Bug #336: Filter cidx-meta files to only show repos the user can access
+        if repository_alias and "cidx-meta" in repository_alias:
+            access_filtering_service = _get_access_filtering_service()
+            if access_filtering_service:
+                filenames = [Path(f["path"]).name for f in serialized_files]
+                allowed = set(
+                    access_filtering_service.filter_cidx_meta_files(
+                        filenames, user.username
+                    )
+                )
+                serialized_files = [
+                    f for f in serialized_files
+                    if Path(f["path"]).name in allowed
+                ]
 
         # Build directory structure from file list
         structure = {
@@ -5374,6 +5422,40 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             show_stats=args.get("show_stats", False),
             include_hidden=args.get("include_hidden", False),
         )
+
+        # Bug #336: Filter cidx-meta tree to only show repos the user can access
+        if repository_alias and "cidx-meta" in repository_alias:
+            _tree_access_svc = _get_access_filtering_service()
+            if _tree_access_svc and result.root.children is not None:
+                _all_names = [
+                    node.name for node in result.root.children if not node.is_directory
+                ]
+                _allowed = set(
+                    _tree_access_svc.filter_cidx_meta_files(_all_names, user.username)
+                )
+                result.root.children = [
+                    node
+                    for node in result.root.children
+                    if node.is_directory or node.name in _allowed
+                ]
+                # Rebuild tree_string excluding lines for unauthorized file entries
+                _filtered_lines = []
+                for _line in result.tree_string.splitlines():
+                    _stripped = _line.strip()
+                    # Lines for file entries end with a filename (no trailing '/')
+                    # Extract the name after the last connector/space sequence
+                    _name = _stripped.lstrip("|+- ")
+                    if not _name.endswith("/") and _name in _all_names and _name not in _allowed:
+                        continue
+                    _filtered_lines.append(_line)
+                result = result.__class__(
+                    root=result.root,
+                    tree_string="\n".join(_filtered_lines),
+                    total_directories=result.total_directories,
+                    total_files=len(result.root.children),
+                    max_depth_reached=result.max_depth_reached,
+                    root_path=result.root_path,
+                )
 
         # Convert TreeNode to dict recursively
         def tree_node_to_dict(node):
