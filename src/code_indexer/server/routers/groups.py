@@ -16,7 +16,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field, model_validator
 
-from ..auth.dependencies import get_current_user, get_current_admin_user
+from ..auth.dependencies import get_current_admin_user
 from ..auth.user_manager import User
 from ..services.constants import CIDX_META_REPO
 from ..services.group_access_manager import (
@@ -209,14 +209,14 @@ def _group_to_response(group: Group) -> GroupResponse:
 
 @router.get("", response_model=List[GroupResponse])
 def list_groups(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     group_manager: GroupAccessManager = Depends(get_group_manager),
 ) -> List[GroupResponse]:
     """
     List all groups.
 
     Returns a list of all groups with their basic information.
-    Accessible by all authenticated users.
+    Requires admin role.
     """
     groups = group_manager.get_all_groups()
     return [_group_to_response(g) for g in groups]
@@ -267,13 +267,14 @@ def create_group(
 @router.get("/{group_id}", response_model=GroupDetailResponse)
 def get_group(
     group_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     group_manager: GroupAccessManager = Depends(get_group_manager),
 ) -> GroupDetailResponse:
     """
     Get detailed information about a specific group.
 
     Returns group details including user count and accessible repositories.
+    Requires admin role.
     """
     group = group_manager.get_group(group_id)
     if group is None:
