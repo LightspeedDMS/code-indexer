@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.67] - 2026-02-27
+
+### Fixed
+
+- Dependency map scheduler never triggers on fresh init (Bug #326). The `_scheduler_loop()` had a chicken-and-egg bug where `next_run` is NULL on fresh init and only set after successful analysis. Added bootstrap branch that triggers first delta analysis when `next_run` is NULL and no analysis is currently running.
+- Dependency map jobs (full and delta) now show "server" instead of "Unknown" in Recent Activity dashboard. Added `repo_alias="server"` to both `register_job()` calls.
+
 ## [9.3.66] - 2026-02-27
 
 ### Fixed

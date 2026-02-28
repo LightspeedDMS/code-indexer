@@ -154,6 +154,94 @@ class TestSchedulerDaemonThread:
         assert not dependency_map_service._daemon_thread.is_alive()
 
 
+class TestBootstrapNullNextRun:
+    """Test Bug #326: scheduler must bootstrap when next_run is NULL."""
+
+    def test_scheduler_does_not_trigger_when_disabled_and_next_run_null(
+        self, dependency_map_service, mock_config_manager, mock_tracking_backend
+    ):
+        """Bug #326: Disabled scheduler must never call run_delta_analysis even if next_run is NULL."""
+        # Disable dependency map
+        mock_config_manager.get_claude_integration_config.return_value.dependency_map_enabled = False
+
+        # Simulate fresh init: next_run is NULL (the bug scenario)
+        mock_tracking_backend.get_tracking.return_value = {
+            "id": 1,
+            "last_run": None,
+            "next_run": None,
+            "status": "pending",
+            "commit_hashes": None,
+            "error_message": None,
+        }
+
+        with patch.object(dependency_map_service, "run_delta_analysis") as mock_delta:
+            try:
+                dependency_map_service.start_scheduler()
+
+                # Give scheduler time to poll
+                time.sleep(0.3)
+
+                # Must NOT call delta analysis when feature is disabled
+                mock_delta.assert_not_called()
+
+            finally:
+                dependency_map_service.stop_scheduler()
+
+    def test_scheduler_bootstraps_when_next_run_is_null_and_enabled(
+        self, dependency_map_service, mock_tracking_backend
+    ):
+        """Bug #326: Scheduler must trigger run_delta_analysis when next_run is NULL and enabled."""
+        # Simulate fresh init: next_run is NULL (the bug scenario)
+        mock_tracking_backend.get_tracking.return_value = {
+            "id": 1,
+            "last_run": None,
+            "next_run": None,
+            "status": "pending",
+            "commit_hashes": None,
+            "error_message": None,
+        }
+
+        with patch.object(dependency_map_service, "run_delta_analysis") as mock_delta:
+            try:
+                dependency_map_service.start_scheduler()
+
+                # Give scheduler time to poll and bootstrap
+                time.sleep(0.3)
+
+                # Must call delta analysis to bootstrap (this is the fix)
+                mock_delta.assert_called_once()
+
+            finally:
+                dependency_map_service.stop_scheduler()
+
+    def test_scheduler_does_not_bootstrap_when_status_is_running(
+        self, dependency_map_service, mock_tracking_backend
+    ):
+        """Bug #326: Guard against double-trigger -- no bootstrap if status is 'running'."""
+        # Simulate: next_run NULL but a manual run is already in progress
+        mock_tracking_backend.get_tracking.return_value = {
+            "id": 1,
+            "last_run": None,
+            "next_run": None,
+            "status": "running",
+            "commit_hashes": None,
+            "error_message": None,
+        }
+
+        with patch.object(dependency_map_service, "run_delta_analysis") as mock_delta:
+            try:
+                dependency_map_service.start_scheduler()
+
+                # Give scheduler time to poll
+                time.sleep(0.3)
+
+                # Must NOT bootstrap when a run is already in progress
+                mock_delta.assert_not_called()
+
+            finally:
+                dependency_map_service.stop_scheduler()
+
+
 class TestConcurrencyProtection:
     """Test concurrency protection between delta and full analysis (AC7)."""
 

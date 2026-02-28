@@ -131,7 +131,8 @@ class DependencyMapService:
             try:
                 _tracked_job_id = job_id or f"dep-map-full-{uuid.uuid4().hex[:8]}"
                 self._job_tracker.register_job(
-                    _tracked_job_id, "dependency_map_full", username="system"
+                    _tracked_job_id, "dependency_map_full", username="system",
+                    repo_alias="server",
                 )
                 self._job_tracker.update_status(_tracked_job_id, status="running")
             except Exception as tracker_err:
@@ -969,6 +970,15 @@ class DependencyMapService:
                         logger.info("Scheduled delta refresh triggered")
                         self.run_delta_analysis()
 
+                else:
+                    # Bug #326: Bootstrap first scheduled run when next_run is NULL.
+                    # next_run is only set after a successful analysis completes,
+                    # so on fresh init the scheduler would never trigger without this.
+                    status = tracking.get("status")
+                    if status != "running":
+                        logger.info("Bootstrap: triggering first scheduled delta refresh (no next_run set)")
+                        self.run_delta_analysis()
+
             except Exception as e:
                 logger.error(f"Error in dependency map scheduler loop: {e}", exc_info=True)
 
@@ -1521,7 +1531,8 @@ class DependencyMapService:
             try:
                 _tracked_job_id = job_id or f"dep-map-delta-{uuid.uuid4().hex[:8]}"
                 self._job_tracker.register_job(
-                    _tracked_job_id, "dependency_map_delta", username="system"
+                    _tracked_job_id, "dependency_map_delta", username="system",
+                    repo_alias="server",
                 )
                 self._job_tracker.update_status(_tracked_job_id, status="running")
             except Exception as tracker_err:
