@@ -16,7 +16,8 @@ Key principles:
 """
 
 import logging
-from typing import Any, List, Protocol, Set, runtime_checkable
+import time
+from typing import Any, List, Optional, Protocol, Set, runtime_checkable
 
 from .constants import CIDX_META_REPO, DEFAULT_GROUP_ADMINS
 from .group_access_manager import GroupAccessManager
@@ -46,6 +47,9 @@ class AccessFilteringService:
     # Special group name that has full access to all repos
     ADMIN_GROUP_NAME = DEFAULT_GROUP_ADMINS
 
+    # Bug #338: TTL for _get_all_repo_aliases() cache (seconds)
+    REPO_ALIASES_CACHE_TTL = 60
+
     def __init__(self, group_access_manager: GroupAccessManager):
         """
         Initialize the AccessFilteringService.
@@ -54,6 +58,11 @@ class AccessFilteringService:
             group_access_manager: Manager for group and access data
         """
         self.group_manager = group_access_manager
+        # Bug #338: TTL cache for _get_all_repo_aliases()
+        self._repo_aliases_cache: Optional[Set[str]] = None
+        self._repo_aliases_cache_time: float = 0.0
+        # Bug #338: Register automatic cache invalidation on any repo access change
+        group_access_manager.register_on_repo_change(self.invalidate_repo_aliases_cache)
 
     def get_accessible_repos(self, user_id: str) -> Set[str]:
         """
@@ -226,13 +235,39 @@ class AccessFilteringService:
         Collects repo aliases granted to every group. Used to distinguish
         repo-description .md files from general .md files (e.g. README.md).
 
+        Bug #338: Result is cached with REPO_ALIASES_CACHE_TTL (default 60s)
+        to avoid N+1 DB queries on every filter_cidx_meta_files() call.
+        Use invalidate_repo_aliases_cache() to force a fresh query when
+        group-repo assignments change.
+
         Returns:
             Set of all repo alias strings across all groups.
         """
+        now = time.monotonic()
+        if (
+            self._repo_aliases_cache is not None
+            and (now - self._repo_aliases_cache_time) < self.REPO_ALIASES_CACHE_TTL
+        ):
+            return self._repo_aliases_cache
+
         all_aliases: Set[str] = set()
         for grp in self.group_manager.get_all_groups():
             all_aliases.update(self.group_manager.get_group_repos(grp.id))
+
+        self._repo_aliases_cache = all_aliases
+        self._repo_aliases_cache_time = now
         return all_aliases
+
+    def invalidate_repo_aliases_cache(self) -> None:
+        """
+        Invalidate the _get_all_repo_aliases() TTL cache.
+
+        Bug #338: Call this method after any group-repo assignment change
+        (grant or revoke) so the next call to filter_cidx_meta_files()
+        reflects the updated state immediately rather than waiting for TTL.
+        """
+        self._repo_aliases_cache = None
+        self._repo_aliases_cache_time = 0.0
 
     def filter_cidx_meta_files(self, files: List[str], user_id: str) -> List[str]:
         """

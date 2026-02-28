@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.71] - 2026-02-28
+
+### Security
+
+- Bug #337: regex_search on cidx-meta now filters unauthorized repo description content. Non-admin users only see regex matches from repo files they have access to. Admin users retain full access.
+
+### Performance
+
+- Bug #338: _get_all_repo_aliases() results cached with 60s TTL. Cache auto-invalidated via observer callback in GroupAccessManager when repos are granted/revoked from groups. Eliminates N+1 DB queries on every cidx-meta file access.
+
 ## [9.3.70] - 2026-02-28
 
 ### Security

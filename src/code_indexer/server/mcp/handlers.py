@@ -3566,11 +3566,24 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
         # Story #50: Truncation functions are now sync
         matches = _apply_regex_payload_truncation(matches)
 
+        # Bug #337: Filter cidx-meta regex_search results to only show
+        # matches from repo files the user is authorized to access.
+        if repository_alias and "cidx-meta" in repository_alias:
+            access_svc = _get_access_filtering_service()
+            if access_svc:
+                filenames = [Path(m["file_path"]).name for m in matches]
+                allowed = set(
+                    access_svc.filter_cidx_meta_files(filenames, user.username)
+                )
+                matches = [
+                    m for m in matches if Path(m["file_path"]).name in allowed
+                ]
+
         return _mcp_response(
             {
                 "success": True,
                 "matches": matches,
-                "total_matches": result.total_matches,
+                "total_matches": len(matches),
                 "truncated": result.truncated,
                 "search_engine": result.search_engine,
                 "search_time_ms": result.search_time_ms,
