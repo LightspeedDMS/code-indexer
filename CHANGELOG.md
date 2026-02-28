@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.68] - 2026-02-27
+
+### Fixed
+
+- regex_search fails with KeyError 'text' when ripgrep returns binary/non-UTF8 context lines (Bug #320). Added `_extract_line_text()` helper to handle both `text` and `bytes` (base64-encoded) formats in ripgrep JSON output at all three vulnerable locations: path extraction, match lines, and context lines.
+- Dashboard Recent Jobs sort order now shows running/pending jobs above completed jobs regardless of timestamps (Story #328). Added `_status_priority_sort_key()` function that sorts by status priority (running > pending > completed), then by most-recently-active timestamp within each group.
+
 ## [9.3.67] - 2026-02-27
 
 ### Fixed

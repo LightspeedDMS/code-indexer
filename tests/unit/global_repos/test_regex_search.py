@@ -1325,6 +1325,181 @@ class TestRipgrepInternalDirectoryExclusion:
             assert "30 seconds" in error_msg, "TimeoutError must include timeout duration"
 
 
+class TestParseRipgrepJsonOutputBytesFormat:
+    """Test _parse_ripgrep_json_output handles ripgrep 'bytes' format (Bug #320).
+
+    Ripgrep uses two formats for line content in JSON output:
+    - {"text": "..."} for valid UTF-8 content
+    - {"bytes": "..."} for binary/non-UTF8 content (base64-encoded)
+
+    Prior to the fix, KeyError: 'text' was raised when searching repos
+    with binary or non-UTF8 files.
+    """
+
+    @pytest.fixture
+    def ripgrep_service(self, test_repo):
+        """Create service with ripgrep engine."""
+        with patch("code_indexer.global_repos.regex_search.shutil.which") as mock_which:
+            mock_which.return_value = "/usr/bin/rg"
+            yield RegexSearchService(test_repo)
+
+    # --- _extract_line_text helper tests ---
+
+    def test_extract_line_text_text_format(self, ripgrep_service):
+        """_extract_line_text returns stripped text when 'text' key is present."""
+        result = ripgrep_service._extract_line_text({"text": "hello world\n"})
+        assert result == "hello world"
+
+    def test_extract_line_text_bytes_format(self, ripgrep_service):
+        """_extract_line_text decodes base64 when 'bytes' key is present."""
+        import base64
+        encoded = base64.b64encode(b"binary content\n").decode("ascii")
+        result = ripgrep_service._extract_line_text({"bytes": encoded})
+        assert result == "binary content"
+
+    def test_extract_line_text_bytes_non_utf8(self, ripgrep_service):
+        """_extract_line_text handles non-UTF8 bytes with replacement characters."""
+        import base64
+        # Latin-1 byte that is invalid UTF-8 in strict mode
+        raw = b"caf\xe9\n"
+        encoded = base64.b64encode(raw).decode("ascii")
+        result = ripgrep_service._extract_line_text({"bytes": encoded})
+        # Should not raise; replacement character used for invalid bytes
+        assert isinstance(result, str)
+        assert "\n" not in result
+
+    def test_extract_line_text_empty_dict(self, ripgrep_service):
+        """_extract_line_text returns empty string when dict has neither key."""
+        result = ripgrep_service._extract_line_text({})
+        assert result == ""
+
+    def test_extract_line_text_text_no_newline(self, ripgrep_service):
+        """_extract_line_text handles text without trailing newline."""
+        result = ripgrep_service._extract_line_text({"text": "no newline here"})
+        assert result == "no newline here"
+
+    # --- _parse_ripgrep_json_output match-line bytes format ---
+
+    def test_match_line_with_bytes_format_does_not_raise(self, ripgrep_service, test_repo):
+        """Match line using 'bytes' format must not raise KeyError: 'text' (Bug #320)."""
+        import base64
+        encoded = base64.b64encode(b"binary match line\n").decode("ascii")
+        rg_output = json.dumps({
+            "type": "match",
+            "data": {
+                "path": {"text": str(test_repo / "binary.bin")},
+                "line_number": 5,
+                "lines": {"bytes": encoded},
+                "submatches": [{"start": 0, "end": 6}],
+            },
+        }) + "\n"
+
+        # Must not raise KeyError: 'text'
+        matches, total = ripgrep_service._parse_ripgrep_json_output(rg_output, 100, 0)
+        assert total == 1
+        assert len(matches) == 1
+        assert matches[0].line_number == 5
+        assert matches[0].line_content == "binary match line"
+
+    def test_match_line_with_text_format_still_works(self, ripgrep_service, test_repo):
+        """Match line using 'text' format must still work after fix (regression)."""
+        rg_output = json.dumps({
+            "type": "match",
+            "data": {
+                "path": {"text": str(test_repo / "main.py")},
+                "line_number": 1,
+                "lines": {"text": "def func():\n"},
+                "submatches": [{"start": 0, "end": 3}],
+            },
+        }) + "\n"
+
+        matches, total = ripgrep_service._parse_ripgrep_json_output(rg_output, 100, 0)
+        assert total == 1
+        assert len(matches) == 1
+        assert matches[0].line_content == "def func():"
+
+    # --- _parse_ripgrep_json_output context-line bytes format ---
+
+    def test_context_line_with_bytes_format_does_not_raise(self, ripgrep_service, test_repo):
+        """Context line using 'bytes' format must not raise KeyError: 'text' (Bug #320)."""
+        import base64
+        match_line = json.dumps({
+            "type": "match",
+            "data": {
+                "path": {"text": str(test_repo / "binary.bin")},
+                "line_number": 5,
+                "lines": {"text": "match line\n"},
+                "submatches": [{"start": 0, "end": 5}],
+            },
+        })
+        encoded_ctx = base64.b64encode(b"binary context line\n").decode("ascii")
+        context_line = json.dumps({
+            "type": "context",
+            "data": {
+                "path": {"text": str(test_repo / "binary.bin")},
+                "line_number": 6,
+                "lines": {"bytes": encoded_ctx},
+            },
+        })
+        rg_output = match_line + "\n" + context_line + "\n"
+
+        # Must not raise KeyError: 'text'
+        matches, total = ripgrep_service._parse_ripgrep_json_output(rg_output, 100, 2)
+        assert total == 1
+        assert len(matches) == 1
+        assert matches[0].context_after == ["binary context line"]
+
+    def test_context_line_with_text_format_still_works(self, ripgrep_service, test_repo):
+        """Context line using 'text' format must still work after fix (regression)."""
+        match_line = json.dumps({
+            "type": "match",
+            "data": {
+                "path": {"text": str(test_repo / "main.py")},
+                "line_number": 3,
+                "lines": {"text": "MATCH\n"},
+                "submatches": [{"start": 0, "end": 5}],
+            },
+        })
+        context_line = json.dumps({
+            "type": "context",
+            "data": {
+                "path": {"text": str(test_repo / "main.py")},
+                "line_number": 4,
+                "lines": {"text": "    pass\n"},
+            },
+        })
+        rg_output = match_line + "\n" + context_line + "\n"
+
+        matches, total = ripgrep_service._parse_ripgrep_json_output(rg_output, 100, 1)
+        assert total == 1
+        assert len(matches) == 1
+        assert matches[0].context_after == ["    pass"]
+
+    # --- path bytes format ---
+
+    def test_path_with_bytes_format(self, ripgrep_service, test_repo):
+        """Path field using 'bytes' format must be handled (not crash)."""
+        import base64
+        encoded_path = base64.b64encode(
+            str(test_repo / "binary.bin").encode()
+        ).decode("ascii")
+        rg_output = json.dumps({
+            "type": "match",
+            "data": {
+                "path": {"bytes": encoded_path},
+                "line_number": 1,
+                "lines": {"text": "content\n"},
+                "submatches": [{"start": 0, "end": 7}],
+            },
+        }) + "\n"
+
+        # Must not raise; result should have a non-empty file path
+        matches, total = ripgrep_service._parse_ripgrep_json_output(rg_output, 100, 0)
+        assert total == 1
+        assert len(matches) == 1
+        assert matches[0].file_path  # Must be a non-empty string
+
+
 class TestGrepInternalDirectoryExclusion:
     """Test that grep always excludes CIDX internal directories (Bug #158)."""
 
