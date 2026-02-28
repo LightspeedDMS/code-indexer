@@ -172,7 +172,7 @@ class LangfuseTraceSyncService:
             try:
                 tracked_job_id = f"langfuse-sync-{uuid.uuid4().hex[:8]}"
                 self._job_tracker.register_job(
-                    tracked_job_id, "langfuse_sync", username="system"
+                    tracked_job_id, "langfuse_sync", username="system", repo_alias="server"
                 )
                 self._job_tracker.update_status(tracked_job_id, status="running")
             except Exception as e:

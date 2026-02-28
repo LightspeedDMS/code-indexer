@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.65] - 2026-02-27
+
+### Fixed
+
+- Dashboard "Unknown" repository for server-wide operations (langfuse_sync, startup_reconcile, index_cleanup) now shows "server" instead. Added `repo_alias="server"` to job registration calls.
+- Dashboard null duration for index_cleanup jobs. Added missing `update_status(status="running")` call after job registration so `started_at` timestamp is set.
+
 ## [9.3.64] - 2026-02-27
 
 ### Added
