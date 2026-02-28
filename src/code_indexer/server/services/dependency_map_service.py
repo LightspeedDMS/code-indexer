@@ -16,9 +16,9 @@ Deferred to future refactoring to avoid disrupting Story #193 acceptance criteri
 
 import json
 import logging
+import os
 import re
 import shutil
-import subprocess
 import threading
 import time
 import uuid
@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from .activity_journal_service import ActivityJournalService
 from .constants import CIDX_META_REPO
 
 logger = logging.getLogger(__name__)
@@ -68,12 +69,22 @@ class DependencyMapService:
         self._tracking_backend = tracking_backend
         self._analyzer = analyzer
         self._lock = threading.Lock()
-        self._refresh_scheduler = refresh_scheduler  # Story #227: write-lock coordination
+        self._refresh_scheduler = (
+            refresh_scheduler  # Story #227: write-lock coordination
+        )
         self._job_tracker = job_tracker  # Story #312: unified job tracking (Epic #261)
+        self._activity_journal = (
+            ActivityJournalService()
+        )  # Story #329: activity journal
 
         # Story #193: Scheduler daemon thread state
         self._daemon_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+
+    @property
+    def activity_journal(self) -> ActivityJournalService:
+        """Return the ActivityJournalService instance (Story #329)."""
+        return self._activity_journal  # type: ignore[no-any-return]
 
     def is_available(self) -> bool:
         """
@@ -118,11 +129,14 @@ class DependencyMapService:
         if self._job_tracker is not None:
             try:
                 from .job_tracker import DuplicateJobError
+
                 self._job_tracker.check_operation_conflict("dependency_map_full")
             except DuplicateJobError:
                 raise  # AC6: Propagate conflict to caller
             except Exception as tracker_err:
-                logger.warning(f"JobTracker conflict check failed (non-fatal): {tracker_err}")
+                logger.warning(
+                    f"JobTracker conflict check failed (non-fatal): {tracker_err}"
+                )
 
         # Story #312: Register job with JobTracker (AC2, AC7).
         # All tracker calls defensive: failure never breaks analysis.
@@ -131,12 +145,16 @@ class DependencyMapService:
             try:
                 _tracked_job_id = job_id or f"dep-map-full-{uuid.uuid4().hex[:8]}"
                 self._job_tracker.register_job(
-                    _tracked_job_id, "dependency_map_full", username="system",
+                    _tracked_job_id,
+                    "dependency_map_full",
+                    username="system",
                     repo_alias="server",
                 )
                 self._job_tracker.update_status(_tracked_job_id, status="running")
             except Exception as tracker_err:
-                logger.warning(f"JobTracker registration failed (non-fatal): {tracker_err}")
+                logger.warning(
+                    f"JobTracker registration failed (non-fatal): {tracker_err}"
+                )
                 _tracked_job_id = None
 
         # Non-blocking lock acquire (AC7: Concurrency Protection)
@@ -145,7 +163,8 @@ class DependencyMapService:
             if _tracked_job_id is not None and self._job_tracker is not None:
                 try:
                     self._job_tracker.fail_job(
-                        _tracked_job_id, error="Analysis already in progress (lock held)"
+                        _tracked_job_id,
+                        error="Analysis already in progress (lock held)",
                     )
                 except Exception as tracker_err:
                     logger.warning(
@@ -156,7 +175,9 @@ class DependencyMapService:
         # Story #227: Acquire write lock so RefreshScheduler skips CoW clone during writes.
         _write_lock_acquired = False
         if self._refresh_scheduler is not None:
-            _write_lock_acquired = self._refresh_scheduler.acquire_write_lock("cidx-meta", owner_name="dependency_map_service")
+            _write_lock_acquired = self._refresh_scheduler.acquire_write_lock(
+                "cidx-meta", owner_name="dependency_map_service"
+            )
 
         _analysis_succeeded = False
         try:
@@ -181,6 +202,14 @@ class DependencyMapService:
                 setup_result["repo_list"],
             )
 
+            # Story #329: Initialize activity journal for this analysis run
+            journal_path = None
+            try:
+                journal_path = self._activity_journal.init(paths["staging_dir"])
+                self._activity_journal.log("Starting full analysis")
+            except Exception as e:
+                logger.debug(f"Non-fatal journal init error: {e}")
+
             # Update tracking to running
             self._tracking_backend.update_tracking(
                 status="running", last_run=datetime.now(timezone.utc).isoformat()
@@ -190,27 +219,52 @@ class DependencyMapService:
             if _tracked_job_id is not None and self._job_tracker is not None:
                 try:
                     self._job_tracker.update_status(
-                        _tracked_job_id, progress=20, progress_info="Executing analysis passes"
+                        _tracked_job_id,
+                        progress=20,
+                        progress_info="Executing analysis passes",
                     )
                 except Exception as e:
-                    logger.debug(f"Non-fatal: Failed to update progress (analysis passes): {e}")
+                    logger.debug(
+                        f"Non-fatal: Failed to update progress (analysis passes): {e}"
+                    )
+            try:
+                self._activity_journal.log("Executing analysis passes")
+            except Exception as e:
+                logger.debug(f"Non-fatal journal log error: {e}")
 
             # Execute analysis passes
-            domain_list, errors, pass1_duration_s, pass2_duration_s = self._execute_analysis_passes(
-                config, paths, repo_list
+            domain_list, errors, pass1_duration_s, pass2_duration_s = (
+                self._execute_analysis_passes(
+                    config, paths, repo_list, journal_path=journal_path
+                )
             )
 
             # Story #312 AC5: Progress update during finalization
             if _tracked_job_id is not None and self._job_tracker is not None:
                 try:
                     self._job_tracker.update_status(
-                        _tracked_job_id, progress=80, progress_info="Finalizing analysis"
+                        _tracked_job_id,
+                        progress=80,
+                        progress_info="Finalizing analysis",
                     )
                 except Exception as e:
-                    logger.debug(f"Non-fatal: Failed to update progress (finalization): {e}")
+                    logger.debug(
+                        f"Non-fatal: Failed to update progress (finalization): {e}"
+                    )
+            try:
+                self._activity_journal.log("Finalizing analysis")
+            except Exception as e:
+                logger.debug(f"Non-fatal journal log error: {e}")
 
             # Finalize and cleanup
-            self._finalize_analysis(config, paths, repo_list, domain_list, pass1_duration_s, pass2_duration_s)
+            self._finalize_analysis(
+                config,
+                paths,
+                repo_list,
+                domain_list,
+                pass1_duration_s,
+                pass2_duration_s,
+            )
 
             _analysis_succeeded = True
             return {
@@ -230,7 +284,9 @@ class DependencyMapService:
                     self._job_tracker.fail_job(_tracked_job_id, error=str(e))
                     _tracked_job_id = None  # Prevent double-call in finally
                 except Exception as tracker_err:
-                    logger.warning(f"JobTracker fail_job failed (non-fatal): {tracker_err}")
+                    logger.warning(
+                        f"JobTracker fail_job failed (non-fatal): {tracker_err}"
+                    )
             raise
         finally:
             # Cleanup CLAUDE.md (paths may not be defined if exception occurred early)
@@ -249,15 +305,23 @@ class DependencyMapService:
             self._lock.release()
 
             # Story #312: Complete job in tracker on success (AC7). Defensive - never re-raises.
-            if _analysis_succeeded and _tracked_job_id is not None and self._job_tracker is not None:
+            if (
+                _analysis_succeeded
+                and _tracked_job_id is not None
+                and self._job_tracker is not None
+            ):
                 try:
                     self._job_tracker.complete_job(_tracked_job_id)
                 except Exception as tracker_err:
-                    logger.warning(f"JobTracker complete_job failed (non-fatal): {tracker_err}")
+                    logger.warning(
+                        f"JobTracker complete_job failed (non-fatal): {tracker_err}"
+                    )
 
             # Story #227: Release write lock so RefreshScheduler can proceed.
             if _write_lock_acquired and self._refresh_scheduler is not None:
-                self._refresh_scheduler.release_write_lock("cidx-meta", owner_name="dependency_map_service")
+                self._refresh_scheduler.release_write_lock(
+                    "cidx-meta", owner_name="dependency_map_service"
+                )
 
             # Story #227: Trigger explicit refresh after lock released (only on success).
             # AC2: Writer triggers refresh so RefreshScheduler captures complete data.
@@ -284,14 +348,14 @@ class DependencyMapService:
         # Get repo list and paths
         golden_repos_root = self._golden_repos_manager.golden_repos_dir
         cidx_meta_path = Path(golden_repos_root) / "cidx-meta"  # WRITE path (live)
-        cidx_meta_read_path = self._get_cidx_meta_read_path()    # READ path (versioned)
+        cidx_meta_read_path = self._get_cidx_meta_read_path()  # READ path (versioned)
         staging_dir = cidx_meta_path / "dependency-map.staging"
         final_dir = cidx_meta_path / "dependency-map"
 
         paths = {
             "golden_repos_root": Path(golden_repos_root),
-            "cidx_meta_path": cidx_meta_path,           # WRITE: used for staging/final dirs
-            "cidx_meta_read_path": cidx_meta_read_path, # READ: versioned .versioned/cidx-meta/v_*/
+            "cidx_meta_path": cidx_meta_path,  # WRITE: used for staging/final dirs
+            "cidx_meta_read_path": cidx_meta_read_path,  # READ: versioned .versioned/cidx-meta/v_*/
             "staging_dir": staging_dir,
             "final_dir": final_dir,
         }
@@ -316,7 +380,11 @@ class DependencyMapService:
         }
 
     def _execute_analysis_passes(
-        self, config, paths: Dict[str, Path], repo_list: List[Dict[str, Any]]
+        self,
+        config,
+        paths: Dict[str, Path],
+        repo_list: List[Dict[str, Any]],
+        journal_path: Optional[Path] = None,
     ) -> Tuple[List[Dict[str, Any]], List[str], float, float]:
         """
         Execute the three-pass analysis pipeline with journal-based resumability.
@@ -325,13 +393,14 @@ class DependencyMapService:
             config: Claude integration config
             paths: Dict with staging_dir, final_dir, cidx_meta_path, golden_repos_root
             repo_list: List of repository metadata
+            journal_path: Optional path to activity journal file (Story #329)
 
         Returns:
             Tuple of (domain_list, errors, pass1_duration_s, pass2_duration_s)
         """
         staging_dir = paths["staging_dir"]
         final_dir = paths["final_dir"]
-        cidx_meta_path = paths["cidx_meta_path"]
+        _cidx_meta_path = paths["cidx_meta_path"]  # noqa: F841
         cidx_meta_read_path = paths["cidx_meta_read_path"]  # READ: versioned path
 
         # Check for resumable journal (Iteration 15)
@@ -346,7 +415,10 @@ class DependencyMapService:
                 "pipeline_id": f"dep-map-{int(datetime.now(timezone.utc).timestamp())}",
                 "started_at": datetime.now(timezone.utc).isoformat(),
                 "repo_sizes": {
-                    r["alias"]: {"file_count": r.get("file_count", 0), "total_bytes": r.get("total_bytes", 0)}
+                    r["alias"]: {
+                        "file_count": r.get("file_count", 0),
+                        "total_bytes": r.get("total_bytes", 0),
+                    }
                     for r in repo_list
                 },
                 "pass1": {"status": "pending"},
@@ -364,7 +436,10 @@ class DependencyMapService:
         if journal.get("pass1", {}).get("status") != "completed":
             # Read repo descriptions from cidx-meta (Fix 8: filter stale repos)
             active_aliases = {r.get("alias") for r in repo_list}
-            repo_descriptions = self._read_repo_descriptions(cidx_meta_read_path, active_aliases=active_aliases)
+            repo_descriptions = self._read_repo_descriptions(
+                cidx_meta_read_path,
+                active_aliases=active_aliases,  # type: ignore[arg-type]
+            )
 
             pass1_start = time.time()
             domain_list = self._analyzer.run_pass_1_synthesis(
@@ -392,7 +467,9 @@ class DependencyMapService:
                     f"Cannot resume: {domains_file} not found despite pass1 completed"
                 )
             domain_list = json.loads(domains_file.read_text())
-            logger.info(f"Pass 1 already completed ({journal['pass1']['domains_count']} domains), skipping")
+            logger.info(
+                f"Pass 1 already completed ({journal['pass1']['domains_count']} domains), skipping"
+            )
 
         # Pass 2: Per-domain (skip completed domains)
         errors = []
@@ -413,6 +490,7 @@ class DependencyMapService:
                     repo_list=repo_list,
                     max_turns=config.dependency_map_pass2_max_turns,
                     previous_domain_dir=final_dir if final_dir.exists() else None,
+                    journal_path=journal_path,
                 )
                 # Read output size
                 domain_file = staging_dir / f"{domain_name}.md"
@@ -465,8 +543,8 @@ class DependencyMapService:
         """
         staging_dir = paths["staging_dir"]
         final_dir = paths["final_dir"]
-        cidx_meta_path = paths["cidx_meta_path"]
-        golden_repos_root = paths["golden_repos_root"]
+        _cidx_meta_path = paths["cidx_meta_path"]  # noqa: F841
+        _golden_repos_root = paths["golden_repos_root"]  # noqa: F841
 
         # AC4 (Story #216): Reconcile ghost domains before generating index
         domain_list = self._analyzer._reconcile_domains_json(staging_dir, domain_list)
@@ -485,7 +563,8 @@ class DependencyMapService:
         # Update tracking (AC6: Configuration and Tracking)
         commit_hashes = self._get_commit_hashes(repo_list)
         next_run = (
-            datetime.now(timezone.utc) + timedelta(hours=config.dependency_map_interval_hours)
+            datetime.now(timezone.utc)
+            + timedelta(hours=config.dependency_map_interval_hours)
         ).isoformat()
         self._tracking_backend.update_tracking(
             status="completed",
@@ -495,7 +574,9 @@ class DependencyMapService:
         )
 
         # AC9 (Story #216): Record run metrics to run_history table
-        self._record_run_metrics(final_dir, domain_list, repo_list, pass1_duration_s, pass2_duration_s)
+        self._record_run_metrics(
+            final_dir, domain_list, repo_list, pass1_duration_s, pass2_duration_s
+        )
 
     def _stage_then_swap(self, staging_dir: Path, final_dir: Path) -> None:
         """
@@ -566,11 +647,18 @@ class DependencyMapService:
                 # (pipe-delimited rows that aren't headers or separators)
                 in_cross_domain = False
                 for line in content.splitlines():
-                    if "Cross-Domain Dependencies" in line or "Cross-Domain Dependency Graph" in line:
+                    if (
+                        "Cross-Domain Dependencies" in line
+                        or "Cross-Domain Dependency Graph" in line
+                    ):
                         in_cross_domain = True
                         continue
                     if in_cross_domain:
-                        if line.startswith("| ") and not line.startswith("|---") and not line.startswith("| Source"):
+                        if (
+                            line.startswith("| ")
+                            and not line.startswith("|---")
+                            and not line.startswith("| Source")
+                        ):
                             edge_count += 1
                         elif line.startswith("#"):
                             break
@@ -594,7 +682,9 @@ class DependencyMapService:
                     f"{len(repo_list)} repos, {total_chars} chars"
                 )
             else:
-                logger.debug("Tracking backend does not support record_run_metrics, skipping")
+                logger.debug(
+                    "Tracking backend does not support record_run_metrics, skipping"
+                )
 
         except Exception as e:
             logger.warning(f"Failed to record run metrics: {e}")
@@ -641,7 +731,7 @@ class DependencyMapService:
         Returns:
             Absolute path string to the golden repos directory
         """
-        return self._golden_repos_manager.golden_repos_dir
+        return self._golden_repos_manager.golden_repos_dir  # type: ignore[no-any-return]
 
     def _get_cidx_meta_read_path(self) -> Path:
         """
@@ -672,17 +762,18 @@ class DependencyMapService:
         if versioned_base.exists():
             try:
                 version_dirs = sorted(
-                    [d for d in versioned_base.iterdir()
-                     if d.name.startswith("v_") and d.is_dir()],
+                    [
+                        d
+                        for d in versioned_base.iterdir()
+                        if d.name.startswith("v_") and d.is_dir()
+                    ],
                     key=lambda d: d.name,
                     reverse=True,
                 )
                 if version_dirs:
                     return version_dirs[0]
             except OSError as e:
-                logger.warning(
-                    "Failed to list versioned cidx-meta dirs: %s", e
-                )
+                logger.warning("Failed to list versioned cidx-meta dirs: %s", e)
 
         # Fallback: try get_actual_repo_path (handles non-versioned repos)
         try:
@@ -760,7 +851,11 @@ class DependencyMapService:
                         if line.strip() == "---":
                             in_frontmatter = not in_frontmatter
                             continue
-                        if not in_frontmatter and line.strip() and not line.strip().startswith('#'):
+                        if (
+                            not in_frontmatter
+                            and line.strip()
+                            and not line.strip().startswith("#")
+                        ):
                             description_summary = line.strip()
                             break
                 except Exception as e:
@@ -781,9 +876,11 @@ class DependencyMapService:
         journal_path = staging_dir / "_journal.json"
         if journal_path.exists():
             try:
-                return json.loads(journal_path.read_text())
+                return json.loads(journal_path.read_text())  # type: ignore[no-any-return]
             except (json.JSONDecodeError, OSError) as e:
-                logger.warning(f"Corrupted journal at {journal_path}, starting fresh: {e}")
+                logger.warning(
+                    f"Corrupted journal at {journal_path}, starting fresh: {e}"
+                )
                 return None
         return None
 
@@ -794,7 +891,9 @@ class DependencyMapService:
         tmp_path.write_text(json.dumps(journal, indent=2))
         tmp_path.rename(journal_path)
 
-    def _should_resume(self, staging_dir: Path, repo_list: List[Dict[str, Any]]) -> Optional[Dict]:
+    def _should_resume(
+        self, staging_dir: Path, repo_list: List[Dict[str, Any]]
+    ) -> Optional[Dict]:
         """
         Check if a previous run can be resumed.
 
@@ -809,7 +908,9 @@ class DependencyMapService:
 
         # Check if repo set changed
         current_sizes = {r["alias"]: r.get("total_bytes", 0) for r in repo_list}
-        journal_sizes = {k: v.get("total_bytes", 0) for k, v in journal.get("repo_sizes", {}).items()}
+        journal_sizes = {
+            k: v.get("total_bytes", 0) for k, v in journal.get("repo_sizes", {}).items()
+        }
 
         if set(current_sizes.keys()) != set(journal_sizes.keys()):
             logger.info("Journal found but repo set changed — starting fresh")
@@ -820,16 +921,25 @@ class DependencyMapService:
             journal_bytes = journal_sizes.get(alias, 0)
             # If either was zero and the other isn't, that's a significant change
             if (journal_bytes == 0) != (current_bytes == 0):
-                logger.info(f"Journal found but {alias} size changed from {journal_bytes} to {current_bytes} — starting fresh")
+                logger.info(
+                    f"Journal found but {alias} size changed from {journal_bytes} to {current_bytes} — starting fresh"
+                )
                 return None
-            if journal_bytes > 0 and abs(current_bytes - journal_bytes) / journal_bytes > 0.05:
+            if (
+                journal_bytes > 0
+                and abs(current_bytes - journal_bytes) / journal_bytes > 0.05
+            ):
                 logger.info(f"Journal found but {alias} size changed — starting fresh")
                 return None
 
-        logger.info(f"Resuming from journal: pass1={journal.get('pass1', {}).get('status')}")
+        logger.info(
+            f"Resuming from journal: pass1={journal.get('pass1', {}).get('status')}"
+        )
         return journal
 
-    def _enrich_repo_sizes(self, repo_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _enrich_repo_sizes(
+        self, repo_list: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         """
         Add file_count and total_bytes to each repo dict. Sort by total_bytes descending.
 
@@ -846,7 +956,11 @@ class DependencyMapService:
                 total_bytes = 0
                 for f in clone_path.rglob("*"):
                     # Exclude .git and .code-indexer directories
-                    if f.is_file() and ".git" not in f.parts and ".code-indexer" not in f.parts:
+                    if (
+                        f.is_file()
+                        and ".git" not in f.parts
+                        and ".code-indexer" not in f.parts
+                    ):
                         file_count += 1
                         try:
                             total_bytes += f.stat().st_size
@@ -925,9 +1039,7 @@ class DependencyMapService:
         """
         logger.info("Starting dependency map delta refresh scheduler")
         self._stop_event.clear()
-        self._daemon_thread = threading.Thread(
-            target=self._scheduler_loop, daemon=True
-        )
+        self._daemon_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
         self._daemon_thread.start()
 
     def stop_scheduler(self) -> None:
@@ -954,7 +1066,9 @@ class DependencyMapService:
                 # Check if enabled (config may change at runtime - AC6)
                 config = self._config_manager.get_claude_integration_config()
                 if not config or not config.dependency_map_enabled:
-                    logger.debug("Dependency map disabled, skipping scheduled delta refresh")
+                    logger.debug(
+                        "Dependency map disabled, skipping scheduled delta refresh"
+                    )
                     self._stop_event.wait(SCHEDULER_POLL_INTERVAL_SECONDS)
                     continue
 
@@ -976,11 +1090,15 @@ class DependencyMapService:
                     # so on fresh init the scheduler would never trigger without this.
                     status = tracking.get("status")
                     if status != "running":
-                        logger.info("Bootstrap: triggering first scheduled delta refresh (no next_run set)")
+                        logger.info(
+                            "Bootstrap: triggering first scheduled delta refresh (no next_run set)"
+                        )
                         self.run_delta_analysis()
 
             except Exception as e:
-                logger.error(f"Error in dependency map scheduler loop: {e}", exc_info=True)
+                logger.error(
+                    f"Error in dependency map scheduler loop: {e}", exc_info=True
+                )
 
             # Sleep 60 seconds between checks
             self._stop_event.wait(SCHEDULER_POLL_INTERVAL_SECONDS)
@@ -1009,7 +1127,9 @@ class DependencyMapService:
             try:
                 stored_hashes = json.loads(stored_hashes_json)
             except json.JSONDecodeError:
-                logger.warning("Failed to parse stored commit hashes, treating as empty")
+                logger.warning(
+                    "Failed to parse stored commit hashes, treating as empty"
+                )
                 stored_hashes = {}
 
         # Get current repos
@@ -1144,7 +1264,7 @@ class DependencyMapService:
         # | repo1 | authentication |
         # | repo2 | authentication, data-processing |
 
-        repo_to_domains = {}
+        repo_to_domains: dict[str, list[str]] = {}
 
         # Find table section
         table_match = re.search(
@@ -1223,7 +1343,9 @@ class DependencyMapService:
             return f"---\n{new_frontmatter}\n---\n\n{new_body}"
         else:
             # No frontmatter found, create minimal one
-            return f"---\ndomain: {domain_name}\nlast_analyzed: {now}\n---\n\n{new_body}"
+            return (
+                f"---\ndomain: {domain_name}\nlast_analyzed: {now}\n---\n\n{new_body}"
+            )
 
     def _update_domain_file(
         self,
@@ -1259,7 +1381,7 @@ class DependencyMapService:
         source_file = read_file if read_file is not None else domain_file
         existing_content = source_file.read_text()
 
-        # Build delta merge prompt
+        # Build delta merge prompt (Story #329: pass journal_path for activity journal appendix)
         merge_prompt = self._analyzer.build_delta_merge_prompt(
             domain_name=domain_name,
             existing_content=existing_content,
@@ -1267,6 +1389,7 @@ class DependencyMapService:
             new_repos=new_repos,
             removed_repos=removed_repos,
             domain_list=domain_list,
+            journal_path=self._activity_journal.journal_path,
         )
 
         # Invoke Claude CLI via public method (Code Review H1: proper encapsulation)
@@ -1280,7 +1403,9 @@ class DependencyMapService:
         # overwriting full domain documentation.
         # Strip frontmatter from existing content to measure meaningful body length.
         frontmatter_split = existing_content.split("---\n\n", 1)
-        existing_body = frontmatter_split[-1] if len(frontmatter_split) > 1 else existing_content
+        existing_body = (
+            frontmatter_split[-1] if len(frontmatter_split) > 1 else existing_content
+        )
         existing_body_len = len(existing_body)
 
         if existing_body_len > 500 and len(result) < int(existing_body_len * 0.5):
@@ -1331,10 +1456,15 @@ class DependencyMapService:
         # Claude needs the complete domain landscape, not just affected domains
         # READ from versioned path: live path is empty after Story #224
         dependency_map_read_dir = self._get_cidx_meta_read_path() / "dependency-map"
-        domain_list = [
-            f.stem for f in dependency_map_read_dir.glob("*.md")
-            if not f.name.startswith("_")
-        ] if dependency_map_read_dir.exists() else []
+        domain_list = (
+            [
+                f.stem
+                for f in dependency_map_read_dir.glob("*.md")
+                if not f.name.startswith("_")
+            ]
+            if dependency_map_read_dir.exists()
+            else []
+        )
 
         # Code Review M4: Sort for deterministic processing order
         for domain_name in sorted(affected_domains):
@@ -1360,9 +1490,7 @@ class DependencyMapService:
                 )
             except Exception as e:
                 errors.append(f"Domain '{domain_name}': {e}")
-                logger.warning(
-                    f"Delta analysis failed for domain '{domain_name}': {e}"
-                )
+                logger.warning(f"Delta analysis failed for domain '{domain_name}': {e}")
 
         return errors
 
@@ -1394,7 +1522,12 @@ class DependencyMapService:
         """
         affected: Set[str] = set()
 
-        prompt = self._analyzer.build_domain_discovery_prompt(new_repos, existing_domains)
+        # Story #329: pass journal_path for activity journal appendix in prompt
+        prompt = self._analyzer.build_domain_discovery_prompt(
+            new_repos,
+            existing_domains,
+            journal_path=self._activity_journal.journal_path,
+        )
 
         try:
             result = self._analyzer.invoke_domain_discovery(
@@ -1402,26 +1535,37 @@ class DependencyMapService:
                 config.dependency_map_pass_timeout_seconds,
                 config.dependency_map_delta_max_turns,
             )
-            from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+            from code_indexer.global_repos.dependency_map_analyzer import (
+                DependencyMapAnalyzer,
+            )
+
             assignments = DependencyMapAnalyzer._extract_json(result)
         except Exception as e:
             logger.warning(f"Domain discovery failed for new repos: {e}")
             return affected, True
 
         if not isinstance(assignments, list):
-            logger.warning("Domain discovery returned non-list JSON, skipping assignment")
+            logger.warning(
+                "Domain discovery returned non-list JSON, skipping assignment"
+            )
             return affected, True
 
         # READ current _domains.json from versioned path (Story #224)
-        read_domains_file = self._get_cidx_meta_read_path() / "dependency-map" / "_domains.json"
+        read_domains_file = (
+            self._get_cidx_meta_read_path() / "dependency-map" / "_domains.json"
+        )
         if not read_domains_file.exists():
-            logger.info("_domains.json not found, starting with empty domain list for new repo assignment")
+            logger.info(
+                "_domains.json not found, starting with empty domain list for new repo assignment"
+            )
             domain_list = []
         else:
             try:
                 domain_list = json.loads(read_domains_file.read_text())
             except Exception as e:
-                logger.warning(f"Failed to read _domains.json for new repo assignment: {e}")
+                logger.warning(
+                    f"Failed to read _domains.json for new repo assignment: {e}"
+                )
                 return affected, True
 
         # Build alias-to-domain index for fast lookup
@@ -1475,9 +1619,7 @@ class DependencyMapService:
             logger.warning(f"Failed to write updated _domains.json: {e}")
             return affected, False
 
-    def _finalize_delta_tracking(
-        self, config, all_repos: List[Dict[str, Any]]
-    ) -> None:
+    def _finalize_delta_tracking(self, config, all_repos: List[Dict[str, Any]]) -> None:
         """
         Finalize delta analysis tracking updates (Story #193, AC8).
 
@@ -1498,7 +1640,9 @@ class DependencyMapService:
             error_message=None,
         )
 
-    def run_delta_analysis(self, job_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def run_delta_analysis(
+        self, job_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
         """
         Run delta analysis to refresh only affected domains (Story #193, AC1-8).
 
@@ -1518,11 +1662,14 @@ class DependencyMapService:
         if self._job_tracker is not None:
             try:
                 from .job_tracker import DuplicateJobError
+
                 self._job_tracker.check_operation_conflict("dependency_map_delta")
             except DuplicateJobError:
                 raise  # AC6: Propagate conflict to caller
             except Exception as tracker_err:
-                logger.warning(f"JobTracker conflict check failed (non-fatal): {tracker_err}")
+                logger.warning(
+                    f"JobTracker conflict check failed (non-fatal): {tracker_err}"
+                )
 
         # Story #312: Register job with JobTracker (AC3, AC7).
         # All tracker calls defensive: failure never breaks analysis.
@@ -1531,12 +1678,16 @@ class DependencyMapService:
             try:
                 _tracked_job_id = job_id or f"dep-map-delta-{uuid.uuid4().hex[:8]}"
                 self._job_tracker.register_job(
-                    _tracked_job_id, "dependency_map_delta", username="system",
+                    _tracked_job_id,
+                    "dependency_map_delta",
+                    username="system",
                     repo_alias="server",
                 )
                 self._job_tracker.update_status(_tracked_job_id, status="running")
             except Exception as tracker_err:
-                logger.warning(f"JobTracker registration failed (non-fatal): {tracker_err}")
+                logger.warning(
+                    f"JobTracker registration failed (non-fatal): {tracker_err}"
+                )
                 _tracked_job_id = None
 
         # Non-blocking lock acquire (AC7: Concurrency Protection)
@@ -1547,13 +1698,17 @@ class DependencyMapService:
                 try:
                     self._job_tracker.complete_job(_tracked_job_id)
                 except Exception as tracker_err:
-                    logger.warning(f"JobTracker complete_job (lock skip) failed (non-fatal): {tracker_err}")
+                    logger.warning(
+                        f"JobTracker complete_job (lock skip) failed (non-fatal): {tracker_err}"
+                    )
             return None
 
         # Story #227: Acquire write lock so RefreshScheduler skips CoW clone during writes.
         _write_lock_acquired = False
         if self._refresh_scheduler is not None:
-            _write_lock_acquired = self._refresh_scheduler.acquire_write_lock("cidx-meta", owner_name="dependency_map_service")
+            _write_lock_acquired = self._refresh_scheduler.acquire_write_lock(
+                "cidx-meta", owner_name="dependency_map_service"
+            )
 
         _delta_succeeded = False
         try:
@@ -1561,8 +1716,20 @@ class DependencyMapService:
             config = self._config_manager.get_claude_integration_config()
             if not config or not config.dependency_map_enabled:
                 logger.debug("Delta analysis skipped - dependency_map_enabled is False")
-                _delta_succeeded = True  # Story #312: Mark succeeded so finally completes the job
+                _delta_succeeded = (
+                    True  # Story #312: Mark succeeded so finally completes the job
+                )
                 return None
+
+            # Story #329: Initialize activity journal for this delta analysis run
+            try:
+                delta_journal_dir = Path(
+                    os.path.expanduser("~/.tmp/depmap-delta-journal/")
+                )
+                self._activity_journal.init(delta_journal_dir)
+                self._activity_journal.log("Starting delta analysis")
+            except Exception as e:
+                logger.debug(f"Non-fatal journal init error: {e}")
 
             # Story #312 AC5: Progress update before change detection
             if _tracked_job_id is not None and self._job_tracker is not None:
@@ -1571,7 +1738,13 @@ class DependencyMapService:
                         _tracked_job_id, progress=10, progress_info="Detecting changes"
                     )
                 except Exception as e:
-                    logger.debug(f"Non-fatal: Failed to update progress (detecting changes): {e}")
+                    logger.debug(
+                        f"Non-fatal: Failed to update progress (detecting changes): {e}"
+                    )
+            try:
+                self._activity_journal.log("Detecting changes")
+            except Exception as e:
+                logger.debug(f"Non-fatal journal log error: {e}")
 
             # Detect changes (AC2: Change Detection)
             changed_repos, new_repos, removed_repos = self.detect_changes()
@@ -1620,15 +1793,22 @@ class DependencyMapService:
             discovery_write_success = True
             if "__NEW_REPO_DISCOVERY__" in affected_domains:
                 affected_domains.remove("__NEW_REPO_DISCOVERY__")
-                existing_domains = [
-                    f.stem for f in dependency_map_read_dir.glob("*.md")
-                    if not f.name.startswith("_")
-                ] if dependency_map_read_dir.exists() else []
-                discovered, discovery_write_success = self._discover_and_assign_new_repos(
-                    new_repos=new_repos,
-                    existing_domains=existing_domains,
-                    dependency_map_dir=dependency_map_dir,
-                    config=config,
+                existing_domains = (
+                    [
+                        f.stem
+                        for f in dependency_map_read_dir.glob("*.md")
+                        if not f.name.startswith("_")
+                    ]
+                    if dependency_map_read_dir.exists()
+                    else []
+                )
+                discovered, discovery_write_success = (
+                    self._discover_and_assign_new_repos(
+                        new_repos=new_repos,
+                        existing_domains=existing_domains,
+                        dependency_map_dir=dependency_map_dir,
+                        config=config,
+                    )
                 )
                 affected_domains.update(discovered)
 
@@ -1640,10 +1820,18 @@ class DependencyMapService:
             if _tracked_job_id is not None and self._job_tracker is not None:
                 try:
                     self._job_tracker.update_status(
-                        _tracked_job_id, progress=40, progress_info="Updating affected domains"
+                        _tracked_job_id,
+                        progress=40,
+                        progress_info="Updating affected domains",
                     )
                 except Exception as e:
-                    logger.debug(f"Non-fatal: Failed to update progress (updating domains): {e}")
+                    logger.debug(
+                        f"Non-fatal: Failed to update progress (updating domains): {e}"
+                    )
+            try:
+                self._activity_journal.log("Updating affected domains")
+            except Exception as e:
+                logger.debug(f"Non-fatal journal log error: {e}")
 
             # Update affected domains (AC5: In-Place Updates)
             errors = self._update_affected_domains(
@@ -1659,10 +1847,14 @@ class DependencyMapService:
             if _tracked_job_id is not None and self._job_tracker is not None:
                 try:
                     self._job_tracker.update_status(
-                        _tracked_job_id, progress=80, progress_info="Finalizing delta analysis"
+                        _tracked_job_id,
+                        progress=80,
+                        progress_info="Finalizing delta analysis",
                     )
                 except Exception as e:
-                    logger.debug(f"Non-fatal: Failed to update progress (finalizing delta): {e}")
+                    logger.debug(
+                        f"Non-fatal: Failed to update progress (finalizing delta): {e}"
+                    )
 
             # Finalize tracking (AC8)
             # When discovery write failed, exclude new repos from finalization so they
@@ -1671,14 +1863,24 @@ class DependencyMapService:
                 repos_to_finalize = all_repos
             else:
                 new_aliases = {r.get("alias") for r in new_repos}
-                repos_to_finalize = [r for r in all_repos if r.get("alias") not in new_aliases]
+                repos_to_finalize = [
+                    r for r in all_repos if r.get("alias") not in new_aliases
+                ]
                 logger.warning(
                     f"Discovery write failed: excluding {len(new_repos)} new repo(s) "
                     "from tracking so they are re-detected on next delta run"
                 )
             self._finalize_delta_tracking(config, repos_to_finalize)
 
-            logger.info(f"Delta analysis completed: {len(affected_domains)} domains updated")
+            logger.info(
+                f"Delta analysis completed: {len(affected_domains)} domains updated"
+            )
+
+            # Story #329: Copy journal to final output directory after successful delta run
+            try:
+                self._activity_journal.copy_to_final(dependency_map_dir)
+            except Exception as e:
+                logger.debug(f"Non-fatal journal copy error: {e}")
 
             _delta_succeeded = True
             return {
@@ -1698,7 +1900,9 @@ class DependencyMapService:
                     self._job_tracker.fail_job(_tracked_job_id, error=str(e))
                     _tracked_job_id = None  # Prevent double-call in finally
                 except Exception as tracker_err:
-                    logger.warning(f"JobTracker fail_job failed (non-fatal): {tracker_err}")
+                    logger.warning(
+                        f"JobTracker fail_job failed (non-fatal): {tracker_err}"
+                    )
             raise
 
         finally:
@@ -1715,15 +1919,23 @@ class DependencyMapService:
             self._lock.release()
 
             # Story #312: Complete job in tracker on success (AC7). Defensive - never re-raises.
-            if _delta_succeeded and _tracked_job_id is not None and self._job_tracker is not None:
+            if (
+                _delta_succeeded
+                and _tracked_job_id is not None
+                and self._job_tracker is not None
+            ):
                 try:
                     self._job_tracker.complete_job(_tracked_job_id)
                 except Exception as tracker_err:
-                    logger.warning(f"JobTracker complete_job failed (non-fatal): {tracker_err}")
+                    logger.warning(
+                        f"JobTracker complete_job failed (non-fatal): {tracker_err}"
+                    )
 
             # Story #227: Release write lock so RefreshScheduler can proceed.
             if _write_lock_acquired and self._refresh_scheduler is not None:
-                self._refresh_scheduler.release_write_lock("cidx-meta", owner_name="dependency_map_service")
+                self._refresh_scheduler.release_write_lock(
+                    "cidx-meta", owner_name="dependency_map_service"
+                )
 
             # Story #227: Trigger explicit refresh after lock released (only on success).
             # AC2: Writer triggers refresh so RefreshScheduler captures complete data.
