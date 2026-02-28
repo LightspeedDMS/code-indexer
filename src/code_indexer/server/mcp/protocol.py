@@ -181,6 +181,63 @@ async def _invoke_handler(
             return await loop.run_in_executor(None, bound)
 
 
+def _check_repository_access(
+    arguments: Dict[str, Any],
+    effective_user: User,
+    tool_name: str,
+    access_service: Any,
+) -> None:
+    """Check if user has access to the repository specified in tool arguments.
+
+    Extracts the repository identifier from the arguments dict using the three
+    parameter names tools use: 'repository_alias', 'alias', or 'user_alias'.
+    Skips the check if no repo param is present or if the param is empty/None.
+
+    Strips the '-global' suffix from aliases before checking, since accessible
+    repos are stored without it.
+
+    Raises ValueError if access is denied. Does nothing if user is admin or if
+    no repo parameter is present.
+
+    Args:
+        arguments: Tool arguments dict from the MCP tool call
+        effective_user: The effective user (may differ from authenticated user
+            during impersonation)
+        tool_name: Name of the tool being called (used in error messages)
+        access_service: AccessFilteringService instance for access checks
+    """
+    # Extract the repo identifier using the three known parameter names
+    raw_alias: Optional[str] = None
+    # Story #331 AC3: Added "repo_alias" to protect enter_write_mode,
+    # exit_write_mode, and wiki_article_analytics tools.
+    for param_name in ("repository_alias", "alias", "user_alias", "repo_alias"):
+        value = arguments.get(param_name)
+        if value is not None and isinstance(value, str) and value:
+            raw_alias = value
+            break
+
+    # No repo param present or empty - nothing to check
+    if not raw_alias:
+        return
+
+    # Admin users bypass the check entirely
+    if access_service.is_admin_user(effective_user.username):
+        return
+
+    # Strip -global suffix to match stored repo names
+    normalized = raw_alias
+    if normalized.endswith("-global"):
+        normalized = normalized[: -len("-global")]
+
+    # Check access
+    accessible = access_service.get_accessible_repos(effective_user.username)
+    if normalized not in accessible:
+        raise ValueError(
+            f"Access denied: repository '{raw_alias}' is not accessible to user"
+            f" '{effective_user.username}'"
+        )
+
+
 async def handle_tools_call(
     params: Dict[str, Any], user: User, session_id: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -232,6 +289,47 @@ async def handle_tools_call(
     if not effective_user.has_permission(required_permission):
         raise ValueError(
             f"Permission denied: {required_permission} required for tool {tool_name}"
+        )
+
+    # Story #319: Centralized repository access guard.
+    # Check repo access BEFORE invoking handler, using effective_user.
+    # Lazy import to avoid circular dependency (handlers imports from protocol).
+    try:
+        from code_indexer.server.mcp import handlers as _handlers_module
+
+        _access_service = _handlers_module.app_module.app.state.access_filtering_service
+        _check_repository_access(
+            arguments=arguments,
+            effective_user=effective_user,
+            tool_name=tool_name,
+            access_service=_access_service,
+        )
+    except ValueError:
+        # Re-raise access denied errors from the guard (fail-closed)
+        raise
+    except AttributeError:
+        # Story #331 AC9: Fail-closed when access_filtering_service unavailable.
+        # If the tool arguments contain a repository parameter, DENY access
+        # rather than falling through (fail-open). Tools with no repo parameter
+        # proceed normally.
+        _has_repo_param = any(
+            arguments.get(p)
+            for p in ("repository_alias", "alias", "user_alias", "repo_alias")
+            if (isinstance(arguments.get(p), str) and arguments.get(p))
+            or (isinstance(arguments.get(p), list) and arguments.get(p))
+        )
+        if _has_repo_param:
+            logger.warning(
+                "Access filtering service not available for tool %s - DENYING access",
+                tool_name,
+            )
+            raise ValueError(
+                f"Access denied: access control service unavailable, "
+                f"cannot verify access for tool '{tool_name}'"
+            )
+        logger.debug(
+            "Access filtering service not available for tool %s (no repo param), proceeding",
+            tool_name,
         )
 
     # Get handler function

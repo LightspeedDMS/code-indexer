@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.69] - 2026-02-28
+
+### Security
+
+- Epic #327: Repository Access Control Enforcement - Complete Coverage. Closed all side-channel leaks (Story #331) ensuring restricted users are fully blind to repos they cannot access. Changes include:
+  - Centralized guard now checks `repo_alias` parameter (AC3, protects `enter_write_mode`, `exit_write_mode`, `wiki_article_analytics`)
+  - Guard fails closed when access filtering service unavailable (AC9)
+  - `_get_available_repos()` filters error suggestions by user access (AC1, 15 call sites)
+  - `_expand_wildcard_patterns()` filters wildcard expansion by user access (AC2, 5 call sites)
+  - Omni-search handlers pass user through wildcard expansion (AC4, defense-in-depth)
+  - Composite repo creation validates component repo access (AC5)
+  - cidx-meta query results filtered for referenced repo cross-references (AC6)
+  - Omni-search error dicts filtered to hide unauthorized repo aliases (AC7, 5 handlers)
+  - Cache handles documented as accepted risk (AC8, UUID4 + short TTL)
+  - Repo categories documented as accepted risk (AC10, generic labels)
+  - REST API group endpoints restricted to admin-only (Story #318)
+  - Metadata listing endpoints filtered by group access (Story #316)
+
 ## [9.3.68] - 2026-02-27
 
 ### Fixed

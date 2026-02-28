@@ -703,12 +703,26 @@ def _error_with_suggestions(
     }
 
 
-def _get_available_repos() -> List[str]:
-    """Get list of available global repository aliases for suggestions."""
+def _get_available_repos(user: "User") -> List[str]:
+    """Get list of available global repository aliases for suggestions.
+
+    Story #331 AC1: Filters repos through AccessFilteringService so that
+    restricted users only see repos they have access to in error suggestions.
+
+    Args:
+        user: The authenticated user requesting the repo list.
+
+    Returns:
+        List of repository alias names the user can see.
+    """
     try:
         golden_repos_dir = _get_golden_repos_dir()
         registry = get_server_global_registry(golden_repos_dir)
-        return [r["alias_name"] for r in registry.list_global_repos()]
+        all_repos = [r["alias_name"] for r in registry.list_global_repos()]
+        access_service = _get_access_filtering_service()
+        if access_service:
+            return access_service.filter_repo_listing(all_repos, user.username)
+        return all_repos
     except Exception:
         return []
 
@@ -833,11 +847,16 @@ def _validate_symbol_format(symbol: Optional[str], param_name: str) -> Optional[
     return None
 
 
-def _expand_wildcard_patterns(patterns: List[str]) -> List[str]:
+def _expand_wildcard_patterns(patterns: List[str], user: "User") -> List[str]:
     """Expand wildcard patterns to matching repository aliases.
+
+    Story #331 AC2: Accepts a user parameter and filters the available_repos
+    list through AccessFilteringService before wildcard matching, so that
+    restricted users only see repos they have access to.
 
     Args:
         patterns: List of repo patterns (may include wildcards like '*-global')
+        user: The authenticated user requesting the expansion.
 
     Returns:
         Expanded list of unique repository aliases
@@ -863,6 +882,13 @@ def _expand_wildcard_patterns(patterns: List[str]) -> List[str]:
             )
         )
         return patterns
+
+    # Story #331 AC2: Filter available repos through access control
+    access_service = _get_access_filtering_service()
+    if access_service and not access_service.is_admin_user(user.username):
+        available_repos = access_service.filter_repo_listing(
+            available_repos, user.username
+        )
 
     expanded = []
     for pattern in patterns:
@@ -917,7 +943,7 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     from ..multi.models import MultiSearchRequest
 
     repo_aliases = params.get("repository_alias", [])
-    repo_aliases = _expand_wildcard_patterns(repo_aliases)
+    repo_aliases = _expand_wildcard_patterns(repo_aliases, user)
     requested_limit = _coerce_int(params.get("limit"), 10)
 
     # Smart context-aware defaults: multi-repo (2+) uses per_repo, single repo uses global
@@ -1064,6 +1090,13 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     errors = response.errors or {}
     repos_searched = response.metadata.total_repos_searched
 
+    # Story #331 AC7: Filter errors dict to hide unauthorized repo aliases
+    access_service_for_errors = _get_access_filtering_service()
+    if access_service_for_errors and not access_service_for_errors.is_admin_user(user.username):
+        accessible = access_service_for_errors.get_accessible_repos(user.username)
+        errors = {k: v for k, v in errors.items()
+                  if k.replace("-global", "") in accessible or k in accessible}
+
     # Aggregate results based on mode (use requested_limit for slicing, not effective_limit)
     if aggregation_mode == "per_repo":
         # Per-repo mode: take proportional results from each repo
@@ -1182,7 +1215,7 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
             if not repo_entry:
-                available_repos = _get_available_repos()
+                available_repos = _get_available_repos(user)
                 error_envelope = _error_with_suggestions(
                     error_msg=f"Global repository '{repository_alias}' not found",
                     attempted_value=repository_alias,
@@ -1198,7 +1231,7 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             target_path = alias_manager.read_alias(repository_alias)
 
             if not target_path:
-                available_repos = _get_available_repos()
+                available_repos = _get_available_repos(user)
                 error_envelope = _error_with_suggestions(
                     error_msg=f"Alias for '{repository_alias}' not found",
                     attempted_value=repository_alias,
@@ -1361,6 +1394,11 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 response_results = access_filtering_service.filter_query_results(
                     response_results, user.username
                 )
+                # Story #331 AC6: Filter cidx-meta results that reference inaccessible repos
+                if repository_alias and "cidx-meta" in repository_alias:
+                    response_results = access_filtering_service.filter_cidx_meta_results(
+                        response_results, user.username
+                    )
                 # Story #300 (Finding 1): Truncate back to requested limit after filtering.
                 response_results = response_results[:_requested_limit]
 
@@ -1732,6 +1770,10 @@ def deactivate_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def list_repo_categories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List all repository categories (Story #182)."""
+    # Story #331 AC10: Accepted risk - repository categories are generic
+    # organizational labels (e.g., category names/patterns) that do not
+    # directly reveal specific repository names or existence. Filtering
+    # categories would provide minimal security benefit.
     try:
         # Get category service from golden_repo_manager
         if not hasattr(app_module, "golden_repo_manager") or not app_module.golden_repo_manager:
@@ -1814,7 +1856,7 @@ def get_repository_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
             if not repo_entry:
-                available_repos = _get_available_repos()
+                available_repos = _get_available_repos(user)
                 error_envelope = _error_with_suggestions(
                     error_msg=f"Global repository '{user_alias}' not found",
                     attempted_value=user_alias,
@@ -1944,7 +1986,7 @@ def _omni_list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     import json as json_module
 
     repo_aliases = params.get("repository_alias", [])
-    repo_aliases = _expand_wildcard_patterns(repo_aliases)
+    repo_aliases = _expand_wildcard_patterns(repo_aliases, user)
 
     if not repo_aliases:
         return _mcp_response(
@@ -1988,6 +2030,13 @@ def _omni_list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
+
+    # Story #331 AC7: Filter errors dict to hide unauthorized repo aliases
+    _ac7_service = _get_access_filtering_service()
+    if _ac7_service and not _ac7_service.is_admin_user(user.username):
+        _ac7_accessible = _ac7_service.get_accessible_repos(user.username)
+        errors = {k: v for k, v in errors.items()
+                  if k.replace("-global", "") in _ac7_accessible or k in _ac7_accessible}
 
     # Get response_format parameter (default to "flat" for backward compatibility)
     response_format = params.get("response_format", "flat")
@@ -2062,7 +2111,7 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
             if not repo_entry:
-                available_repos = _get_available_repos()
+                available_repos = _get_available_repos(user)
                 error_envelope = _error_with_suggestions(
                     error_msg=f"Global repository '{repository_alias}' not found",
                     attempted_value=repository_alias,
@@ -2078,7 +2127,7 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             target_path = alias_manager.read_alias(repository_alias)
 
             if not target_path:
-                available_repos = _get_available_repos()
+                available_repos = _get_available_repos(user)
                 error_envelope = _error_with_suggestions(
                     error_msg=f"Alias for '{repository_alias}' not found",
                     attempted_value=repository_alias,
@@ -2200,7 +2249,7 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
             if not repo_entry:
-                available_repos = _get_available_repos()
+                available_repos = _get_available_repos(user)
                 error_envelope = _error_with_suggestions(
                     error_msg=f"Global repository '{repository_alias}' not found",
                     attempted_value=repository_alias,
@@ -2217,7 +2266,7 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             target_path = alias_manager.read_alias(repository_alias)
 
             if not target_path:
-                available_repos = _get_available_repos()
+                available_repos = _get_available_repos(user)
                 error_envelope = _error_with_suggestions(
                     error_msg=f"Alias for '{repository_alias}' not found",
                     attempted_value=repository_alias,
@@ -2367,7 +2416,7 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
             if not repo_entry:
-                available_repos = _get_available_repos()
+                available_repos = _get_available_repos(user)
                 error_envelope = _error_with_suggestions(
                     error_msg=f"Global repository '{repository_alias}' not found",
                     attempted_value=repository_alias,
@@ -2383,7 +2432,7 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             target_path = alias_manager.read_alias(repository_alias)
 
             if not target_path:
-                available_repos = _get_available_repos()
+                available_repos = _get_available_repos(user)
                 error_envelope = _error_with_suggestions(
                     error_msg=f"Alias for '{repository_alias}' not found",
                     attempted_value=repository_alias,
@@ -2500,7 +2549,7 @@ def get_branches(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
             if not repo_entry:
-                available_repos = _get_available_repos()
+                available_repos = _get_available_repos(user)
                 error_envelope = _error_with_suggestions(
                     error_msg=f"Global repository '{repository_alias}' not found",
                     attempted_value=repository_alias,
@@ -2516,7 +2565,7 @@ def get_branches(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             target_path = alias_manager.read_alias(repository_alias)
 
             if not target_path:
-                available_repos = _get_available_repos()
+                available_repos = _get_available_repos(user)
                 error_envelope = _error_with_suggestions(
                     error_msg=f"Alias for '{repository_alias}' not found",
                     attempted_value=repository_alias,
@@ -2856,7 +2905,7 @@ def get_repository_statistics(params: Dict[str, Any], user: User) -> Dict[str, A
             )
 
             if not repo_entry:
-                available_repos = _get_available_repos()
+                available_repos = _get_available_repos(user)
                 error_envelope = _error_with_suggestions(
                     error_msg=f"Global repository '{repository_alias}' not found",
                     attempted_value=repository_alias,
@@ -2871,7 +2920,7 @@ def get_repository_statistics(params: Dict[str, Any], user: User) -> Dict[str, A
             target_path = alias_manager.read_alias(repository_alias)
 
             if not target_path:
-                available_repos = _get_available_repos()
+                available_repos = _get_available_repos(user)
                 error_envelope = _error_with_suggestions(
                     error_msg=f"Alias for '{repository_alias}' not found",
                     attempted_value=repository_alias,
@@ -2971,6 +3020,19 @@ def get_all_repositories_status(params: Dict[str, Any], user: User) -> Dict[str,
             registry = get_server_global_registry(golden_repos_dir)
             global_repos_data = registry.list_global_repos()
 
+            # Story #316: Filter global repos by user's group access
+            access_filtering_service = _get_access_filtering_service()
+            if access_filtering_service:
+                repo_names = [r.get("repo_name", "") for r in global_repos_data]
+                accessible = access_filtering_service.filter_repo_listing(
+                    repo_names, user.username
+                )
+                global_repos_data = [
+                    r
+                    for r in global_repos_data
+                    if r.get("repo_name", "") in accessible
+                ]
+
             for repo in global_repos_data:
                 if "alias_name" not in repo or "repo_name" not in repo:
                     logger.warning(
@@ -3022,6 +3084,22 @@ def manage_composite_repository(params: Dict[str, Any], user: User) -> Dict[str,
         operation = params["operation"]
         user_alias = params["user_alias"]
         golden_repo_aliases = params.get("golden_repo_aliases", [])
+
+        # Story #331 AC5: Validate user has access to all component repos
+        access_service = _get_access_filtering_service()
+        if access_service and golden_repo_aliases:
+            if not access_service.is_admin_user(user.username):
+                accessible = access_service.get_accessible_repos(user.username)
+                for component_alias in golden_repo_aliases:
+                    normalized = component_alias
+                    if normalized.endswith("-global"):
+                        normalized = normalized[: -len("-global")]
+                    if normalized not in accessible:
+                        return _mcp_response({
+                            "success": False,
+                            "error": f"Access denied: repository '{component_alias}' is not accessible.",
+                            "job_id": None,
+                        })
 
         if operation == "create":
             job_id = app_module.activated_repo_manager.activate_repository(
@@ -3087,6 +3165,20 @@ def handle_list_global_repos(args: Dict[str, Any], user: User) -> Dict[str, Any]
     golden_repos_dir = _get_golden_repos_dir()
     ops = GlobalRepoOperations(golden_repos_dir)
     repos = ops.list_repos()
+
+    # Story #316: Apply group-based access filtering
+    access_filtering_service = _get_access_filtering_service()
+    if access_filtering_service:
+        repo_aliases = [r.get("repo_name", r.get("alias", "")) for r in repos]
+        accessible_aliases = access_filtering_service.filter_repo_listing(
+            repo_aliases, user.username
+        )
+        repos = [
+            r
+            for r in repos
+            if r.get("repo_name", r.get("alias", "")) in accessible_aliases
+        ]
+
     return _mcp_response({"success": True, "repos": repos})
 
 
@@ -3242,7 +3334,7 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
     import time
 
     repo_aliases = args.get("repository_alias", [])
-    repo_aliases = _expand_wildcard_patterns(repo_aliases)
+    repo_aliases = _expand_wildcard_patterns(repo_aliases, user)
 
     if not repo_aliases:
         return _mcp_response(
@@ -3295,6 +3387,13 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
             )
 
     elapsed_ms = int((time.time() - start_time) * 1000)
+
+    # Story #331 AC7: Filter errors dict to hide unauthorized repo aliases
+    access_service = _get_access_filtering_service()
+    if access_service and not access_service.is_admin_user(user.username):
+        accessible = access_service.get_accessible_repos(user.username)
+        errors = {k: v for k, v in errors.items()
+                  if k.replace("-global", "") in accessible or k in accessible}
 
     response_format = args.get("response_format", "flat")
     formatted = _format_omni_response(
@@ -4165,7 +4264,7 @@ def _omni_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     import json as json_module
 
     repo_aliases = args.get("repository_alias", [])
-    repo_aliases = _expand_wildcard_patterns(repo_aliases)
+    repo_aliases = _expand_wildcard_patterns(repo_aliases, user)
     limit = _coerce_int(args.get("limit"), 20)
 
     if not repo_aliases:
@@ -4221,6 +4320,13 @@ def _omni_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     # Sort by date descending and apply limit
     all_commits.sort(key=lambda x: x.get("date", ""), reverse=True)
     final_commits = all_commits[:limit]
+
+    # Story #331 AC7: Filter errors dict to hide unauthorized repo aliases
+    _ac7_service = _get_access_filtering_service()
+    if _ac7_service and not _ac7_service.is_admin_user(user.username):
+        _ac7_accessible = _ac7_service.get_accessible_repos(user.username)
+        errors = {k: v for k, v in errors.items()
+                  if k.replace("-global", "") in _ac7_accessible or k in _ac7_accessible}
 
     response_format = args.get("response_format", "flat")
     formatted = _format_omni_response(
@@ -4939,7 +5045,7 @@ def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]
     import time
 
     repo_aliases = args.get("repository_alias", [])
-    repo_aliases = _expand_wildcard_patterns(repo_aliases)
+    repo_aliases = _expand_wildcard_patterns(repo_aliases, user)
     query = args.get("query", "")
     is_regex = args.get("is_regex", False)
 
@@ -4995,6 +5101,13 @@ def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]
             )
 
     elapsed_ms = int((time.time() - start_time) * 1000)
+
+    # Story #331 AC7: Filter errors dict to hide unauthorized repo aliases
+    _ac7_service = _get_access_filtering_service()
+    if _ac7_service and not _ac7_service.is_admin_user(user.username):
+        _ac7_accessible = _ac7_service.get_accessible_repos(user.username)
+        errors = {k: v for k, v in errors.items()
+                  if k.replace("-global", "") in _ac7_accessible or k in _ac7_accessible}
 
     response_format = args.get("response_format", "flat")
     formatted = _format_omni_response(
@@ -5221,7 +5334,7 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 (r for r in global_repos if r["alias_name"] == repository_alias), None
             )
             if not repo_entry:
-                available_repos = _get_available_repos()
+                available_repos = _get_available_repos(user)
                 error_envelope = _error_with_suggestions(
                     error_msg=f"Global repository '{repository_alias}' not found",
                     attempted_value=repository_alias,
@@ -5233,7 +5346,7 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
             repo_path = alias_manager.read_alias(repository_alias)
             if not repo_path:
-                available_repos = _get_available_repos()
+                available_repos = _get_available_repos(user)
                 error_envelope = _error_with_suggestions(
                     error_msg=f"Alias for '{repository_alias}' not found",
                     attempted_value=repository_alias,
@@ -9928,6 +10041,10 @@ def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any
     Returns:
         MCP response with content and pagination info
     """
+    # Story #331 AC8: Accepted risk - cache handles are UUID4 (unguessable)
+    # and short-lived (TTL-based). Cross-user cache access requires knowing
+    # the exact UUID, which is not feasible. Full user-scoping tracking
+    # would add complexity without meaningful security benefit.
     from code_indexer.server.cache.payload_cache import CacheNotFoundError
 
     handle = args.get("handle")
