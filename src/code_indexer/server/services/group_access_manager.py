@@ -14,7 +14,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 from .constants import (
     CIDX_META_REPO,
@@ -112,8 +112,24 @@ class GroupAccessManager:
             db_path: Path to the SQLite database file for groups
         """
         self.db_path = Path(db_path)
+        # Bug #338: Callbacks invoked after any repo access change (grant or revoke)
+        self._on_repo_change_callbacks: List[Callable[[], None]] = []
         self._ensure_schema()
         self._bootstrap_default_groups()
+
+    def register_on_repo_change(self, callback: Callable[[], None]) -> None:
+        """
+        Register a callback to be invoked after any repo access change.
+
+        Bug #338: Centralizes cache invalidation so all call sites (MCP handlers,
+        REST routes, Web UI routes, lifecycle hooks) automatically trigger
+        invalidation without requiring each caller to do it manually.
+
+        Args:
+            callback: Zero-argument callable invoked after grant_repo_access()
+                      or revoke_repo_access() successfully mutates the DB.
+        """
+        self._on_repo_change_callbacks.append(callback)
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get a database connection with row factory and foreign key enforcement."""
@@ -740,7 +756,11 @@ class GroupAccessManager:
             conn.commit()
 
             # rowcount is 0 if INSERT was ignored (already exists)
-            return cursor.rowcount > 0
+            granted = cursor.rowcount > 0
+            if granted:
+                for cb in self._on_repo_change_callbacks:
+                    cb()
+            return granted
         finally:
             conn.close()
 
@@ -776,7 +796,11 @@ class GroupAccessManager:
             )
             conn.commit()
 
-            return cursor.rowcount > 0
+            revoked = cursor.rowcount > 0
+            if revoked:
+                for cb in self._on_repo_change_callbacks:
+                    cb()
+            return revoked
         finally:
             conn.close()
 
