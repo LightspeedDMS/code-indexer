@@ -9,9 +9,6 @@
         <button
             id="refresh-btn"
             class="outline"
-            hx-get="/admin/partials/dashboard-health"
-            hx-target="#health-section"
-            hx-swap="innerHTML"
             onclick="refreshAll()"
         >
             Refresh
@@ -40,33 +37,67 @@
 
 <script>
 let autoRefreshInterval = null;
+let _refreshInProgress = false;
+
+// Shared fetch options - used by refreshAll() and dropdown handlers in dashboard_stats.html
+var _fetchOpts = { credentials: 'same-origin' };
+
+// Shared response handler - used by refreshAll() and dropdown handlers in dashboard_stats.html
+function applyResponse(response, targetSelector) {
+    if (response.status === 401) {
+        if (!window._cidxRedirecting) {
+            window._cidxRedirecting = true;
+            window.location.href = '/login';
+            setTimeout(function() { window._cidxRedirecting = false; }, 3000);
+        }
+        return Promise.resolve();
+    }
+    if (response.ok) {
+        return response.text().then(function(html) {
+            var el = document.querySelector(targetSelector);
+            if (el) el.innerHTML = html;
+        });
+    }
+    return Promise.resolve();
+}
 
 function refreshAll() {
-    // Story #69: Surgical DOM updates - refresh ONLY data sections, not dropdowns
+    // Re-entrancy guard: skip if a refresh cycle is already in flight
+    if (_refreshInProgress) return;
+    _refreshInProgress = true;
 
-    // Refresh health section (unchanged)
-    htmx.ajax('GET', '/admin/partials/dashboard-health', {target: '#health-section', swap: 'innerHTML'});
+    // Story #69: Surgical DOM updates - refresh ONLY data sections, not dropdowns
 
     // Preserve current filter selections during auto-refresh
     // Use optional chaining because elements may not exist on first page load
     const timeFilter = document.getElementById('time-filter')?.value || '24h';
     const apiFilter = document.getElementById('api-filter')?.value || '60';
 
+    // Fire all 4 requests in parallel using fetch(); use Promise.allSettled so
+    // one failure does not block the others from updating the DOM.
     // Story #69: Granular refresh targets - dropdowns stay untouched
-    htmx.ajax('GET', `/admin/partials/dashboard-job-counts?time_filter=${timeFilter}`, {
-        target: '#job-counts-data',
-        swap: 'innerHTML'
-    });
-
     // Story #201: Recent Activity hardcoded to 24h (no dropdown)
-    htmx.ajax('GET', '/admin/partials/dashboard-recent-jobs?recent_filter=24h', {
-        target: '#recent-jobs-tbody',
-        swap: 'innerHTML'
-    });
-
-    htmx.ajax('GET', `/admin/partials/dashboard-api-metrics?api_filter=${apiFilter}`, {
-        target: '#api-metrics-data',
-        swap: 'innerHTML'
+    Promise.allSettled([
+        fetch('/admin/partials/dashboard-health', _fetchOpts),
+        fetch(`/admin/partials/dashboard-job-counts?time_filter=${timeFilter}`, _fetchOpts),
+        fetch('/admin/partials/dashboard-recent-jobs?recent_filter=24h', _fetchOpts),
+        fetch(`/admin/partials/dashboard-api-metrics?api_filter=${apiFilter}`, _fetchOpts)
+    ]).then(function(results) {
+        var updates = [];
+        var targets = [
+            '#health-section',
+            '#job-counts-data',
+            '#recent-jobs-tbody',
+            '#api-metrics-data'
+        ];
+        results.forEach(function(result, i) {
+            if (result.status === 'fulfilled') {
+                updates.push(applyResponse(result.value, targets[i]));
+            }
+        });
+        return Promise.all(updates);
+    }).finally(function() {
+        _refreshInProgress = false;
     });
 }
 

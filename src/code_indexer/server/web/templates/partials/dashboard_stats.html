@@ -168,7 +168,6 @@
 <h2>Recent Activity</h2>
 
 <div class="recent-activity">
-    {% if recent_jobs and recent_jobs|length > 0 %}
     <table role="grid">
         <thead>
             <tr>
@@ -180,6 +179,7 @@
         </thead>
         <!-- Story #69: Granular refresh target for table body ONLY -->
         <tbody id="recent-jobs-tbody">
+            {% if recent_jobs and recent_jobs|length > 0 %}
             {% for job in recent_jobs %}
             <tr>
                 <td>
@@ -192,29 +192,27 @@
                 </td>
             </tr>
             {% endfor %}
+            {% else %}
+            <tr>
+                <td colspan="4" style="text-align: center;">No recent activity to display.</td>
+            </tr>
+            {% endif %}
         </tbody>
     </table>
-    {% else %}
-    <!-- Story #69: When no jobs, refresh target is the entire recent-activity div -->
-    <p id="recent-jobs-tbody" class="no-activity">No recent activity to display.</p>
-    {% endif %}
 </div>
 
 <script>
 // Story #69: Surgical DOM updates for dropdown changes
+// Uses shared applyResponse() and _fetchOpts defined in dashboard.html
 function updateJobStats() {
-    const timeFilter = document.getElementById('time-filter').value;
-    htmx.ajax('GET', `/admin/partials/dashboard-job-counts?time_filter=${timeFilter}`, {
-        target: '#job-counts-data',
-        swap: 'innerHTML'
-    });
+    var timeFilter = document.getElementById('time-filter').value;
+    fetch('/admin/partials/dashboard-job-counts?time_filter=' + encodeURIComponent(timeFilter), _fetchOpts)
+        .then(function(r) { applyResponse(r, '#job-counts-data'); });
 }
 
 function updateApiActivity() {
-    const apiFilter = document.getElementById('api-filter').value;
-    htmx.ajax('GET', `/admin/partials/dashboard-api-metrics?api_filter=${apiFilter}`, {
-        target: '#api-metrics-data',
-        swap: 'innerHTML'
-    });
+    var apiFilter = document.getElementById('api-filter').value;
+    fetch('/admin/partials/dashboard-api-metrics?api_filter=' + encodeURIComponent(apiFilter), _fetchOpts)
+        .then(function(r) { applyResponse(r, '#api-metrics-data'); });
 }
 </script>
