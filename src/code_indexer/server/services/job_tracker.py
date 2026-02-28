@@ -161,6 +161,32 @@ def _tracked_job_to_dict(job: TrackedJob) -> Dict[str, Any]:
     }
 
 
+def _status_priority_sort_key(job_dict: Dict[str, Any]):
+    """
+    Sort key for get_recent_jobs: running first, then pending/resolving, then completed.
+
+    Story #328: Running jobs must appear above completed jobs regardless of timestamps.
+    Within each priority group, most-recently-active timestamp first (descending).
+    """
+    status = job_dict.get("status", "")
+    if status == "running":
+        priority = 0
+        time_str = job_dict.get("started_at") or job_dict.get("created_at")
+    elif status in ("pending", "resolving_prerequisites"):
+        priority = 1
+        time_str = job_dict.get("created_at")
+    else:
+        priority = 2
+        time_str = job_dict.get("completed_at") or job_dict.get("created_at")
+
+    if time_str:
+        dt = datetime.fromisoformat(time_str)
+    else:
+        dt = datetime.min.replace(tzinfo=timezone.utc)
+
+    return (priority, -dt.timestamp())
+
+
 # Columns fetched by all SELECT queries — keeps column index mapping single-source.
 _SELECT_COLUMNS = (
     "job_id, operation_type, status, created_at, started_at, completed_at, "
@@ -442,8 +468,8 @@ class JobTracker:
                 seen_ids.add(job.job_id)
                 result.append(_tracked_job_to_dict(job))
 
-        # Sort by created_at descending (active jobs may not be sorted)
-        result.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+        # Story #328: Sort with running/pending jobs first, then by time
+        result.sort(key=_status_priority_sort_key)
         return result
 
     def query_jobs(

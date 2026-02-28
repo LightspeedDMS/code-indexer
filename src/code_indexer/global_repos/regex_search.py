@@ -153,6 +153,25 @@ class RegexSearchService:
             search_time_ms=elapsed_ms,
         )
 
+    def _extract_line_text(self, lines_data: dict) -> str:
+        """Extract text content from ripgrep JSON lines data.
+
+        Ripgrep uses two formats for line content:
+        - {"text": "..."} for valid UTF-8 content
+        - {"bytes": "..."} for binary/non-UTF8 (base64-encoded)
+        """
+        if "text" in lines_data:
+            return lines_data["text"].rstrip("\n")
+        elif "bytes" in lines_data:
+            import base64
+
+            return (
+                base64.b64decode(lines_data["bytes"])
+                .decode("utf-8", errors="replace")
+                .rstrip("\n")
+            )
+        return ""
+
     def _parse_ripgrep_json_output(
         self,
         output: str,
@@ -180,7 +199,7 @@ class RegexSearchService:
                     total += 1
                     if len(matches) < max_results:
                         match_data = data["data"]
-                        abs_path = match_data["path"]["text"]
+                        abs_path = self._extract_line_text(match_data["path"])
                         try:
                             rel_path = str(Path(abs_path).relative_to(self.repo_path))
                         except ValueError:
@@ -194,14 +213,14 @@ class RegexSearchService:
                                 file_path=rel_path,
                                 line_number=match_data["line_number"],
                                 column=column,
-                                line_content=match_data["lines"]["text"].rstrip("\n"),
+                                line_content=self._extract_line_text(match_data["lines"]),
                                 context_before=context_before.copy(),
                                 context_after=[],
                             )
                         )
                         context_before = []
                 elif data.get("type") == "context" and context_lines > 0:
-                    ctx = data["data"]["lines"]["text"].rstrip("\n")
+                    ctx = self._extract_line_text(data["data"]["lines"])
                     if (
                         matches
                         and data["data"]["line_number"] > matches[-1].line_number
