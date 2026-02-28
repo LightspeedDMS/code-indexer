@@ -46,6 +46,7 @@ from code_indexer.server.repositories.activated_repo_manager import (
 )
 from code_indexer.server.repositories.scip_audit import SCIPAuditRepository
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.global_repos.alias_manager import AliasManager
 
 logger = logging.getLogger(__name__)
 
@@ -3513,7 +3514,7 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
         resolved = _resolve_repo_path(repository_alias, golden_repos_dir)
         if not resolved:
             return _mcp_response(
-                {"success": False, "error": "Repository '.*' not found"}
+                {"success": False, "error": f"Repository '{repository_alias}' not found"}
             )
         repo_path = Path(resolved)
 
@@ -4689,21 +4690,39 @@ def _find_latest_versioned_repo(base_path: Path, repo_name: str) -> Optional[str
 
 
 def _resolve_repo_path(repo_identifier: str, golden_repos_dir: str) -> Optional[str]:
-    """Resolve repository identifier to filesystem path with actual git repo.
+    """Resolve repository identifier to filesystem path.
 
-    Searches multiple locations to find a directory with .git:
-    1. The index_path from registry (if it has .git)
-    2. The golden-repos/{name} directory
-    3. The golden-repos/repos/{name} directory
-    4. Versioned repos in .versioned/{name}/v_*/
+    Resolution priority:
+    0. Alias JSON target_path (authoritative for read operations)
+    1. Full path (if not -global and is a git repo)
+    2. index_path from registry (if it has .git)
+    3. golden-repos/{name} directory
+    4. golden-repos/repos/{name} directory
+    5. Versioned repos in .versioned/{name}/v_*/
+    6. index_path fallback (directory exists)
 
     Args:
         repo_identifier: Repository alias or path
         golden_repos_dir: Path to golden repos directory
 
     Returns:
-        Filesystem path to git repository, or None if not found
+        Filesystem path to repository, or None if not found
     """
+    # Step 0: Try alias JSON target_path (authoritative for read operations)
+    # AliasManager.read_alias() returns the versioned snapshot path
+    aliases_path = Path(golden_repos_dir) / "aliases"
+    if aliases_path.is_dir():
+        alias_manager = AliasManager(str(aliases_path))
+        # Try the identifier directly (e.g. "cidx-meta-global")
+        alias_path = alias_manager.read_alias(repo_identifier)
+        if alias_path and Path(alias_path).is_dir():
+            return alias_path
+        # If not -global, try with -global suffix
+        if not repo_identifier.endswith("-global"):
+            alias_path = alias_manager.read_alias(f"{repo_identifier}-global")
+            if alias_path and Path(alias_path).is_dir():
+                return alias_path
+
     # Try as full path first
     if not repo_identifier.endswith("-global"):
         repo_path = Path(repo_identifier)
@@ -5385,44 +5404,15 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         golden_repos_dir = _get_golden_repos_dir()
 
         # Resolve repository_alias to actual path
-        if repository_alias.endswith("-global"):
-            # Use AliasManager for global repos (same as browse_directory does),
-            # because _resolve_repo_path is git-centric and fails for non-git repos
-            # like cidx-meta which is a generated folder with .md files.
-            registry = get_server_global_registry(golden_repos_dir)
-            global_repos = registry.list_global_repos()
-            repo_entry = next(
-                (r for r in global_repos if r["alias_name"] == repository_alias), None
+        repo_path = _resolve_repo_path(repository_alias, golden_repos_dir)
+        if repo_path is None:
+            available_repos = _get_available_repos(user)
+            error_envelope = _error_with_suggestions(
+                error_msg=f"Repository '{repository_alias}' not found",
+                attempted_value=repository_alias,
+                available_values=available_repos,
             )
-            if not repo_entry:
-                available_repos = _get_available_repos(user)
-                error_envelope = _error_with_suggestions(
-                    error_msg=f"Global repository '{repository_alias}' not found",
-                    attempted_value=repository_alias,
-                    available_values=available_repos,
-                )
-                return _mcp_response(error_envelope)
-            from code_indexer.global_repos.alias_manager import AliasManager
-
-            alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
-            repo_path = alias_manager.read_alias(repository_alias)
-            if not repo_path:
-                available_repos = _get_available_repos(user)
-                error_envelope = _error_with_suggestions(
-                    error_msg=f"Alias for '{repository_alias}' not found",
-                    attempted_value=repository_alias,
-                    available_values=available_repos,
-                )
-                return _mcp_response(error_envelope)
-        else:
-            repo_path = _resolve_repo_path(repository_alias, golden_repos_dir)
-            if repo_path is None:
-                return _mcp_response(
-                    {
-                        "success": False,
-                        "error": f"Repository '{repository_alias}' not found",
-                    }
-                )
+            return _mcp_response(error_envelope)
 
         # Create service and generate tree
         service = DirectoryExplorerService(Path(repo_path))
