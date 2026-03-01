@@ -151,8 +151,12 @@ class TestJobStatusPartialEndpoint:
             cookies=admin_session_cookie,
         )
         assert response.status_code == 200
-        # Should contain some health state text from the 5-state model
-        health_states = ["Healthy", "Disabled", "Running", "Unhealthy", "Degraded"]
+        # Should contain some health state text from the health model.
+        # Includes 5-state model states plus Story #342 content health states.
+        health_states = [
+            "Healthy", "Disabled", "Running", "Unhealthy", "Degraded",
+            "Needs Repair", "Critical",
+        ]
         content = response.text
         assert any(state in content for state in health_states), (
             f"No health state found in response. Content: {content[:500]}"
@@ -559,3 +563,344 @@ class TestGraphDataEndpoint:
         # May have nodes (if golden repos exist) or empty
         assert isinstance(data["nodes"], list)
         assert isinstance(data["edges"], list)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Story #342 Change 2: _get_known_repo_names excludes orphan global_repos rows
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _make_test_db(tmp_path, global_repos_names, golden_repos_aliases):
+    """
+    Create a real SQLite database at tmp_path/server/data/cidx_server.db
+    with controlled fixture data in global_repos and golden_repos_metadata.
+
+    Returns (server_dir, db_path) so callers can patch config_manager.server_dir.
+    """
+    import sqlite3
+
+    server_dir = tmp_path / "server"
+    data_dir = server_dir / "data"
+    data_dir.mkdir(parents=True)
+    db_path = data_dir / "cidx_server.db"
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("CREATE TABLE global_repos (repo_name TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE golden_repos_metadata (alias TEXT PRIMARY KEY)")
+        for name in global_repos_names:
+            conn.execute("INSERT INTO global_repos (repo_name) VALUES (?)", (name,))
+        for alias in golden_repos_aliases:
+            conn.execute(
+                "INSERT INTO golden_repos_metadata (alias) VALUES (?)", (alias,)
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return server_dir, db_path
+
+
+def _call_get_known_repo_names(server_dir):
+    """
+    Call _get_known_repo_names() with config patched to use the given server_dir.
+
+    get_config_service is imported locally inside _get_known_repo_names, so we
+    patch it at its source module path.
+
+    Returns the set of repo names (or None on error).
+    """
+    from unittest.mock import MagicMock, patch
+
+    mock_config_manager = MagicMock()
+    mock_config_manager.server_dir = server_dir
+    mock_config_service = MagicMock()
+    mock_config_service.config_manager = mock_config_manager
+
+    with patch(
+        "code_indexer.server.services.config_service.get_config_service",
+        return_value=mock_config_service,
+    ):
+        from code_indexer.server.web.dependency_map_routes import _get_known_repo_names
+
+        return _get_known_repo_names()
+
+
+class TestGetKnownRepoNamesOrphanFiltering:
+    """
+    Change 2: _get_known_repo_names() must use INNER JOIN to exclude repos
+    that exist in global_repos but NOT in golden_repos_metadata (orphan activations).
+
+    All tests use real SQLite files (no mocking of sqlite3) via _make_test_db
+    and _call_get_known_repo_names helpers.
+    """
+
+    def test_returns_repos_in_both_tables(self, tmp_path):
+        """Repos present in both global_repos and golden_repos_metadata are returned."""
+        server_dir, _ = _make_test_db(
+            tmp_path,
+            global_repos_names=["backend", "frontend"],
+            golden_repos_aliases=["backend", "frontend"],
+        )
+        result = _call_get_known_repo_names(server_dir)
+        assert result == {"backend", "frontend"}, f"Expected both repos, got: {result}"
+
+    def test_excludes_orphan_global_repos_entries(self, tmp_path):
+        """
+        Repos only in global_repos (not in golden_repos_metadata) are excluded.
+
+        This is the core fix: multimodal-mock exists in global_repos but has no
+        golden_repos_metadata entry (orphaned activation from a deleted golden repo).
+        It must NOT appear in the returned set.
+        """
+        server_dir, _ = _make_test_db(
+            tmp_path,
+            global_repos_names=["backend", "multimodal-mock"],
+            golden_repos_aliases=["backend"],  # multimodal-mock intentionally absent
+        )
+        result = _call_get_known_repo_names(server_dir)
+        assert "multimodal-mock" not in result, (
+            f"Orphan 'multimodal-mock' should be excluded but was in result: {result}"
+        )
+        assert "backend" in result, (
+            f"Legitimate 'backend' should be included but was missing: {result}"
+        )
+
+    def test_excludes_repos_only_in_golden_repos_metadata(self, tmp_path):
+        """
+        Repos only in golden_repos_metadata (not in global_repos) are also excluded.
+
+        The INNER JOIN is symmetric: only the intersection of both tables is returned.
+        """
+        server_dir, _ = _make_test_db(
+            tmp_path,
+            global_repos_names=["backend"],
+            golden_repos_aliases=["backend", "not-activated-repo"],
+        )
+        result = _call_get_known_repo_names(server_dir)
+        assert "not-activated-repo" not in result, (
+            f"'not-activated-repo' should be excluded but was in result: {result}"
+        )
+        assert result == {"backend"}, f"Expected only 'backend', got: {result}"
+
+    def test_returns_empty_set_when_no_overlap(self, tmp_path):
+        """Returns empty set when global_repos and golden_repos_metadata have no overlap."""
+        server_dir, _ = _make_test_db(
+            tmp_path,
+            global_repos_names=["orphan-a"],
+            golden_repos_aliases=["unactivated-b"],
+        )
+        result = _call_get_known_repo_names(server_dir)
+        assert result == set(), f"Expected empty set, got: {result}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Story #342 Bug Fix: _build_domain_analyzer data flow
+# Bug 1: repo_list was always [] (executor hardcodes [])
+# Bug 2: previous_domain_dir was always None (should be output_dir)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _make_fake_dep_map_service(repo_list=None, enrich_adds_fields=True):
+    """
+    Build a minimal fake dep_map_service for _build_domain_analyzer tests.
+
+    The fake exposes:
+      - _get_activated_repos()  -> returns repo_list (default: two fake repos)
+      - _enrich_repo_sizes()    -> returns the input list unchanged (or with sizes added)
+      - _analyzer               -> a recording object that captures run_pass_2_per_domain args
+      - _config_manager         -> None (max_turns will use default 25)
+      - _activity_journal       -> None (journal_path will be None)
+    """
+    from types import SimpleNamespace
+
+    if repo_list is None:
+        repo_list = [
+            {"alias": "alpha", "clone_path": "/fake/alpha", "description_summary": "Alpha repo"},
+            {"alias": "beta", "clone_path": "/fake/beta", "description_summary": "Beta repo"},
+        ]
+
+    # Capture the arguments passed to run_pass_2_per_domain
+    captured_calls = []
+
+    class FakeAnalyzer:
+        def run_pass_2_per_domain(self, staging_dir, domain, domain_list, repo_list,
+                                  max_turns, previous_domain_dir, journal_path):
+            captured_calls.append({
+                "staging_dir": staging_dir,
+                "domain": domain,
+                "domain_list": domain_list,
+                "repo_list": repo_list,
+                "max_turns": max_turns,
+                "previous_domain_dir": previous_domain_dir,
+                "journal_path": journal_path,
+            })
+            # Write a non-empty domain file so the closure returns True
+            (staging_dir / f"{domain['name']}.md").write_text("# content")
+
+    fake_analyzer = FakeAnalyzer()
+
+    def fake_get_activated_repos():
+        return list(repo_list)  # return copy
+
+    def fake_enrich_repo_sizes(repos):
+        if enrich_adds_fields:
+            for r in repos:
+                r.setdefault("file_count", 10)
+                r.setdefault("total_bytes", 1024)
+        return repos
+
+    service = SimpleNamespace(
+        _get_activated_repos=fake_get_activated_repos,
+        _enrich_repo_sizes=fake_enrich_repo_sizes,
+        _analyzer=fake_analyzer,
+        _config_manager=None,
+        _activity_journal=None,
+    )
+    return service, captured_calls
+
+
+class TestBuildDomainAnalyzerCapturesRepoList:
+    """
+    Bug 1 fix: _build_domain_analyzer must capture real repo_list from
+    dep_map_service at closure-creation time and use it, IGNORING the
+    empty [] that dep_map_repair_executor.py always passes.
+    """
+
+    def test_analyzer_uses_captured_repo_list_not_empty_list(self, tmp_path):
+        """
+        When executor calls analyzer(out_dir, domain, domain_list, []),
+        the closure must use the captured repo_list (not []).
+        """
+        from code_indexer.server.web.dependency_map_routes import _build_domain_analyzer
+
+        expected_repos = [
+            {"alias": "repo-x", "clone_path": "/x", "description_summary": "X",
+             "file_count": 5, "total_bytes": 500},
+        ]
+        service, captured_calls = _make_fake_dep_map_service(repo_list=expected_repos)
+
+        domain = {"name": "test-domain", "description": "d", "participating_repos": ["repo-x"]}
+        domain_list = [domain]
+
+        analyzer = _build_domain_analyzer(service, tmp_path)
+
+        # Executor always passes [] as repo_list
+        result = analyzer(tmp_path, domain, domain_list, [])
+
+        assert result is True, "Analyzer should succeed (domain file written)"
+        assert len(captured_calls) == 1, f"Expected 1 call, got {len(captured_calls)}"
+
+        call = captured_calls[0]
+        # Must NOT be empty list -- must be the captured list from service
+        assert call["repo_list"] != [], (
+            "repo_list passed to run_pass_2_per_domain must not be empty []"
+        )
+        assert len(call["repo_list"]) == 1, (
+            f"Expected 1 repo in list, got {len(call['repo_list'])}"
+        )
+        assert call["repo_list"][0]["alias"] == "repo-x", (
+            f"Expected repo-x, got {call['repo_list'][0]['alias']}"
+        )
+
+    def test_analyzer_ignores_executor_empty_list_uses_captured(self, tmp_path):
+        """
+        Confirms executor passing [] is overridden by captured list.
+        Tests the 'effective_repo_list = captured if not repo_list else repo_list' logic.
+        """
+        from code_indexer.server.web.dependency_map_routes import _build_domain_analyzer
+
+        service, captured_calls = _make_fake_dep_map_service()
+
+        domain = {"name": "d1", "description": "desc", "participating_repos": []}
+        analyzer = _build_domain_analyzer(service, tmp_path)
+
+        # Executor passes [] -- the bug scenario
+        analyzer(tmp_path, domain, [domain], [])
+
+        assert len(captured_calls) == 1
+        # repo_list in the call must NOT be [] (the bug value)
+        assert captured_calls[0]["repo_list"] != [], (
+            "Bug 1 regression: repo_list is still [] -- fix not applied"
+        )
+
+    def test_analyzer_uses_non_empty_repo_list_when_provided_by_caller(self, tmp_path):
+        """
+        If caller passes a non-empty repo_list, it should be used as-is
+        (the 'effective_repo_list = captured if not repo_list else repo_list' branch).
+        """
+        from code_indexer.server.web.dependency_map_routes import _build_domain_analyzer
+
+        service, captured_calls = _make_fake_dep_map_service()
+        caller_repo_list = [
+            {"alias": "override-repo", "clone_path": "/o", "description_summary": "O",
+             "file_count": 3, "total_bytes": 300},
+        ]
+
+        domain = {"name": "d2", "description": "desc", "participating_repos": []}
+        analyzer = _build_domain_analyzer(service, tmp_path)
+
+        # Caller passes a real non-empty list
+        analyzer(tmp_path, domain, [domain], caller_repo_list)
+
+        assert len(captured_calls) == 1
+        # The caller's list should be used (not the captured one)
+        assert captured_calls[0]["repo_list"] == caller_repo_list, (
+            "When executor provides non-empty repo_list, it should be used"
+        )
+
+
+class TestBuildDomainAnalyzerPreviousDomainDir:
+    """
+    Bug 2 fix: _build_domain_analyzer must pass output_dir as previous_domain_dir
+    instead of None, so Claude can see the existing (partially correct) domain
+    analysis files and improve them rather than starting from scratch.
+    """
+
+    def test_previous_domain_dir_is_output_dir_not_none(self, tmp_path):
+        """
+        previous_domain_dir passed to run_pass_2_per_domain must be output_dir,
+        not None.
+        """
+        from code_indexer.server.web.dependency_map_routes import _build_domain_analyzer
+
+        service, captured_calls = _make_fake_dep_map_service()
+        output_dir = tmp_path
+
+        domain = {"name": "my-domain", "description": "d", "participating_repos": []}
+        analyzer = _build_domain_analyzer(service, output_dir)
+
+        analyzer(output_dir, domain, [domain], [])
+
+        assert len(captured_calls) == 1
+        call = captured_calls[0]
+        assert call["previous_domain_dir"] is not None, (
+            "Bug 2 regression: previous_domain_dir is None -- fix not applied"
+        )
+        assert call["previous_domain_dir"] == output_dir, (
+            f"previous_domain_dir should be {output_dir}, "
+            f"got {call['previous_domain_dir']}"
+        )
+
+    def test_previous_domain_dir_same_as_closure_output_dir(self, tmp_path):
+        """
+        The output_dir passed to _build_domain_analyzer (closure creation) is the
+        same directory used as previous_domain_dir -- it contains the existing
+        broken analysis that Claude should improve on.
+        """
+        from code_indexer.server.web.dependency_map_routes import _build_domain_analyzer
+
+        service, captured_calls = _make_fake_dep_map_service()
+
+        # Two different Path objects pointing to same place -- equality check
+        closure_output_dir = tmp_path
+        call_out_dir = tmp_path
+
+        domain = {"name": "fix-domain", "description": "d", "participating_repos": []}
+        analyzer = _build_domain_analyzer(service, closure_output_dir)
+
+        analyzer(call_out_dir, domain, [domain], [])
+
+        assert len(captured_calls) == 1
+        # previous_domain_dir is the closure's output_dir (not the call's out_dir)
+        assert captured_calls[0]["previous_domain_dir"] == closure_output_dir

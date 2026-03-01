@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.76
+
+### Features
+
+- feat: Dependency Map Repair Mode with Smart Health Detection (Story #342). Five-check health detector inspects dependency map output for missing/zero-char/undersized domain files, orphan files, count mismatches, stale index, and incomplete/malformed domains. Conditional repair button appears when anomalies detected, triggering 5-phase repair: Claude CLI re-analysis with retry, orphan removal, JSON reconciliation, programmatic index regeneration, and post-validation. New API endpoints GET /admin/dependency-map/health and POST /admin/dependency-map/repair with admin auth. Shared dep_map_file_utils module eliminates cross-service duplication.
+
+### Bug Fixes
+
+- fix: Phase 1 repair weak success check -- now re-validates via health detector after Claude CLI re-analysis to confirm anomaly is actually resolved, retries if structure still invalid (Story #342)
+- fix: Phase 1 repair broken content fed back to Claude -- deletes broken domain file before calling analyzer so Claude starts fresh instead of preserving malformed structure from previous analysis (Story #342)
+
 ## v9.3.75
 
 ### Bug Fixes
