@@ -182,7 +182,7 @@ class CleanupManager:
                 time.sleep(0.05)
                 try:
                     func(failed_path)
-                except OSError:
+                except (OSError, TypeError):
                     pass
             else:
                 logger.debug(f"rmtree onerror: {func.__name__}({failed_path}): {exc}")
