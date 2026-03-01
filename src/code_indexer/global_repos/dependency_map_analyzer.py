@@ -186,7 +186,9 @@ class DependencyMapAnalyzer:
             clone_path = repo.get("clone_path", "unknown")
             file_count = repo.get("file_count", "?")
             total_mb = round(repo.get("total_bytes", 0) / (1024 * 1024), 1)
-            prompt += f"- **{alias}**: `{clone_path}` ({file_count} files, {total_mb} MB)\n"
+            prompt += (
+                f"- **{alias}**: `{clone_path}` ({file_count} files, {total_mb} MB)\n"
+            )
         prompt += "\n"
 
         prompt += "## Instructions\n\n"
@@ -194,7 +196,9 @@ class DependencyMapAnalyzer:
             "Identify domain clusters and list participating repos per domain.\n\n"
         )
         prompt += "**IMPORTANT**: The `cidx-meta` repository is the system metadata registry where dependency map output is stored. "
-        prompt += "It must NOT be included as a participating repository in any domain. "
+        prompt += (
+            "It must NOT be included as a participating repository in any domain. "
+        )
         prompt += "If you see references to cidx-meta in other repos, that is a system-level integration, not a domain dependency.\n\n"
 
         prompt += "### Source-Code-First Exploration (MANDATORY)\n\n"
@@ -236,7 +240,11 @@ class DependencyMapAnalyzer:
 
         prompt += "### COMPLETENESS MANDATE\n\n"
         prompt += f"There are exactly {len(repo_list)} repositories. Your output MUST assign ALL {len(repo_list)} of them.\n"
-        prompt += "Verify INTERNALLY that total repos across all domains equals " + str(len(repo_list)) + ". Do NOT output the verification.\n"
+        prompt += (
+            "Verify INTERNALLY that total repos across all domains equals "
+            + str(len(repo_list))
+            + ". Do NOT output the verification.\n"
+        )
         prompt += "If you cannot find integration evidence for a repo, assign it to its own standalone domain.\n"
         prompt += "MISSING REPOS = FAILED ANALYSIS. Every valid alias must appear exactly once.\n"
         prompt += "All verification must be done INTERNALLY. Your output must contain ONLY JSON.\n\n"
@@ -269,7 +277,9 @@ class DependencyMapAnalyzer:
         prompt += "]\n"
 
         # Invoke Claude CLI (Pass 1 explores all repos to identify domains and outputs JSON)
-        timeout = self.pass_timeout  # Pass 1 uses full timeout (heaviest phase: explores all repos)
+        timeout = (
+            self.pass_timeout
+        )  # Pass 1 uses full timeout (heaviest phase: explores all repos)
         result = self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None)
 
         # Parse JSON response
@@ -313,7 +323,7 @@ class DependencyMapAnalyzer:
                 if claimed_path:
                     # Check alias appears as a delimited segment in path (not arbitrary substring)
                     # This handles paths like /repos/.versioned/flask-large/v_123/
-                    pattern = r'(?:^|[/\\_.-])' + re.escape(r) + r'(?:$|[/\\_.-])'
+                    pattern = r"(?:^|[/\\_.-])" + re.escape(r) + r"(?:$|[/\\_.-])"
                     if not re.search(pattern, claimed_path):
                         logger.warning(
                             f"Pass 1 repo '{r}' has suspicious path '{claimed_path}' "
@@ -351,7 +361,7 @@ class DependencyMapAnalyzer:
             seen.add(r)
 
         unassigned = valid_aliases - assigned_repos
-        for alias in sorted(unassigned):
+        for alias in sorted(unassigned):  # type: ignore[assignment,type-var]
             # Find description from repo_list
             desc = "No description"
             for r in repo_list:
@@ -360,7 +370,7 @@ class DependencyMapAnalyzer:
                     break
 
             # Strip markdown heading markers from description
-            desc = desc.lstrip('#').strip()
+            desc = desc.lstrip("#").strip()
 
             # If description equals alias name or is empty, use better default
             if not desc or desc.lower() == alias.lower():
@@ -385,7 +395,7 @@ class DependencyMapAnalyzer:
             f"Pass 1 complete: identified {len(domain_list)} domains, wrote {domains_file}"
         )
 
-        return domain_list
+        return domain_list  # type: ignore[no-any-return]
 
     def _build_output_first_prompt(
         self,
@@ -393,6 +403,7 @@ class DependencyMapAnalyzer:
         domain_list: List[Dict[str, Any]],
         repo_list: List[Dict[str, Any]],
         previous_domain_dir: Optional[Path] = None,
+        journal_path: Optional[Path] = None,
     ) -> str:
         """Build output-first prompt for large domains (>3 repos)."""
         domain_name = domain["name"]
@@ -426,7 +437,9 @@ class DependencyMapAnalyzer:
 
         prompt += "\n## Participating Repositories\n\n"
         path_map = {r.get("alias"): r.get("clone_path") for r in repo_list}
-        repo_file_count_map = {r.get("alias"): r.get("file_count", "?") for r in repo_list}
+        repo_file_count_map = {
+            r.get("alias"): r.get("file_count", "?") for r in repo_list
+        }
         for repo_alias in participating_repos_sorted:
             clone_path = path_map.get(repo_alias, "path not found")
             file_count = repo_file_count_map.get(repo_alias, "?")
@@ -438,21 +451,34 @@ class DependencyMapAnalyzer:
         if participating_repos_sorted:
             prompt += "## INSIDE-OUT ANALYSIS STRATEGY\n\n"
             prompt += f"Start your analysis from **{participating_repos_sorted[0]}** (largest repository, "
-            prompt += f"{repo_size_map.get(participating_repos_sorted[0], 0) // 1024} KB). "
+            prompt += (
+                f"{repo_size_map.get(participating_repos_sorted[0], 0) // 1024} KB). "
+            )
             prompt += "Map its integration points first, then fan out to discover how the smaller repositories connect to it.\n"
-            prompt += "This ensures the dominant codebase anchors the dependency graph.\n\n"
+            prompt += (
+                "This ensures the dominant codebase anchors the dependency graph.\n\n"
+            )
 
         # Feed previous analysis if good quality - with explicit improvement mandate
         if previous_domain_dir and (previous_domain_dir / f"{domain_name}.md").exists():
             existing_content = (previous_domain_dir / f"{domain_name}.md").read_text()
-            if self._has_markdown_headings(existing_content) and len(existing_content.strip()) > 1000:
+            if (
+                self._has_markdown_headings(existing_content)
+                and len(existing_content.strip()) > 1000
+            ):
                 prompt += "## Previous Analysis (EXTEND, IMPROVE, and CORRECT)\n\n"
                 prompt += "A previous analysis exists for this domain. You MUST:\n"
-                prompt += "1. **Preserve** accurate findings from the previous analysis\n"
-                prompt += "2. **Correct** any errors, inaccuracies, or outdated information\n"
+                prompt += (
+                    "1. **Preserve** accurate findings from the previous analysis\n"
+                )
+                prompt += (
+                    "2. **Correct** any errors, inaccuracies, or outdated information\n"
+                )
                 prompt += "3. **Extend** with new dependencies or details not previously documented\n"
                 prompt += "4. **Improve** clarity, evidence quality, and structural organization\n\n"
-                prompt += "Do NOT start from scratch - build upon the previous work.\n\n"
+                prompt += (
+                    "Do NOT start from scratch - build upon the previous work.\n\n"
+                )
                 prompt += existing_content + "\n\n"
 
         # Output template
@@ -482,13 +508,19 @@ class DependencyMapAnalyzer:
         # Evidence requirements (condensed)
         prompt += "## Evidence Requirements\n\n"
         prompt += "Every dependency MUST include: source reference (module/subsystem), evidence type, reasoning.\n"
-        prompt += "If you cannot find concrete evidence, DO NOT include the dependency.\n\n"
+        prompt += (
+            "If you cannot find concrete evidence, DO NOT include the dependency.\n\n"
+        )
 
         # OPTIONAL verification searches at the end
         prompt += "## OPTIONAL: MCP Verification Searches (max 5 calls)\n\n"
         prompt += "After writing your analysis, you MAY use the `search_code` MCP tool for verification.\n"
-        prompt += "Limit: AT MOST 5 search_code calls total. Do NOT explore extensively.\n"
-        prompt += "These searches are for CONFIRMING what you wrote, not for discovery.\n\n"
+        prompt += (
+            "Limit: AT MOST 5 search_code calls total. Do NOT explore extensively.\n"
+        )
+        prompt += (
+            "These searches are for CONFIRMING what you wrote, not for discovery.\n\n"
+        )
 
         # Prohibited content
         prompt += "## PROHIBITED Content\n\n"
@@ -502,7 +534,36 @@ class DependencyMapAnalyzer:
         prompt += "Follow the template structure above exactly.\n"
         prompt += "Output ONLY the content (no markdown code blocks, no preamble).\n"
 
+        if journal_path is not None:
+            prompt += self._build_activity_journal_appendix(journal_path)
+
         return prompt
+
+    def _build_activity_journal_appendix(self, journal_path: Path) -> str:
+        """Build activity journal instruction appendix for Claude CLI prompts (Story #329)."""
+        return f"""
+
+## Activity Journal (MANDATORY)
+
+You MUST log your progress to the activity journal file during this analysis.
+Use the Bash tool to append entries:
+
+    echo "[$(date +%H:%M:%S)] **claude** Your activity message here" >> {journal_path}
+
+Required entries (log each as you perform the action):
+- "Exploring repository: {{alias}}" -- when you start examining a repository
+- "Reading file: {{relative_path}}" -- when you read a significant file
+- "Searching code: '{{query}}'" -- when you use search_code MCP tool
+- "Analyzing imports and dependencies in {{alias}}" -- when analyzing integration points
+- "Writing domain analysis for {{domain}}" -- when you begin writing the output
+- "Documenting cross-domain dependency: {{source}} -> {{target}}" -- when finding cross-domain links
+
+Rules:
+- One line per entry, present tense, minimal formatting (bold for emphasis only)
+- Keep entries short (under 120 characters)
+- Log at LEAST 3 entries during your analysis
+- Do NOT read from or modify the journal file -- only append via echo
+"""
 
     def _build_std_header(
         self,
@@ -532,7 +593,9 @@ class DependencyMapAnalyzer:
         if not repos_sorted:
             return ""
         prompt = "## INSIDE-OUT ANALYSIS STRATEGY\n\n"
-        prompt += f"Start your analysis from **{repos_sorted[0]}** (largest repository, "
+        prompt += (
+            f"Start your analysis from **{repos_sorted[0]}** (largest repository, "
+        )
         prompt += f"{repo_size_map.get(repos_sorted[0], 0) // 1024} KB). "
         prompt += "Map its integration points first, then fan out to discover how the smaller repositories connect to it.\n"
         prompt += "This ensures the dominant codebase anchors the dependency graph.\n\n"
@@ -549,7 +612,9 @@ class DependencyMapAnalyzer:
         prompt += "IMPORTANT: Each repository is a directory on disk. You MUST explore source code using these paths.\n"
         prompt += "Start by listing each repo's directory structure, then read key files (entry points, configs, manifests).\n\n"
         path_map = {r.get("alias"): r.get("clone_path") for r in repo_list}
-        repo_file_count_map = {r.get("alias"): r.get("file_count", "?") for r in repo_list}
+        repo_file_count_map = {
+            r.get("alias"): r.get("file_count", "?") for r in repo_list
+        }
         for repo_alias in repos_sorted:
             clone_path = path_map.get(repo_alias, "path not found")
             file_count = repo_file_count_map.get(repo_alias, "?")
@@ -567,7 +632,9 @@ class DependencyMapAnalyzer:
         """Build CIDX MCP search instructions section."""
         prompt = "## CIDX Semantic Search (MCP Tools) - MANDATORY\n\n"
         prompt += "You MUST use the `cidx-local` MCP server's `search_code` tool during this analysis.\n"
-        prompt += "It provides semantic search across ALL indexed golden repositories.\n\n"
+        prompt += (
+            "It provides semantic search across ALL indexed golden repositories.\n\n"
+        )
         prompt += "### Required Searches\n\n"
         prompt += "For EACH participating repository, run at least one search:\n"
         for repo_alias in repos_sorted:
@@ -597,24 +664,34 @@ class DependencyMapAnalyzer:
     def _build_std_exploration_and_evidence(self) -> str:
         """Build source code exploration mandate, dependency types, and evidence sections."""
         prompt = "## Source Code Exploration Mandate\n\n"
-        prompt += "DO NOT rely solely on README files or documentation. Actively explore:\n"
+        prompt += (
+            "DO NOT rely solely on README files or documentation. Actively explore:\n"
+        )
         prompt += "- Import statements and package dependencies (requirements.txt, package.json, setup.py, go.mod)\n"
         prompt += "- Entry points (main.py, app.py, index.ts, cmd/ directories)\n"
         prompt += "- Configuration files for references to other repos/services\n"
         prompt += "- API endpoint definitions and client code\n"
         prompt += "- Test files (often reveal integration dependencies)\n"
         prompt += "- Build and deployment scripts\n\n"
-        prompt += "Assess each repo's documentation depth relative to its codebase size.\n"
+        prompt += (
+            "Assess each repo's documentation depth relative to its codebase size.\n"
+        )
         prompt += "A repo with 100+ source files and a 5-line README has unreliable documentation - explore its source code thoroughly.\n\n"
         prompt += "**NOTE**: The `cidx-meta` directory in the golden-repos root is the system metadata registry. "
         prompt += "It stores dependency map output and repo descriptions. Ignore it during analysis — it is not a source code repository.\n\n"
         prompt += "## Dependency Types to Identify\n\n"
         prompt += "**CRITICAL**: ABSENCE of code imports does NOT mean absence of dependency.\n\n"
-        prompt += "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
-        prompt += "  Example: 'web-app imports shared-types package for User interface'\n\n"
+        prompt += (
+            "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
+        )
+        prompt += (
+            "  Example: 'web-app imports shared-types package for User interface'\n\n"
+        )
         prompt += "- **Data contracts**: Shared database tables/views/schemas, shared file formats\n"
         prompt += "  Example: 'lambda-processor reads customer_summary_view exposed by core-db'\n\n"
-        prompt += "- **Service integration**: REST/HTTP/MCP/gRPC API calls between repos\n"
+        prompt += (
+            "- **Service integration**: REST/HTTP/MCP/gRPC API calls between repos\n"
+        )
         prompt += "  Example: 'frontend calls backend /api/auth endpoint for login'\n\n"
         prompt += "- **External tool invocation**: CLI tools, subprocess calls, shell commands invoking another repo\n"
         prompt += "  Example: 'deployment-scripts invoke cidx CLI for indexing'\n\n"
@@ -623,7 +700,9 @@ class DependencyMapAnalyzer:
         prompt += "- **Message/event contracts**: Queue messages, webhooks, pub/sub events, callback URLs\n"
         prompt += "  Example: 'order-service publishes order.created event consumed by notification-service'\n\n"
         prompt += "- **Deployment dependencies**: Runtime availability requirements (repo A must be running for repo B)\n"
-        prompt += "  Example: 'web-app requires auth-service to be running and reachable'\n\n"
+        prompt += (
+            "  Example: 'web-app requires auth-service to be running and reachable'\n\n"
+        )
         prompt += "- **Semantic coupling**: Behavioral contracts where changing logic in repo A breaks expectations in repo B\n"
         prompt += "  Example: 'analytics-pipeline expects user-service to always include email field in user records'\n\n"
         return prompt
@@ -637,12 +716,16 @@ class DependencyMapAnalyzer:
         prompt += "2. Confirm it has actual code-level or integration relationships with other repos in this domain\n"
         prompt += "3. If a repo does NOT belong in this domain based on source code evidence, state this explicitly\n\n"
         prompt += "## MANDATORY: Technology Stack Verification\n\n"
-        prompt += "When describing a repository's technology stack or primary language:\n"
+        prompt += (
+            "When describing a repository's technology stack or primary language:\n"
+        )
         prompt += "1. Search for dependency manifests (requirements.txt, package.json, Cargo.toml, go.mod, *.csproj, pom.xml, pyproject.toml)\n"
         prompt += "2. Check actual source file extensions in the repository (.py, .ts, .js, .rs, .go, .cs, .java, .pas)\n"
         prompt += "3. Do NOT assume technology based on tool names, library names, or general knowledge\n"
         prompt += "4. If a repo uses a library written in language X as a binding/wrapper in language Y, the repo's primary language is Y, not X\n"
-        prompt += "5. State only what the dependency manifest and source files confirm\n\n"
+        prompt += (
+            "5. State only what the dependency manifest and source files confirm\n\n"
+        )
         prompt += "## MANDATORY: Evidence-Based Claims\n\n"
         prompt += "Every dependency you document MUST include:\n"
         prompt += '1. **Source reference**: The specific module, package, or subsystem where the dependency manifests (e.g., "code-indexer\'s server/mcp/handlers.py module")\n'
@@ -677,11 +760,17 @@ class DependencyMapAnalyzer:
         prompt += "Write CONCISE analysis focused on inter-repository navigation. Your audience is an MCP user deciding which repos to explore.\n"
         prompt += "- Document precise dependency connections (who calls who, shared data, integration points)\n"
         prompt += "- Include specific evidence (file names, function names, config keys) but NOT full code snippets\n"
-        prompt += "- Keep each section to 3-8 sentences. Shorter is better if precise.\n"
-        prompt += "- Do NOT reproduce source code, JSON schemas, or directory listings\n\n"
+        prompt += (
+            "- Keep each section to 3-8 sentences. Shorter is better if precise.\n"
+        )
+        prompt += (
+            "- Do NOT reproduce source code, JSON schemas, or directory listings\n\n"
+        )
         prompt += "## Output Budget\n\n"
         prompt += "Your analysis MUST be between 3,000 and 10,000 characters.\n"
-        prompt += "If you find yourself writing more, you are including too much detail.\n"
+        prompt += (
+            "If you find yourself writing more, you are including too much detail.\n"
+        )
         prompt += "Focus on WHAT connects repos, not HOW the internals work.\n\n"
         prompt += "## OUTPUT TEMPLATE (fill in each section)\n\n"
         prompt += "Your output MUST follow this exact structure:\n\n"
@@ -698,7 +787,9 @@ class DependencyMapAnalyzer:
         prompt += "Do NOT include any of the following in your output:\n"
         prompt += "- YAML frontmatter blocks (the system adds these automatically)\n"
         prompt += "- Speculative sections like 'Recommendations', 'Potential Integration Opportunities', 'Future Considerations', or 'Suggested Improvements'\n"
-        prompt += "- Advisory content about what SHOULD be done or COULD be integrated\n"
+        prompt += (
+            "- Advisory content about what SHOULD be done or COULD be integrated\n"
+        )
         prompt += "- 'MCP Searches Performed' or search audit trail sections\n"
         prompt += "- Code snippets or source code blocks\n"
         prompt += "- JSON schema definitions or field-by-field breakdowns\n"
@@ -722,6 +813,7 @@ class DependencyMapAnalyzer:
         domain_list: List[Dict[str, Any]],
         repo_list: List[Dict[str, Any]],
         previous_domain_dir: Optional[Path] = None,
+        journal_path: Optional[Path] = None,
     ) -> str:
         """Build standard prompt for small domains (<=3 repos)."""
         domain_name = domain["name"]
@@ -732,16 +824,21 @@ class DependencyMapAnalyzer:
         )
 
         prompt = self._build_std_header(domain, domain_list, repos_sorted)
-        prompt += self._build_std_analysis_strategy(repos_sorted, repo_size_map)
-        prompt += self._build_std_repo_locations(repos_sorted, repo_list, repo_size_map)
-        prompt += self._build_std_mcp_search(repos_sorted, participating_repos, repo_list)
+        prompt += self._build_std_analysis_strategy(repos_sorted, repo_size_map)  # type: ignore[arg-type]
+        prompt += self._build_std_repo_locations(repos_sorted, repo_list, repo_size_map)  # type: ignore[arg-type]
+        prompt += self._build_std_mcp_search(
+            repos_sorted, participating_repos, repo_list
+        )
         prompt += self._build_std_exploration_and_evidence()
         prompt += self._build_std_verification_mandates()
 
         # Feed previous analysis if good quality
         if previous_domain_dir and (previous_domain_dir / f"{domain_name}.md").exists():
             existing_content = (previous_domain_dir / f"{domain_name}.md").read_text()
-            if self._has_markdown_headings(existing_content) and len(existing_content.strip()) > 1000:
+            if (
+                self._has_markdown_headings(existing_content)
+                and len(existing_content.strip()) > 1000
+            ):
                 prompt += "## Previous Analysis (refine and improve)\n\n"
                 prompt += existing_content + "\n\n"
             else:
@@ -751,6 +848,10 @@ class DependencyMapAnalyzer:
                 )
 
         prompt += self._build_std_output_section(domain_name)
+
+        if journal_path is not None:
+            prompt += self._build_activity_journal_appendix(journal_path)
+
         return prompt
 
     def run_pass_2_per_domain(
@@ -761,6 +862,7 @@ class DependencyMapAnalyzer:
         repo_list: List[Dict[str, Any]],
         max_turns: int,
         previous_domain_dir: Optional[Path] = None,
+        journal_path: Optional[Path] = None,
     ) -> None:
         """
         Run Pass 2: Per-domain source code analysis (AC1).
@@ -774,6 +876,7 @@ class DependencyMapAnalyzer:
             repo_list: List of repository metadata dicts with alias and clone_path
             max_turns: Maximum Claude CLI turns for this pass
             previous_domain_dir: Previous dependency-map dir for incremental improvement
+            journal_path: Optional path to activity journal file (Story #329)
         """
         domain_name = domain["name"]
         participating_repos = domain.get("participating_repos", [])
@@ -783,12 +886,20 @@ class DependencyMapAnalyzer:
         if is_large_domain:
             # Use output-first prompt for large domains (>3 repos)
             prompt = self._build_output_first_prompt(
-                domain, domain_list, repo_list, previous_domain_dir
+                domain,
+                domain_list,
+                repo_list,
+                previous_domain_dir,
+                journal_path=journal_path,
             )
         else:
             # Use standard prompt for small domains (<=3 repos)
             prompt = self._build_standard_prompt(
-                domain, domain_list, repo_list, previous_domain_dir
+                domain,
+                domain_list,
+                repo_list,
+                previous_domain_dir,
+                journal_path=journal_path,
             )
 
         # Fix 1 (Iteration 12): PostToolUse hook to prevent turn exhaustion
@@ -810,7 +921,9 @@ class DependencyMapAnalyzer:
 
         # Invoke Claude CLI (Pass 2 needs MCP search_code tool for source code analysis)
         result = self._invoke_claude_cli(
-            prompt, self.pass_timeout, max_turns,
+            prompt,
+            self.pass_timeout,
+            max_turns,
             allowed_tools="mcp__cidx-local__search_code",
             post_tool_hook=hook_reminder,
             hook_thresholds=hook_thresh,
@@ -834,7 +947,9 @@ class DependencyMapAnalyzer:
                     "and the Pass 1 evidence provided.\n\n"
                 ) + prompt
                 result = self._invoke_claude_cli(
-                    budget_prompt, self.pass_timeout, 8,
+                    budget_prompt,
+                    self.pass_timeout,
+                    8,
                     allowed_tools="",  # NO MCP tools
                     post_tool_hook=hook_reminder,
                 )
@@ -846,7 +961,9 @@ class DependencyMapAnalyzer:
                     "you MUST write your complete analysis output immediately.\n\n"
                 ) + prompt
                 result = self._invoke_claude_cli(
-                    budget_prompt, self.pass_timeout, 15,
+                    budget_prompt,
+                    self.pass_timeout,
+                    15,
                     allowed_tools="mcp__cidx-local__search_code",
                     post_tool_hook=hook_reminder,
                 )
@@ -869,9 +986,11 @@ class DependencyMapAnalyzer:
                 "any knowledge you have. Focus on precise inter-repo connections for navigation.\n\n"
             ) + prompt
             result = self._invoke_claude_cli(
-                retry_prompt, self.pass_timeout, 10,
+                retry_prompt,
+                self.pass_timeout,
+                10,
                 allowed_tools="",  # No MCP tools - write only
-                post_tool_hook=hook_reminder
+                post_tool_hook=hook_reminder,
             )
             result = self._strip_meta_commentary(result)
 
@@ -1091,7 +1210,15 @@ class DependencyMapAnalyzer:
             Prompt string ready to send to Claude CLI
         """
         repo_count = len(repo_list)
-        domain_guidance = "3-7" if repo_count <= 20 else ("5-15" if repo_count <= 50 else ("10-30" if repo_count <= 100 else "15-50"))
+        domain_guidance = (
+            "3-7"
+            if repo_count <= 20
+            else (
+                "5-15"
+                if repo_count <= 50
+                else ("10-30" if repo_count <= 100 else "15-50")
+            )
+        )
 
         prompt = "# Domain Synthesis Task\n\n"
         prompt += "Analyze the following repository descriptions and identify domain clusters.\n\n"
@@ -1105,14 +1232,18 @@ class DependencyMapAnalyzer:
             clone_path = repo.get("clone_path", "unknown")
             file_count = repo.get("file_count", "?")
             total_mb = round(repo.get("total_bytes", 0) / (1024 * 1024), 1)
-            prompt += f"- **{alias}**: `{clone_path}` ({file_count} files, {total_mb} MB)\n"
+            prompt += (
+                f"- **{alias}**: `{clone_path}` ({file_count} files, {total_mb} MB)\n"
+            )
         prompt += f"\n## Instructions\n\nAIM for {domain_guidance} domains for {repo_count} repositories.\n"
         prompt += f"Assign ALL {repo_count} repositories. Missing repos = failed analysis.\n\n"
         prompt += "## Output Format\n\nYour ENTIRE response must be ONLY a valid JSON array.\n"
         prompt += '[\n  {"name": "domain-name", "description": "scope", "participating_repos": ["alias1"]}\n]\n'
         return prompt
 
-    def _build_previous_domains_section(self, previous_domains_dir: Optional[Path]) -> str:
+    def _build_previous_domains_section(
+        self, previous_domains_dir: Optional[Path]
+    ) -> str:
         """Return previous domain structure section for Pass 1 stability, or empty string."""
         if previous_domains_dir is None:
             return ""
@@ -1122,7 +1253,9 @@ class DependencyMapAnalyzer:
         try:
             prev_domains = json.loads(prev_file.read_text())
         except Exception as e:
-            logger.warning(f"build_pass1_prompt: failed to read previous _domains.json: {e}")
+            logger.warning(
+                f"build_pass1_prompt: failed to read previous _domains.json: {e}"
+            )
             return ""
         if not isinstance(prev_domains, list) or not prev_domains:
             return ""
@@ -1196,7 +1329,7 @@ class DependencyMapAnalyzer:
         lines = content.split("\n")
 
         # Find ## Cross-Domain heading (case-insensitive, flexible wording)
-        heading_pattern = re.compile(r'^##\s+Cross[- ]Domain\b', re.IGNORECASE)
+        heading_pattern = re.compile(r"^##\s+Cross[- ]Domain\b", re.IGNORECASE)
 
         start_idx = None
         for i, line in enumerate(lines):
@@ -1280,13 +1413,15 @@ class DependencyMapAnalyzer:
             if set(source_repo) <= {"-", " "}:
                 continue
 
-            rows.append({
-                "source_repo": source_repo,
-                "depends_on": depends_on,
-                "target_domain": target_domain,
-                "dep_type": dep_type,
-                "why": why,
-            })
+            rows.append(
+                {
+                    "source_repo": source_repo,
+                    "depends_on": depends_on,
+                    "target_domain": target_domain,
+                    "dep_type": dep_type,
+                    "why": why,
+                }
+            )
 
         return rows
 
@@ -1319,7 +1454,9 @@ class DependencyMapAnalyzer:
                 continue
 
             content = domain_file.read_text()
-            cross_domain_text = DependencyMapAnalyzer._extract_cross_domain_section(content)
+            cross_domain_text = DependencyMapAnalyzer._extract_cross_domain_section(
+                content
+            )
 
             if not cross_domain_text:
                 continue
@@ -1359,12 +1496,14 @@ class DependencyMapAnalyzer:
             via_repos_str = ", ".join(sorted(edge_data["via_repos"]))
             dep_type = edge_data["dep_type"]
             why = edge_data["why"]
-            output += f"| {source} | {target} | {via_repos_str} | {dep_type} | {why} |\n"
+            output += (
+                f"| {source} | {target} | {via_repos_str} | {dep_type} | {why} |\n"
+            )
 
         edge_count = len(sorted_edges)
         total_domains = len(domain_list)
         domains_with_edges: set = set()
-        for (source, target) in edges:
+        for source, target in edges:
             domains_with_edges.add(source)
             domains_with_edges.add(target)
 
@@ -1374,7 +1513,9 @@ class DependencyMapAnalyzer:
         output += f"\n**Summary**: {edge_count} cross-domain edges across {total_domains} domains."
         if standalone_domains:
             standalone_str = ", ".join(standalone_domains)
-            output += f" {len(standalone_domains)} standalone domains: {standalone_str}."
+            output += (
+                f" {len(standalone_domains)} standalone domains: {standalone_str}."
+            )
 
         return output
 
@@ -1408,7 +1549,11 @@ class DependencyMapAnalyzer:
 
         for line in text.split("\n"):
             stripped = line.strip()
-            if stripped.startswith("# ") or stripped.startswith("## ") or stripped.startswith("### "):
+            if (
+                stripped.startswith("# ")
+                or stripped.startswith("## ")
+                or stripped.startswith("### ")
+            ):
                 return True
 
         return False
@@ -1458,19 +1603,24 @@ class DependencyMapAnalyzer:
                 for i in range(1, len(lines)):
                     if lines[i].strip() == "---":
                         # Found closing delimiter - strip entire frontmatter
-                        text = "\n".join(lines[i + 1:])
+                        text = "\n".join(lines[i + 1 :])
                         stripped_yaml = True
                         break
             else:
                 # Fix 2: Also detect YAML-like content without opening ---
                 # Claude sometimes omits the opening delimiter
-                yaml_keys = ("domain:", "last_analyzed:", "participating_repos:", "schema_version:")
+                yaml_keys = (
+                    "domain:",
+                    "last_analyzed:",
+                    "participating_repos:",
+                    "schema_version:",
+                )
                 first_content = stripped_first.lower()
                 if any(first_content.startswith(k) for k in yaml_keys):
                     # Find closing ---
                     for i in range(1, len(lines)):
                         if lines[i].strip() == "---":
-                            text = "\n".join(lines[i + 1:])
+                            text = "\n".join(lines[i + 1 :])
                             stripped_yaml = True
                             break
 
@@ -1486,7 +1636,11 @@ class DependencyMapAnalyzer:
         for i, line in enumerate(lines):
             stripped = line.strip()
             # Check for markdown heading (level 1, 2, or 3: #, ##, ###)
-            if stripped.startswith("# ") or stripped.startswith("## ") or stripped.startswith("### "):
+            if (
+                stripped.startswith("# ")
+                or stripped.startswith("## ")
+                or stripped.startswith("### ")
+            ):
                 first_heading_idx = i
                 break
 
@@ -1543,10 +1697,12 @@ class DependencyMapAnalyzer:
             # Found actual content - stop stripping
             # Content lines start with: #, ##, -, |, **, or regular text
             # NOTE: Numbered lists (digits) require special handling (see below)
-            if (stripped.startswith("#") or
-                stripped.startswith("**") or
-                stripped.startswith("-") or
-                stripped.startswith("|")):
+            if (
+                stripped.startswith("#")
+                or stripped.startswith("**")
+                or stripped.startswith("-")
+                or stripped.startswith("|")
+            ):
                 break
 
             # Special handling for numbered list items (Fix 4)
@@ -1698,7 +1854,7 @@ class DependencyMapAnalyzer:
         if end_idx == -1:
             raise ValueError(
                 f"No matching closing bracket found for JSON starting at position {start_idx} "
-                f"(context: {text[start_idx:start_idx+200]})"
+                f"(context: {text[start_idx : start_idx + 200]})"
             )
 
         # Step 4: Extract and validate JSON
@@ -1764,7 +1920,9 @@ class DependencyMapAnalyzer:
 
         # Guard against negative max_turns
         if max_turns < 0:
-            logger.warning(f"max_turns={max_turns} is negative, treating as 0 (single-shot mode)")
+            logger.warning(
+                f"max_turns={max_turns} is negative, treating as 0 (single-shot mode)"
+            )
             max_turns = 0
 
         # max_turns=0 means single-shot print mode (no tool use, no agentic loop)
@@ -1779,7 +1937,7 @@ class DependencyMapAnalyzer:
             if post_tool_hook is not None:
                 # Create temporary counter file
                 counter_file = tempfile.NamedTemporaryFile(
-                    mode='w', prefix='depmap_hook_', suffix='.cnt', delete=False
+                    mode="w", prefix="depmap_hook_", suffix=".cnt", delete=False
                 )
                 counter_file.write("0")
                 counter_file.close()
@@ -1795,24 +1953,28 @@ class DependencyMapAnalyzer:
                 # Iteration 14: Purpose-driven threshold messages emphasizing conciseness
                 bash_script = (
                     f"F={shlex.quote(counter_file.name)}; "
-                    f"C=$(cat \"$F\"); C=$((C+1)); echo \"$C\" > \"$F\"; "
-                    f"if [ \"$C\" -gt {late_threshold} ]; then "
+                    f'C=$(cat "$F"); C=$((C+1)); echo "$C" > "$F"; '
+                    f'if [ "$C" -gt {late_threshold} ]; then '
                     f"echo {shlex.quote('CRITICAL: STOP searching. Write your concise dependency analysis NOW. Document precise inter-repo connections only — no code snippets, no implementation details. Start with # Domain Analysis heading.')}; "
-                    f"elif [ \"$C\" -gt {early_threshold} ]; then "
+                    f'elif [ "$C" -gt {early_threshold} ]; then '
                     f"echo {shlex.quote('WARNING: Running low on turns. Start writing your concise dependency analysis. Focus on precise inter-repo connections for navigation — no code snippets, no verbose details. Output starts with # Domain Analysis heading.')}; "
                     f"else "
                     f"echo {shlex.quote(post_tool_hook)}; "
                     f"fi"
                 )
 
-                hook_settings = json.dumps({
-                    "hooks": {
-                        "PostToolUse": [{
-                            "matcher": "",
-                            "command": f"bash -c {shlex.quote(bash_script)}"
-                        }]
+                hook_settings = json.dumps(
+                    {
+                        "hooks": {
+                            "PostToolUse": [
+                                {
+                                    "matcher": "",
+                                    "command": f"bash -c {shlex.quote(bash_script)}",
+                                }
+                            ]
+                        }
                     }
-                })
+                )
                 cmd.extend(["--settings", hook_settings])
 
         # Add --allowedTools only if specified
@@ -1820,7 +1982,7 @@ class DependencyMapAnalyzer:
             cmd.extend(["--allowedTools", allowed_tools])
 
         # Prompt passed via stdin (not command-line) to avoid E2BIG with large prompts
-        prompt_size_kb = len(prompt.encode('utf-8')) / 1024
+        prompt_size_kb = len(prompt.encode("utf-8")) / 1024
         logger.info(
             f"Claude CLI prompt size: {prompt_size_kb:.1f} KB, "
             f"cmd args: {len(' '.join(cmd))} chars"
@@ -1834,10 +1996,16 @@ class DependencyMapAnalyzer:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                env={k: v for k, v in os.environ.items() if k not in (
-                    ("CLAUDECODE", "ANTHROPIC_API_KEY") if "CLAUDECODE" in os.environ
-                    else ("CLAUDECODE",)
-                )},
+                env={
+                    k: v
+                    for k, v in os.environ.items()
+                    if k
+                    not in (
+                        ("CLAUDECODE", "ANTHROPIC_API_KEY")
+                        if "CLAUDECODE" in os.environ
+                        else ("CLAUDECODE",)
+                    )
+                },
                 input=prompt,  # Pass prompt via stdin to avoid ARG_MAX (E2BIG) with large prompts
             )
         finally:
@@ -1885,6 +2053,7 @@ class DependencyMapAnalyzer:
         new_repos: List[str],
         removed_repos: List[str],
         domain_list: List[str],
+        journal_path: Optional[Path] = None,
     ) -> str:
         """
         Build delta merge prompt with self-correction mandate (Story #193).
@@ -1896,6 +2065,7 @@ class DependencyMapAnalyzer:
             new_repos: List of new repo aliases
             removed_repos: List of removed repo aliases
             domain_list: List of all domain names for cross-domain awareness
+            journal_path: Optional path to activity journal file (Story #329)
 
         Returns:
             Prompt for Claude CLI delta merge
@@ -1973,11 +2143,11 @@ class DependencyMapAnalyzer:
         else:
             all_repos_in_domain = set()
         changed_aliases = {
-            r.get("alias", "") if isinstance(r, dict) else r
+            r.get("alias", "") if isinstance(r, dict) else r  # type: ignore[attr-defined]
             for r in changed_repos
         }
         new_aliases = {
-            r.get("alias", "") if isinstance(r, dict) else r
+            r.get("alias", "") if isinstance(r, dict) else r  # type: ignore[attr-defined]
             for r in new_repos
         }
         removed_aliases = set(removed_repos)
@@ -2029,7 +2199,9 @@ class DependencyMapAnalyzer:
         )
         prompt += "4. ADD new dependencies discovered in changed/new repos\n"
         prompt += "5. For UNCHANGED repos: preserve ALL existing analysis EXACTLY as-is — do NOT remove or modify their dependencies\n"
-        prompt += "6. NEVER remove a cross-domain dependency involving an UNCHANGED repo\n"
+        prompt += (
+            "6. NEVER remove a cross-domain dependency involving an UNCHANGED repo\n"
+        )
         prompt += "7. Cross-Domain Connections MUST use the structured table format with Outgoing and Incoming subsections\n\n"
 
         prompt += "## Evidence-Based Claims Requirement\n\n"
@@ -2047,7 +2219,9 @@ class DependencyMapAnalyzer:
         prompt += "Do NOT include any of the following in your output:\n"
         prompt += "- YAML frontmatter blocks (the system adds these automatically)\n"
         prompt += "- Speculative sections like 'Recommendations', 'Potential Integration Opportunities', 'Future Considerations', or 'Suggested Improvements'\n"
-        prompt += "- Advisory content about what SHOULD be done or COULD be integrated\n"
+        prompt += (
+            "- Advisory content about what SHOULD be done or COULD be integrated\n"
+        )
         prompt += "- Any content not directly supported by source code evidence\n\n"
         prompt += "Document ONLY verified, factual dependencies and relationships found in source code.\n\n"
 
@@ -2064,12 +2238,16 @@ class DependencyMapAnalyzer:
         prompt += "The Cross-Domain Connections section MUST use the following structured table format:\n\n"
         prompt += _CROSS_DOMAIN_SCHEMA
 
+        if journal_path is not None:
+            prompt += self._build_activity_journal_appendix(journal_path)
+
         return prompt
 
     def build_domain_discovery_prompt(
         self,
         new_repos: List[Dict[str, Any]],
         existing_domains: List[str],
+        journal_path: Optional[Path] = None,
     ) -> str:
         """
         Build domain discovery prompt for new repos (Story #193).
@@ -2077,6 +2255,7 @@ class DependencyMapAnalyzer:
         Args:
             new_repos: List of new repo dicts with alias and description_summary
             existing_domains: List of existing domain names
+            journal_path: Optional path to activity journal file (Story #329)
 
         Returns:
             Prompt for discovering which domains new repos belong to
@@ -2103,6 +2282,9 @@ class DependencyMapAnalyzer:
         prompt += "[\n"
         prompt += '  {"repo": "alias", "domains": ["domain1", "domain2"]}\n'
         prompt += "]\n"
+
+        if journal_path is not None:
+            prompt += self._build_activity_journal_appendix(journal_path)
 
         return prompt
 
@@ -2153,7 +2335,9 @@ class DependencyMapAnalyzer:
         prompt += "Do NOT include any of the following in your output:\n"
         prompt += "- YAML frontmatter blocks (the system adds these automatically)\n"
         prompt += "- Speculative sections like 'Recommendations', 'Potential Integration Opportunities', 'Future Considerations', or 'Suggested Improvements'\n"
-        prompt += "- Advisory content about what SHOULD be done or COULD be integrated\n"
+        prompt += (
+            "- Advisory content about what SHOULD be done or COULD be integrated\n"
+        )
         prompt += "- Any content not directly supported by source code evidence\n\n"
         prompt += "Document ONLY verified, factual dependencies and relationships found in source code.\n\n"
 

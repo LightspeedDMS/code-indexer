@@ -28,7 +28,44 @@
             <span class="status-text">{{ job_status.health }}</span>
         </div>
         <footer>
-            <small>Status: {{ job_status.status or "unknown" }}</small>
+            <small>
+                {% if job_status.content_anomaly_count is defined and job_status.content_anomaly_count > 0 %}
+                    {{ job_status.content_anomaly_count }} anomal{{ 'y' if job_status.content_anomaly_count == 1 else 'ies' }} — run Full Analysis
+                    {% if job_status.content_anomalies is defined %}
+                    <ul style="margin: 0.25rem 0 0 0; padding: 0; list-style: none;">
+                        {% for a in job_status.content_anomalies %}
+                        <li style="font-size: 0.85em; color: var(--pico-color-amber-600, #92400e);">
+                            {% if a.type == "missing_domain_file" %}
+                                Missing file for domain: {{ a.domain }}
+                            {% elif a.type == "zero_char_domain" %}
+                                Empty file for domain: {{ a.domain }}
+                            {% elif a.type == "undersized_domain" %}
+                                Undersized file for domain: {{ a.domain }} ({{ a.size }} bytes)
+                            {% elif a.type == "incomplete_domain" %}
+                                Incomplete domain: {{ a.domain }} (missing required sections)
+                            {% elif a.type == "malformed_domain" %}
+                                Malformed domain: {{ a.domain }} ({{ a.detail }})
+                            {% elif a.type == "orphan_domain_file" %}
+                                Orphan file: {{ a.file }} (not in _domains.json)
+                            {% elif a.type == "domain_count_mismatch" %}
+                                Domain count mismatch: {{ a.json_count }} in JSON vs {{ a.file_count }} files
+                            {% elif a.type == "missing_index" %}
+                                Missing _index.md
+                            {% elif a.type == "stale_index" %}
+                                Stale _index.md (missing repos)
+                            {% elif a.type == "uncovered_repo" %}
+                                Uncovered repos: {{ a.missing_repos | join(", ") }}
+                            {% else %}
+                                {{ a.type }}{% if a.domain %}: {{ a.domain }}{% endif %}
+                            {% endif %}
+                        </li>
+                        {% endfor %}
+                    </ul>
+                    {% endif %}
+                {% else %}
+                    Status: {{ job_status.status or "unknown" }}
+                {% endif %}
+            </small>
         </footer>
     </article>
 
@@ -83,6 +120,17 @@
                 </button>
             </div>
             <div id="depmap-trigger-status" style="font-size: 0.9rem;"></div>
+            <!-- Story #342: Conditional Repair Button -->
+            <div id="depmap-repair-container" style="display: none;">
+                <button class="contrast"
+                        id="depmap-repair-btn"
+                        hx-post="/admin/dependency-map/repair"
+                        hx-swap="none"
+                        style="width: 100%; font-size: 0.85rem; padding: 0.4rem 0.6rem; margin-top: 0.25rem;">
+                    Repair
+                </button>
+                <small id="depmap-repair-summary" style="display: block; margin-top: 0.25rem; color: var(--pico-color-amber-550);"></small>
+            </div>
         </div>
     </article>
 </div>
@@ -137,33 +185,56 @@
 </article>
 {% endif %}
 
-</div>
-
+<!-- Story #342: Health check and repair button visibility -->
 <script>
-// Handle Run Now trigger response
-document.body.addEventListener('htmx:afterRequest', function(evt) {
-    if (evt.detail.elt.hasAttribute('hx-post') &&
-        evt.detail.elt.getAttribute('hx-post') === '/admin/dependency-map/trigger') {
-        const statusDiv = document.getElementById('depmap-trigger-status');
-        if (!statusDiv) return;
+(function() {
+    fetch('/admin/dependency-map/health', { credentials: 'same-origin' })
+        .then(function(response) {
+            if (response.status === 401) {
+                window.location.href = '/login';
+                return null;
+            }
+            return response.ok ? response.json() : null;
+        })
+        .then(function(data) {
+            if (!data) return;
 
-        if (evt.detail.successful) {
-            statusDiv.innerHTML = '<span style="color: var(--pico-color-green-550);">Analysis triggered</span>';
-            // Refresh job status after 3 seconds
-            setTimeout(function() {
-                htmx.ajax('GET', '/admin/partials/depmap-job-status', {
-                    target: '#depmap-job-status',
-                    swap: 'innerHTML'
-                });
-            }, 3000);
-        } else {
-            statusDiv.innerHTML = '<span style="color: var(--pico-color-red-550);">Failed to trigger analysis</span>';
-        }
+            var container = document.getElementById('depmap-repair-container');
+            var summary = document.getElementById('depmap-repair-summary');
 
-        // Clear status after 8 seconds
-        setTimeout(function() {
-            statusDiv.innerHTML = '';
-        }, 8000);
+            if (data.status !== 'healthy' && data.repairable_count > 0) {
+                if (container) container.style.display = 'block';
+                if (summary) {
+                    summary.textContent = data.repairable_count + ' repairable anomal' +
+                        (data.repairable_count === 1 ? 'y' : 'ies') + ' detected';
+                }
+            } else {
+                if (container) container.style.display = 'none';
+                if (summary) summary.textContent = '';
+            }
+        })
+        .catch(function() {
+            // Silently fail - repair UI stays hidden
+        });
+
+    if (!window._depmapRepairListenerAdded) {
+        window._depmapRepairListenerAdded = true;
+        document.body.addEventListener('htmx:afterRequest', function(evt) {
+            if (evt.detail.elt && evt.detail.elt.id === 'depmap-repair-btn') {
+                var statusEl = document.getElementById('depmap-trigger-status');
+                if (!statusEl) return;
+                var xhr = evt.detail.xhr;
+                if (xhr.status === 202) {
+                    statusEl.innerHTML = '<small style="color: var(--pico-color-green-550);">Repair triggered</small>';
+                } else if (xhr.status === 409) {
+                    statusEl.innerHTML = '<small style="color: var(--pico-color-amber-550);">Analysis in progress</small>';
+                } else {
+                    statusEl.innerHTML = '<small style="color: var(--pico-color-red-550);">Repair failed</small>';
+                }
+            }
+        });
     }
-});
+})();
 </script>
+
+</div>

@@ -1,0 +1,154 @@
+{% if is_running %}
+<!-- Story #329: Activity Journal Panel - independent partial, not inside job-status refresh cycle -->
+<!-- This panel is loaded once and accumulates entries via beforeend polling.                     -->
+<!-- It is NOT inside depmap-job-status-content so it is never destroyed by the 5s outerHTML swap. -->
+<article id="depmap-activity-panel" style="margin-top: 1rem;">
+    <header>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h3 style="margin: 0;">Activity Journal</h3>
+            <span id="depmap-progress-text"
+                  style="font-size: 0.85rem; color: var(--pico-muted-color);">
+                {{ progress_info }}
+            </span>
+        </div>
+        <!-- Progress bar -->
+        <div style="margin-top: 0.5rem; background: var(--pico-secondary-background);
+                    border-radius: 4px; height: 8px; overflow: hidden;">
+            <div id="depmap-progress-bar"
+                 style="height: 100%; background: var(--pico-primary);
+                        border-radius: 4px; transition: width 0.3s ease;
+                        width: {{ progress }}%;">
+            </div>
+        </div>
+        <div style="text-align: right; font-size: 0.75rem;
+                    color: var(--pico-muted-color); margin-top: 2px;">
+            <span id="depmap-progress-pct">{{ progress }}%</span>
+        </div>
+    </header>
+
+    <!-- Scrolling journal entries -->
+    <div id="depmap-journal-scroll"
+         style="max-height: 400px; overflow-y: auto; padding: 0.5rem;
+                font-family: monospace; font-size: 0.8rem; line-height: 1.5;
+                background: var(--pico-card-background-color); border-radius: 4px;">
+        <div id="depmap-activity-entries"
+             hx-get="/admin/partials/depmap-activity-journal?offset=0"
+             hx-trigger="every 5s"
+             hx-swap="beforeend">
+        </div>
+    </div>
+</article>
+
+<script>
+// Story #329: Handle journal polling response - update offset and progress
+// This script lives in the activity panel partial so it initialises when
+// the panel is first loaded. It uses event delegation on document.body so
+// it works for the lifetime of the page even without re-registration.
+(function() {
+    // Guard: only register once even if partial is somehow loaded multiple times
+    if (window._depmapJournalListenerRegistered) return;
+    window._depmapJournalListenerRegistered = true;
+
+    document.body.addEventListener('htmx:afterRequest', function(evt) {
+        // Handle Run Now trigger response
+        if (evt.detail.elt.hasAttribute('hx-post') &&
+            evt.detail.elt.getAttribute('hx-post') === '/admin/dependency-map/trigger') {
+            var statusDiv = document.getElementById('depmap-trigger-status');
+            if (!statusDiv) return;
+
+            if (evt.detail.successful) {
+                statusDiv.innerHTML = '<span style="color: var(--pico-color-green-550);">Analysis triggered</span>';
+
+                // Reset journal and offset on new analysis trigger
+                var entriesEl = document.getElementById('depmap-activity-entries');
+                if (entriesEl) {
+                    entriesEl.innerHTML = '';
+                    entriesEl.setAttribute('hx-get', '/admin/partials/depmap-activity-journal?offset=0');
+                    htmx.process(entriesEl);
+                }
+
+                // Refresh job status after 3 seconds
+                setTimeout(function() {
+                    htmx.ajax('GET', '/admin/partials/depmap-job-status', {
+                        target: '#depmap-job-status',
+                        swap: 'innerHTML'
+                    });
+                }, 3000);
+            } else {
+                statusDiv.innerHTML = '<span style="color: var(--pico-color-red-550);">Failed to trigger analysis</span>';
+            }
+
+            // Clear status after 8 seconds
+            setTimeout(function() {
+                statusDiv.innerHTML = '';
+            }, 8000);
+            return;
+        }
+
+        // Handle journal polling response - update offset and progress
+        var path = evt.detail.pathInfo && evt.detail.pathInfo.requestPath;
+        if (path && path.indexOf('depmap-activity-journal') !== -1) {
+            var xhr = evt.detail.xhr;
+            var newOffset = xhr.getResponseHeader('X-Journal-Offset');
+            var progressPct = xhr.getResponseHeader('X-Journal-Progress');
+            var progressInfo = xhr.getResponseHeader('X-Journal-Progress-Info');
+
+            // Update offset for next poll
+            if (newOffset) {
+                var entriesEl = document.getElementById('depmap-activity-entries');
+                if (entriesEl) {
+                    entriesEl.setAttribute('hx-get',
+                        '/admin/partials/depmap-activity-journal?offset=' + newOffset);
+                    htmx.process(entriesEl);
+                }
+            }
+
+            // Update progress bar and percentage text
+            if (progressPct) {
+                var bar = document.getElementById('depmap-progress-bar');
+                if (bar) bar.style.width = progressPct + '%';
+                var pct = document.getElementById('depmap-progress-pct');
+                if (pct) pct.textContent = progressPct + '%';
+            }
+
+            // Update progress info text
+            if (progressInfo) {
+                var info = document.getElementById('depmap-progress-text');
+                if (info) info.textContent = decodeURIComponent(progressInfo);
+            }
+        }
+    });
+
+    // Story #329: Auto-scroll journal when near bottom
+    // Fix M1: Capture scroll state BEFORE HTMX swap to avoid race condition where
+    // scrollHeight has already increased by the time MutationObserver fires.
+    var scrollContainer = document.getElementById('depmap-journal-scroll');
+    if (!scrollContainer) return;
+
+    var SCROLL_THRESHOLD = 50;
+    var wasNearBottom = true;
+
+    function isNearBottom() {
+        return scrollContainer.scrollHeight - scrollContainer.scrollTop
+               - scrollContainer.clientHeight < SCROLL_THRESHOLD;
+    }
+
+    document.body.addEventListener('htmx:beforeSwap', function(evt) {
+        if (evt.detail.target && evt.detail.target.id === 'depmap-activity-entries') {
+            wasNearBottom = isNearBottom();
+        }
+    });
+
+    var observer = new MutationObserver(function() {
+        if (wasNearBottom) {
+            scrollContainer.scrollTop = scrollContainer.scrollHeight;
+        }
+    });
+
+    var entriesContainer = document.getElementById('depmap-activity-entries');
+    if (entriesContainer) {
+        observer.observe(entriesContainer, { childList: true, subtree: true });
+    }
+})();
+</script>
+{% endif %}

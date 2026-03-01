@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.76
+
+### Features
+
+- feat: Dependency Map Repair Mode with Smart Health Detection (Story #342). Five-check health detector inspects dependency map output for missing/zero-char/undersized domain files, orphan files, count mismatches, stale index, and incomplete/malformed domains. Conditional repair button appears when anomalies detected, triggering 5-phase repair: Claude CLI re-analysis with retry, orphan removal, JSON reconciliation, programmatic index regeneration, and post-validation. New API endpoints GET /admin/dependency-map/health and POST /admin/dependency-map/repair with admin auth. Shared dep_map_file_utils module eliminates cross-service duplication.
+
+### Bug Fixes
+
+- fix: Phase 1 repair weak success check -- now re-validates via health detector after Claude CLI re-analysis to confirm anomaly is actually resolved, retries if structure still invalid (Story #342)
+- fix: Phase 1 repair broken content fed back to Claude -- deletes broken domain file before calling analyzer so Claude starts fresh instead of preserving malformed structure from previous analysis (Story #342)
+
+## v9.3.75
+
+### Bug Fixes
+
+- fix: Activity journal panel lifecycle -- panel now hides after analysis completes, polling stops via X-Journal-Active header instead of perpetual 3s refresh (Story #329)
+- fix: Journal init ordering -- moved _activity_journal.init() after staging dir cleanup to prevent journal file deletion (Story #329)
+- fix: Progress bar stuck at 20% -- pass tracked_job_id to _execute_analysis_passes() for per-domain progress updates across 30-90% range (Story #329)
+- fix: 0-char domain analysis retry -- when Pass 2 domain produces empty output, retry up to 3 times before marking failed; applies to both full and delta analysis (Bug #341)
+
+## v9.3.74
+
+### Features
+
+- feat: Dependency Map live activity journal and progress bar (Story #329). Real-time visibility into analysis progress via ActivityJournalService with thread-safe byte-offset tailing, granular per-domain progress tracking replacing coarse 3-step progress, HTMX-polled journal panel with auto-scroll, and Claude CLI prompt appendix for activity logging.
+
+### Maintenance
+
+- fix: Add --follow-imports=silent to mypy pre-commit hook to prevent cascade into pre-existing errors
+- fix: Silence 12 pre-existing mypy type errors in dependency_map_analyzer.py, dependency_map_service.py, dependency_map_routes.py
+
 ## v9.3.73
 
 ### Bug Fixes
