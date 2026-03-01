@@ -230,7 +230,57 @@ def depmap_activity_journal_partial(request: Request, offset: int = 0):
     response.headers["X-Journal-Progress-Info"] = (
         quote(progress_info) if progress_info else ""
     )
+    # Check if analysis is currently running
+    is_active = dep_map_service is not None and not dep_map_service.is_available()
+    response.headers["X-Journal-Active"] = "1" if is_active else "0"
     return response
+
+
+@dependency_map_router.get(
+    "/partials/depmap-activity-panel", response_class=HTMLResponse
+)
+def depmap_activity_panel_partial(request: Request):
+    """
+    HTMX partial for the full Activity Journal panel (Story #329 fix).
+
+    GET /admin/partials/depmap-activity-panel
+
+    Admin-only. Returns the complete journal panel HTML (container + entries div
+    + scripts) when analysis is running, or empty content when idle.
+
+    This endpoint is loaded ONCE by the main dependency_map.html page as a sibling
+    to the job-status section. The panel is NOT inside the job-status refresh cycle,
+    so it is never destroyed by the 5s outerHTML swap.
+
+    The returned panel contains a polling div that accumulates entries via beforeend,
+    preserving all accumulated journal entries across job-status refreshes.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+
+    dep_map_service = _get_dep_map_service_from_state()
+
+    is_running = False
+    progress = 0
+    progress_info = ""
+
+    if dep_map_service is not None:
+        try:
+            is_running = not dep_map_service.is_available()
+        except Exception as e:
+            logger.debug("Could not check dep_map_service availability: %s", e)
+        progress, progress_info = _get_progress_from_service(dep_map_service)
+
+    return templates.TemplateResponse(
+        "partials/depmap_activity_panel.html",
+        {
+            "request": request,
+            "is_running": is_running,
+            "progress": progress,
+            "progress_info": progress_info,
+        },
+    )
 
 
 @dependency_map_router.get("/dependency-map", response_class=HTMLResponse)

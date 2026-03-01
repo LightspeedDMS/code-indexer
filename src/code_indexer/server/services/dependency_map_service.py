@@ -202,14 +202,6 @@ class DependencyMapService:
                 setup_result["repo_list"],
             )
 
-            # Story #329: Initialize activity journal for this analysis run
-            journal_path = None
-            try:
-                journal_path = self._activity_journal.init(paths["staging_dir"])
-                self._activity_journal.log("Starting full analysis")
-            except Exception as e:
-                logger.debug(f"Non-fatal journal init error: {e}")
-
             # Update tracking to running
             self._tracking_backend.update_tracking(
                 status="running", last_run=datetime.now(timezone.utc).isoformat()
@@ -227,16 +219,9 @@ class DependencyMapService:
                     logger.debug(
                         f"Non-fatal: Failed to update progress (analysis passes): {e}"
                     )
-            try:
-                self._activity_journal.log("Executing analysis passes")
-            except Exception as e:
-                logger.debug(f"Non-fatal journal log error: {e}")
-
             # Execute analysis passes
             domain_list, errors, pass1_duration_s, pass2_duration_s = (
-                self._execute_analysis_passes(
-                    config, paths, repo_list, journal_path=journal_path
-                )
+                self._execute_analysis_passes(config, paths, repo_list, _tracked_job_id)
             )
 
             # Story #312 AC5: Progress update during finalization
@@ -252,7 +237,9 @@ class DependencyMapService:
                         f"Non-fatal: Failed to update progress (finalization): {e}"
                     )
             try:
-                self._activity_journal.log("Finalizing analysis")
+                self._activity_journal.log(
+                    "Finalizing: generating index and swapping directories"
+                )
             except Exception as e:
                 logger.debug(f"Non-fatal journal log error: {e}")
 
@@ -267,6 +254,12 @@ class DependencyMapService:
             )
 
             _analysis_succeeded = True
+            try:
+                self._activity_journal.log(
+                    f"Analysis complete: {len(domain_list)} domains analyzed"
+                )
+            except Exception as e:
+                logger.debug(f"Non-fatal journal log error: {e}")
             return {
                 "status": "completed",
                 "domains_count": len(domain_list),
@@ -384,7 +377,7 @@ class DependencyMapService:
         config,
         paths: Dict[str, Path],
         repo_list: List[Dict[str, Any]],
-        journal_path: Optional[Path] = None,
+        tracked_job_id: Optional[str] = None,
     ) -> Tuple[List[Dict[str, Any]], List[str], float, float]:
         """
         Execute the three-pass analysis pipeline with journal-based resumability.
@@ -393,7 +386,6 @@ class DependencyMapService:
             config: Claude integration config
             paths: Dict with staging_dir, final_dir, cidx_meta_path, golden_repos_root
             repo_list: List of repository metadata
-            journal_path: Optional path to activity journal file (Story #329)
 
         Returns:
             Tuple of (domain_list, errors, pass1_duration_s, pass2_duration_s)
@@ -427,6 +419,21 @@ class DependencyMapService:
             }
             # Save journal immediately to prevent loss if crash occurs before Pass 1
             self._save_journal(staging_dir, journal)
+            # Story #329: Initialize activity journal AFTER staging dir cleanup
+            try:
+                self._activity_journal.init(staging_dir)
+                self._activity_journal.log(
+                    f"Starting full analysis with {len(repo_list)} repositories"
+                )
+            except Exception as e:
+                logger.debug(f"Non-fatal journal init error: {e}")
+        else:
+            # Resuming — init journal in existing staging dir (don't wipe)
+            try:
+                self._activity_journal.init(staging_dir)
+                self._activity_journal.log("Resuming analysis")
+            except Exception as e:
+                logger.debug(f"Non-fatal journal init error (resume): {e}")
 
         # Generate CLAUDE.md (AC2: CLAUDE.md Orientation File)
         self._analyzer.generate_claude_md(repo_list)
@@ -459,6 +466,12 @@ class DependencyMapService:
                 if d["name"] not in journal["pass2"]:
                     journal["pass2"][d["name"]] = {"status": "pending"}
             self._save_journal(staging_dir, journal)
+            try:
+                self._activity_journal.log(
+                    f"Pass 1 complete: identified {len(domain_list)} domains"
+                )
+            except Exception as e:
+                logger.debug(f"Non-fatal journal log error: {e}")
         else:
             # Load domain_list from _domains.json with boundary check
             domains_file = staging_dir / "_domains.json"
@@ -474,7 +487,8 @@ class DependencyMapService:
         # Pass 2: Per-domain (skip completed domains)
         errors = []
         pass2_start = time.time()
-        for domain in domain_list:
+        total_domains = len(domain_list)
+        for domain_idx, domain in enumerate(domain_list):
             domain_name = domain["name"]
             domain_status = journal.get("pass2", {}).get(domain_name, {}).get("status")
 
@@ -483,27 +497,113 @@ class DependencyMapService:
                 continue
 
             try:
-                self._analyzer.run_pass_2_per_domain(
-                    staging_dir=staging_dir,
-                    domain=domain,
-                    domain_list=domain_list,
-                    repo_list=repo_list,
-                    max_turns=config.dependency_map_pass2_max_turns,
-                    previous_domain_dir=final_dir if final_dir.exists() else None,
-                    journal_path=journal_path,
+                self._activity_journal.log(
+                    f"Pass 2: analyzing domain {domain_idx + 1}/{total_domains}: {domain_name}"
                 )
-                # Read output size
-                domain_file = staging_dir / f"{domain_name}.md"
-                chars = len(domain_file.read_text()) if domain_file.exists() else 0
+            except Exception as e:
+                logger.debug(f"Non-fatal journal log error: {e}")
+
+            # Story #329: Per-domain progress update (30-90% range across Pass 2)
+            if tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    progress_pct = 30 + int(domain_idx * (60.0 / total_domains))
+                    self._job_tracker.update_status(
+                        tracked_job_id,
+                        progress=progress_pct,
+                        progress_info=f"Pass 2: domain {domain_idx + 1}/{total_domains}",
+                    )
+                except Exception as e:
+                    logger.debug(
+                        f"Non-fatal: Failed to update progress (Pass 2 domain {domain_idx}): {e}"
+                    )
+
+            MAX_DOMAIN_RETRIES = 3
+            attempt = 0
+            chars = 0
+            domain_file = staging_dir / f"{domain_name}.md"
+
+            while attempt < MAX_DOMAIN_RETRIES:
+                attempt += 1
+                try:
+                    self._analyzer.run_pass_2_per_domain(
+                        staging_dir=staging_dir,
+                        domain=domain,
+                        domain_list=domain_list,
+                        repo_list=repo_list,
+                        max_turns=config.dependency_map_pass2_max_turns,
+                        previous_domain_dir=final_dir if final_dir.exists() else None,
+                        journal_path=self._activity_journal.journal_path,
+                    )
+                    chars = len(domain_file.read_text()) if domain_file.exists() else 0
+
+                    if chars > 0:
+                        # Success
+                        break
+
+                    # 0 chars — retry if attempts remain
+                    if attempt < MAX_DOMAIN_RETRIES:
+                        try:
+                            self._activity_journal.log(
+                                f"Pass 2: domain {domain_idx + 1}/{total_domains} produced 0 chars, "
+                                f"retrying (attempt {attempt + 1}/{MAX_DOMAIN_RETRIES})"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Non-fatal journal log error: {e}")
+                        logger.warning(
+                            f"Pass 2 domain '{domain_name}' produced 0 chars on attempt {attempt}/{MAX_DOMAIN_RETRIES}, retrying"
+                        )
+                        # Delete empty/missing file before retry
+                        if domain_file.exists():
+                            domain_file.unlink()
+                    else:
+                        # All retries exhausted
+                        try:
+                            self._activity_journal.log(
+                                f"Pass 2: domain {domain_idx + 1}/{total_domains} FAILED after {MAX_DOMAIN_RETRIES} attempts (0 chars)"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Non-fatal journal log error: {e}")
+                        logger.error(
+                            f"Pass 2 domain '{domain_name}' produced 0 chars after {MAX_DOMAIN_RETRIES} attempts"
+                        )
+
+                except Exception as e:
+                    if attempt < MAX_DOMAIN_RETRIES:
+                        try:
+                            self._activity_journal.log(
+                                f"Pass 2: domain {domain_idx + 1}/{total_domains} error, "
+                                f"retrying (attempt {attempt + 1}/{MAX_DOMAIN_RETRIES}): {str(e)[:80]}"
+                            )
+                        except Exception as journal_err:
+                            logger.debug(f"Non-fatal journal log error: {journal_err}")
+                        logger.warning(
+                            f"Pass 2 failed for domain '{domain_name}' on attempt {attempt}/{MAX_DOMAIN_RETRIES}: {e}"
+                        )
+                        if domain_file.exists():
+                            domain_file.unlink()
+                    else:
+                        errors.append(f"Domain '{domain_name}': {e}")
+                        logger.warning(f"Pass 2 failed for domain '{domain_name}' after {MAX_DOMAIN_RETRIES} attempts: {e}")
+                        break
+
+            # Record final status in journal
+            if chars > 0:
                 journal["pass2"][domain_name] = {
                     "status": "completed",
                     "chars": chars,
                     "completed_at": datetime.now(timezone.utc).isoformat(),
                 }
-            except Exception as e:
-                errors.append(f"Domain '{domain_name}': {e}")
-                logger.warning(f"Pass 2 failed for domain '{domain_name}': {e}")
-                journal["pass2"][domain_name] = {"status": "failed", "error": str(e)}
+                try:
+                    self._activity_journal.log(
+                        f"Pass 2: domain {domain_idx + 1}/{total_domains} complete ({chars} chars)"
+                    )
+                except Exception as e:
+                    logger.debug(f"Non-fatal journal log error: {e}")
+            else:
+                journal["pass2"][domain_name] = {
+                    "status": "failed",
+                    "error": f"0 chars after {MAX_DOMAIN_RETRIES} attempts",
+                }
 
             self._save_journal(staging_dir, journal)  # Save after each domain
 
@@ -1467,7 +1567,8 @@ class DependencyMapService:
         )
 
         # Code Review M4: Sort for deterministic processing order
-        for domain_name in sorted(affected_domains):
+        total_affected = len(affected_domains)
+        for domain_idx, domain_name in enumerate(sorted(affected_domains)):
             # READ existence check and content from versioned path (live path is empty after Story #224)
             read_domain_file = dependency_map_read_dir / f"{domain_name}.md"
             # WRITE updated file to live path (so RefreshScheduler detects changes)
@@ -1478,19 +1579,78 @@ class DependencyMapService:
                 continue
 
             try:
-                self._update_domain_file(
-                    domain_name=domain_name,
-                    domain_file=domain_file,
-                    changed_repos=changed_aliases,
-                    new_repos=new_aliases,
-                    removed_repos=removed_repos,
-                    domain_list=domain_list,
-                    config=config,
-                    read_file=read_domain_file,
+                self._activity_journal.log(
+                    f"Delta: updating domain {domain_idx + 1}/{total_affected}: {domain_name}"
                 )
             except Exception as e:
-                errors.append(f"Domain '{domain_name}': {e}")
-                logger.warning(f"Delta analysis failed for domain '{domain_name}': {e}")
+                logger.debug(f"Non-fatal journal log error: {e}")
+
+            MAX_DOMAIN_RETRIES = 3
+            original_mtime = domain_file.stat().st_mtime if domain_file.exists() else 0
+
+            for attempt in range(1, MAX_DOMAIN_RETRIES + 1):
+                try:
+                    self._update_domain_file(
+                        domain_name=domain_name,
+                        domain_file=domain_file,
+                        changed_repos=changed_aliases,
+                        new_repos=new_aliases,
+                        removed_repos=removed_repos,
+                        domain_list=domain_list,
+                        config=config,
+                        read_file=read_domain_file,
+                    )
+                    # Check if file was actually updated (mtime changed)
+                    new_mtime = domain_file.stat().st_mtime if domain_file.exists() else 0
+                    if new_mtime > original_mtime:
+                        try:
+                            self._activity_journal.log(
+                                f"Delta: domain {domain_idx + 1}/{total_affected} complete"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Non-fatal journal log error: {e}")
+                        break  # Success
+
+                    # File not updated — truncation guard likely fired or 0-char result
+                    if attempt < MAX_DOMAIN_RETRIES:
+                        try:
+                            self._activity_journal.log(
+                                f"Delta: domain {domain_idx + 1}/{total_affected} not updated, "
+                                f"retrying (attempt {attempt + 1}/{MAX_DOMAIN_RETRIES})"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Non-fatal journal log error: {e}")
+                        logger.warning(
+                            f"Delta domain '{domain_name}' not updated on attempt {attempt}/{MAX_DOMAIN_RETRIES}, retrying"
+                        )
+                    else:
+                        try:
+                            self._activity_journal.log(
+                                f"Delta: domain {domain_idx + 1}/{total_affected} not updated after {MAX_DOMAIN_RETRIES} attempts"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Non-fatal journal log error: {e}")
+                        logger.warning(
+                            f"Delta domain '{domain_name}' not updated after {MAX_DOMAIN_RETRIES} attempts"
+                        )
+
+                except Exception as e:
+                    if attempt < MAX_DOMAIN_RETRIES:
+                        try:
+                            self._activity_journal.log(
+                                f"Delta: domain {domain_idx + 1}/{total_affected} error, "
+                                f"retrying (attempt {attempt + 1}/{MAX_DOMAIN_RETRIES}): {str(e)[:80]}"
+                            )
+                        except Exception as journal_err:
+                            logger.debug(f"Non-fatal journal log error: {journal_err}")
+                        logger.warning(
+                            f"Delta failed for domain '{domain_name}' on attempt {attempt}/{MAX_DOMAIN_RETRIES}: {e}"
+                        )
+                    else:
+                        errors.append(f"Domain '{domain_name}': {e}")
+                        logger.warning(
+                            f"Delta failed for domain '{domain_name}' after {MAX_DOMAIN_RETRIES} attempts: {e}"
+                        )
 
         return errors
 
@@ -1749,6 +1909,15 @@ class DependencyMapService:
             # Detect changes (AC2: Change Detection)
             changed_repos, new_repos, removed_repos = self.detect_changes()
 
+            total_changes = len(changed_repos) + len(new_repos) + len(removed_repos)
+            try:
+                self._activity_journal.log(
+                    f"Detected {total_changes} changes: {len(changed_repos)} changed, "
+                    f"{len(new_repos)} new, {len(removed_repos)} removed repos"
+                )
+            except Exception as e:
+                logger.debug(f"Non-fatal journal log error: {e}")
+
             # Skip if no changes
             if not changed_repos and not new_repos and not removed_repos:
                 logger.info("No changes detected, skipping delta analysis")
@@ -1777,6 +1946,13 @@ class DependencyMapService:
             affected_domains = self.identify_affected_domains(
                 changed_repos, new_repos, removed_repos
             )
+
+            try:
+                self._activity_journal.log(
+                    f"Identified {len(affected_domains)} affected domains"
+                )
+            except Exception as e:
+                logger.debug(f"Non-fatal journal log error: {e}")
 
             if not affected_domains:
                 logger.info("No affected domains identified")
@@ -1829,7 +2005,9 @@ class DependencyMapService:
                         f"Non-fatal: Failed to update progress (updating domains): {e}"
                     )
             try:
-                self._activity_journal.log("Updating affected domains")
+                self._activity_journal.log(
+                    f"Updating {len(affected_domains)} affected domains"
+                )
             except Exception as e:
                 logger.debug(f"Non-fatal journal log error: {e}")
 
@@ -1842,6 +2020,11 @@ class DependencyMapService:
                 removed_repos,
                 config,
             )
+
+            try:
+                self._activity_journal.log("Delta analysis complete")
+            except Exception as e:
+                logger.debug(f"Non-fatal journal log error: {e}")
 
             # Story #312 AC5: Progress update before finalization
             if _tracked_job_id is not None and self._job_tracker is not None:

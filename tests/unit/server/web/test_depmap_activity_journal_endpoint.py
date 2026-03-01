@@ -263,6 +263,24 @@ class TestDepmapActivityJournalEndpoint:
         assert "x-journal-offset" in headers_lower
         assert "x-journal-progress" in headers_lower
 
+    def test_endpoint_returns_x_journal_active_header(
+        self, client, admin_session_cookie
+    ):
+        """Response includes X-Journal-Active header."""
+        response = client.get(self.ENDPOINT, cookies=admin_session_cookie)
+        assert response.status_code == 200
+        headers_lower = {k.lower(): v for k, v in response.headers.items()}
+        assert "x-journal-active" in headers_lower
+
+    def test_endpoint_x_journal_active_is_zero_when_no_service(
+        self, client, admin_session_cookie
+    ):
+        """When no analysis is running (service None in test env), X-Journal-Active is 0."""
+        response = client.get(self.ENDPOINT, cookies=admin_session_cookie)
+        assert response.status_code == 200
+        headers_lower = {k.lower(): v for k, v in response.headers.items()}
+        assert headers_lower.get("x-journal-active") == "0"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # _render_journal_html() content rendering with realistic journal entries
@@ -304,3 +322,51 @@ class TestRenderJournalHtmlRealistic:
         assert result.count('<div class="journal-entry">') == 3
         assert "<strong>system</strong>" in result
         assert "<strong>analyzer</strong>" in result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /admin/partials/depmap-activity-panel endpoint tests (Story #329 fix)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestDepmapActivityPanelEndpoint:
+    """Integration tests for the activity panel HTMX partial endpoint.
+
+    This endpoint returns the FULL journal panel HTML when analysis is running,
+    or empty content when idle. It is independent from the job-status refresh cycle.
+    """
+
+    ENDPOINT = "/admin/partials/depmap-activity-panel"
+
+    def test_endpoint_returns_200_for_admin(self, client, admin_session_cookie):
+        """Admin can access the activity panel endpoint."""
+        response = client.get(self.ENDPOINT, cookies=admin_session_cookie)
+        assert response.status_code == 200
+
+    def test_endpoint_returns_401_for_unauthenticated(self, client):
+        """Unauthenticated request returns 401."""
+        response = client.get(self.ENDPOINT, follow_redirects=False)
+        assert response.status_code == 401
+
+    def test_endpoint_returns_html_content_type(self, client, admin_session_cookie):
+        """Response content-type is text/html."""
+        response = client.get(self.ENDPOINT, cookies=admin_session_cookie)
+        assert response.status_code == 200
+        assert "text/html" in response.headers.get("content-type", "")
+
+    def test_endpoint_returns_empty_body_when_not_running(
+        self, client, admin_session_cookie
+    ):
+        """When no analysis is running, body is empty (panel hidden)."""
+        response = client.get(self.ENDPOINT, cookies=admin_session_cookie)
+        assert response.status_code == 200
+        # No active analysis in test env - panel template renders empty ({% if is_running %})
+        assert response.text.strip() == ""
+
+    def test_endpoint_handles_missing_service_gracefully(
+        self, client, admin_session_cookie
+    ):
+        """When dep_map_service is None (not available), endpoint returns 200 with empty body."""
+        # The service is None in test env (no dep map service configured)
+        response = client.get(self.ENDPOINT, cookies=admin_session_cookie)
+        assert response.status_code == 200

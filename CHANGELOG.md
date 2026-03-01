@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.75
+
+### Bug Fixes
+
+- fix: Activity journal panel lifecycle -- panel now hides after analysis completes, polling stops via X-Journal-Active header instead of perpetual 3s refresh (Story #329)
+- fix: Journal init ordering -- moved _activity_journal.init() after staging dir cleanup to prevent journal file deletion (Story #329)
+- fix: Progress bar stuck at 20% -- pass tracked_job_id to _execute_analysis_passes() for per-domain progress updates across 30-90% range (Story #329)
+- fix: 0-char domain analysis retry -- when Pass 2 domain produces empty output, retry up to 3 times before marking failed; applies to both full and delta analysis (Bug #341)
+
 ## v9.3.74
 
 ### Features
