@@ -1741,7 +1741,7 @@ async def grant_repo_access(
 
     except Exception as e:
         logger.error(
-            format_error_log("SCIP-GENERAL-042", "Failed to grant repo access: %s", e)
+            format_error_log("SCIP-GENERAL-042", f"Failed to grant repo access: {e}")
         )
         return _repo_access_error_response(is_ajax, request, session, str(e), 500)
 
@@ -1818,7 +1818,7 @@ async def revoke_repo_access(
         )
     except Exception as e:
         logger.error(
-            format_error_log("SCIP-GENERAL-043", "Failed to revoke repo access: %s", e)
+            format_error_log("SCIP-GENERAL-043", f"Failed to revoke repo access: {e}")
         )
         return _repo_access_error_response(is_ajax, request, session, str(e), 500)
 
@@ -2001,12 +2001,8 @@ def _get_golden_repos_list():
             global_repos = {r["repo_name"]: r for r in registry.list_global_repos()}
         except Exception as e:
             logger.warning(
-                format_error_log(
-                    "SCIP-GENERAL-044",
-                    "Could not load global registry: %s",
-                    e,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                format_error_log("SCIP-GENERAL-044", f"Could not load global registry: {e}"),
+                extra={"correlation_id": get_correlation_id()},
             )
             global_repos = {}
 
@@ -2027,12 +2023,8 @@ def _get_golden_repos_list():
                     }
         except Exception as e:
             logger.warning(
-                format_error_log(
-                    "SCIP-GENERAL-048",
-                    "Could not load category information: %s",
-                    e,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                format_error_log("SCIP-GENERAL-048", f"Could not load category information: {e}"),
+                extra={"correlation_id": get_correlation_id()},
             )
 
         # Add status, global alias, version, and index information for display
@@ -2074,13 +2066,8 @@ def _get_golden_repos_list():
                         )
                     except Exception as e:
                         logger.warning(
-                            format_error_log(
-                                "SCIP-GENERAL-045",
-                                "Could not read alias file %s: %s",
-                                alias_file,
-                                e,
-                                extra={"correlation_id": get_correlation_id()},
-                            )
+                            format_error_log("SCIP-GENERAL-045", f"Could not read alias file {alias_file}: {e}"),
+                            extra={"correlation_id": get_correlation_id()},
                         )
                         repo["version"] = None
                         repo["last_refresh"] = None
@@ -2109,13 +2096,8 @@ def _get_golden_repos_list():
                     repo["temporal_status"] = temporal_status
                 except Exception as e:
                     logger.warning(
-                        format_error_log(
-                            "SCIP-GENERAL-046",
-                            "Failed to get temporal status for %s: %s",
-                            repo.get("alias"),
-                            e,
-                            extra={"correlation_id": get_correlation_id()},
-                        )
+                        format_error_log("SCIP-GENERAL-046", f"Failed to get temporal status for {repo.get('alias')}: {e}"),
+                        extra={"correlation_id": get_correlation_id()},
                     )
                     repo["temporal_status"] = {"format": "error", "message": str(e)}
             else:
@@ -2183,13 +2165,9 @@ def _get_golden_repos_list():
         return sorted(repos, key=lambda r: r.get("alias", "").lower())
     except Exception as e:
         logger.error(
-            format_error_log(
-                "SCIP-GENERAL-047",
-                "Failed to get golden repos list: %s",
-                e,
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("SCIP-GENERAL-047", f"Failed to get golden repos list: {e}"),
+            exc_info=True,
+            extra={"correlation_id": get_correlation_id()},
         )
         return []
 
@@ -2211,12 +2189,8 @@ def _create_golden_repos_page_response(
         categories = category_service.list_categories()
     except Exception as e:
         logger.warning(
-            format_error_log(
-                "SCIP-GENERAL-049",
-                "Could not load categories for template: %s",
-                e,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("SCIP-GENERAL-049", f"Could not load categories for template: {e}"),
+            extra={"correlation_id": get_correlation_id()},
         )
         categories = []
 
@@ -2763,14 +2737,9 @@ def golden_repo_details(
         raise
     except Exception as e:
         logger.error(
-            format_error_log(
-                "STORE-GENERAL-026",
-                "Failed to get golden repo details for '%s': %s",
-                alias,
-                e,
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("STORE-GENERAL-026", f"Failed to get golden repo details for '{alias}': {e}"),
+            exc_info=True,
+            extra={"correlation_id": get_correlation_id()},
         )
         raise HTTPException(status_code=404, detail=f"Repository '{alias}' not found")
 
@@ -2799,12 +2768,8 @@ def golden_repos_list_partial(request: Request):
         categories = category_service.list_categories()
     except Exception as e:
         logger.warning(
-            format_error_log(
-                "SCIP-GENERAL-050",
-                "Could not load categories for partial template: %s",
-                e,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("SCIP-GENERAL-050", f"Could not load categories for partial template: {e}"),
+            extra={"correlation_id": get_correlation_id()},
         )
         categories = []
 
@@ -2871,12 +2836,8 @@ def _get_all_activated_repos() -> list:
                 }
         except Exception as e:
             logger.warning(
-                format_error_log(
-                    "SCIP-GENERAL-051",
-                    "Could not load category information for activated repos: %s",
-                    e,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                format_error_log("SCIP-GENERAL-051", f"Could not load category information for activated repos: {e}"),
+                extra={"correlation_id": get_correlation_id()},
             )
 
         # Iterate over all user directories
@@ -2914,15 +2875,9 @@ def _get_all_activated_repos() -> list:
                     except Exception as e:
                         # Honest error handling - indicate failure clearly
                         logger.error(
-                            format_error_log(
-                                "STORE-GENERAL-027",
-                                "Failed to get temporal status for repo %s/%s: %s",
-                                username,
-                                repo.get("user_alias", "unknown"),
-                                e,
-                                exc_info=True,
-                                extra={"correlation_id": get_correlation_id()},
-                            )
+                            format_error_log("STORE-GENERAL-027", f"Failed to get temporal status for repo {username}/{repo.get('user_alias', 'unknown')}: {e}"),
+                            exc_info=True,
+                            extra={"correlation_id": get_correlation_id()},
                         )
                         # Provide error temporal_status with honest error format
                         repo["temporal_status"] = {
@@ -2941,13 +2896,9 @@ def _get_all_activated_repos() -> list:
 
     except Exception as e:
         logger.error(
-            format_error_log(
-                "STORE-GENERAL-028",
-                "Failed to get activated repos: %s",
-                e,
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("STORE-GENERAL-028", f"Failed to get activated repos: {e}"),
+            exc_info=True,
+            extra={"correlation_id": get_correlation_id()},
         )
         return []
 
@@ -3299,13 +3250,9 @@ def _get_background_job_manager():
         return background_job_manager
     except Exception as e:
         logger.error(
-            format_error_log(
-                "STORE-GENERAL-029",
-                "Failed to get background job manager: %s",
-                e,
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("STORE-GENERAL-029", f"Failed to get background job manager: {e}"),
+            exc_info=True,
+            extra={"correlation_id": get_correlation_id()},
         )
         return None
 
@@ -3640,12 +3587,8 @@ def _get_all_activated_repos_for_query() -> list:
             )
     except Exception as e:
         logger.warning(
-            format_error_log(
-                "STORE-GENERAL-030",
-                "Could not load global repos for query: %s",
-                e,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("STORE-GENERAL-030", f"Could not load global repos for query: {e}"),
+            extra={"correlation_id": get_correlation_id()},
         )
 
     # Add user-activated repos
@@ -4047,24 +3990,16 @@ def query_submit(
                                 )
                         except FileNotFoundError as e:
                             logger.error(
-                                format_error_log(
-                                    "STORE-GENERAL-032",
-                                    "SCIP query failed - file not found: %s",
-                                    e,
-                                    exc_info=True,
-                                    extra={"correlation_id": get_correlation_id()},
-                                )
+                                format_error_log("STORE-GENERAL-032", f"SCIP query failed - file not found: {e}"),
+                                exc_info=True,
+                                extra={"correlation_id": get_correlation_id()},
                             )
                             error_message = f"SCIP index not found or corrupted for repository '{user_alias}'. Generate an index with: `cidx scip generate`"
                         except Exception as e:
                             logger.error(
-                                format_error_log(
-                                    "STORE-GENERAL-033",
-                                    "SCIP query execution failed: %s",
-                                    e,
-                                    exc_info=True,
-                                    extra={"correlation_id": get_correlation_id()},
-                                )
+                                format_error_log("STORE-GENERAL-033", f"SCIP query execution failed: {e}"),
+                                exc_info=True,
+                                extra={"correlation_id": get_correlation_id()},
                             )
                             error_message = f"SCIP query failed for repository '{user_alias}': {str(e)}. Try regenerating the index with: `cidx scip generate`"
 
@@ -4140,13 +4075,9 @@ def query_submit(
                             )
                     except Exception as e:
                         logger.error(
-                            format_error_log(
-                                "STORE-GENERAL-034",
-                                "Global repo query failed: %s",
-                                e,
-                                exc_info=True,
-                                extra={"correlation_id": get_correlation_id()},
-                            )
+                            format_error_log("STORE-GENERAL-034", f"Global repo query failed: {e}"),
+                            exc_info=True,
+                            extra={"correlation_id": get_correlation_id()},
                         )
                         error_message = f"Query failed: {str(e)}"
             else:
@@ -4191,13 +4122,9 @@ def query_submit(
 
     except Exception as e:
         logger.error(
-            format_error_log(
-                "STORE-GENERAL-035",
-                "Query execution failed: %s",
-                e,
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("STORE-GENERAL-035", f"Query execution failed: {e}"),
+            exc_info=True,
+            extra={"correlation_id": get_correlation_id()},
         )
         error_message = f"Query failed: {str(e)}"
 
@@ -4261,13 +4188,9 @@ def _get_semantic_query_manager():
         return semantic_query_manager
     except Exception as e:
         logger.error(
-            format_error_log(
-                "STORE-GENERAL-036",
-                "Failed to get semantic query manager: %s",
-                e,
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("STORE-GENERAL-036", f"Failed to get semantic query manager: {e}"),
+            exc_info=True,
+            extra={"correlation_id": get_correlation_id()},
         )
         return None
 
@@ -4431,13 +4354,9 @@ def _execute_scip_query(
             )
     except FileNotFoundError as e:
         logger.error(
-            format_error_log(
-                "STORE-GENERAL-038",
-                "SCIP query failed - file not found: %s",
-                e,
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("STORE-GENERAL-038", f"SCIP query failed - file not found: {e}"),
+            exc_info=True,
+            extra={"correlation_id": get_correlation_id()},
         )
         return (
             results,
@@ -4445,13 +4364,9 @@ def _execute_scip_query(
         )
     except Exception as e:
         logger.error(
-            format_error_log(
-                "STORE-GENERAL-039",
-                "SCIP query execution failed: %s",
-                e,
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("STORE-GENERAL-039", f"SCIP query execution failed: {e}"),
+            exc_info=True,
+            extra={"correlation_id": get_correlation_id()},
         )
         return (
             results,
@@ -4631,13 +4546,9 @@ def query_results_partial_post(
                             )
                     except Exception as e:
                         logger.error(
-                            format_error_log(
-                                "STORE-GENERAL-040",
-                                "Global repo query failed: %s",
-                                e,
-                                exc_info=True,
-                                extra={"correlation_id": get_correlation_id()},
-                            )
+                            format_error_log("STORE-GENERAL-040", f"Global repo query failed: {e}"),
+                            exc_info=True,
+                            extra={"correlation_id": get_correlation_id()},
                         )
                         error_message = f"Query failed: {str(e)}"
             else:
@@ -4682,13 +4593,9 @@ def query_results_partial_post(
 
     except Exception as e:
         logger.error(
-            format_error_log(
-                "STORE-GENERAL-041",
-                "Query execution failed: %s",
-                e,
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("STORE-GENERAL-041", f"Query execution failed: {e}"),
+            exc_info=True,
+            extra={"correlation_id": get_correlation_id()},
         )
         error_message = f"Query failed: {str(e)}"
 
@@ -6503,12 +6410,8 @@ def reset_config(
         )
     except Exception as e:
         logger.error(
-            format_error_log(
-                "STORE-GENERAL-045",
-                "Failed to reset config: %s",
-                e,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("STORE-GENERAL-045", f"Failed to reset config: {e}"),
+            extra={"correlation_id": get_correlation_id()},
         )
         return _create_config_page_response(
             request,
@@ -6577,12 +6480,8 @@ async def update_langfuse_pull_config(
         )
     except Exception as e:
         logger.error(
-            format_error_log(
-                "STORE-GENERAL-046",
-                "Failed to update Langfuse pull config: %s",
-                e,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("STORE-GENERAL-046", f"Failed to update Langfuse pull config: {e}"),
+            extra={"correlation_id": get_correlation_id()},
         )
         return _create_config_page_response(
             request,
@@ -6749,13 +6648,8 @@ async def update_config_section(
         )
     except Exception as e:
         logger.error(
-            format_error_log(
-                "STORE-GENERAL-048",
-                "Failed to save config section %s: %s",
-                section,
-                e,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("STORE-GENERAL-048", f"Failed to save config section {section}: {e}"),
+            extra={"correlation_id": get_correlation_id()},
         )
         return _create_config_page_response(
             request,
@@ -6797,12 +6691,8 @@ def reset_config(
         )
     except Exception as e:
         logger.error(
-            format_error_log(
-                "STORE-GENERAL-049",
-                "Failed to reset config: %s",
-                e,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("STORE-GENERAL-049", f"Failed to reset config: {e}"),
+            extra={"correlation_id": get_correlation_id()},
         )
         return _create_config_page_response(
             request,
@@ -6910,13 +6800,8 @@ def save_api_key(
         )
     except Exception as e:
         logger.error(
-            format_error_log(
-                "STORE-GENERAL-050",
-                "Failed to save %s API key: %s",
-                platform,
-                e,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("STORE-GENERAL-050", f"Failed to save {platform} API key: {e}"),
+            extra={"correlation_id": get_correlation_id()},
         )
         return _create_config_page_response(
             request,
@@ -6970,13 +6855,8 @@ def delete_api_key(
         )
     except Exception as e:
         logger.error(
-            format_error_log(
-                "SVC-GENERAL-015",
-                "Failed to delete %s API key: %s",
-                platform,
-                e,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("SVC-GENERAL-015", f"Failed to delete {platform} API key: {e}"),
+            extra={"correlation_id": get_correlation_id()},
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -7135,12 +7015,8 @@ def update_file_content_limits(
         )
     except Exception as e:
         logger.error(
-            format_error_log(
-                "SVC-GENERAL-016",
-                "Failed to update file content limits: %s",
-                e,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            format_error_log("SVC-GENERAL-016", f"Failed to update file content limits: {e}"),
+            extra={"correlation_id": get_correlation_id()},
         )
         return _create_file_content_limits_response(
             request,
