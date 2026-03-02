@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.77
+
+### Bug Fixes
+
+- fix: CleanupManager._onerror callback TypeError when retrying os.open() after EMFILE -- catch TypeError alongside OSError since shutil's internal os.open(path, flags) retry only receives path, preventing crash during file descriptor exhaustion cleanup (Bug #343)
+
 ## v9.3.76
 
 ### Features
