@@ -1960,6 +1960,7 @@ Rules:
         allowed_tools: Optional[str] = None,
         post_tool_hook: Optional[str] = None,
         hook_thresholds: Optional[tuple] = None,
+        permission_mode: Optional[str] = None,
     ) -> str:
         """
         Invoke Claude CLI with direct subprocess (AC1).
@@ -1982,6 +1983,9 @@ Rules:
             post_tool_hook: Optional PostToolUse hook reminder text. If provided with max_turns > 0,
                            adds --settings flag with PostToolUse hook that echoes the reminder after
                            each tool call. Use for Pass 2 to reinforce output format requirements.
+            permission_mode: Optional permission mode for Claude CLI.
+                            - None: No --permission-mode flag (default permissions)
+                            - "bypassPermissions": Skip all permission prompts (for file writing)
 
         Returns:
             Claude CLI stdout output
@@ -2014,8 +2018,9 @@ Rules:
         counter_file = None
         if max_turns > 0:
             cmd.extend(["--max-turns", str(max_turns)])
-            # Server-side automation: bypass permission prompts for non-interactive subprocess
-            cmd.extend(["--permission-mode", "bypassPermissions"])
+            # Only add --permission-mode if explicitly requested by caller
+            if permission_mode:
+                cmd.extend(["--permission-mode", permission_mode])
             # Fix 1 (Iteration 12): Turn-aware PostToolUse hook with counter file.
             # Replaces static echo with bash script that tracks tool call count and
             # escalates urgency messages as turns run out (prevents Claude from

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.83
+
+### Bug Fixes
+
+- fix: Scope bypassPermissions to Pass 1 only, preventing Claude from writing domain files directly in Pass 2 (Bug #349). Root cause: v9.3.82 applied --permission-mode bypassPermissions globally to all agentic Claude CLI invocations, giving Claude Write tool access in Pass 2. Claude wrote domain .md files directly to staging (without YAML frontmatter), Python saw empty stdout, skipped its frontmatter-adding write, and Claude's files persisted through stage-then-swap. Fix: Made permission_mode a per-call parameter on _invoke_claude_cli(); only Pass 1 passes bypassPermissions. Added defense-in-depth cleanup to delete any Claude-written file when analyzer skips a domain due to insufficient output.
+
 ## v9.3.82
 
 ### Bug Fixes
