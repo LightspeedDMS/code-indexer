@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.79
+
+### Bug Fixes
+
+- fix: IndexRegenerator case-sensitivity bug destroyed cross-domain dependency edges during repair for mixed-case domain names (Bug #348). Root cause was a DRY violation -- IndexRegenerator reimplemented cross-domain parsing with naive text matching that compared original-case domain names against lowercased lines (always failed for "Core DMS Platform" etc). Also wrote wrong 3-column format instead of 5-column. Fix deletes duplicated logic entirely and delegates to DependencyMapAnalyzer._build_cross_domain_graph() which correctly parses structured Outgoing Dependencies tables. File reduced from 394 to 286 lines.
+
 ## v9.3.78
 
 ### Performance

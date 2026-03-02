@@ -10,7 +10,7 @@ Algorithm:
   2. For each domain, read its .md file and parse YAML frontmatter
   3. Build Domain Catalog table from domain names, descriptions, repo counts
   4. Build Repo-to-Domain Matrix from participating_repos in each domain
-  5. Scan domain files for cross-domain connection references (best-effort)
+  5. Delegate cross-domain graph building to DependencyMapAnalyzer
   6. Write fresh _index.md with frontmatter + all three sections
 """
 
@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
 from code_indexer.server.services.dep_map_file_utils import (
     load_domains_json as _load_domains_json_util,
     parse_yaml_frontmatter as _parse_yaml_frontmatter_util,
@@ -26,19 +27,6 @@ from code_indexer.server.services.dep_map_file_utils import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Section headers that may contain cross-domain dependency information
-CROSS_DOMAIN_SECTION_HEADERS = [
-    "## Cross-Domain Connections",
-    "## Cross-Domain Dependencies",
-]
-
-# Phrases that indicate no cross-domain deps in a section
-NO_DEPS_PHRASES = [
-    "no verified cross-domain",
-    "no cross-domain dependencies",
-    "none",
-]
 
 
 class IndexRegenerator:
@@ -66,14 +54,16 @@ class IndexRegenerator:
 
         catalog_rows = self._build_catalog_rows(output_dir, domain_list)
         matrix_rows = self._build_matrix_rows(output_dir, domain_list)
-        cross_domain_edges = self._collect_cross_domain_edges(output_dir, domain_list)
+        cross_domain_graph = DependencyMapAnalyzer._build_cross_domain_graph(
+            output_dir, domain_list
+        )
 
         all_repos = sorted({row[0] for row in matrix_rows})
 
         content = self._format_index_md(
             catalog_rows=catalog_rows,
             matrix_rows=matrix_rows,
-            cross_domain_edges=cross_domain_edges,
+            cross_domain_graph=cross_domain_graph,
             repos=all_repos,
             domain_count=len(catalog_rows),
         )
@@ -154,99 +144,6 @@ class IndexRegenerator:
         return rows
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Cross-domain dependency collection
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _collect_cross_domain_edges(
-        self, output_dir: Path, domain_list: List[Dict[str, Any]]
-    ) -> List[Tuple[str, str, str]]:
-        """
-        Collect cross-domain dependency edges from domain .md file contents.
-
-        Scans each domain file for a Cross-Domain section. If the section
-        explicitly states there are no dependencies, it is skipped.
-
-        Returns list of (source_domain, target_domain, evidence) tuples.
-        This is best-effort: if a file has complex or unparseable references,
-        the section is skipped rather than producing garbage output.
-        """
-        edges = []
-        domain_names = {d.get("name", "") for d in domain_list if d.get("name")}
-
-        for domain in domain_list:
-            name = domain.get("name", "")
-            if not name:
-                continue
-            md_file = output_dir / f"{name}.md"
-            if not md_file.exists():
-                continue
-
-            try:
-                content = md_file.read_text(encoding="utf-8")
-            except Exception as e:
-                logger.warning("Failed to read %s: %s", md_file, e)
-                continue
-
-            section_edges = self._parse_cross_domain_section(
-                content, name, domain_names
-            )
-            edges.extend(section_edges)
-
-        return edges
-
-    def _parse_cross_domain_section(
-        self, content: str, source_domain: str, known_domains: set
-    ) -> List[Tuple[str, str, str]]:
-        """
-        Parse cross-domain dependency references from a domain file's content.
-
-        Looks for a Cross-Domain section header and extracts references to
-        other known domain names. Returns empty list if section indicates
-        no dependencies or if parsing yields no usable references.
-        """
-        # Find the cross-domain section
-        section_start = -1
-        section_header = ""
-        for header in CROSS_DOMAIN_SECTION_HEADERS:
-            idx = content.find(header)
-            if idx != -1:
-                section_start = idx
-                section_header = header
-                break
-
-        if section_start == -1:
-            return []
-
-        # Extract section body (up to next ## header or end of file)
-        body_start = section_start + len(section_header)
-        next_header = content.find("\n## ", body_start)
-        if next_header != -1:
-            section_body = content[body_start:next_header]
-        else:
-            section_body = content[body_start:]
-
-        section_lower = section_body.lower().strip()
-
-        # Check for explicit "no dependencies" phrases
-        for phrase in NO_DEPS_PHRASES:
-            if phrase in section_lower:
-                return []
-
-        # Try to find references to known domain names
-        edges = []
-        for line in section_body.splitlines():
-            line_lower = line.lower()
-            for target in known_domains:
-                if target == source_domain:
-                    continue
-                if target in line_lower:
-                    evidence = line.strip().lstrip("- ").strip()
-                    if evidence:
-                        edges.append((source_domain, target, evidence))
-
-        return edges
-
-    # ─────────────────────────────────────────────────────────────────────────
     # Frontmatter parsing
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -301,7 +198,7 @@ class IndexRegenerator:
         self,
         catalog_rows: List[Tuple[str, str, int]],
         matrix_rows: List[Tuple[str, str]],
-        cross_domain_edges: List[Tuple[str, str, str]],
+        cross_domain_graph: str,
         repos: List[str],
         domain_count: int,
     ) -> str:
@@ -311,7 +208,8 @@ class IndexRegenerator:
         Args:
             catalog_rows: List of (domain_name, description, repo_count)
             matrix_rows: List of (repo_name, domain_name)
-            cross_domain_edges: List of (source_domain, target_domain, evidence)
+            cross_domain_graph: Pre-built cross-domain graph markdown string
+                                from DependencyMapAnalyzer._build_cross_domain_graph()
             repos: Sorted list of all repos across all domains
             domain_count: Total number of domains included
 
@@ -362,18 +260,12 @@ class IndexRegenerator:
             matrix_body = "_No repositories._"
         matrix_section = matrix_header + matrix_body + "\n"
 
-        # Cross-Domain Dependencies table
-        if cross_domain_edges:
-            cross_header = (
-                "## Cross-Domain Dependencies\n\n"
-                "| Source Domain | Target Domain | Evidence |\n"
-                "|---|---|---|\n"
+        # Cross-Domain Dependencies section -- delegate to DependencyMapAnalyzer
+        if cross_domain_graph:
+            cross_section = cross_domain_graph.replace(
+                "## Cross-Domain Dependency Graph",
+                "## Cross-Domain Dependencies",
             )
-            cross_body = "\n".join(
-                f"| {src} | {tgt} | {evidence} |"
-                for src, tgt, evidence in cross_domain_edges
-            )
-            cross_section = cross_header + cross_body + "\n"
         else:
             cross_section = (
                 "## Cross-Domain Dependencies\n\n"
