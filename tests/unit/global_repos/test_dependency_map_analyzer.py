@@ -594,13 +594,11 @@ class TestPass1PromptGuardrails:
         # Verify COMPLETENESS MANDATE section instructs internal verification
         assert "Verify INTERNALLY that total repos across all domains equals" in prompt
         assert "Do NOT output the verification" in prompt
-        assert "All verification must be done INTERNALLY" in prompt
-        assert "Your output must contain ONLY JSON" in prompt
 
-        # Verify Output Format section prohibits non-JSON content
-        assert "Your ENTIRE response must be ONLY a valid JSON array" in prompt
-        assert "Do NOT output completeness checks, summaries, or commentary" in prompt
-        assert "ONLY the JSON array" in prompt
+        # Verify file-based output instructions (Story #349 — replaces old Output Format section)
+        assert "You MUST write your output as a JSON file" in prompt
+        assert "Do NOT output the JSON to stdout" in prompt
+        assert "python3 -m json.tool" in prompt
 
 
 class TestPass1JsonParseFailure:
@@ -626,14 +624,14 @@ class TestPass1JsonParseFailure:
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
-        with pytest.raises(RuntimeError, match="Pass 1 \\(Synthesis\\) returned unparseable output"):
+        with pytest.raises(RuntimeError, match="Pass 1 \\(Synthesis\\) failed after retry"):
             analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=[], max_turns=50)
 
     @patch("subprocess.run")
-    def test_pass_1_single_shot_retry_succeeds(self, mock_subprocess, tmp_path):
-        """Test Pass 1 single-shot retry succeeds when agentic attempt returns commentary."""
+    def test_pass_1_agentic_retry_with_file_reminder_succeeds(self, mock_subprocess, tmp_path):
+        """Test Pass 1 agentic retry with file-write reminder succeeds when first attempt returns commentary."""
         # First call (agentic): returns commentary instead of JSON
-        # Second call (single-shot): returns valid JSON
+        # Second call (agentic retry with file-write reminder): returns valid JSON on stdout
         call_count = [0]
 
         def side_effect(*args, **kwargs):
@@ -645,7 +643,7 @@ class TestPass1JsonParseFailure:
                     stdout="The domain synthesis analysis is complete. The JSON output above contains 7 domain clusters...",
                 )
             else:
-                # Single-shot retry: valid JSON
+                # Agentic retry: valid JSON on stdout (fallback path)
                 return MagicMock(
                     returncode=0,
                     stdout=json.dumps([
@@ -675,7 +673,7 @@ class TestPass1JsonParseFailure:
 
         result = analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=50)
 
-        # Verify subprocess was called twice (agentic + single-shot retry)
+        # Verify subprocess was called twice (agentic + agentic retry)
         assert mock_subprocess.call_count == 2
 
         # Verify first call used max_turns=50 (agentic)
@@ -685,10 +683,14 @@ class TestPass1JsonParseFailure:
         first_turns_idx = first_cmd.index("--max-turns")
         assert first_cmd[first_turns_idx + 1] == "50"
 
-        # Verify second call used max_turns=0 (single-shot - no --max-turns flag)
+        # Verify second call also uses agentic mode (Story #349: no more single-shot retry)
         second_call_args = mock_subprocess.call_args_list[1]
         second_cmd = second_call_args[0][0]
-        assert "--max-turns" not in second_cmd
+        assert "--max-turns" in second_cmd
+
+        # Verify retry prompt contains file-write reminder
+        second_prompt = second_call_args[1]["input"]
+        assert "CRITICAL: You MUST write your output to the file" in second_prompt
 
         # Verify result is from successful retry
         assert len(result) == 1
@@ -696,7 +698,7 @@ class TestPass1JsonParseFailure:
 
     @patch("subprocess.run")
     def test_pass_1_both_attempts_fail(self, mock_subprocess, tmp_path):
-        """Test Pass 1 raises RuntimeError when both agentic and single-shot attempts fail."""
+        """Test Pass 1 raises RuntimeError when both agentic attempts fail."""
         # Both calls return commentary (no JSON)
         mock_subprocess.return_value = MagicMock(
             returncode=0,
@@ -716,8 +718,8 @@ class TestPass1JsonParseFailure:
             {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
         ]
 
-        # Verify RuntimeError is raised with "both attempts" message
-        with pytest.raises(RuntimeError, match="Pass 1 \\(Synthesis\\) returned unparseable output on both attempts"):
+        # Verify RuntimeError is raised with "failed after retry" message (Story #349)
+        with pytest.raises(RuntimeError, match="Pass 1 \\(Synthesis\\) failed after retry"):
             analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=50)
 
         # Verify subprocess was called twice

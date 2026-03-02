@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.81
+
+### Features
+
+- feat: File-based output for Pass 1 dependency map synthesis (Story #349). Replaces stdout JSON parsing with file-based approach where Claude CLI writes JSON to pass1_domains.json, validates with python3 -m json.tool, and self-corrects errors. Eliminates production failure on servers with 100+ golden repos where Claude outputs narrative instead of JSON due to primacy/recency dilution in very large prompts. Output format instructions moved to top of prompt. Three-tier resilience: file primary, stdout fallback, agentic retry with file-write reminder.
+
+### Bug Fixes
+
+- fix: Dependency map "Running" state lost on navigate-back. Two fixes: (A) job status partial guard prevents content health from overriding Running badge when analysis is active, (B) activity journal polling starts on page load with every-3s trigger instead of requiring a trigger event.
+
 ## v9.3.80
 
 ### Features

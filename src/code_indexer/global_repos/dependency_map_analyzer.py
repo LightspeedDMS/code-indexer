@@ -159,6 +159,11 @@ class DependencyMapAnalyzer:
 
         Analyzes cidx-meta repository descriptions to identify domain clusters.
 
+        Uses file-based output: Claude writes the JSON to a staging file,
+        validates it with python3 -m json.tool, and self-corrects errors.
+        The analyzer reads the file after Claude CLI returns. Falls back to
+        stdout extraction if the file is not written.
+
         Args:
             staging_dir: Staging directory for output files
             repo_descriptions: Dict mapping repo alias to description content
@@ -168,11 +173,44 @@ class DependencyMapAnalyzer:
         Returns:
             List of domain dicts with 'name', 'description', 'participating_repos'
         """
-        # Build synthesis prompt
+        # Paths for file-based output (Story #349)
+        pass1_file = staging_dir / "pass1_domains.json"
+        # Relative path from Claude CLI cwd (golden_repos_root)
+        # staging_dir is cidx-meta/dependency-map.staging/ inside golden_repos_root
+        try:
+            pass1_file_rel = pass1_file.relative_to(self.golden_repos_root)
+        except ValueError:
+            # If staging_dir is not under golden_repos_root (e.g. in tests), use absolute
+            pass1_file_rel = pass1_file
+        pass1_file_abs = str(pass1_file)
+
+        # Build synthesis prompt — output format + file instructions FIRST (primacy/recency)
         prompt = "# Domain Synthesis Task\n\n"
         prompt += "You are running in the golden-repos root directory with filesystem access to all repositories.\n\n"
-        prompt += "Analyze the following repository descriptions and identify domain clusters.\n\n"
 
+        # ── OUTPUT FORMAT AND FILE INSTRUCTIONS (at TOP — before repo descriptions) ──
+        prompt += "## CRITICAL: Output Format and File Instructions\n\n"
+        prompt += "You MUST write your output as a JSON file — do NOT output the JSON to stdout.\n\n"
+        prompt += "### JSON Schema\n\n"
+        prompt += "Write a JSON array where each element is a domain object with these exact fields:\n\n"
+        prompt += "[\n"
+        prompt += '  {"name": "domain-name", "description": "1-sentence domain scope", '
+        prompt += '"participating_repos": ["alias1", "alias2"], '
+        prompt += '"repo_paths": {"alias1": "/full/path/to/alias1", "alias2": "/full/path/to/alias2"}, '
+        prompt += '"evidence": "Brief justification referencing actual files/patterns observed"}\n'
+        prompt += "]\n\n"
+        prompt += "### File Output Instructions\n\n"
+        prompt += "1. Write the JSON array to this file path:\n"
+        prompt += f"   - Relative from your cwd: `./{pass1_file_rel}`\n"
+        prompt += f"   - Absolute path: `{pass1_file_abs}`\n\n"
+        prompt += "2. Validate the file with:\n"
+        prompt += "   ```\n"
+        prompt += f"   python3 -m json.tool {pass1_file_abs}\n"
+        prompt += "   ```\n\n"
+        prompt += "3. If validation fails, fix the JSON errors and re-validate until it passes.\n\n"
+        prompt += "4. Do NOT output the JSON to stdout. Only write it to the file above.\n\n"
+
+        # ── REPOSITORY DESCRIPTIONS (after file instructions) ──
         prompt += "## Repository Descriptions\n\n"
         for alias, content in repo_descriptions.items():
             prompt += f"### {alias}\n\n"
@@ -246,8 +284,7 @@ class DependencyMapAnalyzer:
             + ". Do NOT output the verification.\n"
         )
         prompt += "If you cannot find integration evidence for a repo, assign it to its own standalone domain.\n"
-        prompt += "MISSING REPOS = FAILED ANALYSIS. Every valid alias must appear exactly once.\n"
-        prompt += "All verification must be done INTERNALLY. Your output must contain ONLY JSON.\n\n"
+        prompt += "MISSING REPOS = FAILED ANALYSIS. Every valid alias must appear exactly once.\n\n"
 
         prompt += "### Unassigned Repository Handling\n\n"
         prompt += "If a repository does not fit any domain (no integration evidence found), assign it to a\n"
@@ -264,42 +301,89 @@ class DependencyMapAnalyzer:
         prompt += "\nAny domain containing repos not in this list will be rejected by validation.\n"
         prompt += f"\nCOMPLETENESS CHECK: Your output must contain exactly {len(repo_list)} repos total across all domains.\n\n"
 
-        prompt += "## Output Format\n\n"
-        prompt += "Your ENTIRE response must be ONLY a valid JSON array. No markdown, no explanations, no verification text, no preamble.\n"
-        prompt += "Do NOT output completeness checks, summaries, or commentary. ONLY the JSON array.\n"
-        prompt += "For each domain, include a `repo_paths` object mapping each alias to its FULL filesystem path.\n"
-        prompt += "If you cannot provide the real path for a repo, DO NOT include that repo.\n\n"
-        prompt += "[\n"
-        prompt += '  {"name": "domain-name", "description": "1-sentence domain scope", '
-        prompt += '"participating_repos": ["alias1", "alias2"], '
-        prompt += '"repo_paths": {"alias1": "/full/path/to/alias1", "alias2": "/full/path/to/alias2"}, '
-        prompt += '"evidence": "Brief justification referencing actual files/patterns observed"}\n'
-        prompt += "]\n"
-
         # Invoke Claude CLI (Pass 1 explores all repos to identify domains and outputs JSON)
         timeout = (
             self.pass_timeout
         )  # Pass 1 uses full timeout (heaviest phase: explores all repos)
         result = self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None)
 
-        # Parse JSON response
+        # ── File-based output: primary path (Story #349) ──
         logger.debug(f"Pass 1 raw output length: {len(result)} chars")
-        try:
-            domain_list = self._extract_json(result)
-        except (json.JSONDecodeError, ValueError) as e:
+        domain_list = None
+
+        if pass1_file.exists():
+            file_content = pass1_file.read_text()
+            file_size = len(file_content)
+            try:
+                domain_list = json.loads(file_content)
+                logger.info(
+                    f"Pass 1 output read from file: {pass1_file} "
+                    f"({file_size} bytes, {len(domain_list)} domains)"
+                )
+            except json.JSONDecodeError as e:
+                logger.warning(
+                    f"Pass 1 output file exists but contains invalid JSON: {e}"
+                )
+            finally:
+                pass1_file.unlink(missing_ok=True)  # cleanup even on parse failure
+        else:
             logger.warning(
-                f"Pass 1 agentic attempt returned no parseable JSON ({e}), "
-                f"output preview: {result[:200]!r} -- "
-                "retrying in single-shot mode (max_turns=0)"
+                f"Pass 1 output file not found at {pass1_file}, "
+                "falling back to stdout extraction"
             )
-            result = self._invoke_claude_cli(prompt, timeout, 0, allowed_tools=None)
-            logger.debug(f"Pass 1 single-shot retry output length: {len(result)} chars")
+
+        # ── Stdout fallback ──
+        if domain_list is None:
             try:
                 domain_list = self._extract_json(result)
-            except (json.JSONDecodeError, ValueError) as e2:
-                raise RuntimeError(
-                    f"Pass 1 (Synthesis) returned unparseable output on both attempts: {e2}"
-                ) from e2
+                logger.info("Pass 1 output extracted from stdout (fallback)")
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.debug(f"Pass 1 stdout extraction failed: {e}, will retry")
+
+        # ── Retry if both paths failed ──
+        if domain_list is None:
+            logger.warning(
+                "Pass 1 first attempt failed (no file, no parseable stdout). "
+                "Retrying with file-write reminder."
+            )
+            # Delete stale file if it exists from prior attempt
+            pass1_file.unlink(missing_ok=True)
+
+            retry_prompt = (
+                "CRITICAL: You MUST write your output to the file. "
+                "Do NOT output JSON to stdout.\n"
+                f"Write the JSON array to: {pass1_file_abs}\n"
+                f"Then validate with: python3 -m json.tool {pass1_file_abs}\n"
+                "Fix any errors and re-validate until the file contains valid JSON.\n\n"
+                + prompt
+            )
+            result = self._invoke_claude_cli(
+                retry_prompt, timeout, max_turns, allowed_tools=None
+            )
+
+            if pass1_file.exists():
+                file_content = pass1_file.read_text()
+                try:
+                    domain_list = json.loads(file_content)
+                    logger.info(
+                        f"Pass 1 retry output read from file: {pass1_file} "
+                        f"({len(file_content)} bytes, {len(domain_list)} domains)"
+                    )
+                except json.JSONDecodeError as e2:
+                    logger.error(f"Pass 1 retry file also invalid: {e2}")
+                finally:
+                    pass1_file.unlink(missing_ok=True)
+
+            if domain_list is None:
+                try:
+                    domain_list = self._extract_json(result)
+                except (json.JSONDecodeError, ValueError) as e2:
+                    raise RuntimeError(
+                        f"Pass 1 (Synthesis) failed after retry: "
+                        f"file not written and stdout unparseable. "
+                        f"File path checked: {pass1_file_abs}. "
+                        f"Stdout preview: {result[:200]!r}"
+                    ) from e2
 
         # Validate Pass 1 output: filter hallucinated repos, catch unassigned repos
         valid_aliases = {r.get("alias") for r in repo_list}
