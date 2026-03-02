@@ -949,27 +949,37 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     result.processing_time = time.time() - start_time
                     return result
 
-            # Handle visibility updates for unchanged files (fast, non-parallel operation)
+            # Fix A+D (Story #339): Pre-fetch all content points ONCE and share between
+            # both visibility-ensure and branch-isolation operations.
+            # Replaces: (a) per-file scroll_points in the unchanged_files loop,
+            #           (b) internal limit=10000 fetch in hide_files_not_in_branch_thread_safe
+            needs_visibility_or_isolation = unchanged_files or not skip_branch_isolation
+            all_content_points: List[Dict[str, Any]] = []
+            if needs_visibility_or_isolation:
+                all_content_points = self._fetch_all_content_points(collection_name)
+
+            # Handle visibility updates for unchanged files (fast batch operation)
             if unchanged_files:
                 if progress_callback:
                     progress_callback(
                         0,
                         0,
                         Path(""),
-                        info=f"👁️  Updating visibility for {len(unchanged_files)} unchanged files",
+                        info=f"Updating visibility for {len(unchanged_files)} unchanged files",
                         slot_tracker=slot_tracker,
                     )
 
-                for file_path in unchanged_files:
-                    try:
-                        self._ensure_file_visible_in_branch_thread_safe(
-                            file_path, new_branch, collection_name
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to update visibility for {file_path}: {e}"
-                        )
-                        continue
+                try:
+                    self._batch_ensure_files_visible_in_branch(
+                        file_paths=unchanged_files,
+                        branch=new_branch,
+                        collection_name=collection_name,
+                        all_content_points=all_content_points,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Batch visibility update failed for branch '{new_branch}': {e}"
+                    )
 
             # Hide files that don't exist in the new branch (branch isolation)
             # Apply branch isolation unless explicitly skipped
@@ -993,6 +1003,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     progress_callback,
                     slot_tracker,
                     fts_manager=fts_manager,
+                    all_content_points=all_content_points,
                 )
 
             result.processing_time = time.time() - start_time
@@ -1210,6 +1221,111 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
 
             return True
 
+    def _fetch_all_content_points(
+        self, collection_name: str
+    ) -> List[Dict[str, Any]]:
+        """Paginated fetch of ALL content points from the vector store.
+
+        Fix D (Story #339): Replaces the single limit=10000 call in
+        hide_files_not_in_branch_thread_safe which silently truncates large repos.
+        Mirrors smart_indexer._scroll_all_content_points pattern.
+
+        Uses limit=5000 per page and with_vectors=False for memory efficiency.
+        Breaks on stuck pagination to prevent infinite loops.
+
+        Args:
+            collection_name: Name of the vector collection
+
+        Returns:
+            List of all content point dicts (payload only, no vectors)
+        """
+        all_points: List[Dict[str, Any]] = []
+        offset = None
+
+        while True:
+            points, next_offset = self.vector_store_client.scroll_points(
+                collection_name=collection_name,
+                filter_conditions={
+                    "must": [{"key": "type", "match": {"value": "content"}}]
+                },
+                limit=5000,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,  # CRITICAL: No vectors - massive memory savings
+            )
+
+            if not points:
+                break
+
+            all_points.extend(points)
+
+            # Safety: check for stuck pagination BEFORE updating offset
+            if next_offset is not None and next_offset == offset:
+                logger.error(
+                    f"Pagination stuck at offset {offset} in _fetch_all_content_points - breaking"
+                )
+                break
+
+            offset = next_offset
+
+            if offset is None:
+                # Normal completion - no more data
+                break
+
+        return all_points
+
+    def _batch_ensure_files_visible_in_branch(
+        self,
+        file_paths: List[str],
+        branch: str,
+        collection_name: str,
+        all_content_points: List[Dict[str, Any]],
+    ) -> None:
+        """Batch operation ensuring all unchanged files are visible in branch.
+
+        Fix A (Story #339): Replaces the per-file loop calling
+        _ensure_file_visible_in_branch_thread_safe (which made one scroll_points
+        call per file and acquired the lock per file).
+
+        Performance improvement:
+        - Acquires _visibility_lock exactly once for the entire batch
+        - Filters all_content_points in memory (no N scroll_points calls)
+        - Calls _batch_update_payload_only once with all updates
+
+        Args:
+            file_paths: Unchanged file paths to ensure visible in branch
+            branch: Branch name to remove from hidden_branches
+            collection_name: Filesystem collection name
+            all_content_points: Pre-fetched content points (from _fetch_all_content_points)
+        """
+        if not file_paths:
+            return
+
+        with self._visibility_lock:
+            unchanged_set = set(file_paths)
+            points_to_update = []
+
+            for point in all_content_points:
+                file_path = point.get("payload", {}).get("path")
+                if file_path not in unchanged_set:
+                    continue
+
+                current_hidden = point.get("payload", {}).get("hidden_branches", [])
+                if branch in current_hidden:
+                    new_hidden = [b for b in current_hidden if b != branch]
+                    points_to_update.append(
+                        {"id": point["id"], "payload": {"hidden_branches": new_hidden}}
+                    )
+
+            if points_to_update:
+                self.vector_store_client._batch_update_payload_only(
+                    points_to_update, collection_name
+                )
+                logger.info(
+                    f"Batch updated {len(points_to_update)} points for visibility ensure "
+                    f"(branch '{branch}')"
+                )
+
     def _ensure_file_visible_in_branch_thread_safe(
         self, file_path: str, branch: str, collection_name: str
     ):
@@ -1354,6 +1470,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         progress_callback: Optional[Callable] = None,
         slot_tracker: Optional[CleanSlotTracker] = None,
         fts_manager: Optional[Any] = None,
+        all_content_points: Optional[List[Dict[str, Any]]] = None,
     ):
         """Thread-safe version of hiding files that don't exist in branch.
 
@@ -1367,6 +1484,10 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                         delete_document() is called for each hidden file (best-effort)
                         and commit() is called once after all deletes. Errors on
                         individual files are logged but do not stop processing.
+            all_content_points: Optional pre-fetched content points. When provided,
+                        the internal scroll_points fetch is skipped (Fix D, Story #339).
+                        Pass the result of _fetch_all_content_points to share the fetch
+                        with _batch_ensure_files_visible_in_branch.
         """
         # Reset progress timers for branch isolation phase transition
         if progress_callback and hasattr(progress_callback, "reset_progress_timers"):
@@ -1381,24 +1502,20 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 slot_tracker=slot_tracker,
             )
 
-        # Get all unique file paths from content points in the database
-        with self._database_lock:
-            try:
-                all_content_points, _ = self.vector_store_client.scroll_points(
-                    filter_conditions={
-                        "must": [{"key": "type", "match": {"value": "content"}}]
-                    },
-                    limit=10000,
-                    collection_name=collection_name,
-                )
-                if not isinstance(all_content_points, list):
-                    logger.error(
-                        f"Unexpected scroll_points return type: {type(all_content_points)}"
-                    )
+        # Fix D (Story #339): Use pre-fetched content points when available to avoid
+        # a redundant scroll_points call. Falls back to internal fetch if not provided.
+        if all_content_points is None:
+            with self._database_lock:
+                try:
+                    all_content_points = self._fetch_all_content_points(collection_name)
+                    if not isinstance(all_content_points, list):
+                        logger.error(
+                            f"Unexpected _fetch_all_content_points return type: {type(all_content_points)}"
+                        )
+                        return False
+                except Exception as e:
+                    logger.error(f"Failed to get all content points from database: {e}")
                     return False
-            except Exception as e:
-                logger.error(f"Failed to get all content points from database: {e}")
-                return False
 
         # Extract unique file paths from database and NORMALIZE to relative
         db_file_paths = set()

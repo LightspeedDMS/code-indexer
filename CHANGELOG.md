@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.78
+
+### Performance
+
+- perf: Batch visibility update optimization reduces unchanged-file visibility phase from 5-8 minutes to seconds on large repos (Story #339). Four fixes: (A) batch ensure-visible replaces 2823 sequential scroll_points calls with single pre-fetched in-memory filter + batch payload write, (B) lightweight _batch_update_payload_only bypasses full upsert pipeline for payload-only changes, (C) _parse_filter hoisted outside per-file loop in scroll_points, (D) proper pagination in _fetch_all_content_points prevents silent truncation at 10000 points.
+
 ## v9.3.77
 
 ### Bug Fixes
