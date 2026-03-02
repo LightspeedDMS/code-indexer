@@ -339,7 +339,7 @@ def depmap_job_status_partial(request: Request):
     # Story #342: Merge content health into job status (single source of truth)
     # Content health overrides job health when it's worse than job health
     output_dir = _get_dep_map_output_dir()
-    if output_dir is not None:
+    if output_dir is not None and job_status.get("status") != "running":
         from ..services.dep_map_health_detector import DepMapHealthDetector
 
         try:

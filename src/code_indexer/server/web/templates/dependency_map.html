@@ -49,6 +49,7 @@
                 background: var(--pico-card-background-color); border-radius: 4px;">
         <div id="depmap-activity-entries"
              hx-get="/admin/partials/depmap-activity-journal?offset=0"
+             hx-trigger="load, every 3s"
              hx-swap="beforeend">
         </div>
     </div>
