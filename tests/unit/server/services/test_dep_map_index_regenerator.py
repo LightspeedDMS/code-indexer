@@ -375,3 +375,312 @@ class TestRegenerateEmptyDomains:
         # Frontmatter counts must be 0
         assert "domains_count: 0" in text
         assert "repos_analyzed_count: 0" in text
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bug #348: Cross-domain edge parsing fixes
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def make_domain_md_with_outgoing(
+    name: str, repos: list, outgoing_rows: list
+) -> str:
+    """
+    Build a domain .md file with a populated Outgoing Dependencies table.
+
+    outgoing_rows: list of (source_repo, depends_on, target_domain, dep_type, why) tuples
+    """
+    repos_yaml = "\n".join(f"  - {r}" for r in repos)
+    repos_roles = "\n".join(f"- **{r}**: Participates in {name}." for r in repos)
+
+    rows_md = ""
+    for source_repo, depends_on, target_domain, dep_type, why in outgoing_rows:
+        rows_md += (
+            f"| {source_repo} | {depends_on} | {target_domain}"
+            f" | {dep_type} | {why} | see code |\n"
+        )
+
+    return f"""\
+---
+name: {name}
+description: Domain {name}
+participating_repos:
+{repos_yaml}
+last_analyzed: "2026-01-01T00:00:00Z"
+---
+
+# Domain Analysis: {name}
+
+## Overview
+
+This is domain {name} with sufficient content to pass the size check.
+
+## Repository Roles
+
+{repos_roles}
+
+## Intra-Domain Dependencies
+
+Standard intra-domain dependency relationships.
+
+## Cross-Domain Connections
+
+### Outgoing Dependencies
+
+| This Repo | Depends On | Target Domain | Type | Why | Evidence |
+|---|---|---|---|---|---|
+{rows_md}
+### Incoming Dependencies
+
+None detected.
+"""
+
+
+def make_domain_md_with_no_outgoing(name: str, repos: list) -> str:
+    """Build a domain .md file with Outgoing Dependencies sentinel (no deps)."""
+    repos_yaml = "\n".join(f"  - {r}" for r in repos)
+    repos_roles = "\n".join(f"- **{r}**: Participates in {name}." for r in repos)
+
+    return f"""\
+---
+name: {name}
+description: Domain {name}
+participating_repos:
+{repos_yaml}
+last_analyzed: "2026-01-01T00:00:00Z"
+---
+
+# Domain Analysis: {name}
+
+## Overview
+
+Domain {name} has no outgoing cross-domain dependencies.
+
+## Repository Roles
+
+{repos_roles}
+
+## Intra-Domain Dependencies
+
+Standard intra-domain dependency relationships.
+
+## Cross-Domain Connections
+
+### Outgoing Dependencies
+
+No verified cross-domain dependencies.
+
+### Incoming Dependencies
+
+None detected.
+"""
+
+
+class TestRegenerateMixedCaseDomainEdges:
+    """Bug #348 fix: Mixed-case domain names must produce correct cross-domain edges."""
+
+    def test_mixed_case_domains_produce_edges(self, tmp_path):
+        """
+        Domains with mixed-case names (e.g., 'Core DMS Platform') must produce
+        cross-domain edges in the regenerated _index.md.
+
+        Previously broken: case-sensitivity mismatch caused `if target in line_lower`
+        to always fail for mixed-case domain names.
+        """
+        source_domain = "Core DMS Platform"
+        target_domain = "Dealer Configuration"
+
+        domains = [
+            {
+                "name": source_domain,
+                "description": "Core DMS platform services",
+                "participating_repos": ["dms-core", "dms-api"],
+            },
+            {
+                "name": target_domain,
+                "description": "Dealer configuration management",
+                "participating_repos": ["dealer-config"],
+            },
+        ]
+        make_domains_json(tmp_path, domains)
+
+        # Source domain has an outgoing edge to target domain
+        (tmp_path / f"{source_domain}.md").write_text(
+            make_domain_md_with_outgoing(
+                source_domain,
+                ["dms-core", "dms-api"],
+                [
+                    (
+                        "dms-core",
+                        "dealer-config",
+                        target_domain,
+                        "api-call",
+                        "Reads dealer config data",
+                    )
+                ],
+            )
+        )
+        (tmp_path / f"{target_domain}.md").write_text(
+            make_domain_md_with_no_outgoing(target_domain, ["dealer-config"])
+        )
+
+        regenerator = _get_regenerator()
+        index_path = regenerator.regenerate(tmp_path)
+        text = index_path.read_text(encoding="utf-8")
+
+        # Cross-domain section must exist
+        assert "## Cross-Domain Dependencies" in text
+        # Must NOT contain the "no dependencies" placeholder
+        assert "No cross-domain dependencies detected" not in text
+        # Edge must appear: source → target
+        assert source_domain in text
+        assert target_domain in text
+        # A table row connecting them must be present
+        assert f"| {source_domain} | {target_domain} |" in text
+
+
+class TestRegenerateLowercaseDomainEdgesRegression:
+    """Bug #348 fix regression: Lowercase domain names must still produce edges."""
+
+    def test_lowercase_domains_produce_edges(self, tmp_path):
+        """
+        Lowercase domain names (e.g., 'auth-domain') must still produce
+        cross-domain edges -- regression test after case-sensitivity fix.
+        """
+        source_domain = "auth-domain"
+        target_domain = "data-domain"
+
+        domains = [
+            {
+                "name": source_domain,
+                "description": "Authentication domain",
+                "participating_repos": ["auth-svc"],
+            },
+            {
+                "name": target_domain,
+                "description": "Data access domain",
+                "participating_repos": ["data-svc"],
+            },
+        ]
+        make_domains_json(tmp_path, domains)
+
+        (tmp_path / f"{source_domain}.md").write_text(
+            make_domain_md_with_outgoing(
+                source_domain,
+                ["auth-svc"],
+                [
+                    (
+                        "auth-svc",
+                        "data-svc",
+                        target_domain,
+                        "db-query",
+                        "User credential lookup",
+                    )
+                ],
+            )
+        )
+        (tmp_path / f"{target_domain}.md").write_text(
+            make_domain_md_with_no_outgoing(target_domain, ["data-svc"])
+        )
+
+        regenerator = _get_regenerator()
+        index_path = regenerator.regenerate(tmp_path)
+        text = index_path.read_text(encoding="utf-8")
+
+        assert "## Cross-Domain Dependencies" in text
+        assert "No cross-domain dependencies detected" not in text
+        assert f"| {source_domain} | {target_domain} |" in text
+
+
+class TestRegenerateEmptyOutgoingTableProducesNoEdges:
+    """Bug #348: Outgoing table with sentinel produces no edges."""
+
+    def test_empty_outgoing_table_produces_no_edges(self, tmp_path):
+        """
+        A domain whose Outgoing Dependencies section contains only the sentinel
+        'No verified cross-domain dependencies.' must produce no cross-domain edges.
+        """
+        domains = [
+            {
+                "name": "domain-a",
+                "description": "Domain A",
+                "participating_repos": ["repo-a"],
+            },
+            {
+                "name": "domain-b",
+                "description": "Domain B",
+                "participating_repos": ["repo-b"],
+            },
+        ]
+        make_domains_json(tmp_path, domains)
+
+        (tmp_path / "domain-a.md").write_text(
+            make_domain_md_with_no_outgoing("domain-a", ["repo-a"])
+        )
+        (tmp_path / "domain-b.md").write_text(
+            make_domain_md_with_no_outgoing("domain-b", ["repo-b"])
+        )
+
+        regenerator = _get_regenerator()
+        index_path = regenerator.regenerate(tmp_path)
+        text = index_path.read_text(encoding="utf-8")
+
+        assert "## Cross-Domain Dependencies" in text
+        assert "No cross-domain dependencies detected" in text
+
+
+class TestRegenerateCorrect5ColumnFormat:
+    """Bug #348 fix: Regenerated cross-domain table must use 5-column format."""
+
+    def test_cross_domain_table_has_5_column_format(self, tmp_path):
+        """
+        The cross-domain table must use the 5-column format:
+        Source Domain | Target Domain | Via Repos | Type | Why
+
+        Previously broken: regenerator wrote 3-column format
+        'Source Domain | Target Domain | Evidence'.
+        """
+        source_domain = "service-domain"
+        target_domain = "infra-domain"
+
+        domains = [
+            {
+                "name": source_domain,
+                "description": "Service layer",
+                "participating_repos": ["svc-repo"],
+            },
+            {
+                "name": target_domain,
+                "description": "Infrastructure layer",
+                "participating_repos": ["infra-repo"],
+            },
+        ]
+        make_domains_json(tmp_path, domains)
+
+        (tmp_path / f"{source_domain}.md").write_text(
+            make_domain_md_with_outgoing(
+                source_domain,
+                ["svc-repo"],
+                [
+                    (
+                        "svc-repo",
+                        "infra-repo",
+                        target_domain,
+                        "http-call",
+                        "Service calls infra API",
+                    )
+                ],
+            )
+        )
+        (tmp_path / f"{target_domain}.md").write_text(
+            make_domain_md_with_no_outgoing(target_domain, ["infra-repo"])
+        )
+
+        regenerator = _get_regenerator()
+        index_path = regenerator.regenerate(tmp_path)
+        text = index_path.read_text(encoding="utf-8")
+
+        # Must have 5-column header
+        assert "| Source Domain | Target Domain | Via Repos | Type | Why |" in text
+        # Must NOT have old 3-column header
+        assert "| Source Domain | Target Domain | Evidence |" not in text

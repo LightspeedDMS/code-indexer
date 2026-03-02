@@ -1902,6 +1902,12 @@ class FilesystemVectorStore:
         # Get page of files
         page_files = all_files[start_idx : start_idx + limit]
 
+        # Fix C: Parse filter ONCE before the loop (was inside per-file loop).
+        # Avoids O(N) repeated filter compilation for collections with thousands of files.
+        filter_func = None
+        if filter_conditions:
+            filter_func = self._parse_filter(filter_conditions)
+
         # Load points
         points: List[Dict[str, Any]] = []
         for vector_file in page_files:
@@ -1918,10 +1924,9 @@ class FilesystemVectorStore:
                 if with_vectors:
                     point["vector"] = data["vector"]
 
-                # Apply filter conditions
-                if filter_conditions:
+                # Apply pre-parsed filter (compiled once above)
+                if filter_func is not None:
                     payload = point.get("payload", {})
-                    filter_func = self._parse_filter(filter_conditions)
                     if not filter_func(payload):
                         continue
 
@@ -2708,6 +2713,78 @@ class FilesystemVectorStore:
             return True
 
         except Exception:
+            return False
+
+    def _batch_update_payload_only(
+        self, points: List[Dict[str, Any]], collection_name: str
+    ) -> bool:
+        """Update payload fields only, bypassing the full upsert pipeline.
+
+        Fix B (Story #339): Lightweight alternative to _batch_update_points for
+        visibility-only changes (e.g. hidden_branches). Bypasses:
+        - Projection matrix loading
+        - Git blob hash lookups
+        - Path index updates
+        - Vector quantization
+
+        Uses id_index for O(1) file resolution, then does direct JSON
+        read -> payload merge -> JSON write. Vector data and chunk_text
+        are preserved exactly as stored.
+
+        Args:
+            points: List of updates with structure {"id": point_id, "payload": {...}}
+                    Only the specified payload fields are merged; all others preserved.
+            collection_name: Name of the collection
+
+        Returns:
+            True on success (including empty list or all-skip scenarios)
+        """
+        if not points:
+            return True
+
+        try:
+            # Ensure id_index is loaded for O(1) file resolution
+            with self._id_index_lock:
+                if collection_name not in self._id_index:
+                    self._id_index[collection_name] = self._load_id_index(collection_name)
+                index = self._id_index[collection_name]
+
+            for point in points:
+                point_id = point["id"]
+                new_payload_fields = point["payload"]
+
+                # O(1) lookup - no directory scan
+                vector_file = index.get(point_id)
+                if vector_file is None:
+                    # Point not in id_index - skip gracefully
+                    continue
+
+                if not vector_file.exists():
+                    # File was deleted externally - skip gracefully
+                    continue
+
+                # Direct JSON read
+                with open(vector_file) as f:
+                    data = json.load(f)
+
+                # Merge only the specified payload fields (preserve all others)
+                existing_payload = data.get("payload", {})
+                for key, value in new_payload_fields.items():
+                    existing_payload[key] = value
+                data["payload"] = existing_payload
+
+                # Direct JSON write (atomic via _atomic_write_json)
+                self._atomic_write_json(vector_file, data)
+
+            return True
+
+        except Exception as e:
+            logger.warning(
+                "Failed to batch update payload for collection %s: %s",
+                collection_name,
+                e,
+                exc_info=True,
+            )
             return False
 
     def rebuild_payload_indexes(self, collection_name: str) -> bool:

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.80
+
+### Features
+
+- feat: CIDX Server Performance Testing Suite (Epic #332). Standalone CLI tool in tools/perf-suite/ that measures server response times under escalating concurrent load (1-50 users), identifies degradation thresholds, and produces publishable Markdown reports. Covers 14 endpoints (semantic/hybrid/FTS search, SCIP callchain/impact/context, regex search, multi-repo queries, filesystem ops, wiki analytics) across 3 JSON scenario files. Uses httpx async with asyncio.Semaphore for precise concurrency control, single shared JWT with proactive refresh, ASCII degradation charts, and hardware profiling via SSH. 160 unit tests, 19 source modules.
+
+## v9.3.79
+
+### Bug Fixes
+
+- fix: IndexRegenerator case-sensitivity bug destroyed cross-domain dependency edges during repair for mixed-case domain names (Bug #348). Root cause was a DRY violation -- IndexRegenerator reimplemented cross-domain parsing with naive text matching that compared original-case domain names against lowercased lines (always failed for "Core DMS Platform" etc). Also wrote wrong 3-column format instead of 5-column. Fix deletes duplicated logic entirely and delegates to DependencyMapAnalyzer._build_cross_domain_graph() which correctly parses structured Outgoing Dependencies tables. File reduced from 394 to 286 lines.
+
+## v9.3.78
+
+### Performance
+
+- perf: Batch visibility update optimization reduces unchanged-file visibility phase from 5-8 minutes to seconds on large repos (Story #339). Four fixes: (A) batch ensure-visible replaces 2823 sequential scroll_points calls with single pre-fetched in-memory filter + batch payload write, (B) lightweight _batch_update_payload_only bypasses full upsert pipeline for payload-only changes, (C) _parse_filter hoisted outside per-file loop in scroll_points, (D) proper pagination in _fetch_all_content_points prevents silent truncation at 10000 points.
+
 ## v9.3.77
 
 ### Bug Fixes
