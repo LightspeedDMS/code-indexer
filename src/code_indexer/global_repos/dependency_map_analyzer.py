@@ -190,7 +190,7 @@ class DependencyMapAnalyzer:
 
         # ── OUTPUT FORMAT AND FILE INSTRUCTIONS (at TOP — before repo descriptions) ──
         prompt += "## CRITICAL: Output Format and File Instructions\n\n"
-        prompt += "You MUST write your output as a JSON file — do NOT output the JSON to stdout.\n\n"
+        prompt += "You MUST write your output as a JSON file. If you cannot write files due to permission errors, output ONLY the raw JSON array to stdout as fallback (no commentary, no explanation — just the JSON).\n\n"
         prompt += "### JSON Schema\n\n"
         prompt += "Write a JSON array where each element is a domain object with these exact fields:\n\n"
         prompt += "[\n"
@@ -208,7 +208,7 @@ class DependencyMapAnalyzer:
         prompt += f"   python3 -m json.tool {pass1_file_abs}\n"
         prompt += "   ```\n\n"
         prompt += "3. If validation fails, fix the JSON errors and re-validate until it passes.\n\n"
-        prompt += "4. Do NOT output the JSON to stdout. Only write it to the file above.\n\n"
+        prompt += "4. PREFERRED: Write to the file above. FALLBACK: If file writing is blocked by permissions, output ONLY the raw JSON array to stdout (no explanation, no commentary).\n\n"
 
         # ── REPOSITORY DESCRIPTIONS (after file instructions) ──
         prompt += "## Repository Descriptions\n\n"
@@ -351,7 +351,7 @@ class DependencyMapAnalyzer:
 
             retry_prompt = (
                 "CRITICAL: You MUST write your output to the file. "
-                "Do NOT output JSON to stdout.\n"
+                "If file writing is blocked by permissions, output ONLY the raw JSON array to stdout.\n"
                 f"Write the JSON array to: {pass1_file_abs}\n"
                 f"Then validate with: python3 -m json.tool {pass1_file_abs}\n"
                 "Fix any errors and re-validate until the file contains valid JSON.\n\n"
@@ -2014,6 +2014,8 @@ Rules:
         counter_file = None
         if max_turns > 0:
             cmd.extend(["--max-turns", str(max_turns)])
+            # Server-side automation: bypass permission prompts for non-interactive subprocess
+            cmd.extend(["--permission-mode", "bypassPermissions"])
             # Fix 1 (Iteration 12): Turn-aware PostToolUse hook with counter file.
             # Replaces static echo with bash script that tracks tool call count and
             # escalates urgency messages as turns run out (prevents Claude from

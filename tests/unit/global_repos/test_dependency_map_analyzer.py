@@ -597,7 +597,8 @@ class TestPass1PromptGuardrails:
 
         # Verify file-based output instructions (Story #349 — replaces old Output Format section)
         assert "You MUST write your output as a JSON file" in prompt
-        assert "Do NOT output the JSON to stdout" in prompt
+        # Softened: now allows stdout fallback when permissions block file writing
+        assert "PREFERRED: Write to the file above" in prompt or "FALLBACK" in prompt
         assert "python3 -m json.tool" in prompt
 
 

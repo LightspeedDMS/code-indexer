@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.82
+
+### Bug Fixes
+
+- fix: Add --permission-mode bypassPermissions to Claude CLI agentic invocations (Bug #349). Pass 1 dependency map synthesis failed on staging because Claude CLI tool use (Write, Bash) was blocked by permission prompts in non-interactive subprocess mode. Also softened "do NOT output to stdout" instructions to allow stdout JSON fallback when file writing is impossible.
+
 ## v9.3.81
 
 ### Features
