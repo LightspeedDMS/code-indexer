@@ -10530,11 +10530,7 @@ def _get_cidx_callback_base_url() -> Optional[str]:
         return None
     except Exception as e:
         logger.warning(
-            format_error_log(
-                "MCP-GENERAL-125",
-                "Failed to get CIDX callback URL from delegation config: %s",
-                e,
-            )
+            format_error_log("MCP-GENERAL-125", f"Failed to get CIDX callback URL from delegation config: {e}")
         )
         return None
 

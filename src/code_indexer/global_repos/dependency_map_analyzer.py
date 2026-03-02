@@ -305,7 +305,7 @@ class DependencyMapAnalyzer:
         timeout = (
             self.pass_timeout
         )  # Pass 1 uses full timeout (heaviest phase: explores all repos)
-        result = self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None)
+        result = self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None, dangerously_skip_permissions=True)
 
         # ── File-based output: primary path (Story #349) ──
         logger.debug(f"Pass 1 raw output length: {len(result)} chars")
@@ -358,7 +358,7 @@ class DependencyMapAnalyzer:
                 + prompt
             )
             result = self._invoke_claude_cli(
-                retry_prompt, timeout, max_turns, allowed_tools=None
+                retry_prompt, timeout, max_turns, allowed_tools=None, dangerously_skip_permissions=True
             )
 
             if pass1_file.exists():
@@ -382,7 +382,7 @@ class DependencyMapAnalyzer:
                         f"Pass 1 (Synthesis) failed after retry: "
                         f"file not written and stdout unparseable. "
                         f"File path checked: {pass1_file_abs}. "
-                        f"Stdout preview: {result[:200]!r}"
+                        f"Stdout preview: {result[:1000]!r}"
                     ) from e2
 
         # Validate Pass 1 output: filter hallucinated repos, catch unassigned repos
@@ -1960,7 +1960,7 @@ Rules:
         allowed_tools: Optional[str] = None,
         post_tool_hook: Optional[str] = None,
         hook_thresholds: Optional[tuple] = None,
-        permission_mode: Optional[str] = None,
+        dangerously_skip_permissions: bool = False,
     ) -> str:
         """
         Invoke Claude CLI with direct subprocess (AC1).
@@ -1983,9 +1983,9 @@ Rules:
             post_tool_hook: Optional PostToolUse hook reminder text. If provided with max_turns > 0,
                            adds --settings flag with PostToolUse hook that echoes the reminder after
                            each tool call. Use for Pass 2 to reinforce output format requirements.
-            permission_mode: Optional permission mode for Claude CLI.
-                            - None: No --permission-mode flag (default permissions)
-                            - "bypassPermissions": Skip all permission prompts (for file writing)
+            dangerously_skip_permissions: If True, adds --dangerously-skip-permissions flag to allow
+                                         Claude CLI to write files without permission prompts.
+                                         Use for Pass 1 only (file-based JSON output).
 
         Returns:
             Claude CLI stdout output
@@ -2018,9 +2018,9 @@ Rules:
         counter_file = None
         if max_turns > 0:
             cmd.extend(["--max-turns", str(max_turns)])
-            # Only add --permission-mode if explicitly requested by caller
-            if permission_mode:
-                cmd.extend(["--permission-mode", permission_mode])
+            # Only add --dangerously-skip-permissions if explicitly requested by caller
+            if dangerously_skip_permissions:
+                cmd.append("--dangerously-skip-permissions")
             # Fix 1 (Iteration 12): Turn-aware PostToolUse hook with counter file.
             # Replaces static echo with bash script that tracks tool call count and
             # escalates urgency messages as turns run out (prevents Claude from

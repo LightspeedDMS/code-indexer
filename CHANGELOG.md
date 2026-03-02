@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.84
+
+### Bug Fixes
+
+- fix: format_error_log() crashes in 32 error handlers across routes.py and handlers.py. All calls used printf-style %s formatting with 3+ positional arguments, but format_error_log() only accepts 2 positional args (error_code, message) plus **kwargs. Converted all 32 calls to f-string interpolation and moved extra=/exc_info= kwargs to the outer logger call.
+
+- fix: Pass 1 dependency map synthesis fails with "permission restrictions" on production (125 repos). Claude CLI could not write pass1_domains.json because no permission bypass flag was passed. Switched from --permission-mode bypassPermissions to --dangerously-skip-permissions (matching all other Claude CLI invocations in codebase) and ensured both Pass 1 primary and retry calls include the flag. Pass 2 intentionally excluded to prevent frontmatter corruption.
+
+- fix: Pass 1 error message stdout preview truncated to 200 chars, hiding actual error details. Increased to 1000 chars so the diagnostic information (permission errors, file paths, Claude self-diagnosis) is visible in the UI.
+
 ## v9.3.83
 
 ### Bug Fixes
