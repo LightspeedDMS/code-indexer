@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.80
+
+### Features
+
+- feat: CIDX Server Performance Testing Suite (Epic #332). Standalone CLI tool in tools/perf-suite/ that measures server response times under escalating concurrent load (1-50 users), identifies degradation thresholds, and produces publishable Markdown reports. Covers 14 endpoints (semantic/hybrid/FTS search, SCIP callchain/impact/context, regex search, multi-repo queries, filesystem ops, wiki analytics) across 3 JSON scenario files. Uses httpx async with asyncio.Semaphore for precise concurrency control, single shared JWT with proactive refresh, ASCII degradation charts, and hardware profiling via SSH. 160 unit tests, 19 source modules.
+
 ## v9.3.79
 
 ### Bug Fixes

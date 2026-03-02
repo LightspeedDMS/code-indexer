@@ -1,0 +1,118 @@
+[
+  {
+    "name": "scip_callchain_click",
+    "endpoint": "scip_callchain",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "from_symbol": "BaseCommand",
+      "to_symbol": "make_context",
+      "repository_alias": "click-global"
+    },
+    "repo_alias": "click-global",
+    "priority": "high",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "scip_callchain_code_indexer",
+    "endpoint": "scip_callchain",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "from_symbol": "SmartIndexer",
+      "to_symbol": "index_file",
+      "repository_alias": "code-indexer-global"
+    },
+    "repo_alias": "code-indexer-global",
+    "priority": "high",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "scip_impact_click",
+    "endpoint": "scip_impact",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "symbol": "BaseCommand",
+      "repository_alias": "click-global"
+    },
+    "repo_alias": "click-global",
+    "priority": "high",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "scip_impact_code_indexer",
+    "endpoint": "scip_impact",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "symbol": "SmartIndexer",
+      "repository_alias": "code-indexer-global"
+    },
+    "repo_alias": "code-indexer-global",
+    "priority": "high",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "scip_context_click",
+    "endpoint": "scip_context",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "symbol": "Command",
+      "repository_alias": "click-global"
+    },
+    "repo_alias": "click-global",
+    "priority": "high",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "scip_context_code_indexer",
+    "endpoint": "scip_context",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "symbol": "GoldenRepoManager",
+      "repository_alias": "code-indexer-global"
+    },
+    "repo_alias": "code-indexer-global",
+    "priority": "high",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "rest_scip_multi_click_flask",
+    "endpoint": "/api/scip/multi/references",
+    "protocol": "rest",
+    "method": "POST",
+    "parameters": {
+      "symbol": "BaseCommand",
+      "repository_aliases": ["click-global", "flask-large-global"],
+      "limit": 20
+    },
+    "repo_alias": "click-global",
+    "priority": "high",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "rest_scip_multi_code_indexer",
+    "endpoint": "/api/scip/multi/references",
+    "protocol": "rest",
+    "method": "POST",
+    "parameters": {
+      "symbol": "SmartIndexer",
+      "repository_aliases": ["code-indexer-global"],
+      "limit": 20
+    },
+    "repo_alias": "code-indexer-global",
+    "priority": "high",
+    "warmup_count": 3,
+    "measurement_count": 20
+  }
+]
