@@ -6291,6 +6291,8 @@ def scip_context(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Returns:
         MCP-compliant response with smart context results
     """
+    from code_indexer.scip.database.queries import QueryTimeoutError
+
     try:
         symbol = params.get("symbol")
         limit = _coerce_int(params.get("limit"), 20)
@@ -6310,12 +6312,25 @@ def scip_context(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             min_score=min_score,
             repository_alias=repository_alias,
             username=user.username,
+            timeout_seconds=30,
         )
 
         return _mcp_response(
             {
                 "success": True,
                 **result,
+            }
+        )
+    except QueryTimeoutError as e:
+        logger.warning(
+            f"scip_context timeout for symbol: {params.get('symbol')}: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response(
+            {
+                "success": False,
+                "error": f"Query timeout exceeded: {e}",
+                "files": [],
             }
         )
     except Exception as e:

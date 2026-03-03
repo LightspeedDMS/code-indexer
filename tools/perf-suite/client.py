@@ -107,16 +107,30 @@ class PerfClient:
         return self._request_counter
 
     async def execute_mcp(
-        self, client: httpx.AsyncClient, tool_name: str, arguments: dict[str, Any]
+        self,
+        client: httpx.AsyncClient,
+        tool_name: str,
+        arguments: dict[str, Any],
+        timeout: int = 60,
     ) -> RequestResult:
-        """Execute an MCP JSON-RPC tool call. HTTP/JSON-RPC errors are captured, not raised."""
+        """Execute an MCP JSON-RPC tool call. HTTP/JSON-RPC errors are captured, not raised.
+
+        Args:
+            client: httpx.AsyncClient to use for the request
+            tool_name: MCP tool name to call
+            arguments: Tool arguments dict
+            timeout: Per-request timeout in seconds (default 60). Prevents indefinite hangs
+                when the server is processing a slow query (e.g. scip_context on large repos).
+        """
         token = await self._ensure_valid_token(client)
         headers = build_auth_headers(token)
         envelope = build_mcp_envelope(tool_name, arguments, self._next_request_id())
 
         start_time = time.monotonic()
         try:
-            response = await client.post(self.mcp_url, json=envelope, headers=headers)
+            response = await client.post(
+                self.mcp_url, json=envelope, headers=headers, timeout=timeout
+            )
             elapsed_ms = (time.monotonic() - start_time) * 1000.0
             response_bytes = len(response.content)
 
@@ -150,6 +164,16 @@ class PerfClient:
                 response_size_bytes=response_bytes,
             )
 
+        except httpx.TimeoutException as exc:
+            elapsed_ms = (time.monotonic() - start_time) * 1000.0
+            return RequestResult(
+                response_time_ms=elapsed_ms,
+                status_code=0,
+                success=False,
+                response_size_bytes=0,
+                error_message=f"Request timeout after {timeout}s: {exc}",
+            )
+
         except httpx.RequestError as exc:
             elapsed_ms = (time.monotonic() - start_time) * 1000.0
             return RequestResult(
@@ -161,9 +185,21 @@ class PerfClient:
             )
 
     async def execute_rest(
-        self, client: httpx.AsyncClient, endpoint: str, parameters: dict[str, Any]
+        self,
+        client: httpx.AsyncClient,
+        endpoint: str,
+        parameters: dict[str, Any],
+        timeout: int = 60,
     ) -> RequestResult:
-        """Execute a REST API request. HTTP errors (4xx/5xx) are captured, not raised."""
+        """Execute a REST API request. HTTP errors (4xx/5xx) are captured, not raised.
+
+        Args:
+            client: httpx.AsyncClient to use for the request
+            endpoint: REST endpoint path (e.g. "/api/query")
+            parameters: Request body parameters
+            timeout: Per-request timeout in seconds (default 60). Prevents indefinite hangs
+                when the server is processing a slow query (e.g. scip_context on large repos).
+        """
         token = await self._ensure_valid_token(client)
         headers = build_auth_headers(token)
         url = f"{self.server_url}{endpoint}"
@@ -171,7 +207,7 @@ class PerfClient:
 
         start_time = time.monotonic()
         try:
-            response = await client.post(url, json=payload, headers=headers)
+            response = await client.post(url, json=payload, headers=headers, timeout=timeout)
             elapsed_ms = (time.monotonic() - start_time) * 1000.0
             response_bytes = len(response.content)
             success = response.status_code < 400
@@ -183,6 +219,16 @@ class PerfClient:
                 success=success,
                 response_size_bytes=response_bytes,
                 error_message=error_message,
+            )
+
+        except httpx.TimeoutException as exc:
+            elapsed_ms = (time.monotonic() - start_time) * 1000.0
+            return RequestResult(
+                response_time_ms=elapsed_ms,
+                status_code=0,
+                success=False,
+                response_size_bytes=0,
+                error_message=f"Request timeout after {timeout}s: {exc}",
             )
 
         except httpx.RequestError as exc:

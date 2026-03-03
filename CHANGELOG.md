@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.90
+
+### Bug Fixes
+
+- fix: scip_context hangs indefinitely for large symbols on large repos (Bug #351). Added 30-second timeout protection using thread-based watchdog pattern (daemon thread + join(timeout=)). Works correctly from ThreadPoolExecutor worker threads where MCP handlers run, unlike signal.alarm() which only fires in the main thread. All except blocks in _get_smart_context_impl() re-raise QueryTimeoutError to prevent silent swallowing. Also added 60-second client timeout to perf suite httpx calls.
+
 ## v9.3.89
 
 ### Bug Fixes
