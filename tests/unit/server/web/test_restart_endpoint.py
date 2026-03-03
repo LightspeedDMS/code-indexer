@@ -456,28 +456,34 @@ class TestDelayedRestartMechanism:
         # Should check for INVOCATION_ID
         mock_env.assert_called_with("INVOCATION_ID")
 
-    def test_systemd_mode_calls_systemctl_restart(self):
+    def test_systemd_mode_writes_signal_file(self):
         """
-        In systemd mode, _delayed_restart calls systemctl restart.
+        In systemd mode, _delayed_restart writes a restart signal file.
+
+        Story #355: Instead of calling systemctl (requires sudo), the server
+        writes a signal file that the auto-updater picks up and executes restart.
 
         When _delayed_restart is called in systemd environment
-        Then it executes: systemctl restart cidx-server
+        Then it writes a JSON signal file to RESTART_SIGNAL_PATH
         """
         from code_indexer.server.web.routes import _delayed_restart
+        import tempfile
+        import json
 
-        with patch("time.sleep"):
-            with patch("os.environ.get") as mock_env:
-                mock_env.return_value = "some-invocation-id"  # Systemd
-                with patch("subprocess.run") as mock_subprocess:
-                    _delayed_restart(delay=2)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mock_signal_path = Path(tmpdir) / "restart.signal"
+            with patch("time.sleep"):
+                with patch("os.environ.get") as mock_env:
+                    mock_env.return_value = "some-invocation-id"  # Systemd
+                    with patch("code_indexer.server.web.routes.RESTART_SIGNAL_PATH", mock_signal_path):
+                        _delayed_restart(delay=2)
 
-        # Should call subprocess.run with sudo systemctl restart
-        mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args[0][0]
-        assert call_args[0] == "sudo"
-        assert "/usr/bin/systemctl" in call_args
-        assert "restart" in call_args
-        assert "cidx-server" in call_args
+            # Signal file should have been written (assert while tmpdir still exists)
+            assert mock_signal_path.exists()
+            signal_data = json.loads(mock_signal_path.read_text())
+            assert "timestamp" in signal_data
+            assert "reason" in signal_data
+            assert signal_data["reason"] == "diagnostics_restart"
 
     def test_dev_mode_calls_os_execv(self):
         """
@@ -530,13 +536,14 @@ class TestDelayedRestartMechanism:
 class TestErrorHandling:
     """Tests for error handling in restart mechanism (Code Review Issues #3 and #4)."""
 
-    def test_systemctl_failure_is_logged(self):
+    def test_signal_file_write_failure_is_logged(self):
         """
-        subprocess.run failure is captured and logged.
+        Signal file write failure is captured and logged.
 
+        Story #355: In systemd mode, _delayed_restart writes a signal file.
         Given _delayed_restart is called in systemd mode
-        When systemctl restart fails with non-zero exit code
-        Then stderr is captured and logged
+        When signal file write fails with OSError
+        Then the error is logged
         And the error doesn't crash the server
         """
         from code_indexer.server.web.routes import _delayed_restart
@@ -545,48 +552,50 @@ class TestErrorHandling:
             with patch("os.environ.get") as mock_env:
                 mock_env.return_value = "some-invocation-id"  # Systemd mode
 
-                with patch("subprocess.run") as mock_subprocess:
-                    with patch("code_indexer.server.web.routes.logger") as mock_logger:
-                        # Simulate systemctl failure
-                        mock_result = MagicMock()
-                        mock_result.returncode = 1
-                        mock_result.stderr = "Failed to restart cidx-server.service: Unit not found"
-                        mock_subprocess.return_value = mock_result
+                mock_signal_path = MagicMock()
+                mock_signal_path.parent = MagicMock()
+                mock_signal_path.parent.mkdir.side_effect = OSError("Permission denied")
 
+                with patch("code_indexer.server.web.routes.RESTART_SIGNAL_PATH", mock_signal_path):
+                    with patch("code_indexer.server.web.routes.logger") as mock_logger:
                         # Should not raise exception
                         _delayed_restart(delay=2)
 
                         # Verify error was logged
                         assert mock_logger.error.called
                         error_log = mock_logger.error.call_args[0][0]
-                        assert "systemctl" in error_log.lower() or "restart" in error_log.lower()
+                        assert "signal" in error_log.lower() or "failed" in error_log.lower()
 
-    def test_systemctl_captures_output(self):
+    def test_signal_file_contains_valid_json(self):
         """
-        subprocess.run captures stdout and stderr.
+        Signal file written by _delayed_restart contains valid JSON with required fields.
 
+        Story #355: In systemd mode, _delayed_restart writes a JSON signal file.
         Given _delayed_restart is called in systemd mode
-        When subprocess.run is executed
-        Then capture_output=True and text=True are used
+        When the signal file is written
+        Then its content is valid JSON with 'timestamp' and 'reason' fields
         """
         from code_indexer.server.web.routes import _delayed_restart
+        import tempfile
+        import json
 
         with patch("time.sleep"):
             with patch("os.environ.get") as mock_env:
                 mock_env.return_value = "some-invocation-id"  # Systemd mode
 
-                with patch("subprocess.run") as mock_subprocess:
-                    mock_result = MagicMock()
-                    mock_result.returncode = 0
-                    mock_subprocess.return_value = mock_result
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    mock_signal_path = Path(tmpdir) / "restart.signal"
+                    with patch("code_indexer.server.web.routes.RESTART_SIGNAL_PATH", mock_signal_path):
+                        _delayed_restart(delay=2)
 
-                    _delayed_restart(delay=2)
+                    # Signal file should contain valid JSON
+                    assert mock_signal_path.exists()
+                    content = mock_signal_path.read_text()
+                    signal_data = json.loads(content)
 
-                    # Verify subprocess.run was called with capture flags
-                    mock_subprocess.assert_called_once()
-                    call_kwargs = mock_subprocess.call_args[1]
-                    assert call_kwargs.get("capture_output") is True
-                    assert call_kwargs.get("text") is True
+                    # Verify required fields are present
+                    assert "timestamp" in signal_data
+                    assert "reason" in signal_data
 
     def test_os_execv_failure_is_caught(self):
         """

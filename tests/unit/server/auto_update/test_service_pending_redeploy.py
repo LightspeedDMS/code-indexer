@@ -33,10 +33,16 @@ class TestPollOncePendingRedeploy:
         mock_marker = MagicMock()
         mock_marker.exists.return_value = True
 
-        with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
-            service.deployment_executor.execute.return_value = True
+        # Story #355: RESTART_SIGNAL_PATH is checked BEFORE the redeploy marker.
+        # Patch it to return False so the test reaches the redeploy marker code path.
+        mock_restart_signal = MagicMock()
+        mock_restart_signal.exists.return_value = False
 
-            service.poll_once()
+        with patch("code_indexer.server.auto_update.service.RESTART_SIGNAL_PATH", mock_restart_signal):
+            with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
+                service.deployment_executor.execute.return_value = True
+
+                service.poll_once()
 
         # Verify marker.exists() was called (called twice: legacy migration check + main check)
         assert mock_marker.exists.call_count == 2
@@ -60,11 +66,17 @@ class TestPollOncePendingRedeploy:
         mock_marker.exists.return_value = True
         mock_marker.unlink.side_effect = Exception("Permission denied")
 
-        with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
-            service.deployment_executor.execute.return_value = True
+        # Story #355: RESTART_SIGNAL_PATH is checked BEFORE the redeploy marker.
+        # Patch it to return False so the test reaches the redeploy marker code path.
+        mock_restart_signal = MagicMock()
+        mock_restart_signal.exists.return_value = False
 
-            # Should not raise exception
-            service.poll_once()
+        with patch("code_indexer.server.auto_update.service.RESTART_SIGNAL_PATH", mock_restart_signal):
+            with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
+                service.deployment_executor.execute.return_value = True
+
+                # Should not raise exception
+                service.poll_once()
 
         # Deployment should still execute
         service.deployment_executor.execute.assert_called_once()
@@ -76,11 +88,17 @@ class TestPollOncePendingRedeploy:
         mock_legacy = MagicMock()
         mock_legacy.exists.return_value = False
 
-        with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
-            with patch("code_indexer.server.auto_update.service.LEGACY_REDEPLOY_MARKER", mock_legacy):
-                service.change_detector.has_changes.return_value = False
+        # Story #355: RESTART_SIGNAL_PATH is checked BEFORE the redeploy marker.
+        # Patch it to return False so the test reaches the redeploy marker code path.
+        mock_restart_signal = MagicMock()
+        mock_restart_signal.exists.return_value = False
 
-                service.poll_once()
+        with patch("code_indexer.server.auto_update.service.RESTART_SIGNAL_PATH", mock_restart_signal):
+            with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
+                with patch("code_indexer.server.auto_update.service.LEGACY_REDEPLOY_MARKER", mock_legacy):
+                    service.change_detector.has_changes.return_value = False
+
+                    service.poll_once()
 
         # Verify marker check happened (called twice: legacy migration check + main check)
         assert mock_marker.exists.call_count == 2
@@ -111,12 +129,18 @@ class TestPollOncePendingRedeploy:
         def mock_transition(state):
             call_order.append(f"transition_{state.value}")
 
-        with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
-            with patch("code_indexer.server.auto_update.service.LEGACY_REDEPLOY_MARKER", mock_legacy):
-                service.transition_to = mock_transition
-                service.change_detector.has_changes.return_value = False
+        # Story #355: RESTART_SIGNAL_PATH is checked BEFORE the redeploy marker.
+        # Patch it to return False so the test reaches the redeploy marker code path.
+        mock_restart_signal = MagicMock()
+        mock_restart_signal.exists.return_value = False
 
-                service.poll_once()
+        with patch("code_indexer.server.auto_update.service.RESTART_SIGNAL_PATH", mock_restart_signal):
+            with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
+                with patch("code_indexer.server.auto_update.service.LEGACY_REDEPLOY_MARKER", mock_legacy):
+                    service.transition_to = mock_transition
+                    service.change_detector.has_changes.return_value = False
+
+                    service.poll_once()
 
         # Marker check must be first operation (called twice: legacy migration check + main check)
         assert call_order[0] == "marker_check"
@@ -135,12 +159,18 @@ class TestPollOncePendingRedeploy:
         mock_legacy = MagicMock()
         mock_legacy.exists.return_value = False
 
-        with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
-            with patch("code_indexer.server.auto_update.service.LEGACY_REDEPLOY_MARKER", mock_legacy):
-                service.change_detector.has_changes.return_value = False
+        # Story #355: RESTART_SIGNAL_PATH is checked BEFORE the redeploy marker.
+        # Patch it to return False so the test reaches the redeploy marker code path.
+        mock_restart_signal = MagicMock()
+        mock_restart_signal.exists.return_value = False
 
-                # Should complete without error, confirming marker check integration
-                service.poll_once()
+        with patch("code_indexer.server.auto_update.service.RESTART_SIGNAL_PATH", mock_restart_signal):
+            with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
+                with patch("code_indexer.server.auto_update.service.LEGACY_REDEPLOY_MARKER", mock_legacy):
+                    service.change_detector.has_changes.return_value = False
+
+                    # Should complete without error, confirming marker check integration
+                    service.poll_once()
 
         # Verify marker was checked (called twice: legacy migration check + main check)
         assert mock_marker.exists.call_count == 2
@@ -153,11 +183,16 @@ class TestPollOncePendingRedeploy:
         mock_marker = MagicMock()
         mock_marker.exists.return_value = True
 
-        with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
-            with patch("code_indexer.server.auto_update.service.logger") as mock_logger:
-                service.deployment_executor.execute.return_value = True
+        # Story #355: RESTART_SIGNAL_PATH is checked BEFORE the redeploy marker.
+        mock_restart_signal = MagicMock()
+        mock_restart_signal.exists.return_value = False
 
-                service.poll_once()
+        with patch("code_indexer.server.auto_update.service.RESTART_SIGNAL_PATH", mock_restart_signal):
+            with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
+                with patch("code_indexer.server.auto_update.service.logger") as mock_logger:
+                    service.deployment_executor.execute.return_value = True
+
+                    service.poll_once()
 
         # Verify logging mentions pending/redeploy
         mock_logger.info.assert_called()
@@ -169,10 +204,15 @@ class TestPollOncePendingRedeploy:
         mock_marker = MagicMock()
         mock_marker.exists.return_value = True
 
-        with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
-            service.deployment_executor.execute.return_value = True
+        # Story #355: RESTART_SIGNAL_PATH is checked BEFORE the redeploy marker.
+        mock_restart_signal = MagicMock()
+        mock_restart_signal.exists.return_value = False
 
-            service.poll_once()
+        with patch("code_indexer.server.auto_update.service.RESTART_SIGNAL_PATH", mock_restart_signal):
+            with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
+                service.deployment_executor.execute.return_value = True
+
+                service.poll_once()
 
         # Verify both execute() and restart_server() were called
         service.deployment_executor.execute.assert_called_once()
@@ -186,10 +226,15 @@ class TestPollOncePendingRedeploy:
         mock_marker = MagicMock()
         mock_marker.exists.return_value = True
 
-        with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
-            service.deployment_executor.execute.return_value = False  # Deployment failed
+        # Story #355: RESTART_SIGNAL_PATH is checked BEFORE the redeploy marker.
+        mock_restart_signal = MagicMock()
+        mock_restart_signal.exists.return_value = False
 
-            service.poll_once()
+        with patch("code_indexer.server.auto_update.service.RESTART_SIGNAL_PATH", mock_restart_signal):
+            with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
+                service.deployment_executor.execute.return_value = False  # Deployment failed
+
+                service.poll_once()
 
         # Verify execute() called but restart_server() NOT called
         service.deployment_executor.execute.assert_called_once()
@@ -211,10 +256,15 @@ class TestPollOncePendingRedeploy:
         mock_marker = MagicMock()
         mock_marker.exists.return_value = True
 
-        with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
-            service.deployment_executor.execute.return_value = True
+        # Story #355: RESTART_SIGNAL_PATH is checked BEFORE the redeploy marker.
+        mock_restart_signal = MagicMock()
+        mock_restart_signal.exists.return_value = False
 
-            service.poll_once()
+        with patch("code_indexer.server.auto_update.service.RESTART_SIGNAL_PATH", mock_restart_signal):
+            with patch("code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER", mock_marker):
+                service.deployment_executor.execute.return_value = True
+
+                service.poll_once()
 
         # Verify state transitions: DEPLOYING -> RESTARTING -> IDLE
         assert ServiceState.DEPLOYING in state_history
