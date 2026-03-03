@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.86
+
+### Bug Fixes
+
+- fix: FTS unmatched quote crash (Bug #346). Tantivy parse_query() raises ValueError on queries with odd number of double-quotes. Added sanitize_fts_query() that strips all quotes when count is odd, applied at both top-level and per-term parse paths in _build_search_query().
+
+- fix: API metrics tracking gap (Bug #350). Dashboard showed ZERO activity for SCIP, browse, list, and many other MCP tools because only search_code, regex_search, file_crud, ssh_key_manager, and git_operations tracked metrics. Centralized tracking in protocol.py dispatch layer (handle_tools_call) with _SELF_TRACKING_TOOLS frozenset to skip search_code/regex_search. Removed 25 scattered increment_other_api_call() calls from file_crud_service (3), git_operations_service (17), ssh_key_manager (5). Added tracking to 6 REST endpoints: /api/query/multi, /api/scip/multi/definition, /references, /dependencies, /dependents, /callchain.
+
 ## v9.3.85
 
 ### Enhancements

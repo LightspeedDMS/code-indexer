@@ -429,3 +429,162 @@ class TestTantivyIndexManager:
             # Must NOT raise AttributeError - new impl does not call segment_readers
             result = manager.get_all_indexed_paths()
             assert "src/foo.py" in result
+
+
+class TestSanitizeFtsQuery:
+    """Tests for the module-level sanitize_fts_query() pure function."""
+
+    def test_sanitize_fts_query_no_quotes(self):
+        """Input with no quotes is returned unchanged (fast path)."""
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        assert sanitize_fts_query("hello world") == "hello world"
+        assert sanitize_fts_query("def authenticate") == "def authenticate"
+        assert sanitize_fts_query("") == ""
+
+    def test_sanitize_fts_query_even_quotes(self):
+        """Balanced (even) number of quotes returned unchanged — phrase search preserved."""
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        # Two quotes: valid phrase search like "hello world"
+        assert sanitize_fts_query('"hello world"') == '"hello world"'
+        # Four quotes: two separate phrase terms
+        assert sanitize_fts_query('"foo" "bar"') == '"foo" "bar"'
+
+    def test_sanitize_fts_query_odd_single_quote(self):
+        """Single unmatched quote causes all quotes to be stripped entirely."""
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        assert sanitize_fts_query('hello "world') == "hello world"
+        assert sanitize_fts_query('"authenticate') == "authenticate"
+        assert sanitize_fts_query('test"') == "test"
+
+    def test_sanitize_fts_query_odd_three_quotes(self):
+        """Three quotes (odd count) causes all quotes to be stripped."""
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        # Three quotes: odd, all stripped
+        assert sanitize_fts_query('"foo" "bar') == "foo bar"
+        assert sanitize_fts_query('a "b" "c') == "a b c"
+
+
+class TestBuildSearchQuerySanitization:
+    """Integration tests verifying sanitize_fts_query is applied in _build_search_query."""
+
+    def _make_manager(self, tmpdir: str) -> "TantivyIndexManager":
+        """Helper: create and initialize a TantivyIndexManager."""
+        from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+
+        index_dir = Path(tmpdir) / ".code-indexer" / "tantivy_index"
+        manager = TantivyIndexManager(index_dir=index_dir)
+        manager.initialize_index()
+        # Add one document so the index is not empty and queries can execute
+        manager.add_document(
+            {
+                "path": "src/example.py",
+                "content": "def authenticate user token",
+                "content_raw": "def authenticate user token",
+                "identifiers": ["authenticate", "user", "token"],
+                "line_start": 1,
+                "line_end": 1,
+                "language": "python",
+            }
+        )
+        manager.commit()
+        return manager
+
+    def test_build_search_query_sanitizes_unmatched_quote_exact_single_term(self):
+        """Exact single-term path: unmatched quote stripped before parse_query() call.
+
+        Without sanitization, parse_query('"authenticate') raises a Tantivy
+        SyntaxError. With sanitization it should succeed.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_manager(tmpdir)
+
+            import tantivy
+            from tantivy import Query as TantivyQuery
+
+            # Single term with a leading unmatched quote — would raise SyntaxError
+            # without sanitization. After sanitization it becomes 'authenticate'.
+            # Must not raise.
+            result = manager._build_search_query(
+                query_text='"authenticate',
+                search_field="content",
+                edit_distance=0,
+                tantivy=tantivy,
+                TantivyQuery=TantivyQuery,
+            )
+            assert result is not None
+
+    def test_build_search_query_sanitizes_unmatched_quote_exact_multi_term(self):
+        """Exact multi-term AND path: unmatched quote stripped before per-term parse_query() calls."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_manager(tmpdir)
+
+            import tantivy
+            from tantivy import Query as TantivyQuery
+
+            # Two terms, trailing unmatched quote on second — sanitized to 'user token'
+            result = manager._build_search_query(
+                query_text='user token"',
+                search_field="content",
+                edit_distance=0,
+                tantivy=tantivy,
+                TantivyQuery=TantivyQuery,
+            )
+            assert result is not None
+
+    def test_build_search_query_sanitizes_unmatched_quote_fuzzy_single_term(self):
+        """Fuzzy single-term path: unmatched quote stripped before fuzzy_term_query() call."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_manager(tmpdir)
+
+            import tantivy
+            from tantivy import Query as TantivyQuery
+
+            # Fuzzy single term with unmatched quote — sanitized to 'authenticate'
+            result = manager._build_search_query(
+                query_text='"authenticate',
+                search_field="content",
+                edit_distance=1,
+                tantivy=tantivy,
+                TantivyQuery=TantivyQuery,
+            )
+            assert result is not None
+
+    def test_build_search_query_sanitizes_unmatched_quote_fuzzy_multi_term(self):
+        """Fuzzy multi-term path: unmatched quote stripped before per-term fuzzy_term_query() calls."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_manager(tmpdir)
+
+            import tantivy
+            from tantivy import Query as TantivyQuery
+
+            # Two fuzzy terms with trailing unmatched quote — sanitized to 'user token'
+            result = manager._build_search_query(
+                query_text='user token"',
+                search_field="content",
+                edit_distance=1,
+                tantivy=tantivy,
+                TantivyQuery=TantivyQuery,
+            )
+            assert result is not None
+
+    def test_build_search_query_preserves_matched_phrase_query(self):
+        """Even-quote input (phrase search) passes through _build_search_query unchanged."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_manager(tmpdir)
+
+            import tantivy
+            from tantivy import Query as TantivyQuery
+
+            # Balanced quotes: valid phrase search, must not be stripped
+            result = manager._build_search_query(
+                query_text='"authenticate user"',
+                search_field="content",
+                edit_distance=0,
+                tantivy=tantivy,
+                TantivyQuery=TantivyQuery,
+            )
+            assert result is not None

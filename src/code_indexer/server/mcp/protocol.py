@@ -32,6 +32,16 @@ mcp_router = APIRouter()
 # Security scheme for bearer token authentication (auto_error=False for optional auth)
 security = HTTPBearer(auto_error=False)
 
+# Tools that track their own API metrics at handler/service level.
+# Protocol-level tracking skips these to avoid double-counting.
+# search_code: tracks semantic/other_index via semantic_query_manager._perform_search()
+#   (single-repo) and _omni_search_code() (multi-repo) in handlers.py.
+# regex_search: tracks regex via global_repos/regex_search.py.
+# authenticate: bypasses handle_tools_call() entirely via mcp-public special path.
+_SELF_TRACKING_TOOLS = frozenset({"search_code", "regex_search"})
+
+from code_indexer.server.services.api_metrics_service import api_metrics_service  # noqa: E402
+
 
 def validate_jsonrpc_request(
     request: Dict[str, Any],
@@ -338,10 +348,10 @@ async def handle_tools_call(
 
     handler = HANDLER_REGISTRY[tool_name]
 
-    # NOTE: API metrics tracking moved to service layer (Story #4 AC2)
-    # Services (file_crud_service, ssh_key_manager, git_operations_service, etc.)
-    # track their own increment_other_api_call() calls to prevent double-counting.
-    # search_code tracks semantic_search/other_index_search, regex_search tracks regex_search.
+    # Bug #350: API metrics tracking centralized at protocol dispatch layer (below).
+    # All non-self-tracking tools call increment_other_api_call() on success.
+    # Self-tracking tools (search_code, regex_search) are in _SELF_TRACKING_TOOLS.
+    # Service-level tracking removed from file_crud, git_operations, ssh_key_manager.
 
     # Call handler with arguments
     # Special handling for handlers that need session_state (CRITICAL 1, 3 fix)
@@ -395,6 +405,12 @@ async def handle_tools_call(
         result = await _invoke_handler(
             handler, arguments, user, session_state, sig, is_async
         )
+
+    # Bug #350: Protocol-level API metrics tracking.
+    # Track all MCP tool calls except self-tracking tools.
+    # This line is only reached on success - exceptions propagate before this point.
+    if tool_name not in _SELF_TRACKING_TOOLS:
+        api_metrics_service.increment_other_api_call()
 
     return cast(Dict[str, Any], result)
 

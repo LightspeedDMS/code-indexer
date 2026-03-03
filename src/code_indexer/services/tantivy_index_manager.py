@@ -18,6 +18,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def sanitize_fts_query(query_text: str) -> str:
+    """Strip all double-quote characters if count is odd (unmatched quotes).
+
+    Tantivy's parse_query() raises ValueError on unmatched double-quotes.
+    This function ensures queries with an odd number of double-quotes have
+    all double-quotes removed, preventing parse errors.
+
+    Algorithm:
+      - 0 quotes: return unchanged (fast path)
+      - even count: return unchanged (valid phrase search like "hello world")
+      - odd count: strip all " characters
+    """
+    quote_count = query_text.count('"')
+    if quote_count == 0 or quote_count % 2 == 0:
+        return query_text
+    return query_text.replace('"', "")
+
+
 class TantivyIndexManager:
     """
     Manages Tantivy full-text search index for CIDX.
@@ -388,6 +406,9 @@ class TantivyIndexManager:
         if self._index is None:
             raise RuntimeError("Index not initialized")
 
+        # Sanitize query to prevent ValueError from unmatched double-quotes
+        query_text = sanitize_fts_query(query_text)
+
         # Split query into terms to detect single vs multi-word queries
         query_terms = query_text.split()
         is_multi_word = len(query_terms) > 1
@@ -426,7 +447,9 @@ class TantivyIndexManager:
                 # Multi-word exact query: Require ALL terms to exist (AND semantics)
                 # Example: "gloc pattern" returns 0 results if "gloc" doesn't exist
                 term_queries = [
-                    self._index.parse_query(term, [search_field, "identifiers"])
+                    self._index.parse_query(
+                        sanitize_fts_query(term), [search_field, "identifiers"]
+                    )
                     for term in query_terms
                 ]
 

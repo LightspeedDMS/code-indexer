@@ -25,6 +25,7 @@ from ..auth.dependencies import get_current_user
 from ..auth.user_manager import User
 from ..multi.scip_models import SCIPMultiRequest, SCIPMultiResponse
 from ..multi.scip_multi_service import SCIPMultiService
+from code_indexer.server.services.api_metrics_service import api_metrics_service
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +186,9 @@ def multi_repository_definition(
         HTTPException: 500 if unexpected error occurs
     """
     try:
+        # Bug #350: Track REST API call in metrics
+        api_metrics_service.increment_other_api_call()
+
         # Log request
         logger.info(
             f"SCIP multi-definition request from user {user.username}: "
@@ -276,6 +280,9 @@ def multi_repository_references(
         HTTPException: 500 if unexpected error occurs
     """
     try:
+        # Bug #350: Track REST API call in metrics
+        api_metrics_service.increment_other_api_call()
+
         # Log request
         logger.info(
             f"SCIP multi-references request from user {user.username}: "
@@ -367,6 +374,9 @@ def multi_repository_dependencies(
         HTTPException: 500 if unexpected error occurs
     """
     try:
+        # Bug #350: Track REST API call in metrics
+        api_metrics_service.increment_other_api_call()
+
         # Log request
         logger.info(
             f"SCIP multi-dependencies request from user {user.username}: "
@@ -458,6 +468,9 @@ def multi_repository_dependents(
         HTTPException: 500 if unexpected error occurs
     """
     try:
+        # Bug #350: Track REST API call in metrics
+        api_metrics_service.increment_other_api_call()
+
         # Log request
         logger.info(
             f"SCIP multi-dependents request from user {user.username}: "
@@ -552,6 +565,9 @@ def multi_repository_callchain(
         HTTPException: 500 if unexpected error occurs
     """
     try:
+        # Bug #350: Track REST API call in metrics
+        api_metrics_service.increment_other_api_call()
+
         # Log request
         logger.info(
             f"SCIP multi-callchain request from user {user.username}: "

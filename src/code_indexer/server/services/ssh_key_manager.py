@@ -148,10 +148,6 @@ class SSHKeyManager:
         Returns:
             KeyMetadata for the created key
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         with self._get_lock():
             # Generate the key
@@ -213,10 +209,6 @@ class SSHKeyManager:
         Returns:
             Updated KeyMetadata
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         with self._get_lock():
             if self._use_sqlite and self._sqlite_backend is not None:
@@ -287,10 +279,6 @@ class SSHKeyManager:
         Returns:
             True (always succeeds, idempotent operation)
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         with self._get_lock():
             if self._use_sqlite and self._sqlite_backend is not None:
@@ -354,10 +342,6 @@ class SSHKeyManager:
         Returns:
             KeyListResult with managed and unmanaged key lists
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         return self._list_keys_internal()
 
@@ -407,10 +391,6 @@ class SSHKeyManager:
         Returns:
             Public key string
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         if self._use_sqlite and self._sqlite_backend is not None:
             # SQLite backend (Story #702)
