@@ -240,14 +240,7 @@ class DependencyMapAnalyzer:
             )
         prompt += "\n"
 
-        prompt += "## What Is a Domain?\n\n"
-        prompt += "A domain is a meaningful functional or technical area that groups multiple related repositories. "
-        prompt += "A domain is NOT a repository — it represents a higher-level organizational concept "
-        prompt += "(e.g., 'authentication', 'data-pipeline', 'frontend-platform') that encompasses the repositories "
-        prompt += "participating in that area. "
-        prompt += "The purpose of domain analysis is to group repositories into these meaningful areas so that "
-        prompt += "cross-repository dependencies can be understood at a higher abstraction level, and so that "
-        prompt += "changes to one repository can be traced to their impact across the broader domain.\n\n"
+        prompt += self._build_domain_definition_section()
 
         prompt += "## Instructions\n\n"
         prompt += (
@@ -307,9 +300,10 @@ class DependencyMapAnalyzer:
         prompt += "MISSING REPOS = FAILED ANALYSIS. Every valid alias must appear exactly once.\n\n"
 
         prompt += "### Unassigned Repository Handling\n\n"
-        prompt += "If a repository does not fit any domain (no integration evidence found), assign it to a\n"
-        prompt += "standalone domain as a LAST RESORT. Name the domain after its functional purpose, not its\n"
-        prompt += "repository alias (e.g., 'code-search-tooling' rather than 'code-indexer'). A domain always\n"
+        prompt += "If a repository does not fit any domain (no integration evidence found after examining\n"
+        prompt += "source code), assign it to a standalone domain as a LAST RESORT. Name the domain after\n"
+        prompt += "its functional purpose as a technical area (e.g., 'code-search-tooling' rather than\n"
+        prompt += "'code-indexer'), even if the repository alias sounds descriptive. A domain always\n"
         prompt += "represents a functional area, even when it contains only one repository.\n"
         prompt += "Do NOT leave repositories unassigned.\n\n"
 
@@ -1340,14 +1334,7 @@ Rules:
         )
 
         prompt = "# Domain Synthesis Task\n\n"
-        prompt += "## What Is a Domain?\n\n"
-        prompt += "A domain is a meaningful functional or technical area that groups multiple related repositories. "
-        prompt += "A domain is NOT a repository — it represents a higher-level organizational concept "
-        prompt += "(e.g., 'authentication', 'data-pipeline', 'frontend-platform') that encompasses the repositories "
-        prompt += "participating in that area. "
-        prompt += "The purpose of domain analysis is to group repositories into these meaningful areas so that "
-        prompt += "cross-repository dependencies can be understood at a higher abstraction level, and so that "
-        prompt += "changes to one repository can be traced to their impact across the broader domain.\n\n"
+        prompt += self._build_domain_definition_section()
         prompt += "Analyze the following repository descriptions and identify domain clusters.\n\n"
         prompt += self._build_previous_domains_section(previous_domains_dir)
         prompt += "## Repository Descriptions\n\n"
@@ -1367,6 +1354,18 @@ Rules:
         prompt += "## Output Format\n\nYour ENTIRE response must be ONLY a valid JSON array.\n"
         prompt += '[\n  {"name": "domain-name", "description": "scope", "participating_repos": ["alias1"]}\n]\n'
         return prompt
+
+    def _build_domain_definition_section(self) -> str:
+        """Return the 'What Is a Domain?' conceptual definition section for Pass 1 prompts."""
+        section = "## What Is a Domain?\n\n"
+        section += "A domain is a meaningful functional or technical area that groups multiple related repositories. "
+        section += "A domain is NOT a repository — it represents a higher-level organizational concept "
+        section += "(e.g., 'authentication', 'data-pipeline', 'frontend-platform') that encompasses the repositories "
+        section += "participating in that area. "
+        section += "The purpose of domain analysis is to group repositories into these meaningful areas so that "
+        section += "cross-repository dependencies can be understood at a higher abstraction level, and so that "
+        section += "changes to one repository can be traced to their impact across the broader domain.\n\n"
+        return section
 
     def _build_previous_domains_section(
         self, previous_domains_dir: Optional[Path]

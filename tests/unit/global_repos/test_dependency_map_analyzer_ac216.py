@@ -278,6 +278,17 @@ class TestPass1DomainConceptClarity:
         repo_list = [{"alias": "svc-a", "clone_path": "/fake/a", "file_count": 10, "total_bytes": 1000}]
         repo_descriptions = {"svc-a": "Service A description"}
         prompt = analyzer.build_pass1_prompt(repo_descriptions, repo_list)
+        assert "## What Is a Domain?" in prompt, "Expected 'What Is a Domain?' section"
+        # build_pass1_prompt uses "## Output Format" (not "## Instructions")
+        assert "## Output Format" in prompt, "Expected '## Output Format' section"
         domain_def_pos = prompt.index("What Is a Domain?")
-        instructions_pos = prompt.index("## Instructions") if "## Instructions" in prompt else prompt.index("## Output Format")
-        assert domain_def_pos < instructions_pos
+        output_fmt_pos = prompt.index("## Output Format")
+        assert domain_def_pos < output_fmt_pos
+
+    def test_domain_definition_helper_returns_expected_content(self, tmp_path):
+        """_build_domain_definition_section() returns domain definition with key phrases."""
+        analyzer = _make_analyzer(tmp_path)
+        section = analyzer._build_domain_definition_section()
+        assert "## What Is a Domain?" in section
+        assert "domain is NOT a repository" in section
+        assert "group repositories" in section.lower()
