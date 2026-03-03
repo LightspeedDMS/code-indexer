@@ -17,23 +17,107 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_BOOL_OPS: frozenset = frozenset({"OR", "AND", "NOT"})
+
 
 def sanitize_fts_query(query_text: str) -> str:
-    """Strip all double-quote characters if count is odd (unmatched quotes).
+    """Sanitize an FTS query to prevent Tantivy parse errors.
 
-    Tantivy's parse_query() raises ValueError on unmatched double-quotes.
-    This function ensures queries with an odd number of double-quotes have
-    all double-quotes removed, preventing parse errors.
+    Tantivy's parse_query() raises errors for:
+      1. Unmatched double-quotes (odd count)
+      2. Bare boolean operators with no valid operands (e.g. bare "OR", trailing "term OR",
+         leading "OR term", adjacent "term OR AND other")
 
     Algorithm:
-      - 0 quotes: return unchanged (fast path)
-      - even count: return unchanged (valid phrase search like "hello world")
-      - odd count: strip all " characters
+      Phase 1 - Unmatched quotes:
+        - 0 quotes: skip (fast path)
+        - even count: unchanged (valid phrase search like "hello world")
+        - odd count: strip all " characters
+
+      Phase 2 - Bare boolean operators:
+        Only all-uppercase "OR", "AND", "NOT" are Tantivy operators.
+        Mixed-case variants ("Or", "aNd") are treated as literals — unchanged.
+        - OR and AND require a non-operator term on BOTH left and right sides.
+          If either side is missing or is another operator, lowercase the token.
+        - NOT requires only a non-operator term on the RIGHT side.
+          If the right side is missing or is another operator, lowercase the token.
+
+    Bug #353: By preventing the parse error at source, error bursts (e.g.
+    ~120 repeated errors across repositories) are eliminated implicitly.
     """
+    # Phase 1: handle unmatched quotes
     quote_count = query_text.count('"')
-    if quote_count == 0 or quote_count % 2 == 0:
+    if quote_count != 0 and quote_count % 2 != 0:
+        query_text = query_text.replace('"', "")
+
+    # Phase 2: handle bare boolean operators
+    tokens = query_text.split()
+    if not any(tok in _BOOL_OPS for tok in tokens):
         return query_text
-    return query_text.replace('"', "")
+
+    result = list(tokens)
+    for i, tok in enumerate(tokens):
+        if tok not in _BOOL_OPS:
+            continue
+
+        # Check immediate neighbors (not skipping over other operators).
+        # An operator immediately adjacent to another operator means invalid usage.
+        immediate_left = tokens[i - 1] if i > 0 else None
+        immediate_right = tokens[i + 1] if i < len(tokens) - 1 else None
+
+        # A valid left operand: exists AND is not itself a boolean operator
+        has_left = immediate_left is not None and immediate_left not in _BOOL_OPS
+        # A valid right operand: exists AND is not itself a boolean operator
+        has_right = immediate_right is not None and immediate_right not in _BOOL_OPS
+
+        # Determine validity:
+        # NOT is valid when it has a non-operator term on the right.
+        # OR and AND are valid when they have non-operator terms on BOTH sides.
+        if tok == "NOT":
+            is_valid = has_right
+        else:
+            is_valid = has_left and has_right
+
+        if not is_valid:
+            result[i] = tok.lower()
+
+    return " ".join(result) if tokens else query_text
+
+
+def _contains_valid_boolean_ops(query_text: str) -> bool:
+    """Detect if a sanitized query contains valid boolean operators.
+
+    Returns True if the query contains OR/AND/NOT operators with proper operands,
+    meaning it should be passed directly to Tantivy's parse_query() instead of
+    being split into per-term queries.
+
+    Uses the same validation rules as sanitize_fts_query():
+    - OR/AND need non-operator terms on BOTH left and right sides
+    - NOT needs non-operator terms on BOTH sides (bare 'NOT term' rejected
+      by Tantivy: 'Only excluding terms given')
+    - Only all-uppercase OR, AND, NOT are Tantivy operators
+    """
+    tokens = query_text.split()
+    if len(tokens) < 2:
+        return False
+
+    for i, token in enumerate(tokens):
+        if token not in _BOOL_OPS:
+            continue
+
+        left = tokens[i - 1] if i > 0 else None
+        right = tokens[i + 1] if i < len(tokens) - 1 else None
+        has_left = left is not None and left not in _BOOL_OPS
+        has_right = right is not None and right not in _BOOL_OPS
+
+        # All operators (OR, AND, NOT) require non-operator terms on both sides.
+        # OR/AND: standard boolean grammar requires operands on both sides.
+        # NOT: Tantivy rejects bare 'NOT term' ('Only excluding terms given'),
+        #      so only compound 'positive_term NOT excluded_term' is valid.
+        if has_left and has_right:
+            return True
+
+    return False
 
 
 class TantivyIndexManager:
@@ -413,9 +497,28 @@ class TantivyIndexManager:
         query_terms = query_text.split()
         is_multi_word = len(query_terms) > 1
 
+        # Detect boolean operators: only route if multi-word and has valid boolean ops
+        has_boolean_ops = is_multi_word and _contains_valid_boolean_ops(query_text)
+
         if edit_distance > 0:
             # FUZZY MATCHING: Apply fuzzy matching to each term independently
-            if is_multi_word:
+            if has_boolean_ops:
+                # Boolean + fuzzy incompatible: strip operators, fuzzy-match remaining terms
+                logger.warning("Boolean operators ignored in fuzzy mode: %s", query_text)
+                non_op_terms = [t for t in query_terms if t not in _BOOL_OPS]
+                fuzzy_queries = [
+                    TantivyQuery.fuzzy_term_query(
+                        self._schema,
+                        search_field,
+                        term,
+                        distance=edit_distance,
+                        transposition_cost_one=True,
+                    )
+                    for term in non_op_terms
+                ]
+                subqueries = [(tantivy.Occur.Must, q) for q in fuzzy_queries]
+                return TantivyQuery.boolean_query(subqueries)
+            elif is_multi_word:
                 # Multi-word fuzzy query: Apply fuzzy matching to each term, combine with AND
                 # Example: "gloc pattern" with edit_distance=1 fuzzy-matches "glob" AND "pattern"
                 fuzzy_queries = [
@@ -443,7 +546,11 @@ class TantivyIndexManager:
                 )
         else:
             # EXACT MATCHING: Require ALL terms to match
-            if is_multi_word:
+            if has_boolean_ops:
+                # Boolean query: pass entire query to Tantivy's parse_query() which natively
+                # supports OR, AND, NOT operators. sanitize_fts_query() already ensured validity.
+                return self._index.parse_query(query_text, [search_field, "identifiers"])
+            elif is_multi_word:
                 # Multi-word exact query: Require ALL terms to exist (AND semantics)
                 # Example: "gloc pattern" returns 0 results if "gloc" doesn't exist
                 term_queries = [
