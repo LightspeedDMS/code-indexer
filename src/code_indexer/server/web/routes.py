@@ -36,6 +36,7 @@ from ..services.ci_token_manager import CITokenManager, TokenValidationError
 from ..services.config_service import get_config_service
 from code_indexer import __version__ as cidx_version
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -8751,7 +8752,7 @@ def _delayed_restart(delay: int = 2) -> None:
 
     This function sleeps for the specified delay to allow the HTTP response
     to complete, then restarts the server using the appropriate method:
-    - Systemd mode: Uses systemctl restart cidx-server
+    - Systemd mode: Writes restart signal file for auto-updater pickup
     - Dev mode: Uses os.execv to re-exec the current process
 
     Args:
@@ -8769,22 +8770,25 @@ def _delayed_restart(delay: int = 2) -> None:
     is_systemd = os.environ.get("INVOCATION_ID") is not None
 
     if is_systemd:
-        # Systemd mode: use systemctl restart (Code Review Issue #3)
-        logger.info("Restarting via systemctl (systemd mode)")
-        result = subprocess.run(
-            ["sudo", "/usr/bin/systemctl", "restart", "cidx-server"],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode != 0:
-            logger.error(
-                "systemctl restart failed (rc=%d): %s",
-                result.returncode,
-                result.stderr
+        # Story #355: Systemd mode - write signal file for auto-updater to pick up.
+        # This avoids needing sudo/privilege escalation (NoNewPrivileges=true compatible).
+        from datetime import datetime as _datetime
+        signal_data = {
+            "timestamp": _datetime.now().isoformat(),
+            "reason": "diagnostics_restart",
+        }
+        try:
+            RESTART_SIGNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            RESTART_SIGNAL_PATH.write_text(json.dumps(signal_data))
+            logger.info(
+                "Restart signal written to %s, waiting for auto-updater to execute",
+                RESTART_SIGNAL_PATH,
             )
-            # Reset flag on failure (Code Review Finding #1)
-            with _restart_lock:
-                _restart_in_progress = False
+        except OSError as e:
+            logger.error("Failed to write restart signal file: %s", e)
+        # Reset flag immediately - we won't block waiting for the auto-updater
+        with _restart_lock:
+            _restart_in_progress = False
     else:
         # Dev mode: re-exec the current process (Code Review Issue #4)
         logger.info("Restarting via os.execv (dev mode)")

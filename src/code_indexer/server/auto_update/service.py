@@ -5,6 +5,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
+import json
 import logging
 
 if TYPE_CHECKING:
@@ -14,6 +15,8 @@ if TYPE_CHECKING:
 from code_indexer.server.auto_update.deployment_executor import (
     LEGACY_REDEPLOY_MARKER,
     PENDING_REDEPLOY_MARKER,
+    RESTART_SIGNAL_PATH,
+    RESTART_SIGNAL_STALENESS_THRESHOLD,
 )
 from code_indexer.server.logging_utils import format_error_log
 
@@ -93,6 +96,50 @@ class AutoUpdateService:
         assert (
             self.deployment_executor is not None
         ), "deployment_executor must be set before calling poll_once()"
+
+        # Story #355: Check for restart signal file BEFORE redeploy marker check.
+        # Server writes this file to request a restart when running under systemd
+        # (avoids needing sudo/NoNewPrivileges=true compatible).
+        if RESTART_SIGNAL_PATH.exists():
+            try:
+                signal_content = RESTART_SIGNAL_PATH.read_text()
+                signal_data = json.loads(signal_content)
+                signal_ts = datetime.fromisoformat(signal_data["timestamp"])
+                signal_age = (datetime.now() - signal_ts).total_seconds()
+            except Exception as e:
+                logger.warning(
+                    f"Could not parse restart signal file: {e}, deleting it",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                RESTART_SIGNAL_PATH.unlink(missing_ok=True)
+                return
+
+            if signal_age >= RESTART_SIGNAL_STALENESS_THRESHOLD:
+                logger.warning(
+                    f"Stale restart signal detected (age: {signal_age:.1f}s), "
+                    f"deleting without restart",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                RESTART_SIGNAL_PATH.unlink(missing_ok=True)
+                return
+
+            # Fresh signal: delete file BEFORE restart attempt (no retry loop)
+            RESTART_SIGNAL_PATH.unlink(missing_ok=True)
+            logger.info(
+                "Restart signal detected, file deleted, executing restart",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            restart_ok = self.deployment_executor.restart_server()
+            if not restart_ok:
+                logger.error(
+                    format_error_log(
+                        "AUTO-UPDATE-013",
+                        "Restart signal handler: server restart FAILED "
+                        "(signal already deleted, no retry)",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+            return
 
         # Issue #154: Check for pending-redeploy marker FIRST (before state checks)
         # Backwards compatibility: migrate legacy marker path (v8.15.0 wrote to /var/lib/)

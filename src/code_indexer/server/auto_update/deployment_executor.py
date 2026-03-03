@@ -36,6 +36,14 @@ AUTO_UPDATE_SERVICE_NAME = "cidx-auto-update"
 AUTO_UPDATE_STATUS_FILE = Path.home() / ".cidx-server" / "auto-update-status.json"
 SYSTEMCTL_TIMEOUT_SECONDS = 30  # Timeout for systemctl restart operations
 
+# Story #355: Signal-based server restart via auto-updater
+# Server writes this file to request a restart; auto-updater detects and executes it.
+# Using ~/.cidx-server/ to avoid systemd PrivateTmp=yes isolation issues.
+RESTART_SIGNAL_PATH = Path.home() / ".cidx-server" / "restart.signal"
+# Signals older than this threshold (seconds) are treated as stale (from a previous crash)
+# and deleted without triggering a restart. Set to 2x the typical poll interval.
+RESTART_SIGNAL_STALENESS_THRESHOLD = 120
+
 # Hnswlib fallback constants (Bug #160)
 # Note: Using /var/tmp/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
 HNSWLIB_FALLBACK_PATH = Path("/var/tmp/cidx-hnswlib")

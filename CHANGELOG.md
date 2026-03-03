@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.92
+
+### Enhancements
+
+- feat: Signal-based server restart via auto-updater (Story #355, v9.3.92). Server no longer needs sudo/privilege escalation to restart under systemd with NoNewPrivileges=true. When admin triggers restart from Diagnostics tab, server writes JSON signal file (~/.cidx-server/restart.signal) with timestamp and reason fields. Auto-updater poll_once() detects the signal, deletes the file before calling restart_server() (at-most-once delivery), and executes the restart. Stale signals (>120s) are cleaned up without restart. Dev mode (os.execv) unchanged.
+
 ## v9.3.91
 
 ### Enhancements
