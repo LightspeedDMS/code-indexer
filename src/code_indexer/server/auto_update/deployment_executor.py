@@ -2128,6 +2128,226 @@ class DeploymentExecutor:
             )
             return False
 
+    def _ensure_memory_overcommit(self) -> bool:
+        """Ensure vm.overcommit_memory=1 is set for fork safety.
+
+        Production servers with vm.overcommit_memory=0 (heuristic mode) refuse fork()
+        when VmPeak exceeds CommitLimit, even though mmap'd memory is disk-backed.
+        The CIDX server reaches ~57GB VmPeak from mmap'd HNSW indexes and SQLite DBs,
+        causing all subprocess.run() calls to fail with OSError: [Errno 12] Cannot
+        allocate memory.
+
+        Setting vm.overcommit_memory=1 (always overcommit) allows fork() regardless
+        of virtual memory size, which is safe because the child process (exec'd
+        immediately via subprocess) never actually uses the parent's memory pages.
+
+        Returns:
+            True if already configured or successfully configured, False on error
+        """
+        try:
+            # Check current value
+            check_result = subprocess.run(
+                ["sysctl", "-n", "vm.overcommit_memory"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if check_result.stdout.strip() == "1":
+                logger.debug(
+                    "Memory overcommit already configured (vm.overcommit_memory=1)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            # Write persistent sysctl config file
+            write_result = subprocess.run(
+                ["sudo", "tee", "/etc/sysctl.d/99-cidx-memory.conf"],
+                input="vm.overcommit_memory = 1\n",
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if write_result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-090",
+                        f"Failed to write /etc/sysctl.d/99-cidx-memory.conf: {write_result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            # Apply immediately
+            apply_result = subprocess.run(
+                ["sudo", "sysctl", "-p", "/etc/sysctl.d/99-cidx-memory.conf"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if apply_result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-091",
+                        f"Failed to apply sysctl config via sysctl -p: {apply_result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            logger.info(
+                "Configured vm.overcommit_memory=1 for fork safety",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-092",
+                    f"Exception configuring memory overcommit: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+    def _ensure_swap_file(self) -> bool:
+        """Ensure a 4GB swap file exists as an OOM safety net.
+
+        Creates /swapfile with proper permissions, formats it, enables it,
+        and adds a persistent fstab entry so it survives reboots.
+
+        This provides an additional safety net for OOM conditions when the
+        server has large mmap'd virtual memory from HNSW indexes and SQLite DBs.
+
+        Returns:
+            True if swap exists or was successfully created, False on error
+        """
+        try:
+            # Check if any swap is already active
+            check_result = subprocess.run(
+                ["swapon", "--show", "--noheadings"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if check_result.stdout.strip():
+                logger.debug(
+                    f"Swap already configured: {check_result.stdout.strip()}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            # Allocate 4GB swap file
+            fallocate_result = subprocess.run(
+                ["sudo", "fallocate", "-l", "4G", "/swapfile"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if fallocate_result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-093",
+                        f"fallocate -l 4G /swapfile failed: {fallocate_result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            # Set secure permissions (0600 - root only)
+            chmod_result = subprocess.run(
+                ["sudo", "chmod", "600", "/swapfile"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if chmod_result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-094",
+                        f"chmod 600 /swapfile failed: {chmod_result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            # Format as swap
+            mkswap_result = subprocess.run(
+                ["sudo", "mkswap", "/swapfile"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if mkswap_result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-095",
+                        f"mkswap /swapfile failed: {mkswap_result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            # Enable swap immediately
+            swapon_result = subprocess.run(
+                ["sudo", "swapon", "/swapfile"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if swapon_result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-096",
+                        f"swapon /swapfile failed: {swapon_result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            # Add fstab entry for reboot persistence
+            fstab_result = subprocess.run(
+                ["cat", "/etc/fstab"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if "/swapfile" not in fstab_result.stdout:
+                tee_result = subprocess.run(
+                    ["sudo", "tee", "-a", "/etc/fstab"],
+                    input="/swapfile none swap sw 0 0\n",
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if tee_result.returncode != 0:
+                    # Non-fatal: swap is active but will not survive reboot
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-097",
+                            f"Failed to append /swapfile entry to /etc/fstab: {tee_result.stderr} "
+                            "- swap is active but will not survive reboot",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+                    # Still return True - swap IS active
+
+            logger.info(
+                "Created and enabled 4GB swap file",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-098",
+                    f"Exception creating swap file: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
     def execute(self) -> bool:
         """Execute complete deployment: git pull + pip install.
 
@@ -2250,6 +2470,28 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-057",
                     "Sudoers restart rule could not be verified/created - "
                     "server self-restart may fail",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Step 9: Ensure vm.overcommit_memory=1 for fork safety
+        if not self._ensure_memory_overcommit():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-099",
+                    "Memory overcommit could not be configured - "
+                    "subprocess fork may fail with ENOMEM on high VmPeak",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Step 10: Ensure swap file exists as safety net
+        if not self._ensure_swap_file():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-100",
+                    "Swap file could not be created - "
+                    "no swap safety net for OOM conditions",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )

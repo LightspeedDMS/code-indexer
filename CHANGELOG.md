@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.91
+
+### Enhancements
+
+- feat: Auto-updater configures vm.overcommit_memory=1 and provisions 4GB swap file to prevent ENOMEM fork failures (Story #356). Production servers with large mmap'd HNSW indexes (~57GB VmPeak) fail subprocess.run() calls (git, pip, systemctl) when kernel heuristic overcommit refuses fork(). Added two new idempotent _ensure_* methods to DeploymentExecutor: _ensure_memory_overcommit() writes /etc/sysctl.d/99-cidx-memory.conf and applies immediately, _ensure_swap_file() creates /swapfile with fstab persistence. Both are non-fatal (deployment continues on failure) and safe for repeated runs.
+
 ## v9.3.90
 
 ### Bug Fixes
