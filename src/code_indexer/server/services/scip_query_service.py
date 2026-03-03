@@ -486,6 +486,7 @@ class SCIPQueryService:
         min_score: float = 0.0,
         repository_alias: Optional[str] = None,
         username: Optional[str] = None,
+        timeout_seconds: int = 30,
     ) -> Dict[str, Any]:
         """
         Get smart context for a symbol - curated file list with relevance scoring.
@@ -496,9 +497,14 @@ class SCIPQueryService:
             min_score: Minimum relevance score (0.0-1.0)
             repository_alias: Reserved for future filtering support
             username: Reserved for future filtering support
+            timeout_seconds: Maximum seconds for the query (default 30).
+                Raises QueryTimeoutError if exceeded.
 
         Returns:
             Dictionary with smart context results
+
+        Raises:
+            QueryTimeoutError: If the query exceeds timeout_seconds.
         """
         from code_indexer.scip.query.composites import get_smart_context
 
@@ -508,7 +514,9 @@ class SCIPQueryService:
         # Note: repository_alias and username reserved for future filtering
         _ = repository_alias, username
 
-        result = get_smart_context(symbol, scip_dir, limit=limit, min_score=min_score)
+        result = get_smart_context(
+            symbol, scip_dir, limit=limit, min_score=min_score, timeout_seconds=timeout_seconds
+        )
 
         return {
             "target_symbol": result.target_symbol,

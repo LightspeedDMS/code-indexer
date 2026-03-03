@@ -186,6 +186,197 @@ class TestAuthHeaderConstruction:
         assert headers["Content-Type"] == "application/json"
 
 
+class TestPerfClientTimeout:
+    """Tests for configurable per-request timeout in PerfClient.
+
+    Bug #351: PerfClient has no per-request timeout. One hung server response
+    blocks the entire perf suite forever.
+
+    AC2: execute_mcp() and execute_rest() must accept a configurable timeout
+         parameter (default 60 seconds).
+    """
+
+    def test_execute_mcp_has_timeout_parameter(self):
+        """execute_mcp() must have a timeout parameter."""
+        import inspect
+        from client import PerfClient
+
+        sig = inspect.signature(PerfClient.execute_mcp)
+        assert "timeout" in sig.parameters, (
+            "PerfClient.execute_mcp() must have a 'timeout' parameter"
+        )
+
+    def test_execute_mcp_default_timeout_is_60_seconds(self):
+        """execute_mcp() must default to 60-second timeout."""
+        import inspect
+        from client import PerfClient
+
+        sig = inspect.signature(PerfClient.execute_mcp)
+        assert "timeout" in sig.parameters, "execute_mcp() must have a timeout parameter"
+        default = sig.parameters["timeout"].default
+        assert default == 60, (
+            f"execute_mcp() timeout default must be 60 seconds, got {default}"
+        )
+
+    def test_execute_rest_has_timeout_parameter(self):
+        """execute_rest() must have a timeout parameter."""
+        import inspect
+        from client import PerfClient
+
+        sig = inspect.signature(PerfClient.execute_rest)
+        assert "timeout" in sig.parameters, (
+            "PerfClient.execute_rest() must have a 'timeout' parameter"
+        )
+
+    def test_execute_rest_default_timeout_is_60_seconds(self):
+        """execute_rest() must default to 60-second timeout."""
+        import inspect
+        from client import PerfClient
+
+        sig = inspect.signature(PerfClient.execute_rest)
+        assert "timeout" in sig.parameters, "execute_rest() must have a timeout parameter"
+        default = sig.parameters["timeout"].default
+        assert default == 60, (
+            f"execute_rest() timeout default must be 60 seconds, got {default}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_mcp_passes_timeout_to_httpx(self):
+        """execute_mcp() must pass timeout to the underlying httpx client.post() call."""
+        import httpx
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from client import PerfClient
+
+        client = PerfClient(
+            server_url="http://localhost:8000",
+            username="admin",
+            password="admin",
+        )
+        # Pre-seed a token so authenticate is not called
+        import time
+        from client import TokenTracker
+        client._token_tracker = TokenTracker(token="test_token", acquired_at=time.time())
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.content = b'{"result": {}}'
+        mock_response.json.return_value = {"result": {}}
+
+        mock_http_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_http_client.post = AsyncMock(return_value=mock_response)
+
+        from metrics import RequestResult
+        await client.execute_mcp(
+            mock_http_client, "search_code", {"query_text": "auth"}, timeout=45
+        )
+
+        # Verify timeout was passed through to httpx client.post()
+        call_kwargs = mock_http_client.post.call_args[1]
+        assert "timeout" in call_kwargs, (
+            "execute_mcp() must pass timeout kwarg to httpx client.post()"
+        )
+        assert call_kwargs["timeout"] == 45, (
+            f"timeout must be 45, got {call_kwargs['timeout']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_rest_passes_timeout_to_httpx(self):
+        """execute_rest() must pass timeout to the underlying httpx client.post() call."""
+        import httpx
+        from unittest.mock import AsyncMock, MagicMock
+        from client import PerfClient
+
+        client = PerfClient(
+            server_url="http://localhost:8000",
+            username="admin",
+            password="admin",
+        )
+        import time
+        from client import TokenTracker
+        client._token_tracker = TokenTracker(token="test_token", acquired_at=time.time())
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.content = b'{"result": {}}'
+
+        mock_http_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_http_client.post = AsyncMock(return_value=mock_response)
+
+        await client.execute_rest(
+            mock_http_client, "/api/query", {"query_text": "auth"}, timeout=45
+        )
+
+        call_kwargs = mock_http_client.post.call_args[1]
+        assert "timeout" in call_kwargs, (
+            "execute_rest() must pass timeout kwarg to httpx client.post()"
+        )
+        assert call_kwargs["timeout"] == 45, (
+            f"timeout must be 45, got {call_kwargs['timeout']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_mcp_timeout_returns_error_result_on_timeout(self):
+        """execute_mcp() must return error RequestResult (not raise) on timeout."""
+        import httpx
+        from unittest.mock import AsyncMock
+        from client import PerfClient
+
+        client = PerfClient(
+            server_url="http://localhost:8000",
+            username="admin",
+            password="admin",
+        )
+        import time
+        from client import TokenTracker
+        client._token_tracker = TokenTracker(token="test_token", acquired_at=time.time())
+
+        mock_http_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_http_client.post = AsyncMock(
+            side_effect=httpx.TimeoutException("Request timed out")
+        )
+
+        result = await client.execute_mcp(
+            mock_http_client, "search_code", {"query_text": "auth"}, timeout=1
+        )
+
+        assert result.success is False, "execute_mcp() must return success=False on timeout"
+        assert result.error_message is not None, "error_message must be set on timeout"
+        assert "timeout" in result.error_message.lower() or "timed out" in result.error_message.lower(), (
+            f"error_message must mention timeout, got: {result.error_message}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_rest_timeout_returns_error_result_on_timeout(self):
+        """execute_rest() must return error RequestResult (not raise) on timeout."""
+        import httpx
+        from unittest.mock import AsyncMock
+        from client import PerfClient
+
+        client = PerfClient(
+            server_url="http://localhost:8000",
+            username="admin",
+            password="admin",
+        )
+        import time
+        from client import TokenTracker
+        client._token_tracker = TokenTracker(token="test_token", acquired_at=time.time())
+
+        mock_http_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_http_client.post = AsyncMock(
+            side_effect=httpx.TimeoutException("Request timed out")
+        )
+
+        result = await client.execute_rest(
+            mock_http_client, "/api/query", {"query_text": "auth"}, timeout=1
+        )
+
+        assert result.success is False, "execute_rest() must return success=False on timeout"
+        assert result.error_message is not None, "error_message must be set on timeout"
+        assert "timeout" in result.error_message.lower() or "timed out" in result.error_message.lower(), (
+            f"error_message must mention timeout, got: {result.error_message}"
+        )
+
+
 class TestPerfClientUnit:
     """Unit tests for PerfClient (non-async parts that can be tested without a server)."""
 

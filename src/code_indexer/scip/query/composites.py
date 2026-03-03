@@ -1,16 +1,19 @@
 """SCIP composite queries - impact analysis and other high-level queries."""
 
 import logging
+import threading
 try:
     from pysqlite3 import dbapi2 as sqlite3
 except ImportError:
     import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath
-from typing import List, Optional, Set, Dict
+from typing import Any, List, Optional, Set, Dict
 
 from .primitives import QueryResult, SCIPQueryEngine
 from .backends import CallChain as BackendCallChain
+from ..database.queries import QueryTimeoutError
+
 
 logger = logging.getLogger(__name__)
 
@@ -637,6 +640,7 @@ def get_smart_context(
     limit: int = 20,
     min_score: float = 0.0,
     project: Optional[str] = None,
+    timeout_seconds: int = 30,
 ) -> SmartContextResult:
     """
     Get smart context for a symbol - curated file list with relevance scoring.
@@ -650,9 +654,66 @@ def get_smart_context(
         limit: Maximum files to return (default 20)
         min_score: Minimum relevance score (0.0-1.0)
         project: Filter to specific project path
+        timeout_seconds: Maximum seconds to spend on the query (default 30).
+            Raises QueryTimeoutError if exceeded. Set to 0 to disable.
 
     Returns:
         SmartContextResult with prioritized file list
+
+    Raises:
+        QueryTimeoutError: If the query exceeds timeout_seconds.
+    """
+    # Use thread-based watchdog instead of signal.alarm().
+    # signal.alarm() only delivers SIGALRM to the main thread, so it does NOT
+    # work when get_smart_context is called from a ThreadPoolExecutor worker
+    # (e.g., MCP handlers dispatched via loop.run_in_executor).
+    result_holder: List[Any] = [None]
+    exc_holder: List[Optional[BaseException]] = [None]
+
+    def target() -> None:
+        try:
+            result_holder[0] = _get_smart_context_impl(
+                symbol=symbol,
+                scip_dir=scip_dir,
+                limit=limit,
+                min_score=min_score,
+                project=project,
+            )
+        except BaseException as e:
+            exc_holder[0] = e
+
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    t.join(timeout=timeout_seconds if timeout_seconds > 0 else None)
+
+    if t.is_alive():
+        # Worker thread is still running — timeout exceeded.
+        logger.warning(
+            f"get_smart_context exceeded {timeout_seconds}-second timeout for symbol '{symbol}'"
+        )
+        raise QueryTimeoutError(
+            f"Query exceeded {timeout_seconds}-second timeout"
+        )
+
+    if exc_holder[0] is not None:
+        raise exc_holder[0]
+
+    return result_holder[0]  # type: ignore[return-value]
+
+
+def _get_smart_context_impl(
+    symbol: str,
+    scip_dir: Path,
+    limit: int = 20,
+    min_score: float = 0.0,
+    project: Optional[str] = None,
+) -> SmartContextResult:
+    """
+    Internal implementation of get_smart_context (no timeout logic).
+
+    Separated so the thread-based timeout wrapper in get_smart_context()
+    can abandon this function by letting the daemon thread complete naturally
+    while the caller raises QueryTimeoutError.
     """
     # CRITICAL: .scip protobuf files are DELETED after database conversion
     # Only .scip.db (SQLite) files persist after 'cidx scip generate'
@@ -683,10 +744,14 @@ def get_smart_context(
                     context_data[fp].append((defn.symbol, "definition", defn, 1.0))
             except sqlite3.OperationalError as e:
                 logger.debug(f"Skipping {scip_file} (incomplete schema): {e}")
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as e:
+                if isinstance(e, QueryTimeoutError):
+                    raise
+                logger.debug(f"Skipping {scip_file} during definition lookup: {e}")
+    except QueryTimeoutError:
+        raise
+    except Exception as e:
+        logger.debug(f"Definition phase failed for {symbol}: {e}")
 
     # 2. Dependencies (what symbol uses - score 0.8)
     try:
@@ -700,8 +765,10 @@ def get_smart_context(
             if fp not in context_data:
                 context_data[fp] = []
             context_data[fp].append((affected.symbol, "dependent", affected, 0.7))
-    except Exception:
-        pass
+    except QueryTimeoutError:
+        raise
+    except Exception as e:
+        logger.debug(f"Impact analysis phase failed for {symbol}: {e}")
 
     # 3. References (callers - score 0.7)
     try:
@@ -723,10 +790,14 @@ def get_smart_context(
                     context_data[fp].append((ref.symbol, "reference", ref, 0.6))
             except sqlite3.OperationalError as e:
                 logger.debug(f"Skipping {scip_file} (incomplete schema): {e}")
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as e:
+                if isinstance(e, QueryTimeoutError):
+                    raise
+                logger.debug(f"Skipping {scip_file} during reference lookup: {e}")
+    except QueryTimeoutError:
+        raise
+    except Exception as e:
+        logger.debug(f"References phase failed for {symbol}: {e}")
 
     # Aggregate by file and calculate relevance scores
     context_files: List[ContextFile] = []
