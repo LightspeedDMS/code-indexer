@@ -238,3 +238,46 @@ class TestPass1DomainStability:
         )
 
         assert "stable" in prompt.lower() or "stability" in prompt.lower()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Domain concept clarity in Phase 1 prompts
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPass1DomainConceptClarity:
+    """Domain concept clarity in Phase 1 prompts."""
+
+    def test_build_pass1_prompt_contains_domain_definition_section(self, tmp_path):
+        """Pass 1 prompt includes 'What Is a Domain?' section header."""
+        analyzer = _make_analyzer(tmp_path)
+        repo_list = [{"alias": "svc-a", "clone_path": "/fake/a", "file_count": 10, "total_bytes": 1000}]
+        repo_descriptions = {"svc-a": "Service A description"}
+        prompt = analyzer.build_pass1_prompt(repo_descriptions, repo_list)
+        assert "## What Is a Domain?" in prompt
+
+    def test_build_pass1_prompt_states_domain_is_not_repository(self, tmp_path):
+        """Pass 1 prompt explicitly states a domain is NOT a repository."""
+        analyzer = _make_analyzer(tmp_path)
+        repo_list = [{"alias": "svc-a", "clone_path": "/fake/a", "file_count": 10, "total_bytes": 1000}]
+        repo_descriptions = {"svc-a": "Service A description"}
+        prompt = analyzer.build_pass1_prompt(repo_descriptions, repo_list)
+        assert "domain is NOT a repository" in prompt
+
+    def test_build_pass1_prompt_states_grouping_purpose(self, tmp_path):
+        """Pass 1 prompt explains the purpose of grouping repos into domains."""
+        analyzer = _make_analyzer(tmp_path)
+        repo_list = [{"alias": "svc-a", "clone_path": "/fake/a", "file_count": 10, "total_bytes": 1000}]
+        repo_descriptions = {"svc-a": "Service A description"}
+        prompt = analyzer.build_pass1_prompt(repo_descriptions, repo_list)
+        assert "group repositories into" in prompt.lower() or "group repositories" in prompt.lower()
+
+    def test_build_pass1_prompt_domain_definition_before_instructions(self, tmp_path):
+        """Pass 1 prompt has domain definition before instructions section."""
+        analyzer = _make_analyzer(tmp_path)
+        repo_list = [{"alias": "svc-a", "clone_path": "/fake/a", "file_count": 10, "total_bytes": 1000}]
+        repo_descriptions = {"svc-a": "Service A description"}
+        prompt = analyzer.build_pass1_prompt(repo_descriptions, repo_list)
+        domain_def_pos = prompt.index("What Is a Domain?")
+        instructions_pos = prompt.index("## Instructions") if "## Instructions" in prompt else prompt.index("## Output Format")
+        assert domain_def_pos < instructions_pos

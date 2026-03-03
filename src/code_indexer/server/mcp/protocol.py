@@ -32,6 +32,14 @@ mcp_router = APIRouter()
 # Security scheme for bearer token authentication (auto_error=False for optional auth)
 security = HTTPBearer(auto_error=False)
 
+# Tools that track their own API metrics at handler/service level.
+# Protocol-level tracking skips these to avoid double-counting.
+# search_code tracks semantic_search/other_index_search in semantic_query_manager.
+# regex_search tracks regex_search in regex_search handler/service.
+_SELF_TRACKING_TOOLS = frozenset({"search_code", "regex_search"})
+
+from code_indexer.server.services.api_metrics_service import api_metrics_service  # noqa: E402
+
 
 def validate_jsonrpc_request(
     request: Dict[str, Any],
@@ -395,6 +403,12 @@ async def handle_tools_call(
         result = await _invoke_handler(
             handler, arguments, user, session_state, sig, is_async
         )
+
+    # Bug #350: Protocol-level API metrics tracking.
+    # Track all MCP tool calls except self-tracking tools.
+    # This line is only reached on success - exceptions propagate before this point.
+    if tool_name not in _SELF_TRACKING_TOOLS:
+        api_metrics_service.increment_other_api_call()
 
     return cast(Dict[str, Any], result)
 

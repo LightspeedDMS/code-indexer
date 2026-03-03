@@ -213,11 +213,6 @@ class FileCRUDService:
             PermissionError: If path validation fails (security)
             CRUDOperationError: If creation fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
-
         # Enforce write-mode gate for write-exception repos (Story #231)
         self._check_write_mode_active(repo_alias)
 
@@ -294,11 +289,6 @@ class FileCRUDService:
             PermissionError: If path validation fails
             CRUDOperationError: If edit fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
-
         # Enforce write-mode gate for write-exception repos (Story #231)
         self._check_write_mode_active(repo_alias)
 
@@ -386,11 +376,6 @@ class FileCRUDService:
             PermissionError: If path validation fails
             CRUDOperationError: If deletion fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
-
         # Enforce write-mode gate for write-exception repos (Story #231)
         self._check_write_mode_active(repo_alias)
 

@@ -240,10 +240,6 @@ class GitOperationsService:
             FileNotFoundError: If repository not found
             GitCommandError: If git status fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         repo_path = self.activated_repo_manager.get_activated_repo_path(
             username=username, user_alias=repo_alias
@@ -269,10 +265,6 @@ class GitOperationsService:
             FileNotFoundError: If repository not found
             GitCommandError: If git diff fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         # Extract file_paths if present
         file_paths = kwargs.pop("file_paths", None)
@@ -302,10 +294,6 @@ class GitOperationsService:
             FileNotFoundError: If repository not found
             GitCommandError: If git log fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         # Map REST parameter name to service method name
         if "since" in kwargs:
@@ -339,10 +327,6 @@ class GitOperationsService:
             FileNotFoundError: If repository not found
             GitCommandError: If git add fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         file_paths = kwargs.get("file_paths", [])
         repo_path = self.activated_repo_manager.get_activated_repo_path(
@@ -368,10 +352,6 @@ class GitOperationsService:
             FileNotFoundError: If repository not found
             GitCommandError: If git reset fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         file_paths = kwargs.get("file_paths", [])
         repo_path = self.activated_repo_manager.get_activated_repo_path(
@@ -398,10 +378,6 @@ class GitOperationsService:
             GitCommandError: If git commit fails
             ValueError: If user_email or user_name fail validation
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         message = kwargs.get("message", "")
         # Support both author_email (from REST API) and user_email (legacy MCP)
@@ -468,10 +444,6 @@ class GitOperationsService:
             FileNotFoundError: If repository not found
             GitCommandError: If git push fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         remote = kwargs.get("remote", "origin")
         branch = kwargs.get("branch")
@@ -505,10 +477,6 @@ class GitOperationsService:
             FileNotFoundError: If repository not found
             GitCommandError: If git pull fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         remote = kwargs.get("remote", "origin")
         branch = kwargs.get("branch")
@@ -542,10 +510,6 @@ class GitOperationsService:
             FileNotFoundError: If repository not found
             GitCommandError: If git fetch fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         remote = kwargs.get("remote", "origin")
 
@@ -581,10 +545,6 @@ class GitOperationsService:
             ValueError: If hard reset attempted without valid token
             GitCommandError: If git reset fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         mode = kwargs.get("mode", "mixed")
         commit_hash = kwargs.get("commit_hash")
@@ -622,10 +582,6 @@ class GitOperationsService:
             ValueError: If attempted without valid token
             GitCommandError: If git clean fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         confirmation_token = kwargs.get("confirmation_token")
 
@@ -652,10 +608,6 @@ class GitOperationsService:
             FileNotFoundError: If repository not found
             GitCommandError: If git merge --abort fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         repo_path = self.activated_repo_manager.get_activated_repo_path(
             username=username, user_alias=repo_alias
@@ -680,10 +632,6 @@ class GitOperationsService:
             FileNotFoundError: If repository not found
             GitCommandError: If git checkout fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         file_paths = kwargs.get("file_paths", [])
 
@@ -717,10 +665,6 @@ class GitOperationsService:
             FileNotFoundError: If repository not found
             GitCommandError: If git branch fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         repo_path = self.activated_repo_manager.get_activated_repo_path(
             username=username, user_alias=repo_alias
@@ -745,10 +689,6 @@ class GitOperationsService:
             FileNotFoundError: If repository not found
             GitCommandError: If git branch fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         branch_name = kwargs.get("branch_name", "")
 
@@ -775,10 +715,6 @@ class GitOperationsService:
             FileNotFoundError: If repository not found
             GitCommandError: If git checkout/switch fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         branch_name = kwargs.get("branch_name", "")
 
@@ -806,10 +742,6 @@ class GitOperationsService:
             ValueError: If attempted without valid token
             GitCommandError: If git branch delete fails
         """
-        # Track API call at service layer (Story #4 AC2)
-        from .api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_other_api_call()
 
         branch_name = kwargs.get("branch_name", "")
         confirmation_token = kwargs.get("confirmation_token")

@@ -240,6 +240,15 @@ class DependencyMapAnalyzer:
             )
         prompt += "\n"
 
+        prompt += "## What Is a Domain?\n\n"
+        prompt += "A domain is a meaningful functional or technical area that groups multiple related repositories. "
+        prompt += "A domain is NOT a repository — it represents a higher-level organizational concept "
+        prompt += "(e.g., 'authentication', 'data-pipeline', 'frontend-platform') that encompasses the repositories "
+        prompt += "participating in that area. "
+        prompt += "The purpose of domain analysis is to group repositories into these meaningful areas so that "
+        prompt += "cross-repository dependencies can be understood at a higher abstraction level, and so that "
+        prompt += "changes to one repository can be traced to their impact across the broader domain.\n\n"
+
         prompt += "## Instructions\n\n"
         prompt += (
             "Identify domain clusters and list participating repos per domain.\n\n"
@@ -299,8 +308,9 @@ class DependencyMapAnalyzer:
 
         prompt += "### Unassigned Repository Handling\n\n"
         prompt += "If a repository does not fit any domain (no integration evidence found), assign it to a\n"
-        prompt += "single-repo domain named after the repository itself (e.g., 'code-indexer' domain with\n"
-        prompt += "just the code-indexer repo). This ensures every repository appears in at least one domain.\n"
+        prompt += "standalone domain as a LAST RESORT. Name the domain after its functional purpose, not its\n"
+        prompt += "repository alias (e.g., 'code-search-tooling' rather than 'code-indexer'). A domain always\n"
+        prompt += "represents a functional area, even when it contains only one repository.\n"
         prompt += "Do NOT leave repositories unassigned.\n\n"
 
         prompt += "### CRITICAL: Valid Repository Aliases\n\n"
@@ -1330,6 +1340,14 @@ Rules:
         )
 
         prompt = "# Domain Synthesis Task\n\n"
+        prompt += "## What Is a Domain?\n\n"
+        prompt += "A domain is a meaningful functional or technical area that groups multiple related repositories. "
+        prompt += "A domain is NOT a repository — it represents a higher-level organizational concept "
+        prompt += "(e.g., 'authentication', 'data-pipeline', 'frontend-platform') that encompasses the repositories "
+        prompt += "participating in that area. "
+        prompt += "The purpose of domain analysis is to group repositories into these meaningful areas so that "
+        prompt += "cross-repository dependencies can be understood at a higher abstraction level, and so that "
+        prompt += "changes to one repository can be traced to their impact across the broader domain.\n\n"
         prompt += "Analyze the following repository descriptions and identify domain clusters.\n\n"
         prompt += self._build_previous_domains_section(previous_domains_dir)
         prompt += "## Repository Descriptions\n\n"
