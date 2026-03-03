@@ -84,6 +84,42 @@ def sanitize_fts_query(query_text: str) -> str:
     return " ".join(result) if tokens else query_text
 
 
+def _contains_valid_boolean_ops(query_text: str) -> bool:
+    """Detect if a sanitized query contains valid boolean operators.
+
+    Returns True if the query contains OR/AND/NOT operators with proper operands,
+    meaning it should be passed directly to Tantivy's parse_query() instead of
+    being split into per-term queries.
+
+    Uses the same validation rules as sanitize_fts_query():
+    - OR/AND need non-operator terms on BOTH left and right sides
+    - NOT needs non-operator terms on BOTH sides (bare 'NOT term' rejected
+      by Tantivy: 'Only excluding terms given')
+    - Only all-uppercase OR, AND, NOT are Tantivy operators
+    """
+    tokens = query_text.split()
+    if len(tokens) < 2:
+        return False
+
+    for i, token in enumerate(tokens):
+        if token not in _BOOL_OPS:
+            continue
+
+        left = tokens[i - 1] if i > 0 else None
+        right = tokens[i + 1] if i < len(tokens) - 1 else None
+        has_left = left is not None and left not in _BOOL_OPS
+        has_right = right is not None and right not in _BOOL_OPS
+
+        # All operators (OR, AND, NOT) require non-operator terms on both sides.
+        # OR/AND: standard boolean grammar requires operands on both sides.
+        # NOT: Tantivy rejects bare 'NOT term' ('Only excluding terms given'),
+        #      so only compound 'positive_term NOT excluded_term' is valid.
+        if has_left and has_right:
+            return True
+
+    return False
+
+
 class TantivyIndexManager:
     """
     Manages Tantivy full-text search index for CIDX.
@@ -461,9 +497,28 @@ class TantivyIndexManager:
         query_terms = query_text.split()
         is_multi_word = len(query_terms) > 1
 
+        # Detect boolean operators: only route if multi-word and has valid boolean ops
+        has_boolean_ops = is_multi_word and _contains_valid_boolean_ops(query_text)
+
         if edit_distance > 0:
             # FUZZY MATCHING: Apply fuzzy matching to each term independently
-            if is_multi_word:
+            if has_boolean_ops:
+                # Boolean + fuzzy incompatible: strip operators, fuzzy-match remaining terms
+                logger.warning("Boolean operators ignored in fuzzy mode: %s", query_text)
+                non_op_terms = [t for t in query_terms if t not in _BOOL_OPS]
+                fuzzy_queries = [
+                    TantivyQuery.fuzzy_term_query(
+                        self._schema,
+                        search_field,
+                        term,
+                        distance=edit_distance,
+                        transposition_cost_one=True,
+                    )
+                    for term in non_op_terms
+                ]
+                subqueries = [(tantivy.Occur.Must, q) for q in fuzzy_queries]
+                return TantivyQuery.boolean_query(subqueries)
+            elif is_multi_word:
                 # Multi-word fuzzy query: Apply fuzzy matching to each term, combine with AND
                 # Example: "gloc pattern" with edit_distance=1 fuzzy-matches "glob" AND "pattern"
                 fuzzy_queries = [
@@ -491,15 +546,13 @@ class TantivyIndexManager:
                 )
         else:
             # EXACT MATCHING: Require ALL terms to match
-            if is_multi_word:
+            if has_boolean_ops:
+                # Boolean query: pass entire query to Tantivy's parse_query() which natively
+                # supports OR, AND, NOT operators. sanitize_fts_query() already ensured validity.
+                return self._index.parse_query(query_text, [search_field, "identifiers"])
+            elif is_multi_word:
                 # Multi-word exact query: Require ALL terms to exist (AND semantics)
                 # Example: "gloc pattern" returns 0 results if "gloc" doesn't exist
-                #
-                # NOTE: Per-term sanitize_fts_query() call means boolean operators (OR/AND)
-                # between terms are lowercased to literals. This is a pre-existing design
-                # choice: the multi-word path uses AND semantics (all terms must match).
-                # Users wanting OR semantics should use Tantivy's native query syntax in
-                # single-term mode. See Bug #353.
                 term_queries = [
                     self._index.parse_query(
                         sanitize_fts_query(term), [search_field, "identifiers"]

@@ -699,3 +699,287 @@ class TestBuildSearchQuerySanitization:
                 TantivyQuery=TantivyQuery,
             )
             assert result is not None
+
+
+class TestContainsValidBooleanOps:
+    """Unit tests for the module-level _contains_valid_boolean_ops() pure function."""
+
+    def test_valid_or(self):
+        """'term1 OR term2' has valid OR with operands on both sides — returns True."""
+        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+
+        assert _contains_valid_boolean_ops("term1 OR term2") is True
+
+    def test_valid_and(self):
+        """'term1 AND term2' has valid AND with operands on both sides — returns True."""
+        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+
+        assert _contains_valid_boolean_ops("term1 AND term2") is True
+
+    def test_valid_not(self):
+        """Bare 'NOT term1' is NOT valid for Tantivy parse_query — returns False.
+
+        Tantivy rejects queries with only exclusion terms ('Only excluding terms
+        given'). NOT is only valid in compound expressions like 'auth NOT token'
+        where a positive term also exists.
+        """
+        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+
+        assert _contains_valid_boolean_ops("NOT term1") is False
+
+    def test_compound_not(self):
+        """'auth NOT token' has NOT with positive term on left — returns True."""
+        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+
+        assert _contains_valid_boolean_ops("auth NOT token") is True
+
+    def test_chained_ops(self):
+        """'a OR b AND c' contains valid boolean ops — returns True."""
+        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+
+        assert _contains_valid_boolean_ops("a OR b AND c") is True
+
+    def test_multiple_ors(self):
+        """'a OR b OR c' contains multiple valid OR ops — returns True."""
+        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+
+        assert _contains_valid_boolean_ops("a OR b OR c") is True
+
+    def test_no_operators(self):
+        """'hello world' has no boolean operators — returns False."""
+        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+
+        assert _contains_valid_boolean_ops("hello world") is False
+
+    def test_single_term(self):
+        """'hello' is a single term with no operators — returns False."""
+        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+
+        assert _contains_valid_boolean_ops("hello") is False
+
+    def test_empty_string(self):
+        """Empty string has no operators — returns False."""
+        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+
+        assert _contains_valid_boolean_ops("") is False
+
+    def test_lowercase_or(self):
+        """'term or other' uses lowercase 'or' which is not a Tantivy operator — returns False."""
+        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+
+        assert _contains_valid_boolean_ops("term or other") is False
+
+    def test_trailing_or(self):
+        """'term OR' has trailing OR with no right operand — returns False."""
+        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+
+        assert _contains_valid_boolean_ops("term OR") is False
+
+    def test_leading_or(self):
+        """'OR term' has leading OR with no left operand — returns False."""
+        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+
+        assert _contains_valid_boolean_ops("OR term") is False
+
+    def test_adjacent_operators(self):
+        """'term OR AND other' has OR with an operator on its right (not a valid operand) — returns False."""
+        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+
+        assert _contains_valid_boolean_ops("term OR AND other") is False
+
+    def test_bare_not(self):
+        """'NOT' alone has no right operand — returns False."""
+        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+
+        assert _contains_valid_boolean_ops("NOT") is False
+
+
+class TestBuildSearchQueryBoolean:
+    """Integration tests verifying _build_search_query correctly routes boolean queries."""
+
+    def _make_manager(self, tmpdir: str) -> "TantivyIndexManager":
+        """Helper: create and initialize a TantivyIndexManager with auth/login documents."""
+        from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+
+        index_dir = Path(tmpdir) / ".code-indexer" / "tantivy_index"
+        manager = TantivyIndexManager(index_dir=index_dir)
+        manager.initialize_index()
+        # Add documents containing "auth" (for OR/AND testing)
+        manager.add_document(
+            {
+                "path": "src/auth.py",
+                "content": "def authenticate user token",
+                "content_raw": "def authenticate user token",
+                "identifiers": ["authenticate", "user", "token"],
+                "line_start": 1,
+                "line_end": 1,
+                "language": "python",
+            }
+        )
+        # Add document containing "login" (for OR testing - matches OR but not AND)
+        manager.add_document(
+            {
+                "path": "src/login.py",
+                "content": "def login user password",
+                "content_raw": "def login user password",
+                "identifiers": ["login", "user", "password"],
+                "line_start": 1,
+                "line_end": 1,
+                "language": "python",
+            }
+        )
+        manager.commit()
+        return manager
+
+    def test_or_query_returns_valid_query(self):
+        """'auth OR login' with edit_distance=0 produces a valid Tantivy query object."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_manager(tmpdir)
+
+            import tantivy
+            from tantivy import Query as TantivyQuery
+
+            result = manager._build_search_query(
+                query_text="auth OR login",
+                search_field="content",
+                edit_distance=0,
+                tantivy=tantivy,
+                TantivyQuery=TantivyQuery,
+            )
+            assert result is not None
+
+    def test_and_query_returns_valid_query(self):
+        """'auth AND login' with edit_distance=0 produces a valid Tantivy query object."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_manager(tmpdir)
+
+            import tantivy
+            from tantivy import Query as TantivyQuery
+
+            result = manager._build_search_query(
+                query_text="auth AND login",
+                search_field="content",
+                edit_distance=0,
+                tantivy=tantivy,
+                TantivyQuery=TantivyQuery,
+            )
+            assert result is not None
+
+    def test_not_query_returns_valid_query(self):
+        """Bare 'NOT token' falls through to per-term AND path — no crash, valid query.
+
+        Tantivy's parse_query() rejects queries with only exclusion terms
+        ('Only excluding terms given'). Bare 'NOT token' must NOT be routed
+        through the boolean parse_query() path. Instead it falls through to
+        the multi-word AND path which treats 'NOT' and 'token' as two literal
+        terms to match.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_manager(tmpdir)
+
+            import tantivy
+            from tantivy import Query as TantivyQuery
+
+            # Bare "NOT token" must not crash — falls through to per-term path
+            result = manager._build_search_query(
+                query_text="NOT token",
+                search_field="content",
+                edit_distance=0,
+                tantivy=tantivy,
+                TantivyQuery=TantivyQuery,
+            )
+            assert result is not None
+
+    def test_fuzzy_boolean_degrades_gracefully(self, caplog):
+        """'auth OR login' with edit_distance=1 degrades to fuzzy-AND with warning."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_manager(tmpdir)
+
+            import logging
+
+            import tantivy
+            from tantivy import Query as TantivyQuery
+
+            with caplog.at_level(
+                logging.WARNING,
+                logger="code_indexer.services.tantivy_index_manager",
+            ):
+                result = manager._build_search_query(
+                    query_text="auth OR login",
+                    search_field="content",
+                    edit_distance=1,
+                    tantivy=tantivy,
+                    TantivyQuery=TantivyQuery,
+                )
+            assert result is not None
+            assert any("Boolean operators ignored" in msg for msg in caplog.messages)
+
+    def test_non_boolean_preserves_and_semantics(self):
+        """'hello world' (no boolean ops) still uses existing AND semantics path."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_manager(tmpdir)
+
+            import tantivy
+            from tantivy import Query as TantivyQuery
+
+            result = manager._build_search_query(
+                query_text="hello world",
+                search_field="content",
+                edit_distance=0,
+                tantivy=tantivy,
+                TantivyQuery=TantivyQuery,
+            )
+            assert result is not None
+
+    def test_search_or_returns_union_results(self):
+        """Full search() with 'auth OR login' returns documents matching EITHER term."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_manager(tmpdir)
+
+            # "auth OR login" should match both auth.py (contains "authenticate") AND
+            # login.py (contains "login") — union semantics
+            results = manager.search(query_text="authenticate OR login", edit_distance=0)
+
+            # Should find documents from both files
+            paths = [r["path"] for r in results]
+            assert any("auth.py" in p for p in paths), (
+                f"Expected auth.py in results for 'authenticate OR login', got: {paths}"
+            )
+            assert any("login.py" in p for p in paths), (
+                f"Expected login.py in results for 'authenticate OR login', got: {paths}"
+            )
+
+    def test_search_non_boolean_unchanged(self):
+        """Full search() with 'hello world' (no boolean ops) returns only docs with both terms."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_manager(tmpdir)
+
+            # "hello world" — neither term exists in our test docs, so 0 results
+            results = manager.search(query_text="hello world", edit_distance=0)
+            assert results == [], (
+                f"Expected no results for 'hello world' with AND semantics, got: {results}"
+            )
+
+    def test_compound_not_query_returns_valid_query(self):
+        """Compound 'authenticate NOT token' routes through boolean parse_query path.
+
+        'authenticate NOT token' has a positive term ('authenticate') on the left
+        of NOT, so _contains_valid_boolean_ops() returns True and the query is
+        passed to parse_query(). Tantivy accepts this because there is at least
+        one positive inclusion term.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_manager(tmpdir)
+
+            import tantivy
+            from tantivy import Query as TantivyQuery
+
+            # "authenticate NOT token": positive term on left, so boolean path is used
+            result = manager._build_search_query(
+                query_text="authenticate NOT token",
+                search_field="content",
+                edit_distance=0,
+                tantivy=tantivy,
+                TantivyQuery=TantivyQuery,
+            )
+            assert result is not None

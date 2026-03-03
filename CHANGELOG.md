@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.88
+
+### Enhancements
+
+- feat: Proper boolean query support for FTS (Story #354). MCP clients and CLI users can now use boolean operators (OR, AND, NOT) in FTS queries naturally. Added _contains_valid_boolean_ops() detection function that identifies valid boolean operators before _build_search_query() splits into per-term queries. Exact-match boolean queries route directly to Tantivy's parse_query() which natively supports OR/AND/NOT. Fuzzy + boolean degrades gracefully with warning (strips operators, fuzzy-matches remaining terms). Non-boolean multi-word queries preserve existing AND semantics unchanged. Bare NOT handled correctly (requires compound form "term NOT excluded").
+
 ## v9.3.87
 
 ### Bug Fixes
