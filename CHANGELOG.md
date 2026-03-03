@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.85
+
+### Enhancements
+
+- feat: Add canary file-write test to Pass 1 dependency map synthesis prompt. Before Claude spends cycles analyzing 125+ repos, it now runs a quick write/delete test on the target directory as Step 0. If the canary fails (OS permission denied or Claude CLI permission restricted), the process bails immediately with a diagnostic RuntimeError instead of wasting 50+ turns attempting analysis and retrying different write methods. Saves significant time and API tokens when permission issues exist.
+
 ## v9.3.84
 
 ### Bug Fixes
