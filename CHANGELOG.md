@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.89
+
+### Bug Fixes
+
+- fix: Dashboard "Total Traces" count inflated by CIDX vector index files. The _get_langfuse_folder_stats() method used folder.glob("**/*.json") which counted .code-indexer/ vector store JSON files (88K+) alongside actual trace files (4K), inflating the reported count ~22x. Fixed by excluding files with .code-indexer in their path components.
+
 ## v9.3.88
 
 ### Enhancements
