@@ -183,6 +183,7 @@ class DependencyMapAnalyzer:
             # If staging_dir is not under golden_repos_root (e.g. in tests), use absolute
             pass1_file_rel = pass1_file
         pass1_file_abs = str(pass1_file)
+        staging_dir_abs = str(staging_dir)
 
         # Build synthesis prompt — output format + file instructions FIRST (primacy/recency)
         prompt = "# Domain Synthesis Task\n\n"
@@ -200,15 +201,25 @@ class DependencyMapAnalyzer:
         prompt += '"evidence": "Brief justification referencing actual files/patterns observed"}\n'
         prompt += "]\n\n"
         prompt += "### File Output Instructions\n\n"
-        prompt += "1. Write the JSON array to this file path:\n"
+        prompt += "**STEP 0 — MANDATORY CANARY TEST (do this FIRST, before any analysis):**\n"
+        prompt += "Before doing ANY analysis work, test that you can write files by running:\n"
+        prompt += "```\n"
+        prompt += f"echo 'canary' > {pass1_file_abs}.canary && rm {pass1_file_abs}.canary && echo 'CANARY_OK'\n"
+        prompt += "```\n"
+        prompt += "- If you see `CANARY_OK`: proceed with analysis and file writing normally.\n"
+        prompt += "- If the write FAILS for ANY reason: STOP IMMEDIATELY. Do NOT attempt analysis. "
+        prompt += "Output ONLY this exact line to stdout:\n"
+        prompt += f"  `CANARY_FAIL: Cannot write to {staging_dir_abs} — [reason: OS permission denied | Claude permission denied | other]`\n"
+        prompt += "  Then exit. Do NOT retry with other write methods. Do NOT proceed with analysis.\n\n"
+        prompt += "**STEP 1** — Write the JSON array to this file path:\n"
         prompt += f"   - Relative from your cwd: `./{pass1_file_rel}`\n"
         prompt += f"   - Absolute path: `{pass1_file_abs}`\n\n"
-        prompt += "2. Validate the file with:\n"
+        prompt += "**STEP 2** — Validate the file with:\n"
         prompt += "   ```\n"
         prompt += f"   python3 -m json.tool {pass1_file_abs}\n"
         prompt += "   ```\n\n"
-        prompt += "3. If validation fails, fix the JSON errors and re-validate until it passes.\n\n"
-        prompt += "4. PREFERRED: Write to the file above. FALLBACK: If file writing is blocked by permissions, output ONLY the raw JSON array to stdout (no explanation, no commentary).\n\n"
+        prompt += "**STEP 3** — If validation fails, fix the JSON errors and re-validate until it passes.\n\n"
+        prompt += "**FALLBACK**: If file writing worked in the canary test but fails later during the actual write, output ONLY the raw JSON array to stdout (no explanation, no commentary).\n\n"
 
         # ── REPOSITORY DESCRIPTIONS (after file instructions) ──
         prompt += "## Repository Descriptions\n\n"
@@ -306,6 +317,20 @@ class DependencyMapAnalyzer:
             self.pass_timeout
         )  # Pass 1 uses full timeout (heaviest phase: explores all repos)
         result = self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None, dangerously_skip_permissions=True)
+
+        # ── Canary failure fast-path ──
+        if "CANARY_FAIL" in result:
+            canary_msg = result.strip()
+            # Extract just the CANARY_FAIL line
+            for line in canary_msg.split("\n"):
+                if "CANARY_FAIL" in line:
+                    canary_msg = line.strip()
+                    break
+            raise RuntimeError(
+                f"Pass 1 file-write canary test failed: {canary_msg}. "
+                f"Claude CLI cannot write to {staging_dir_abs}. "
+                f"Check --dangerously-skip-permissions flag and OS file permissions."
+            )
 
         # ── File-based output: primary path (Story #349) ──
         logger.debug(f"Pass 1 raw output length: {len(result)} chars")

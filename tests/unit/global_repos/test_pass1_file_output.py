@@ -555,3 +555,151 @@ class TestPass1RetryLogic:
 
         assert call_count[0] == 2
         assert len(result) >= 1
+
+
+# ─── Canary file write test ───────────────────────────────────────────────────
+
+
+class TestPass1CanaryFileWriteTest:
+    """Tests for the STEP 0 mandatory canary file write test added to the Pass 1 prompt."""
+
+    def _capture_prompt(self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json):
+        """Helper: run pass 1 and capture the prompt sent to Claude CLI."""
+        captured_prompt = {}
+
+        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+            captured_prompt["value"] = prompt
+            return valid_domain_json
+
+        analyzer._invoke_claude_cli = fake_invoke
+        analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+        return captured_prompt["value"]
+
+    def test_prompt_contains_canary_test_command(
+        self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
+    ):
+        """Prompt must include the canary echo command to test file writing."""
+        prompt = self._capture_prompt(analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json)
+
+        assert "CANARY_OK" in prompt
+        assert ".canary" in prompt
+        assert "echo 'canary'" in prompt
+
+    def test_prompt_contains_canary_fail_instruction(
+        self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
+    ):
+        """Prompt must include the CANARY_FAIL output instruction."""
+        prompt = self._capture_prompt(analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json)
+
+        assert "CANARY_FAIL" in prompt
+        assert "STOP IMMEDIATELY" in prompt
+
+    def test_prompt_canary_includes_staging_dir_path(
+        self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
+    ):
+        """Prompt CANARY_FAIL line must include the staging directory path."""
+        prompt = self._capture_prompt(analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json)
+
+        staging_dir_abs = str(staging_dir)
+        assert staging_dir_abs in prompt
+
+    def test_canary_fail_in_output_raises_runtime_error(
+        self, analyzer, staging_dir, repo_descriptions, repo_list
+    ):
+        """When CANARY_FAIL appears in output, RuntimeError is raised immediately."""
+        canary_fail_output = (
+            "CANARY_FAIL: Cannot write to /some/dir — [reason: Claude permission denied]"
+        )
+
+        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+            return canary_fail_output
+
+        analyzer._invoke_claude_cli = fake_invoke
+
+        with pytest.raises(RuntimeError) as exc_info:
+            analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+
+        error_msg = str(exc_info.value)
+        assert "canary" in error_msg.lower()
+        assert "CANARY_FAIL" in error_msg
+
+    def test_canary_fail_error_message_includes_staging_dir(
+        self, analyzer, staging_dir, repo_descriptions, repo_list
+    ):
+        """RuntimeError from CANARY_FAIL must include the staging directory path."""
+        canary_fail_output = (
+            "CANARY_FAIL: Cannot write to /some/dir — [reason: OS permission denied]"
+        )
+
+        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+            return canary_fail_output
+
+        analyzer._invoke_claude_cli = fake_invoke
+
+        with pytest.raises(RuntimeError) as exc_info:
+            analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+
+        error_msg = str(exc_info.value)
+        staging_dir_abs = str(staging_dir)
+        assert staging_dir_abs in error_msg, (
+            f"RuntimeError must include staging dir path. Got: {error_msg}"
+        )
+
+    def test_canary_fail_does_not_retry(
+        self, analyzer, staging_dir, repo_descriptions, repo_list
+    ):
+        """CANARY_FAIL must raise immediately — no retry attempt."""
+        call_count = [0]
+
+        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+            call_count[0] += 1
+            return "CANARY_FAIL: Cannot write — permission denied"
+
+        analyzer._invoke_claude_cli = fake_invoke
+
+        with pytest.raises(RuntimeError):
+            analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+
+        assert call_count[0] == 1, (
+            f"CANARY_FAIL must not trigger retry. Expected 1 call, got {call_count[0]}"
+        )
+
+    def test_canary_fail_multiline_output_extracts_fail_line(
+        self, analyzer, staging_dir, repo_descriptions, repo_list
+    ):
+        """CANARY_FAIL detection works when the fail line is embedded in multiline output."""
+        multiline_output = (
+            "Running canary test...\n"
+            "echo 'canary' > /path/to/file.canary\n"
+            "CANARY_FAIL: Cannot write to /path — [reason: OS permission denied]\n"
+            "Exiting as instructed."
+        )
+
+        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+            return multiline_output
+
+        analyzer._invoke_claude_cli = fake_invoke
+
+        with pytest.raises(RuntimeError) as exc_info:
+            analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+
+        error_msg = str(exc_info.value)
+        # Should extract just the CANARY_FAIL line
+        assert "CANARY_FAIL" in error_msg
+
+    def test_normal_output_without_canary_fail_proceeds_normally(
+        self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
+    ):
+        """Output without CANARY_FAIL proceeds through normal file/stdout parsing."""
+        pass1_file = staging_dir / "pass1_domains.json"
+
+        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+            # Normal output with CANARY_OK in it (but no CANARY_FAIL)
+            pass1_file.write_text(valid_domain_json)
+            return "CANARY_OK\nFile written successfully."
+
+        analyzer._invoke_claude_cli = fake_invoke
+        result = analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+
+        assert len(result) == 1
+        assert result[0]["name"] == "authentication"
