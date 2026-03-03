@@ -17,23 +17,71 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_BOOL_OPS: frozenset = frozenset({"OR", "AND", "NOT"})
+
 
 def sanitize_fts_query(query_text: str) -> str:
-    """Strip all double-quote characters if count is odd (unmatched quotes).
+    """Sanitize an FTS query to prevent Tantivy parse errors.
 
-    Tantivy's parse_query() raises ValueError on unmatched double-quotes.
-    This function ensures queries with an odd number of double-quotes have
-    all double-quotes removed, preventing parse errors.
+    Tantivy's parse_query() raises errors for:
+      1. Unmatched double-quotes (odd count)
+      2. Bare boolean operators with no valid operands (e.g. bare "OR", trailing "term OR",
+         leading "OR term", adjacent "term OR AND other")
 
     Algorithm:
-      - 0 quotes: return unchanged (fast path)
-      - even count: return unchanged (valid phrase search like "hello world")
-      - odd count: strip all " characters
+      Phase 1 - Unmatched quotes:
+        - 0 quotes: skip (fast path)
+        - even count: unchanged (valid phrase search like "hello world")
+        - odd count: strip all " characters
+
+      Phase 2 - Bare boolean operators:
+        Only all-uppercase "OR", "AND", "NOT" are Tantivy operators.
+        Mixed-case variants ("Or", "aNd") are treated as literals — unchanged.
+        - OR and AND require a non-operator term on BOTH left and right sides.
+          If either side is missing or is another operator, lowercase the token.
+        - NOT requires only a non-operator term on the RIGHT side.
+          If the right side is missing or is another operator, lowercase the token.
+
+    Bug #353: By preventing the parse error at source, error bursts (e.g.
+    ~120 repeated errors across repositories) are eliminated implicitly.
     """
+    # Phase 1: handle unmatched quotes
     quote_count = query_text.count('"')
-    if quote_count == 0 or quote_count % 2 == 0:
+    if quote_count != 0 and quote_count % 2 != 0:
+        query_text = query_text.replace('"', "")
+
+    # Phase 2: handle bare boolean operators
+    tokens = query_text.split()
+    if not any(tok in _BOOL_OPS for tok in tokens):
         return query_text
-    return query_text.replace('"', "")
+
+    result = list(tokens)
+    for i, tok in enumerate(tokens):
+        if tok not in _BOOL_OPS:
+            continue
+
+        # Check immediate neighbors (not skipping over other operators).
+        # An operator immediately adjacent to another operator means invalid usage.
+        immediate_left = tokens[i - 1] if i > 0 else None
+        immediate_right = tokens[i + 1] if i < len(tokens) - 1 else None
+
+        # A valid left operand: exists AND is not itself a boolean operator
+        has_left = immediate_left is not None and immediate_left not in _BOOL_OPS
+        # A valid right operand: exists AND is not itself a boolean operator
+        has_right = immediate_right is not None and immediate_right not in _BOOL_OPS
+
+        # Determine validity:
+        # NOT is valid when it has a non-operator term on the right.
+        # OR and AND are valid when they have non-operator terms on BOTH sides.
+        if tok == "NOT":
+            is_valid = has_right
+        else:
+            is_valid = has_left and has_right
+
+        if not is_valid:
+            result[i] = tok.lower()
+
+    return " ".join(result) if tokens else query_text
 
 
 class TantivyIndexManager:
@@ -446,6 +494,12 @@ class TantivyIndexManager:
             if is_multi_word:
                 # Multi-word exact query: Require ALL terms to exist (AND semantics)
                 # Example: "gloc pattern" returns 0 results if "gloc" doesn't exist
+                #
+                # NOTE: Per-term sanitize_fts_query() call means boolean operators (OR/AND)
+                # between terms are lowercased to literals. This is a pre-existing design
+                # choice: the multi-word path uses AND semantics (all terms must match).
+                # Users wanting OR semantics should use Tantivy's native query syntax in
+                # single-term mode. See Bug #353.
                 term_queries = [
                     self._index.parse_query(
                         sanitize_fts_query(term), [search_field, "identifiers"]

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.87
+
+### Bug Fixes
+
+- fix: FTS bare boolean operator crash (Bug #353). Tantivy parse_query() raises "Syntax Error: OR" when queries contain bare boolean operators (OR, AND, NOT) without proper operands. Extended sanitize_fts_query() with Phase 2 that detects bare/invalid boolean operators and lowercases them so Tantivy treats them as literal search terms. Handles: bare operators alone ("OR"), trailing ("term OR"), leading ("OR term"), and adjacent ("term OR AND other"). Valid boolean queries ("term1 OR term2") are preserved unchanged. Moved _BOOL_OPS to module-level frozenset for performance.
+
 ## v9.3.86
 
 ### Bug Fixes

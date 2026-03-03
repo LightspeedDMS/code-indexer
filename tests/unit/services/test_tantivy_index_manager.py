@@ -467,6 +467,72 @@ class TestSanitizeFtsQuery:
         assert sanitize_fts_query('"foo" "bar') == "foo bar"
         assert sanitize_fts_query('a "b" "c') == "a b c"
 
+    def test_sanitize_fts_query_bare_or_operator(self):
+        """Bare OR alone is lowercased so Tantivy treats it as literal text."""
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        assert sanitize_fts_query("OR") == "or"
+
+    def test_sanitize_fts_query_bare_and_operator(self):
+        """Bare AND alone is lowercased so Tantivy treats it as literal text."""
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        assert sanitize_fts_query("AND") == "and"
+
+    def test_sanitize_fts_query_bare_not_operator(self):
+        """Bare NOT alone is lowercased so Tantivy treats it as literal text."""
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        assert sanitize_fts_query("NOT") == "not"
+
+    def test_sanitize_fts_query_trailing_boolean(self):
+        """Trailing OR/AND without right operand is lowercased to prevent syntax error."""
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        assert sanitize_fts_query("term OR") == "term or"
+        assert sanitize_fts_query("term AND") == "term and"
+
+    def test_sanitize_fts_query_leading_boolean(self):
+        """Leading OR/AND without left operand is lowercased to prevent syntax error."""
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        assert sanitize_fts_query("OR term") == "or term"
+        assert sanitize_fts_query("AND term") == "and term"
+
+    def test_sanitize_fts_query_adjacent_booleans(self):
+        """Adjacent boolean operators are all lowercased to prevent syntax error."""
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        assert sanitize_fts_query("term OR AND other") == "term or and other"
+
+    def test_sanitize_fts_query_valid_boolean_preserved(self):
+        """Valid boolean queries with operands on both sides are left unchanged."""
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        # These are valid Tantivy queries — must not be modified
+        assert sanitize_fts_query("term1 OR term2") == "term1 OR term2"
+        assert sanitize_fts_query("term1 AND term2") == "term1 AND term2"
+        assert sanitize_fts_query("NOT term1") == "NOT term1"
+
+    def test_sanitize_fts_query_mixed_case_boolean(self):
+        """Mixed-case operators like 'Or', 'aNd' are not Tantivy operators — left unchanged."""
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        # Tantivy only treats all-uppercase OR/AND/NOT as boolean operators
+        assert sanitize_fts_query("Or term") == "Or term"
+        assert sanitize_fts_query("aNd term") == "aNd term"
+        assert sanitize_fts_query("term oR other") == "term oR other"
+
+    def test_sanitize_fts_query_boolean_with_quotes(self):
+        """Combined: odd quote + bare boolean operator — both bugs fixed together."""
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        # Odd quote strips all quotes, then bare OR is lowercased
+        result = sanitize_fts_query('"term OR')
+        # After quote stripping: "term OR" → all quotes removed → "term OR"
+        # Then OR is trailing (no right operand) → "term or"
+        assert result == "term or"
+
 
 class TestBuildSearchQuerySanitization:
     """Integration tests verifying sanitize_fts_query is applied in _build_search_query."""
@@ -582,6 +648,51 @@ class TestBuildSearchQuerySanitization:
             # Balanced quotes: valid phrase search, must not be stripped
             result = manager._build_search_query(
                 query_text='"authenticate user"',
+                search_field="content",
+                edit_distance=0,
+                tantivy=tantivy,
+                TantivyQuery=TantivyQuery,
+            )
+            assert result is not None
+
+    def test_build_search_query_sanitizes_bare_boolean_operator(self):
+        """Bare boolean operator (just 'OR') must not crash _build_search_query.
+
+        Without sanitization, Tantivy raises 'Syntax Error: OR' when
+        parse_query() receives a bare boolean operator with no operands.
+        With sanitization it should succeed by treating 'or' as a literal term.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_manager(tmpdir)
+
+            import tantivy
+            from tantivy import Query as TantivyQuery
+
+            # Bare operator — would raise Tantivy SyntaxError without sanitization
+            result = manager._build_search_query(
+                query_text="OR",
+                search_field="content",
+                edit_distance=0,
+                tantivy=tantivy,
+                TantivyQuery=TantivyQuery,
+            )
+            assert result is not None
+
+    def test_build_search_query_sanitizes_trailing_boolean(self):
+        """Trailing boolean operator ('term OR') must not crash _build_search_query.
+
+        Without sanitization, Tantivy raises 'Syntax Error: OR' for a trailing
+        operator with no right operand. With sanitization it should succeed.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_manager(tmpdir)
+
+            import tantivy
+            from tantivy import Query as TantivyQuery
+
+            # Trailing operator — would raise Tantivy SyntaxError without sanitization
+            result = manager._build_search_query(
+                query_text="authenticate OR",
                 search_field="content",
                 edit_distance=0,
                 tantivy=tantivy,
