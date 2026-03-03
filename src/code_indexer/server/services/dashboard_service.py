@@ -605,9 +605,9 @@ class DashboardService:
             if folder.is_dir() and folder.name.startswith("langfuse_"):
                 user_folders += 1
 
-                # Count JSON files and sizes
+                # Count JSON files and sizes (exclude CIDX index files)
                 for trace_file in folder.glob("**/*.json"):
-                    if trace_file.is_file():
+                    if trace_file.is_file() and ".code-indexer" not in trace_file.parts:
                         total_traces += 1
                         total_size_bytes += trace_file.stat().st_size
 

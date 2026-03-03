@@ -264,6 +264,33 @@ class TestFolderStatistics:
             # Size should be > 0 (small files are rounded to 0.0, check >= 0)
             assert stats["total_size_mb"] >= 0.0
 
+    def test_code_indexer_files_excluded_from_count(self):
+        """JSON files under .code-indexer/ dirs must not count as traces."""
+        from code_indexer.server.services.dashboard_service import DashboardService
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server_dir = Path(tmpdir)
+            golden_repos = server_dir / "data" / "golden-repos"
+            golden_repos.mkdir(parents=True)
+
+            user_folder = golden_repos / "langfuse_user1"
+            user_folder.mkdir()
+
+            # Real trace files
+            (user_folder / "trace1.json").write_text('{"id": "1"}')
+            (user_folder / "trace2.json").write_text('{"id": "2"}')
+
+            # CIDX index files — must NOT be counted
+            cidx_dir = user_folder / ".code-indexer" / "index" / "langfuse_traces"
+            cidx_dir.mkdir(parents=True)
+            (cidx_dir / "vector_0001.json").write_text('{"vec": [0.1, 0.2]}')
+            (cidx_dir / "vector_0002.json").write_text('{"vec": [0.3, 0.4]}')
+
+            service = DashboardService()
+            stats = service._get_langfuse_folder_stats(server_dir)
+            assert stats["user_folders"] == 1
+            assert stats["total_traces"] == 2  # only real traces, not CIDX files
+
     def test_calculate_storage_size(self):
         """Should calculate total storage size in MB."""
         from code_indexer.server.services.dashboard_service import DashboardService
