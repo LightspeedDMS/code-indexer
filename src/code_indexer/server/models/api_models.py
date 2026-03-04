@@ -89,6 +89,18 @@ class SystemHealthInfo(BaseModel):
     net_tx_kb_s: float = Field(
         default=0.0, description="Network transmit speed in KB/s (interval-averaged)"
     )
+    process_rss_mb: float = Field(
+        default=0.0, description="CIDX server process RSS in MB"
+    )
+    mmap_total_mb: float = Field(
+        default=0.0, description="Total memory-mapped file size in MB"
+    )
+    swap_used_mb: float = Field(
+        default=0.0, description="Swap space used in MB"
+    )
+    swap_total_mb: float = Field(
+        default=0.0, description="Total swap space in MB"
+    )
     volumes: List["VolumeInfo"] = Field(
         default_factory=list, description="List of mounted non-removable volumes"
     )

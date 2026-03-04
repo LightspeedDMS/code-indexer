@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.94
+
+### Enhancements
+
+- feat: Dashboard memory metrics - CIDX RSS, Mmap Files, and Swap (Story #358). Added three new metrics to the System Resources card on the web UI dashboard below the existing Memory bar: CIDX RSS (process resident set size in MB), Mmap Files (total file-backed memory-mapped size in MB from HNSW indexes and SQLite DBs), and Swap (used/total in MB). Metrics are collected via psutil with graceful fallback to 0.0 on AccessDenied. Displayed as plain text MB values with 2-second HTMX auto-refresh.
+
 ## v9.3.93
 
 ### Bug Fixes

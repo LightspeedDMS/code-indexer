@@ -88,11 +88,13 @@ class DepMapRepairExecutor:
         index_regenerator: IndexRegenerator,
         domain_analyzer: Optional[Callable] = None,
         journal_callback: Optional[Callable[[str], None]] = None,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> None:
         self._health_detector = health_detector
         self._index_regenerator = index_regenerator
         self._domain_analyzer = domain_analyzer
         self._journal_callback = journal_callback
+        self._progress_callback = progress_callback
 
     def execute(self, output_dir: Path, health_report: HealthReport) -> RepairResult:
         """
@@ -110,6 +112,7 @@ class DepMapRepairExecutor:
         output_dir = Path(output_dir)
 
         if health_report.is_healthy:
+            self._report_progress(100, "Nothing to repair")
             return RepairResult(
                 status="nothing_to_repair",
                 final_health_status="healthy",
@@ -127,18 +130,23 @@ class DepMapRepairExecutor:
         )
 
         # Phase 1: Re-analyze broken domains (EXPENSIVE -- Claude CLI)
+        self._report_progress(10, "Phase 1: Re-analyzing broken domains")
         self._run_phase1(output_dir, health_report, fixed, errors)
 
         # Phase 2: Remove orphan files (FREE)
+        self._report_progress(65, "Phase 2: Removing orphan files")
         self._run_phase2(output_dir, health_report, fixed, errors)
 
         # Phase 3: Reconcile _domains.json (FREE)
+        self._report_progress(70, "Phase 3: Reconciling domains.json")
         self._run_phase3(output_dir, health_report, fixed, errors)
 
         # Phase 4: Regenerate _index.md (FREE -- programmatic)
+        self._report_progress(80, "Phase 4: Regenerating index")
         self._run_phase4(output_dir, health_report, fixed, errors)
 
         # Phase 5: Re-validate
+        self._report_progress(90, "Phase 5: Validating repair")
         new_report = self._health_detector.detect(output_dir)
         anomalies_after = len(new_report.anomalies)
 
@@ -146,6 +154,8 @@ class DepMapRepairExecutor:
             f"Repair complete: {len(fixed)} fixed, {len(errors)} errors, "
             f"final status={new_report.status}"
         )
+
+        self._report_progress(100, "Repair complete")
 
         # Determine result status
         if len(errors) == 0 and new_report.is_healthy:
@@ -364,7 +374,16 @@ class DepMapRepairExecutor:
 
     def _load_domains_json(self, output_dir: Path) -> List[Dict[str, Any]]:
         """Load _domains.json, returning empty list if missing or invalid."""
-        return _load_domains_json_util(output_dir)
+        result: List[Dict[str, Any]] = _load_domains_json_util(output_dir)
+        return result
+
+    def _report_progress(self, progress: int, info: str = "") -> None:
+        """Report progress milestone via progress_callback (if set)."""
+        if self._progress_callback is not None:
+            try:
+                self._progress_callback(progress, info)
+            except Exception as e:
+                logger.warning("progress_callback raised: %s", e)
 
     def _log(self, message: str) -> None:
         """Log a message via journal_callback (if set) and Python logger."""

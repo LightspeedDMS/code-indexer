@@ -7,6 +7,8 @@ All operations use real system checks, database connections, and service monitor
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 
+import os
+
 import psutil
 import time
 import logging
@@ -51,6 +53,9 @@ CPU_SUSTAINED_THRESHOLD = 95.0  # CPU % threshold for sustained high load detect
 MIN_CPU_READINGS_FOR_DEGRADED = 3  # Minimum readings needed for 30s assessment
 MIN_CPU_READINGS_FOR_UNHEALTHY = 6  # Minimum readings needed for 60s assessment
 MAX_CPU_HISTORY_SIZE = 120  # Safety limit to prevent unbounded growth
+
+# Bytes-to-megabytes conversion constant (Story #358)
+BYTES_PER_MB = 1024 * 1024
 
 
 def _load_thresholds_from_config() -> None:
@@ -388,6 +393,22 @@ class HealthCheckService:
         # Get all mounted volumes
         volumes = self._get_mounted_volumes()
 
+        # Process-specific metrics (Story #358)
+        process = psutil.Process(os.getpid())
+        process_rss_mb = process.memory_info().rss / BYTES_PER_MB
+
+        swap = psutil.swap_memory()
+        swap_used_mb = swap.used / BYTES_PER_MB
+        swap_total_mb = swap.total / BYTES_PER_MB
+
+        mmap_total_mb = 0.0
+        try:
+            maps = process.memory_maps(grouped=True)
+            mmap_total_mb = sum(m.size for m in maps if m.path.startswith('/')) / BYTES_PER_MB
+        except (psutil.AccessDenied, psutil.Error, OSError) as e:
+            logger.warning(f"Failed to collect memory map metrics: {e}")
+            mmap_total_mb = 0.0
+
         return SystemHealthInfo(
             memory_usage_percent=memory_percent,
             cpu_usage_percent=cpu_percent,
@@ -401,6 +422,10 @@ class HealthCheckService:
             net_rx_kb_s=net_rx_kb_s,
             net_tx_kb_s=net_tx_kb_s,
             volumes=volumes,
+            process_rss_mb=process_rss_mb,
+            mmap_total_mb=mmap_total_mb,
+            swap_used_mb=swap_used_mb,
+            swap_total_mb=swap_total_mb,
         )
 
     def _collect_database_failures(

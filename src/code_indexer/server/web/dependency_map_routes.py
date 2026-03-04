@@ -178,9 +178,13 @@ def _get_progress_from_service(dep_map_service) -> tuple:
         if job_tracker is None:
             return 0, ""
         active_jobs = job_tracker.get_active_jobs()
-        # Find the dependency map job (full or delta)
+        # Find the dependency map job (full, delta, or repair)
         for job in active_jobs:
-            if job.operation_type in ("dependency_map_full", "dependency_map_delta"):
+            if job.operation_type in (
+                "dependency_map_full",
+                "dependency_map_delta",
+                "dependency_map_repair",
+            ):
                 return job.progress or 0, job.progress_info or ""
     except Exception as e:
         logger.debug("Could not get progress from job tracker: %s", e)
@@ -357,6 +361,7 @@ def depmap_job_status_partial(request: Request):
                 job_status["content_anomalies"] = [
                     a.to_dict() for a in content_report.anomalies
                 ]
+                job_status["repairable_count"] = content_report.repairable_count
         except Exception as e:
             logger.debug("Content health check failed in partial: %s", e)
 
@@ -807,15 +812,171 @@ def _build_domain_analyzer(dep_map_service, output_dir: Path):
     return analyzer
 
 
+def _build_repair_executor(dep_map_service, output_dir: Path, activity_journal):
+    """
+    Build a DepMapRepairExecutor wired to the service's journal and job tracker (Story #352).
+
+    Constructs the executor with:
+      - Real DepMapHealthDetector and IndexRegenerator
+      - Domain analyzer closure that uses the initialized journal_path (AC4)
+      - journal_callback wired to activity_journal.log
+      - progress_callback that updates dep_map_service._job_tracker progress
+
+    Args:
+        dep_map_service: Live DependencyMapService instance.
+        output_dir: Dependency map output directory.
+        activity_journal: ActivityJournalService instance (already initialized).
+
+    Returns:
+        Configured DepMapRepairExecutor instance.
+    """
+    from ..services.dep_map_health_detector import DepMapHealthDetector
+    from ..services.dep_map_index_regenerator import IndexRegenerator
+    from ..services.dep_map_repair_executor import DepMapRepairExecutor
+
+    detector = DepMapHealthDetector()
+    regenerator = IndexRegenerator()
+    domain_analyzer = _build_domain_analyzer(dep_map_service, output_dir)
+
+    journal_cb = getattr(activity_journal, "log", None)
+
+    # progress_callback: forward milestone to job tracker's active repair job
+    job_tracker = getattr(dep_map_service, "_job_tracker", None)
+
+    def _progress_cb(progress: int, info: str = "") -> None:
+        if job_tracker is None:
+            return
+        try:
+            active_jobs = job_tracker.get_active_jobs()
+            for job in active_jobs:
+                if job.operation_type == "dependency_map_repair":
+                    job_tracker.update_status(job.job_id, progress=progress, progress_info=info)
+                    break
+        except Exception as e:
+            logger.debug("progress_cb failed to update job tracker: %s", e)
+
+    return DepMapRepairExecutor(
+        health_detector=detector,
+        index_regenerator=regenerator,
+        domain_analyzer=domain_analyzer,
+        journal_callback=journal_cb,
+        progress_callback=_progress_cb,
+    )
+
+
+def _run_repair_with_feedback(
+    output_dir: Path,
+    tracking_backend,
+    job_tracker,
+    activity_journal,
+    dep_map_service=None,
+) -> None:
+    """
+    Execute repair with full job feedback (Story #352).
+
+    Implements AC1-AC5:
+      AC1: tracking_backend.update_tracking(status=...) for running/completed/failed
+      AC2: activity_journal.init() called with repair-specific journal directory
+      AC3: job_tracker.register_job() with operation_type='dependency_map_repair'
+           and progress milestones via progress_callback
+      AC4: journal_path propagated to domain analyzer (via _build_domain_analyzer)
+      AC5: tracking_backend update and journal.finalize() in finally block
+
+    Args:
+        output_dir: Dependency map output directory.
+        tracking_backend: DependencyMapTrackingBackend instance.
+        job_tracker: JobTracker instance.
+        activity_journal: ActivityJournalService instance.
+        dep_map_service: Optional DependencyMapService for domain analyzer wiring.
+    """
+    import uuid as _uuid
+
+    # AC2: Initialize journal in a repair-specific directory
+    journal_dir = Path.home() / ".tmp" / "depmap-repair-journal"
+    if activity_journal is not None:
+        try:
+            journal_dir.mkdir(parents=True, exist_ok=True)
+            activity_journal.init(journal_dir)
+        except Exception as e:
+            logger.warning("Failed to initialize repair activity journal: %s", e)
+
+    # AC3: Register job in job tracker
+    job_id = str(_uuid.uuid4())
+    if job_tracker is not None:
+        try:
+            job_tracker.register_job(
+                job_id,
+                "dependency_map_repair",
+                username="system",
+            )
+        except Exception as e:
+            logger.warning("Failed to register repair job in job tracker: %s", e)
+
+    # AC1: Mark tracking backend as running
+    if tracking_backend is not None:
+        try:
+            tracking_backend.update_tracking(status="running")
+        except Exception as e:
+            logger.warning("Failed to update tracking backend to running: %s", e)
+
+    success = False
+    try:
+        # Build executor (AC4: journal_path propagated via _build_domain_analyzer)
+        executor = _build_repair_executor(
+            dep_map_service, output_dir, activity_journal
+        )
+
+        from ..services.dep_map_health_detector import DepMapHealthDetector
+
+        detector = DepMapHealthDetector()
+        known_repos = _get_known_repo_names()
+        health_report = detector.detect(output_dir, known_repos=known_repos)
+        result = executor.execute(output_dir, health_report)
+        logger.info("Repair completed: %s", result.status)
+        success = True
+    except Exception as e:
+        logger.error("Repair with feedback failed: %s", e)
+    finally:
+        # AC1 + AC5: Update tracking and finalize journal regardless of outcome
+        terminal_status = "completed" if success else "failed"
+        if tracking_backend is not None:
+            try:
+                tracking_backend.update_tracking(status=terminal_status)
+            except Exception as e:
+                logger.warning(
+                    "Failed to update tracking backend to %s: %s", terminal_status, e
+                )
+
+        if job_tracker is not None:
+            try:
+                if success:
+                    job_tracker.complete_job(job_id)
+                else:
+                    job_tracker.fail_job(job_id, error="Repair failed")
+            except Exception as e:
+                logger.warning(
+                    "Failed to update job tracker on %s: %s", terminal_status, e
+                )
+
+        # AC5: Finalize journal
+        if activity_journal is not None:
+            try:
+                activity_journal.clear()
+            except Exception as e:
+                logger.warning("Failed to finalize repair activity journal: %s", e)
+
+
 @dependency_map_router.post("/dependency-map/repair")
 def trigger_dependency_map_repair(request: Request):
     """
-    Trigger dependency map repair (Story #342).
+    Trigger dependency map repair (Story #342, #352).
 
     POST /admin/dependency-map/repair
 
     Admin-only. Runs health detection, then executes repair for detected anomalies.
     Repair runs in background thread. Returns immediate JSON response.
+    Story #352: Provides same job feedback as Full Analysis and Delta Refresh
+    (tracking backend status, activity journal, job tracker progress milestones).
     """
     session = _require_admin_session(request)
     if not session:
@@ -843,6 +1004,13 @@ def trigger_dependency_map_repair(request: Request):
             status_code=404,
         )
 
+    # Resolve tracking backend and job tracker from dep_map_service
+    tracking_backend = getattr(dep_map_service, "_tracking_backend", None)
+    job_tracker = getattr(dep_map_service, "_job_tracker", None)
+    activity_journal = getattr(dep_map_service, "_activity_journal", None) or getattr(
+        dep_map_service, "activity_journal", None
+    )
+
     def _run_repair():
         # H1 fix (Story #342): acquire lock before doing any work to prevent
         # TOCTOU race between is_available() pre-flight check and repair start.
@@ -850,32 +1018,13 @@ def trigger_dependency_map_repair(request: Request):
             logger.warning("Repair aborted: analysis lock unavailable")
             return
         try:
-            from ..services.dep_map_health_detector import DepMapHealthDetector
-            from ..services.dep_map_index_regenerator import IndexRegenerator
-            from ..services.dep_map_repair_executor import DepMapRepairExecutor
-
-            detector = DepMapHealthDetector()
-            regenerator = IndexRegenerator()
-            domain_analyzer = _build_domain_analyzer(dep_map_service, output_dir)
-
-            journal = getattr(dep_map_service, "_activity_journal", None) or getattr(
-                dep_map_service, "activity_journal", None
+            _run_repair_with_feedback(
+                output_dir=output_dir,
+                tracking_backend=tracking_backend,
+                job_tracker=job_tracker,
+                activity_journal=activity_journal,
+                dep_map_service=dep_map_service,
             )
-            journal_cb = journal.log if journal else None
-
-            executor = DepMapRepairExecutor(
-                health_detector=detector,
-                index_regenerator=regenerator,
-                domain_analyzer=domain_analyzer,
-                journal_callback=journal_cb,
-            )
-
-            known_repos = _get_known_repo_names()
-            health_report = detector.detect(output_dir, known_repos=known_repos)
-            result = executor.execute(output_dir, health_report)
-            logger.info("Repair completed: %s", result.status)
-        except Exception as e:
-            logger.error("Background repair failed: %s", e)
         finally:
             dep_map_service._lock.release()
 

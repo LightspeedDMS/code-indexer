@@ -13,6 +13,7 @@ Used by:
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from threading import Lock
@@ -96,6 +97,22 @@ class SystemMetricsCollector:
         disk_io = psutil.disk_io_counters()
         net_io = psutil.net_io_counters()
 
+        # Process-specific metrics (Story #358)
+        process = psutil.Process(os.getpid())
+        process_rss_mb = process.memory_info().rss / (1024 * 1024)
+
+        # Swap
+        swap = psutil.swap_memory()
+
+        # Mmap file-backed total
+        mmap_total_mb = 0.0
+        try:
+            maps = process.memory_maps(grouped=True)
+            mmap_total_mb = sum(m.size for m in maps if m.path.startswith("/")) / (1024 * 1024)
+        except (psutil.AccessDenied, psutil.Error, OSError) as e:
+            logger.warning("Failed to collect mmap metrics (background): %s", e)
+            mmap_total_mb = 0.0
+
         new_metrics = {
             "cpu_usage": psutil.cpu_percent(interval=None),
             "memory": {
@@ -111,6 +128,10 @@ class SystemMetricsCollector:
                 "receive_bytes": net_io.bytes_recv if net_io else 0,
                 "transmit_bytes": net_io.bytes_sent if net_io else 0,
             },
+            "process_rss_mb": process_rss_mb,
+            "mmap_total_mb": mmap_total_mb,
+            "swap_used_mb": swap.used / (1024 * 1024),
+            "swap_total_mb": swap.total / (1024 * 1024),
         }
 
         # Update cached metrics under lock (fast dict swap)
@@ -131,6 +152,20 @@ class SystemMetricsCollector:
         disk_io = psutil.disk_io_counters()
         net_io = psutil.net_io_counters()
 
+        # Process-specific metrics (Story #358)
+        process = psutil.Process(os.getpid())
+        process_rss_mb = process.memory_info().rss / (1024 * 1024)
+
+        swap = psutil.swap_memory()
+
+        mmap_total_mb = 0.0
+        try:
+            maps = process.memory_maps(grouped=True)
+            mmap_total_mb = sum(m.size for m in maps if m.path.startswith("/")) / (1024 * 1024)
+        except (psutil.AccessDenied, psutil.Error, OSError) as e:
+            logger.warning("Failed to collect mmap metrics (legacy): %s", e)
+            mmap_total_mb = 0.0
+
         self._cached_metrics = {
             "cpu_usage": psutil.cpu_percent(interval=None),
             "memory": {
@@ -146,6 +181,10 @@ class SystemMetricsCollector:
                 "receive_bytes": net_io.bytes_recv if net_io else 0,
                 "transmit_bytes": net_io.bytes_sent if net_io else 0,
             },
+            "process_rss_mb": process_rss_mb,
+            "mmap_total_mb": mmap_total_mb,
+            "swap_used_mb": swap.used / (1024 * 1024),
+            "swap_total_mb": swap.total / (1024 * 1024),
         }
         self._last_cache_time = time.time()
 
@@ -226,6 +265,33 @@ class SystemMetricsCollector:
                 self._refresh_cache()
             assert self._cached_metrics is not None
             return dict(self._cached_metrics["network"])
+
+    def get_process_rss(self) -> float:
+        """Get CIDX server process RSS in MB."""
+        with self._cache_lock:
+            if self._cached_metrics is None:
+                self._refresh_cache()
+            assert self._cached_metrics is not None
+            return float(self._cached_metrics.get("process_rss_mb", 0.0))
+
+    def get_mmap_usage(self) -> float:
+        """Get total memory-mapped file size in MB."""
+        with self._cache_lock:
+            if self._cached_metrics is None:
+                self._refresh_cache()
+            assert self._cached_metrics is not None
+            return float(self._cached_metrics.get("mmap_total_mb", 0.0))
+
+    def get_swap_usage(self) -> dict:
+        """Get swap usage metrics."""
+        with self._cache_lock:
+            if self._cached_metrics is None:
+                self._refresh_cache()
+            assert self._cached_metrics is not None
+            return {
+                "used_mb": float(self._cached_metrics.get("swap_used_mb", 0.0)),
+                "total_mb": float(self._cached_metrics.get("swap_total_mb", 0.0)),
+            }
 
     def get_all_metrics(self) -> Dict[str, Any]:
         """

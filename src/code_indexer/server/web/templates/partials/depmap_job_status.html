@@ -121,7 +121,8 @@
             </div>
             <div id="depmap-trigger-status" style="font-size: 0.9rem;"></div>
             <!-- Story #342: Conditional Repair Button -->
-            <div id="depmap-repair-container" style="display: none;">
+            {% set show_repair = job_status.repairable_count is defined and job_status.repairable_count > 0 %}
+            <div id="depmap-repair-container" style="{% if not show_repair %}display: none;{% endif %}">
                 <button class="contrast"
                         id="depmap-repair-btn"
                         hx-post="/admin/dependency-map/repair"
@@ -129,7 +130,11 @@
                         style="width: 100%; font-size: 0.85rem; padding: 0.4rem 0.6rem; margin-top: 0.25rem;">
                     Repair
                 </button>
-                <small id="depmap-repair-summary" style="display: block; margin-top: 0.25rem; color: var(--pico-color-amber-550);"></small>
+                <small id="depmap-repair-summary" style="display: block; margin-top: 0.25rem; color: var(--pico-color-amber-550);">
+                    {% if show_repair %}
+                        {{ job_status.repairable_count }} repairable anomal{{ 'y' if job_status.repairable_count == 1 else 'ies' }} detected
+                    {% endif %}
+                </small>
             </div>
         </div>
     </article>
@@ -185,38 +190,9 @@
 </article>
 {% endif %}
 
-<!-- Story #342: Health check and repair button visibility -->
+<!-- Story #342: Repair button click response handler -->
 <script>
 (function() {
-    fetch('/admin/dependency-map/health', { credentials: 'same-origin' })
-        .then(function(response) {
-            if (response.status === 401) {
-                window.location.href = '/login';
-                return null;
-            }
-            return response.ok ? response.json() : null;
-        })
-        .then(function(data) {
-            if (!data) return;
-
-            var container = document.getElementById('depmap-repair-container');
-            var summary = document.getElementById('depmap-repair-summary');
-
-            if (data.status !== 'healthy' && data.repairable_count > 0) {
-                if (container) container.style.display = 'block';
-                if (summary) {
-                    summary.textContent = data.repairable_count + ' repairable anomal' +
-                        (data.repairable_count === 1 ? 'y' : 'ies') + ' detected';
-                }
-            } else {
-                if (container) container.style.display = 'none';
-                if (summary) summary.textContent = '';
-            }
-        })
-        .catch(function() {
-            // Silently fail - repair UI stays hidden
-        });
-
     if (!window._depmapRepairListenerAdded) {
         window._depmapRepairListenerAdded = true;
         document.body.addEventListener('htmx:afterRequest', function(evt) {

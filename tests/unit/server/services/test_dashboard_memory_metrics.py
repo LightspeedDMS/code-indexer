@@ -1,0 +1,259 @@
+"""
+Tests for Dashboard Memory Metrics - RSS, Mmap Files, and Swap (Story #358).
+
+Tests verify:
+- SystemHealthInfo model accepts new fields (process_rss_mb, mmap_total_mb,
+  swap_used_mb, swap_total_mb)
+- system_metrics_collector collects process RSS, mmap total, swap metrics
+- mmap collection gracefully defaults to 0.0 on AccessDenied
+- health_service._get_system_info() returns new fields
+"""
+
+from __future__ import annotations
+
+import os
+import unittest
+from unittest.mock import MagicMock, patch
+
+import psutil
+
+from code_indexer.server.models.api_models import SystemHealthInfo
+from code_indexer.server.services.system_metrics_collector import (
+    SystemMetricsCollector,
+    reset_system_metrics_collector,
+)
+
+
+def _make_system_health_info(**kwargs: object) -> SystemHealthInfo:
+    """Helper to create SystemHealthInfo with required fields pre-filled."""
+    defaults = {
+        "memory_usage_percent": 50.0,
+        "cpu_usage_percent": 25.0,
+        "active_jobs": 0,
+        "disk_free_space_gb": 100.0,
+    }
+    defaults.update(kwargs)  # type: ignore[arg-type]
+    return SystemHealthInfo(**defaults)  # type: ignore[arg-type]
+
+
+class TestSystemHealthInfoMemoryFields(unittest.TestCase):
+    """Test that SystemHealthInfo model accepts and stores new memory fields."""
+
+    def test_system_health_info_has_process_rss_mb_field(self) -> None:
+        """SystemHealthInfo must have process_rss_mb field with default 0.0."""
+        info = _make_system_health_info()
+        self.assertEqual(info.process_rss_mb, 0.0)
+
+    def test_system_health_info_has_mmap_total_mb_field(self) -> None:
+        """SystemHealthInfo must have mmap_total_mb field with default 0.0."""
+        info = _make_system_health_info()
+        self.assertEqual(info.mmap_total_mb, 0.0)
+
+    def test_system_health_info_has_swap_used_mb_field(self) -> None:
+        """SystemHealthInfo must have swap_used_mb field with default 0.0."""
+        info = _make_system_health_info()
+        self.assertEqual(info.swap_used_mb, 0.0)
+
+    def test_system_health_info_has_swap_total_mb_field(self) -> None:
+        """SystemHealthInfo must have swap_total_mb field with default 0.0."""
+        info = _make_system_health_info()
+        self.assertEqual(info.swap_total_mb, 0.0)
+
+    def test_system_health_info_accepts_nonzero_memory_fields(self) -> None:
+        """SystemHealthInfo must accept non-zero values for all new memory fields."""
+        info = _make_system_health_info(
+            process_rss_mb=512.5,
+            mmap_total_mb=128.3,
+            swap_used_mb=1024.0,
+            swap_total_mb=2048.0,
+        )
+        self.assertAlmostEqual(info.process_rss_mb, 512.5)
+        self.assertAlmostEqual(info.mmap_total_mb, 128.3)
+        self.assertAlmostEqual(info.swap_used_mb, 1024.0)
+        self.assertAlmostEqual(info.swap_total_mb, 2048.0)
+
+    def test_system_health_info_memory_fields_are_floats(self) -> None:
+        """All new memory fields must be float type."""
+        info = _make_system_health_info(
+            process_rss_mb=256,
+            mmap_total_mb=64,
+            swap_used_mb=512,
+            swap_total_mb=1024,
+        )
+        self.assertIsInstance(info.process_rss_mb, float)
+        self.assertIsInstance(info.mmap_total_mb, float)
+        self.assertIsInstance(info.swap_used_mb, float)
+        self.assertIsInstance(info.swap_total_mb, float)
+
+
+class TestSystemMetricsCollectorMemoryMetrics(unittest.TestCase):
+    """Test that SystemMetricsCollector collects the new memory metrics."""
+
+    def setUp(self) -> None:
+        reset_system_metrics_collector()
+
+    def tearDown(self) -> None:
+        reset_system_metrics_collector()
+
+    def test_collector_has_get_process_rss_method(self) -> None:
+        """SystemMetricsCollector must have get_process_rss() method."""
+        collector = SystemMetricsCollector(cache_ttl_seconds=60.0)
+        self.assertTrue(hasattr(collector, "get_process_rss"))
+        self.assertTrue(callable(collector.get_process_rss))
+
+    def test_collector_has_get_mmap_usage_method(self) -> None:
+        """SystemMetricsCollector must have get_mmap_usage() method."""
+        collector = SystemMetricsCollector(cache_ttl_seconds=60.0)
+        self.assertTrue(hasattr(collector, "get_mmap_usage"))
+        self.assertTrue(callable(collector.get_mmap_usage))
+
+    def test_collector_has_get_swap_usage_method(self) -> None:
+        """SystemMetricsCollector must have get_swap_usage() method."""
+        collector = SystemMetricsCollector(cache_ttl_seconds=60.0)
+        self.assertTrue(hasattr(collector, "get_swap_usage"))
+        self.assertTrue(callable(collector.get_swap_usage))
+
+    def test_get_process_rss_returns_positive_float(self) -> None:
+        """get_process_rss() must return a positive float (real RSS from this process)."""
+        collector = SystemMetricsCollector(cache_ttl_seconds=60.0)
+        # Allow background thread to populate cache
+        import time
+        time.sleep(0.2)
+        rss = collector.get_process_rss()
+        self.assertIsInstance(rss, float)
+        self.assertGreater(rss, 0.0, "Process RSS must be positive")
+
+    def test_get_swap_usage_returns_dict_with_used_and_total(self) -> None:
+        """get_swap_usage() must return dict with 'used_mb' and 'total_mb' keys."""
+        collector = SystemMetricsCollector(cache_ttl_seconds=60.0)
+        import time
+        time.sleep(0.2)
+        swap = collector.get_swap_usage()
+        self.assertIsInstance(swap, dict)
+        self.assertIn("used_mb", swap)
+        self.assertIn("total_mb", swap)
+        self.assertIsInstance(swap["used_mb"], float)
+        self.assertIsInstance(swap["total_mb"], float)
+        self.assertGreaterEqual(swap["used_mb"], 0.0)
+        self.assertGreaterEqual(swap["total_mb"], 0.0)
+
+    def test_get_mmap_usage_returns_non_negative_float(self) -> None:
+        """get_mmap_usage() must return a non-negative float."""
+        collector = SystemMetricsCollector(cache_ttl_seconds=60.0)
+        import time
+        time.sleep(0.2)
+        mmap_mb = collector.get_mmap_usage()
+        self.assertIsInstance(mmap_mb, float)
+        self.assertGreaterEqual(mmap_mb, 0.0)
+
+    def test_mmap_defaults_to_zero_on_access_denied(self) -> None:
+        """mmap collection must return 0.0 when psutil.AccessDenied is raised."""
+        collector = SystemMetricsCollector(cache_ttl_seconds=60.0)
+        # Manually set cache with mmap_total_mb=0.0 to simulate AccessDenied fallback
+        with collector._cache_lock:
+            collector._cached_metrics = {
+                "cpu_usage": 10.0,
+                "memory": {"percent": 50.0, "used_bytes": 1000000},
+                "disk": {"free_bytes": 1000000, "read_bytes": 0, "write_bytes": 0},
+                "network": {"receive_bytes": 0, "transmit_bytes": 0},
+                "process_rss_mb": 256.0,
+                "mmap_total_mb": 0.0,  # Result of AccessDenied fallback
+                "swap_used_mb": 512.0,
+                "swap_total_mb": 1024.0,
+            }
+        mmap_mb = collector.get_mmap_usage()
+        self.assertEqual(mmap_mb, 0.0)
+
+    def test_cached_metrics_include_new_memory_keys(self) -> None:
+        """After refresh, cached metrics must contain the new memory metric keys."""
+        collector = SystemMetricsCollector(cache_ttl_seconds=60.0)
+        import time
+        time.sleep(0.3)
+        with collector._cache_lock:
+            metrics = collector._cached_metrics
+        self.assertIsNotNone(metrics)
+        assert metrics is not None
+        self.assertIn("process_rss_mb", metrics)
+        self.assertIn("mmap_total_mb", metrics)
+        self.assertIn("swap_used_mb", metrics)
+        self.assertIn("swap_total_mb", metrics)
+
+
+class TestHealthServiceSystemInfoMemoryFields(unittest.TestCase):
+    """Test that health_service._get_system_info() returns new memory fields."""
+
+    def test_get_system_info_returns_process_rss_mb(self) -> None:
+        """_get_system_info() must return SystemHealthInfo with process_rss_mb > 0."""
+        from code_indexer.server.services.health_service import HealthCheckService
+
+        # Minimal HealthCheckService construction - just enough for _get_system_info
+        service = HealthCheckService.__new__(HealthCheckService)
+        service._last_disk_counters = None
+        service._last_disk_time = None
+        service._last_net_counters = None
+        service._last_net_time = None
+        service._cpu_history = []
+        service._cpu_history_lock = __import__('threading').Lock()
+
+        result = service._get_system_info()
+        self.assertIsInstance(result, SystemHealthInfo)
+        self.assertGreater(result.process_rss_mb, 0.0,
+                           "process_rss_mb must be > 0 for a running process")
+
+    def test_get_system_info_returns_swap_fields(self) -> None:
+        """_get_system_info() must return SystemHealthInfo with swap_total_mb >= 0."""
+        from code_indexer.server.services.health_service import HealthCheckService
+
+        service = HealthCheckService.__new__(HealthCheckService)
+        service._last_disk_counters = None
+        service._last_disk_time = None
+        service._last_net_counters = None
+        service._last_net_time = None
+        service._cpu_history = []
+        service._cpu_history_lock = __import__('threading').Lock()
+
+        result = service._get_system_info()
+        self.assertGreaterEqual(result.swap_used_mb, 0.0)
+        self.assertGreaterEqual(result.swap_total_mb, 0.0)
+
+    def test_get_system_info_returns_mmap_total_mb(self) -> None:
+        """_get_system_info() must return SystemHealthInfo with mmap_total_mb >= 0."""
+        from code_indexer.server.services.health_service import HealthCheckService
+
+        service = HealthCheckService.__new__(HealthCheckService)
+        service._last_disk_counters = None
+        service._last_disk_time = None
+        service._last_net_counters = None
+        service._last_net_time = None
+        service._cpu_history = []
+        service._cpu_history_lock = __import__('threading').Lock()
+
+        result = service._get_system_info()
+        self.assertGreaterEqual(result.mmap_total_mb, 0.0)
+
+    def test_get_system_info_mmap_gracefully_handles_access_denied(self) -> None:
+        """_get_system_info() must return 0.0 for mmap_total_mb on AccessDenied."""
+        from code_indexer.server.services.health_service import HealthCheckService
+
+        service = HealthCheckService.__new__(HealthCheckService)
+        service._last_disk_counters = None
+        service._last_disk_time = None
+        service._last_net_counters = None
+        service._last_net_time = None
+        service._cpu_history = []
+        service._cpu_history_lock = __import__('threading').Lock()
+
+        mock_process = MagicMock()
+        mock_process.memory_info.return_value.rss = 256 * 1024 * 1024
+        mock_process.memory_maps.side_effect = psutil.AccessDenied(pid=os.getpid())
+
+        with patch("psutil.Process", return_value=mock_process):
+            result = service._get_system_info()
+
+        self.assertEqual(result.mmap_total_mb, 0.0,
+                         "mmap_total_mb must be 0.0 when AccessDenied")
+        self.assertAlmostEqual(result.process_rss_mb, 256.0)
+
+
+if __name__ == "__main__":
+    unittest.main()
