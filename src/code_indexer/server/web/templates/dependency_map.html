@@ -146,6 +146,35 @@
             return;
         }
 
+        // Story #352: Handle Repair button response (same pattern as trigger)
+        if (evt.detail.elt.hasAttribute('hx-post') &&
+            evt.detail.elt.getAttribute('hx-post') === '/admin/dependency-map/repair') {
+            if (evt.detail.successful) {
+                // Reset journal entries and offset, reinstate polling
+                var repairEntriesEl = document.getElementById('depmap-activity-entries');
+                if (repairEntriesEl) {
+                    repairEntriesEl.innerHTML = '';
+                    repairEntriesEl.setAttribute('hx-get',
+                        '/admin/partials/depmap-activity-journal?offset=0');
+                    repairEntriesEl.setAttribute('hx-trigger', 'every 3s');
+                    htmx.process(repairEntriesEl);
+                }
+                showPanel();
+
+                // Reset progress bar
+                updateProgressUI(0, '');
+
+                // Refresh job status after 3 seconds so Running badge appears
+                setTimeout(function() {
+                    htmx.ajax('GET', '/admin/partials/depmap-job-status', {
+                        target: '#depmap-job-status',
+                        swap: 'innerHTML'
+                    });
+                }, 3000);
+            }
+            return;
+        }
+
         // Handle journal polling responses
         var path = evt.detail.pathInfo && evt.detail.pathInfo.requestPath;
         if (path && path.indexOf('depmap-activity-journal') !== -1) {
