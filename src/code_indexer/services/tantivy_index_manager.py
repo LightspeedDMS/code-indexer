@@ -25,7 +25,8 @@ def sanitize_fts_query(query_text: str) -> str:
 
     Tantivy's parse_query() raises errors for:
       1. Unmatched double-quotes (odd count)
-      2. Bare boolean operators with no valid operands (e.g. bare "OR", trailing "term OR",
+      2. Syntax characters used in code identifiers (colon, parentheses, brackets, braces)
+      3. Bare boolean operators with no valid operands (e.g. bare "OR", trailing "term OR",
          leading "OR term", adjacent "term OR AND other")
 
     Algorithm:
@@ -34,7 +35,18 @@ def sanitize_fts_query(query_text: str) -> str:
         - even count: unchanged (valid phrase search like "hello world")
         - odd count: strip all " characters
 
-      Phase 2 - Bare boolean operators:
+      Phase 2 - Escape Tantivy syntax characters:
+        Characters that cause parse errors in code identifiers are escaped/removed.
+        Safe characters (., ~, *, ^, +, -) are preserved (useful for wildcards, fuzzy, etc.).
+        - Colon (:): replaced with space — prevents "Field does not exist" ValueError
+          (Tantivy interprets field:value syntax)
+        - Parentheses (), brackets [], braces {}: stripped — prevent "Syntax Error" or
+          "Unsupported query" ValueError (Tantivy grouping/range syntax)
+
+      Phase 3 - Bare boolean operators:
+        Runs AFTER Phase 2 so boolean validation sees the final token structure
+        after all character escaping. This ensures that e.g. 'ns:OR' (one token)
+        first becomes 'ns OR' (via Phase 2), then 'ns or' (via Phase 3, trailing OR).
         Only all-uppercase "OR", "AND", "NOT" are Tantivy operators.
         Mixed-case variants ("Or", "aNd") are treated as literals — unchanged.
         - OR and AND require a non-operator term on BOTH left and right sides.
@@ -44,44 +56,56 @@ def sanitize_fts_query(query_text: str) -> str:
 
     Bug #353: By preventing the parse error at source, error bursts (e.g.
     ~120 repeated errors across repositories) are eliminated implicitly.
+    Bug #357: Phase 2 must run before Phase 3. When a colon-separated identifier
+    like 'ns:OR' is split by the colon, the resulting tokens must be evaluated
+    for boolean validity rather than left as an unsafe trailing operator.
     """
     # Phase 1: handle unmatched quotes
     quote_count = query_text.count('"')
     if quote_count != 0 and quote_count % 2 != 0:
         query_text = query_text.replace('"', "")
 
-    # Phase 2: handle bare boolean operators
+    # Phase 2: escape Tantivy query syntax characters that appear in code identifiers.
+    # This must run BEFORE Phase 3 (boolean validation) so that colon-separated tokens
+    # like 'ns:OR' are split into ['ns', 'OR'] before boolean validity is checked.
+    # Colon: causes "Field does not exist" ValueError (Tantivy field:value syntax)
+    query_text = query_text.replace(":", " ")
+    # Parentheses, brackets, braces: cause "Syntax Error" or "Unsupported query" ValueError
+    for ch in "()[]{}":
+        query_text = query_text.replace(ch, "")
+
+    # Phase 3: handle bare boolean operators (runs after syntax escaping)
     tokens = query_text.split()
-    if not any(tok in _BOOL_OPS for tok in tokens):
-        return query_text
+    if any(tok in _BOOL_OPS for tok in tokens):
+        result = list(tokens)
+        for i, tok in enumerate(tokens):
+            if tok not in _BOOL_OPS:
+                continue
 
-    result = list(tokens)
-    for i, tok in enumerate(tokens):
-        if tok not in _BOOL_OPS:
-            continue
+            # Check immediate neighbors (not skipping over other operators).
+            # An operator immediately adjacent to another operator means invalid usage.
+            immediate_left = tokens[i - 1] if i > 0 else None
+            immediate_right = tokens[i + 1] if i < len(tokens) - 1 else None
 
-        # Check immediate neighbors (not skipping over other operators).
-        # An operator immediately adjacent to another operator means invalid usage.
-        immediate_left = tokens[i - 1] if i > 0 else None
-        immediate_right = tokens[i + 1] if i < len(tokens) - 1 else None
+            # A valid left operand: exists AND is not itself a boolean operator
+            has_left = immediate_left is not None and immediate_left not in _BOOL_OPS
+            # A valid right operand: exists AND is not itself a boolean operator
+            has_right = immediate_right is not None and immediate_right not in _BOOL_OPS
 
-        # A valid left operand: exists AND is not itself a boolean operator
-        has_left = immediate_left is not None and immediate_left not in _BOOL_OPS
-        # A valid right operand: exists AND is not itself a boolean operator
-        has_right = immediate_right is not None and immediate_right not in _BOOL_OPS
+            # Determine validity:
+            # NOT is valid when it has a non-operator term on the right.
+            # OR and AND are valid when they have non-operator terms on BOTH sides.
+            if tok == "NOT":
+                is_valid = has_right
+            else:
+                is_valid = has_left and has_right
 
-        # Determine validity:
-        # NOT is valid when it has a non-operator term on the right.
-        # OR and AND are valid when they have non-operator terms on BOTH sides.
-        if tok == "NOT":
-            is_valid = has_right
-        else:
-            is_valid = has_left and has_right
+            if not is_valid:
+                result[i] = tok.lower()
 
-        if not is_valid:
-            result[i] = tok.lower()
+        query_text = " ".join(result) if tokens else query_text
 
-    return " ".join(result) if tokens else query_text
+    return query_text
 
 
 def _contains_valid_boolean_ops(query_text: str) -> bool:
@@ -683,13 +707,22 @@ class TantivyIndexManager:
                     ) from e
             else:
                 # Build query using existing helper method for non-regex searches
-                text_query = self._build_search_query(
-                    query_text=query_text,
-                    search_field=search_field,
-                    edit_distance=edit_distance,
-                    tantivy=tantivy,
-                    TantivyQuery=TantivyQuery,
-                )
+                # Defense-in-depth: catch ValueError from Tantivy's parse_query() for
+                # any edge-case syntax that Phase 3 sanitization misses. Return empty
+                # results rather than propagating an error burst across repositories.
+                try:
+                    text_query = self._build_search_query(
+                        query_text=query_text,
+                        search_field=search_field,
+                        edit_distance=edit_distance,
+                        tantivy=tantivy,
+                        TantivyQuery=TantivyQuery,
+                    )
+                except ValueError as e:
+                    logger.warning(
+                        "FTS query parse error (returning empty results): %s", e
+                    )
+                    return []
 
             # Add language filter to query if specified AND no exclusions present
             # If exclusions present, we do post-processing for correct precedence
