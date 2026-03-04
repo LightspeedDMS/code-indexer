@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.93
+
+### Bug Fixes
+
+- fix: FTS search crashes with ValueError on queries containing colons, parentheses, or brackets (Bug #357). Queries like `com.cdk.recreation:SomeClass`, `std::vector`, `foo(bar)`, `test[0]` caused Tantivy parse errors that propagated as QUERY-MIGRATE error bursts (3 log entries per repository). Added Phase 2 to sanitize_fts_query() that escapes Tantivy syntax characters (colon to space, strip `()[]{}`) before boolean operator validation. Defense-in-depth wrapper around _build_search_query() catches any remaining parse errors and returns empty results with a warning instead of propagating ValueError.
+
 ## v9.3.92
 
 ### Enhancements

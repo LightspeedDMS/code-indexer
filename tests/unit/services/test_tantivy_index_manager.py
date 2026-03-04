@@ -533,6 +533,240 @@ class TestSanitizeFtsQuery:
         # Then OR is trailing (no right operand) → "term or"
         assert result == "term or"
 
+    # Phase 3 tests: special syntax characters
+
+    def test_sanitize_fts_query_colon_replaced_with_space(self):
+        """Colon replaced with space to prevent Tantivy field reference interpretation.
+
+        'com.cdk.recreation:SomeClass' causes Tantivy ValueError 'Field does not exist'
+        because Tantivy interprets field:value syntax. Colon must become a space.
+        """
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        result = sanitize_fts_query("com.cdk.recreation:SomeClass")
+        assert result == "com.cdk.recreation SomeClass"
+
+    def test_sanitize_fts_query_double_colon_replaced(self):
+        """Double colon (C++ scope resolution) replaced with spaces.
+
+        'std::vector' causes Tantivy SyntaxError. Both colons must become spaces.
+        """
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        result = sanitize_fts_query("std::vector")
+        assert "std" in result
+        assert "vector" in result
+        assert ":" not in result
+
+    def test_sanitize_fts_query_parentheses_stripped(self):
+        """Parentheses stripped to prevent Tantivy grouping syntax interpretation.
+
+        'foo(bar)' causes Tantivy SyntaxError because parentheses are grouping operators.
+        """
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        result = sanitize_fts_query("foo(bar)")
+        assert "(" not in result
+        assert ")" not in result
+        assert "foo" in result
+        assert "bar" in result
+
+    def test_sanitize_fts_query_brackets_stripped(self):
+        """Square brackets stripped to prevent Tantivy range syntax interpretation.
+
+        'test[0]' causes Tantivy SyntaxError because brackets are range operators.
+        """
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        result = sanitize_fts_query("test[0]")
+        assert "[" not in result
+        assert "]" not in result
+        assert "test" in result
+        assert "0" in result
+
+    def test_sanitize_fts_query_braces_stripped(self):
+        """Curly braces stripped to prevent Tantivy range syntax interpretation.
+
+        '{a TO z}' causes Tantivy 'Unsupported query' ValueError.
+        """
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        result = sanitize_fts_query("{a TO z}")
+        assert "{" not in result
+        assert "}" not in result
+
+    def test_sanitize_fts_query_mixed_special_chars(self):
+        """Mixed special characters in a realistic code identifier are all sanitized."""
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        result = sanitize_fts_query("com.cdk:Class(method)")
+        assert ":" not in result
+        assert "(" not in result
+        assert ")" not in result
+        assert "com.cdk" in result
+
+    def test_sanitize_fts_query_safe_chars_preserved(self):
+        """Dot, tilde, asterisk are safe and must NOT be removed.
+
+        These characters have useful semantics in FTS queries (wildcards, fuzzy, etc.).
+        """
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        assert "." in sanitize_fts_query("com.example.Class")
+        assert "*" in sanitize_fts_query("test*")
+        assert "~" in sanitize_fts_query("roam~")
+
+    def test_sanitize_fts_query_phase3_with_phase1_phase2(self):
+        """Phase 3 works correctly together with Phase 1 (quotes) and Phase 2 (booleans).
+
+        A query with unmatched quotes AND colons should have all phases applied.
+        """
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        result = sanitize_fts_query('"com.example:Class')
+        assert '"' not in result
+        assert ":" not in result
+        assert "com.example" in result
+        assert "Class" in result
+
+    def test_sanitize_fts_query_colon_before_trailing_boolean_lowercased(self):
+        """Phase ordering: syntax escaping (colon) must run BEFORE boolean validation.
+
+        'ns:OR' as a single colon-separated token:
+          - OLD order (boolean first, syntax second): boolean sees 'ns:OR' as one token,
+            does nothing; then syntax replaces colon giving 'ns OR' (trailing OR UNSAFE).
+          - NEW order (syntax first, boolean second): syntax replaces colon giving 'ns OR';
+            then boolean sees trailing OR with no right operand and lowercases to 'ns or' (SAFE).
+
+        Bug #357: With the correct phase order, trailing OR from colon-escaped identifiers
+        is sanitized to lowercase, preventing Tantivy parse errors.
+        """
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        result = sanitize_fts_query("ns:OR")
+        # After colon escaping: "ns OR" (trailing OR)
+        # After boolean validation of trailing OR: "ns or" (safe literal)
+        assert result == "ns or", f"Expected 'ns or', got {result!r}"
+        assert ":" not in result
+        # OR must be lowercased (it's trailing with no right operand)
+        assert "OR" not in result
+
+    def test_sanitize_fts_query_ns_colon_or_colon_value(self):
+        """'ns:OR:value' - colon escaping first, then boolean validation sees valid OR.
+
+        With correct phase order (syntax before boolean):
+          - Phase 1 (quotes): no change
+          - Phase 2 (syntax): 'ns:OR:value' → 'ns OR value' (colons become spaces)
+          - Phase 3 (boolean): OR has 'ns' on left and 'value' on right → valid, preserved
+
+        Result: 'ns OR value' — a valid Tantivy boolean query.
+        """
+        from code_indexer.services.tantivy_index_manager import sanitize_fts_query
+
+        result = sanitize_fts_query("ns:OR:value")
+        assert ":" not in result
+        assert "ns" in result
+        assert "value" in result
+        # OR is valid (operands on both sides after colon escaping) — preserved uppercase
+        assert result == "ns OR value", f"Expected 'ns OR value', got {result!r}"
+
+
+class TestSearchDefenseInDepth:
+    """Tests for defense-in-depth ValueError handling in search().
+
+    Bug #357: _build_search_query() can raise ValueError from Tantivy's parse_query()
+    for edge-case syntax that Phase 3 sanitization misses. The search() method must
+    catch these and return empty results rather than propagating the error and causing
+    QUERY-MIGRATE error bursts across all repositories.
+
+    CRITICAL: Intentional ValueErrors raised before _build_search_query() (for
+    edit_distance out-of-range at line 650 and invalid regex at line 681) must still
+    propagate to the caller — only Tantivy parse errors from _build_search_query()
+    should be silently caught.
+    """
+
+    def _make_manager(self, tmpdir: str) -> "TantivyIndexManager":
+        """Helper: create and initialize a TantivyIndexManager with one document."""
+        from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+
+        index_dir = Path(tmpdir) / ".code-indexer" / "tantivy_index"
+        manager = TantivyIndexManager(index_dir=index_dir)
+        manager.initialize_index()
+        manager.add_document(
+            {
+                "path": "src/example.py",
+                "content": "def authenticate user token",
+                "content_raw": "def authenticate user token",
+                "identifiers": ["authenticate", "user", "token"],
+                "line_start": 1,
+                "line_end": 1,
+                "language": "python",
+            }
+        )
+        manager.commit()
+        return manager
+
+    def test_search_returns_empty_when_build_query_raises_value_error(self, caplog):
+        """search() returns empty list and logs warning when _build_search_query() raises ValueError.
+
+        Defense-in-depth: even if a query slips through Phase 3 sanitization and
+        Tantivy's parse_query() raises ValueError, search() must not propagate it —
+        it must return [] and log a warning. This prevents the QUERY-MIGRATE error
+        burst cascade across repositories.
+        """
+        import logging
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from unittest.mock import patch
+
+            manager = self._make_manager(tmpdir)
+
+            # Simulate _build_search_query raising ValueError (as Tantivy parse_query does)
+            with patch.object(
+                manager,
+                "_build_search_query",
+                side_effect=ValueError("Syntax Error in query"),
+            ):
+                with caplog.at_level(
+                    logging.WARNING,
+                    logger="code_indexer.services.tantivy_index_manager",
+                ):
+                    results = manager.search(query_text="some:bad:query")
+
+            # Must return empty list, not raise
+            assert results == []
+            # Must log a warning about the failure
+            assert any(
+                "warning" in r.levelname.lower() or "Syntax Error" in r.message
+                for r in caplog.records
+            )
+
+    def test_search_still_propagates_invalid_edit_distance_value_error(self):
+        """ValueError from edit_distance validation (before _build_search_query) still propagates.
+
+        The defense-in-depth catch is ONLY for _build_search_query(). The intentional
+        ValueError raised at line 650 for invalid edit_distance must still propagate.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_manager(tmpdir)
+
+            # edit_distance=5 is out of range (0-3) — must raise ValueError
+            with pytest.raises(ValueError, match="edit_distance must be 0-3"):
+                manager.search(query_text="test", edit_distance=5)
+
+    def test_search_still_propagates_invalid_regex_value_error(self):
+        """ValueError from invalid regex (before _build_search_query) still propagates.
+
+        The defense-in-depth catch is ONLY for _build_search_query(). The intentional
+        ValueError raised at line 681 for an invalid regex pattern must still propagate.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._make_manager(tmpdir)
+
+            # Invalid regex: unmatched bracket — must raise ValueError
+            with pytest.raises(ValueError, match="[Ii]nvalid regex"):
+                manager.search(query_text="[invalid regex", use_regex=True)
+
 
 class TestBuildSearchQuerySanitization:
     """Integration tests verifying sanitize_fts_query is applied in _build_search_query."""
