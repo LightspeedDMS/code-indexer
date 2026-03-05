@@ -1,7 +1,7 @@
 """
 FTS Index Cache for Server-Side Performance Optimization.
 
-Story #XXX: Server-Side FTS (Tantivy) Index Caching for Query Performance
+Story #526: Server-Side FTS (Tantivy) Index Caching for Query Performance
 
 Provides in-memory caching of tantivy.Index objects with:
 - TTL-based eviction (AC2)
@@ -147,6 +147,7 @@ class FTSIndexCacheEntry:
     created_at: datetime = field(default_factory=datetime.now)
     last_accessed: datetime = field(default_factory=datetime.now)
     access_count: int = 0
+    index_size_bytes: int = 0
 
     def record_access(self) -> None:
         """
@@ -228,9 +229,6 @@ class FTSIndexCache:
     Performance improvement: Eliminates reload() + searcher() overhead.
     Expected speedup: 5-50x for repeated FTS queries.
     """
-
-    # Estimated memory size per FTS index entry (in MB)
-    ESTIMATED_INDEX_SIZE_MB = 10
 
     def __init__(self, config: Optional[FTSIndexCacheConfig] = None):
         """
@@ -384,6 +382,18 @@ class FTSIndexCache:
         try:
             tantivy_index, schema = loader()
 
+            # Capture real FTS index directory size
+            index_size_bytes = 0
+            try:
+                index_size_bytes = sum(
+                    f.stat().st_size for f in Path(index_dir).rglob("*") if f.is_file()
+                )
+            except Exception:
+                logger.warning(
+                    f"Could not compute FTS index directory size for {index_dir}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
             # Store result in cache (acquire lock for dict write)
             with self._cache_lock:
                 entry = FTSIndexCacheEntry(
@@ -391,6 +401,7 @@ class FTSIndexCache:
                     schema=schema,
                     index_dir=index_dir,
                     ttl_minutes=self.config.ttl_minutes,
+                    index_size_bytes=index_size_bytes,
                 )
                 entry.record_access()
                 self._cache[index_dir] = entry
@@ -452,8 +463,8 @@ class FTSIndexCache:
         if self.config.max_cache_size_mb is None:
             return
 
-        # Calculate current cache size using estimated size per index
-        current_size_mb = len(self._cache) * self.ESTIMATED_INDEX_SIZE_MB
+        # Calculate current cache size using real index sizes
+        current_size_mb = sum(e.index_size_bytes for e in self._cache.values()) / (1024 * 1024)
 
         # Evict LRU entries until under limit
         while current_size_mb > self.config.max_cache_size_mb and self._cache:
@@ -472,7 +483,7 @@ class FTSIndexCache:
             )
 
             # Recalculate size
-            current_size_mb = len(self._cache) * self.ESTIMATED_INDEX_SIZE_MB
+            current_size_mb = sum(e.index_size_bytes for e in self._cache.values()) / (1024 * 1024)
 
         if current_size_mb <= self.config.max_cache_size_mb and self._cache:
             logger.debug(
@@ -571,8 +582,8 @@ class FTSIndexCache:
             FTSIndexCacheStats with current cache metrics
         """
         with self._cache_lock:
-            # Calculate total memory usage using estimated size per index
-            total_memory_mb = len(self._cache) * self.ESTIMATED_INDEX_SIZE_MB
+            # Calculate total memory usage using real index sizes
+            total_memory_mb = sum(e.index_size_bytes for e in self._cache.values()) / (1024 * 1024)
 
             # Per-repository stats
             per_repo_stats = {}

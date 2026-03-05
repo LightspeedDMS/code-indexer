@@ -24,7 +24,7 @@ from .payload_cache import (
     PayloadCacheConfig,
     CacheNotFoundError,
 )
-from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.logging_utils import format_error_log
 
 # Server-wide singleton cache instances
 # Initialized on first import, shared across all server components
@@ -175,6 +175,22 @@ def reset_global_fts_cache() -> None:
         _global_fts_cache_instance = None
 
 
+def get_total_index_memory_mb() -> float:
+    """Get combined index memory from HNSW and FTS caches.
+
+    Returns total memory in MB used by all cached indexes.
+    Returns 0.0 if caches are not yet initialized.
+    """
+    total_mb = 0.0
+    hnsw = _global_cache_instance
+    if hnsw is not None:
+        total_mb += hnsw.get_stats().total_memory_mb
+    fts = _global_fts_cache_instance
+    if fts is not None:
+        total_mb += fts.get_stats().total_memory_mb
+    return total_mb
+
+
 __all__ = [
     # HNSW cache exports
     "HNSWIndexCache",
@@ -190,6 +206,8 @@ __all__ = [
     "FTSIndexCacheStats",
     "get_global_fts_cache",
     "reset_global_fts_cache",
+    # Combined index memory
+    "get_total_index_memory_mb",
     # Payload cache exports (Story #679)
     "PayloadCache",
     "PayloadCacheConfig",

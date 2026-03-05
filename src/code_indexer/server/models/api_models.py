@@ -92,8 +92,8 @@ class SystemHealthInfo(BaseModel):
     process_rss_mb: float = Field(
         default=0.0, description="CIDX server process RSS in MB"
     )
-    mmap_total_mb: float = Field(
-        default=0.0, description="Total memory-mapped file size in MB"
+    index_memory_mb: float = Field(
+        default=0.0, description="Total index memory footprint in MB (HNSW heap + FTS)"
     )
     swap_used_mb: float = Field(
         default=0.0, description="Swap space used in MB"

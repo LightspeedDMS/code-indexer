@@ -401,13 +401,10 @@ class HealthCheckService:
         swap_used_mb = swap.used / BYTES_PER_MB
         swap_total_mb = swap.total / BYTES_PER_MB
 
-        mmap_total_mb = 0.0
-        try:
-            maps = process.memory_maps(grouped=True)
-            mmap_total_mb = sum(m.size for m in maps if m.path.startswith('/')) / BYTES_PER_MB
-        except (psutil.AccessDenied, psutil.Error, OSError) as e:
-            logger.warning(f"Failed to collect memory map metrics: {e}")
-            mmap_total_mb = 0.0
+        # Index memory from caches (HNSW heap + FTS mmap)
+        from .system_metrics_collector import get_system_metrics_collector
+        collector = get_system_metrics_collector()
+        index_memory_mb = collector.get_index_memory()
 
         return SystemHealthInfo(
             memory_usage_percent=memory_percent,
@@ -423,7 +420,7 @@ class HealthCheckService:
             net_tx_kb_s=net_tx_kb_s,
             volumes=volumes,
             process_rss_mb=process_rss_mb,
-            mmap_total_mb=mmap_total_mb,
+            index_memory_mb=index_memory_mb,
             swap_used_mb=swap_used_mb,
             swap_total_mb=swap_total_mb,
         )

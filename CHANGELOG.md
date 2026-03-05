@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.96
+
+### Enhancements
+
+- feat: Real index memory tracking replacing broken mmap metric (Story #526). The dashboard "Mmap Files" metric was fundamentally incorrect -- hnswlib loads indexes via fread() into heap memory, not mmap, making HNSW indexes invisible to process.memory_maps(). Replaced with "Index Mem" that reports actual cache footprint: hnswlib.Index.index_file_size() for HNSW heap allocation, directory size scan for Tantivy FTS mmap files. Field renamed from mmap_total_mb to index_memory_mb across API model, health service, metrics collector, and dashboard. Added callback-based provider pattern to avoid circular imports between cache and metrics modules.
+
 ## v9.3.95
 
 ### Enhancements

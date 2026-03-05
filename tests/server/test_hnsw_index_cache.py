@@ -400,6 +400,7 @@ class TestHNSWIndexCache:
         cache = HNSWIndexCache()
 
         mock_index = Mock()
+        mock_index.index_file_size.return_value = 0
 
         def mock_loader():
             return mock_index, {}
@@ -420,6 +421,7 @@ class TestHNSWIndexCache:
         cache = HNSWIndexCache()
 
         mock_index = Mock()
+        mock_index.index_file_size.return_value = 0
 
         def mock_loader():
             return mock_index, {}
