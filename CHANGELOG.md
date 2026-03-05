@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.97
+
+### Bug Fixes
+
+- fix: Dashboard index_memory_mb stuck at 0.0 despite loaded indexes (Bug #358). Health endpoint was reading from SystemMetricsCollector background-cached value which could stay stale at 0.0 during startup race conditions. Changed to call get_total_index_memory_mb() directly from HNSW/FTS cache stats (always live, always current). Also fixed OTEL machine_metrics.py using wrong import path (from src.code_indexer... instead of from code_indexer...) which created a separate singleton with no index memory provider registered.
+
 ## v9.3.96
 
 ### Enhancements

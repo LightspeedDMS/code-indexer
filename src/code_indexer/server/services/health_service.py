@@ -401,10 +401,10 @@ class HealthCheckService:
         swap_used_mb = swap.used / BYTES_PER_MB
         swap_total_mb = swap.total / BYTES_PER_MB
 
-        # Index memory from caches (HNSW heap + FTS mmap)
-        from .system_metrics_collector import get_system_metrics_collector
-        collector = get_system_metrics_collector()
-        index_memory_mb = collector.get_index_memory()
+        # Index memory from caches (HNSW heap + FTS mmap) - direct call avoids
+        # race condition where SystemMetricsCollector background cache stays at 0.0
+        from ..cache import get_total_index_memory_mb
+        index_memory_mb = get_total_index_memory_mb()
 
         return SystemHealthInfo(
             memory_usage_percent=memory_percent,

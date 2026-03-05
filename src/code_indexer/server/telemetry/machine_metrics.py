@@ -156,7 +156,7 @@ class MachineMetricsExporter:
 
     def _get_metrics_collector(self):
         """Get SystemMetricsCollector lazily to avoid circular imports."""
-        from src.code_indexer.server.services.system_metrics_collector import (
+        from code_indexer.server.services.system_metrics_collector import (
             get_system_metrics_collector,
         )
 
