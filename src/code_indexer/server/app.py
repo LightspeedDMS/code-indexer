@@ -2635,13 +2635,31 @@ def create_app() -> FastAPI:
             # Inject RefreshScheduler for cidx-meta CoW reindex on repo add/remove (Story #270)
             from code_indexer.global_repos.meta_description_hook import (
                 set_refresh_scheduler,
+                CidxMetaRefreshDebouncer,
+                set_debouncer,
+                _DEFAULT_DEBOUNCE_SECONDS,
             )
 
-            set_refresh_scheduler(
+            refresh_scheduler = (
                 global_lifecycle_manager.refresh_scheduler
                 if global_lifecycle_manager is not None
                 else None
             )
+            set_refresh_scheduler(refresh_scheduler)
+
+            # Wire debouncer for coalescing batch-registration refresh triggers (Story #345)
+            if refresh_scheduler is not None:
+                cidx_meta_debouncer = CidxMetaRefreshDebouncer(
+                    refresh_scheduler=refresh_scheduler,
+                    debounce_seconds=_DEFAULT_DEBOUNCE_SECONDS,
+                )
+                set_debouncer(cidx_meta_debouncer)
+                app.state.cidx_meta_debouncer = cidx_meta_debouncer
+                logger.info(
+                    "CidxMetaRefreshDebouncer initialized "
+                    f"(debounce_seconds={_DEFAULT_DEBOUNCE_SECONDS})",
+                    extra={"correlation_id": get_correlation_id()},
+                )
 
             # Start scheduler (internally checks if enabled)
             description_refresh_scheduler.start()
@@ -3260,6 +3278,27 @@ def create_app() -> FastAPI:
                     format_error_log(
                         "APP-GENERAL-027",
                         f"Error stopping description refresh scheduler: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+        # Shutdown: Stop cidx-meta refresh debouncer (Story #345)
+        cidx_meta_debouncer_state = getattr(app.state, "cidx_meta_debouncer", None)
+        if cidx_meta_debouncer_state is not None:
+            try:
+                cidx_meta_debouncer_state.shutdown()
+                from code_indexer.global_repos.meta_description_hook import set_debouncer
+                set_debouncer(None)
+                logger.info(
+                    "CidxMetaRefreshDebouncer shut down",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-029",
+                        f"Error stopping cidx-meta refresh debouncer: {e}",
                         exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
                     )

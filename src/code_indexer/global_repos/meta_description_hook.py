@@ -7,6 +7,7 @@ meta directory management code.
 """
 
 import logging
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -31,6 +32,111 @@ README_NAMES = [
 _tracking_backend: Optional["DescriptionRefreshTrackingBackend"] = None  # type: ignore
 _scheduler: Optional["DescriptionRefreshScheduler"] = None  # type: ignore
 _refresh_scheduler: Optional[Any] = None  # type: ignore
+_debouncer: Optional["CidxMetaRefreshDebouncer"] = None
+
+_DEFAULT_DEBOUNCE_SECONDS = 30
+
+
+class CidxMetaRefreshDebouncer:
+    """
+    Debounces cidx-meta refresh triggers to coalesce rapid batch registrations.
+
+    When multiple repositories are registered in rapid succession, each
+    on_repo_added() call attempts trigger_refresh_for_repo("cidx-meta-global").
+    The first succeeds, but subsequent calls raise DuplicateJobError. This
+    debouncer coalesces those failures into a single deferred refresh that fires
+    after the debounce interval with no further activity.
+
+    Usage:
+        debouncer = CidxMetaRefreshDebouncer(refresh_scheduler, debounce_seconds=30)
+        debouncer.signal_dirty()   # Called when DuplicateJobError is caught
+        debouncer.shutdown()       # Called on server shutdown
+    """
+
+    def __init__(self, refresh_scheduler: Any, debounce_seconds: float = _DEFAULT_DEBOUNCE_SECONDS) -> None:
+        self._refresh_scheduler = refresh_scheduler
+        self._debounce_seconds = debounce_seconds
+        self._dirty: bool = False
+        self._timer: Optional[threading.Timer] = None
+        self._lock = threading.Lock()
+        self._shutdown: bool = False
+
+    def signal_dirty(self) -> None:
+        """
+        Mark cidx-meta as needing a refresh and (re)start the debounce timer.
+
+        If a timer is already running it is cancelled and a new one is started
+        with the full debounce interval (coalescing behavior).  After shutdown
+        the call is silently ignored.
+        """
+        with self._lock:
+            self._dirty = True
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+            if self._shutdown:
+                logger.debug("cidx-meta debouncer: shutdown in progress, ignoring signal_dirty")
+                return
+            self._timer = threading.Timer(self._debounce_seconds, self._on_timer_expired)
+            self._timer.daemon = True
+            self._timer.start()
+        logger.debug(
+            "cidx-meta marked dirty, debounce timer (re)started "
+            f"(interval={self._debounce_seconds}s)"
+        )
+
+    def _on_timer_expired(self) -> None:
+        """
+        Called by the timer thread when the debounce interval elapses.
+
+        Clears dirty state after successful refresh.  If trigger raises
+        DuplicateJobError the job is still running; re-mark dirty and retry
+        after another debounce interval.  Any other exception is logged and
+        swallowed (non-blocking).
+        """
+        from code_indexer.server.repositories.background_jobs import DuplicateJobError
+
+        with self._lock:
+            if not self._dirty or self._shutdown:
+                return
+            # Don't clear _dirty yet — clear after successful refresh
+            self._timer = None
+
+        # Trigger outside lock to avoid holding lock during I/O
+        try:
+            self._refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
+            logger.info("Debounced cidx-meta refresh triggered successfully")
+            # Success — NOW clear dirty
+            with self._lock:
+                self._dirty = False
+        except DuplicateJobError:
+            logger.info("cidx-meta refresh still running, will retry after debounce")
+            with self._lock:
+                # _dirty stays True (was never cleared)
+                if not self._shutdown:
+                    self._timer = threading.Timer(
+                        self._debounce_seconds, self._on_timer_expired
+                    )
+                    self._timer.daemon = True
+                    self._timer.start()
+        except Exception as exc:
+            logger.warning("Debounced cidx-meta refresh failed: %s", exc)
+            # On generic failure, clear dirty to avoid infinite retry
+            with self._lock:
+                self._dirty = False
+
+    def shutdown(self) -> None:
+        """
+        Cancel any pending timer and prevent future timers from being started.
+
+        Safe to call multiple times (idempotent).
+        """
+        with self._lock:
+            self._shutdown = True
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+        logger.debug("CidxMetaRefreshDebouncer shut down")
 
 
 def set_tracking_backend(backend) -> None:
@@ -75,6 +181,22 @@ def set_refresh_scheduler(scheduler) -> None:
     """
     global _refresh_scheduler
     _refresh_scheduler = scheduler
+
+
+def set_debouncer(debouncer: Optional["CidxMetaRefreshDebouncer"]) -> None:
+    """
+    Set module-level CidxMetaRefreshDebouncer for deferred cidx-meta refresh.
+
+    Args:
+        debouncer: CidxMetaRefreshDebouncer instance, or None to clear.
+
+    Note:
+        Called during server startup after the debouncer is created.
+        Used by on_repo_added() and on_repo_removed() when DuplicateJobError
+        is raised by trigger_refresh_for_repo().
+    """
+    global _debouncer
+    _debouncer = debouncer
 
 
 def on_repo_added(
@@ -180,7 +302,22 @@ def on_repo_added(
             _refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
             logger.info(f"Triggered cidx-meta refresh after adding {repo_name}")
         except Exception as e:
-            logger.warning(f"Failed to trigger cidx-meta refresh for {repo_name}: {e}")
+            from code_indexer.server.repositories.background_jobs import DuplicateJobError
+
+            if isinstance(e, DuplicateJobError):
+                if _debouncer is not None:
+                    _debouncer.signal_dirty()
+                    logger.info(
+                        f"cidx-meta refresh deferred (debounced) for {repo_name}"
+                    )
+                else:
+                    logger.warning(
+                        f"cidx-meta refresh skipped for {repo_name}: no debouncer"
+                    )
+            else:
+                logger.warning(
+                    f"Failed to trigger cidx-meta refresh for {repo_name}: {e}"
+                )
 
 
 def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
@@ -216,9 +353,24 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
                         f"Triggered cidx-meta refresh after removing {repo_name}"
                     )
                 except Exception as e:
-                    logger.warning(
-                        f"Failed to trigger cidx-meta refresh for {repo_name}: {e}"
+                    from code_indexer.server.repositories.background_jobs import (
+                        DuplicateJobError,
                     )
+
+                    if isinstance(e, DuplicateJobError):
+                        if _debouncer is not None:
+                            _debouncer.signal_dirty()
+                            logger.info(
+                                f"cidx-meta refresh deferred (debounced) for {repo_name}"
+                            )
+                        else:
+                            logger.warning(
+                                f"cidx-meta refresh skipped for {repo_name}: no debouncer"
+                            )
+                    else:
+                        logger.warning(
+                            f"Failed to trigger cidx-meta refresh for {repo_name}: {e}"
+                        )
 
         except Exception as e:
             logger.error(
