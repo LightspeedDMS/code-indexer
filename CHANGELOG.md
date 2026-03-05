@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.98
+
+### Bug Fixes
+
+- fix: add_golden_repo_index shows empty error messages when subprocess fails (Bug #361). When index creation failed and the error was in stdout (not stderr), the error message showed "Failed to create FTS index: " with nothing after the colon. Applied stderr-or-stdout-or-exit-code fallback chain to all 5 index types (init, semantic, fts, temporal, scip) plus the CalledProcessError handler, ensuring diagnostic information is always present in error messages.
+
 ## v9.3.97
 
 ### Bug Fixes

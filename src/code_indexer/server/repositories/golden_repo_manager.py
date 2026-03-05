@@ -2388,8 +2388,13 @@ class GoldenRepoManager:
                     init_result.returncode != 0
                     and "already exists" not in init_output.lower()
                 ):
+                    error_details = (
+                        init_result.stderr
+                        or init_result.stdout
+                        or f"Exit code {init_result.returncode}"
+                    )
                     raise GoldenRepoError(
-                        f"Failed to initialize repo before indexing: {init_result.stderr}"
+                        f"Failed to initialize repo before indexing: {error_details}"
                     )
                 # Capture output for logging regardless of outcome
                 if init_result.stdout:
@@ -2409,8 +2414,13 @@ class GoldenRepoManager:
                     captured_stdout = result.stdout
                     captured_stderr = result.stderr
                     if result.returncode != 0:
+                        error_details = (
+                            result.stderr
+                            or result.stdout
+                            or f"Exit code {result.returncode}"
+                        )
                         raise GoldenRepoError(
-                            f"Failed to create semantic index: {result.stderr}"
+                            f"Failed to create semantic index: {error_details}"
                         )
 
                 # fts - execute cidx index --rebuild-fts-index (FTS only)
@@ -2425,8 +2435,13 @@ class GoldenRepoManager:
                     captured_stdout = result.stdout
                     captured_stderr = result.stderr
                     if result.returncode != 0:
+                        error_details = (
+                            result.stderr
+                            or result.stdout
+                            or f"Exit code {result.returncode}"
+                        )
                         raise GoldenRepoError(
-                            f"Failed to create FTS index: {result.stderr}"
+                            f"Failed to create FTS index: {error_details}"
                         )
 
                 # temporal - execute cidx index --index-commits with options
@@ -2458,8 +2473,13 @@ class GoldenRepoManager:
                     captured_stdout = result.stdout
                     captured_stderr = result.stderr
                     if result.returncode != 0:
+                        error_details = (
+                            result.stderr
+                            or result.stdout
+                            or f"Exit code {result.returncode}"
+                        )
                         raise GoldenRepoError(
-                            f"Failed to create temporal index: {result.stderr}"
+                            f"Failed to create temporal index: {error_details}"
                         )
 
                     # Bug #131: Update enable_temporal flag in BOTH tables after successful temporal index creation
@@ -2527,8 +2547,13 @@ class GoldenRepoManager:
                     captured_stdout = result.stdout
                     captured_stderr = result.stderr
                     if result.returncode != 0:
+                        error_details = (
+                            result.stderr
+                            or result.stdout
+                            or f"Exit code {result.returncode}"
+                        )
                         raise GoldenRepoError(
-                            f"Failed to create SCIP index: {result.stderr}"
+                            f"Failed to create SCIP index: {error_details}"
                         )
 
                 return {
@@ -2539,8 +2564,13 @@ class GoldenRepoManager:
                     "stderr": captured_stderr,
                 }
             except subprocess.CalledProcessError as e:
+                error_details = (
+                    e.stderr
+                    or e.stdout
+                    or f"Exit code {e.returncode}"
+                )
                 raise GoldenRepoError(
-                    f"Failed to add index: Command failed with exit code {e.returncode}: {e.stderr}"
+                    f"Failed to add index: Command failed: {error_details}"
                 )
             except Exception as e:
                 raise GoldenRepoError(f"Failed to add index: {str(e)}")
