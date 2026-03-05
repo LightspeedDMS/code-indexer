@@ -156,6 +156,7 @@ class HNSWIndexCacheEntry:
     created_at: datetime = field(default_factory=datetime.now)
     last_accessed: datetime = field(default_factory=datetime.now)
     access_count: int = 0
+    index_size_bytes: int = 0
 
     def record_access(self) -> None:
         """
@@ -233,9 +234,6 @@ class HNSWIndexCache:
 
     Performance improvement: ~277ms → <1ms for repeated queries (1800x faster).
     """
-
-    # Estimated memory size per HNSW index entry (in MB)
-    ESTIMATED_INDEX_SIZE_MB = 100
 
     def __init__(self, config: Optional[HNSWIndexCacheConfig] = None):
         """
@@ -367,6 +365,16 @@ class HNSWIndexCache:
         try:
             hnsw_index, id_mapping = loader()
 
+            # Capture real index memory footprint
+            index_size_bytes = 0
+            try:
+                index_size_bytes = hnsw_index.index_file_size()
+            except Exception as e:
+                logger.warning(
+                    f"Could not get index file size for {repo_path}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
             # Store result in cache (acquire lock for dict write)
             with self._cache_lock:
                 entry = HNSWIndexCacheEntry(
@@ -374,6 +382,7 @@ class HNSWIndexCache:
                     id_mapping=id_mapping,
                     repo_path=repo_path,
                     ttl_minutes=self.config.ttl_minutes,
+                    index_size_bytes=index_size_bytes,
                 )
                 entry.record_access()
                 self._cache[repo_path] = entry
@@ -435,8 +444,8 @@ class HNSWIndexCache:
         if self.config.max_cache_size_mb is None:
             return
 
-        # Calculate current cache size using estimated size per index
-        current_size_mb = len(self._cache) * self.ESTIMATED_INDEX_SIZE_MB
+        # Calculate current cache size using real index sizes
+        current_size_mb = sum(e.index_size_bytes for e in self._cache.values()) / (1024 * 1024)
 
         # Evict LRU entries until under limit
         while current_size_mb > self.config.max_cache_size_mb and self._cache:
@@ -455,7 +464,7 @@ class HNSWIndexCache:
             )
 
             # Recalculate size
-            current_size_mb = len(self._cache) * self.ESTIMATED_INDEX_SIZE_MB
+            current_size_mb = sum(e.index_size_bytes for e in self._cache.values()) / (1024 * 1024)
 
         if current_size_mb <= self.config.max_cache_size_mb and self._cache:
             logger.debug(
@@ -554,8 +563,8 @@ class HNSWIndexCache:
             HNSWIndexCacheStats with current cache metrics
         """
         with self._cache_lock:
-            # Calculate total memory usage using estimated size per index
-            total_memory_mb = len(self._cache) * self.ESTIMATED_INDEX_SIZE_MB
+            # Calculate total memory usage using real index sizes
+            total_memory_mb = sum(e.index_size_bytes for e in self._cache.values()) / (1024 * 1024)
 
             # Per-repository stats
             per_repo_stats = {}

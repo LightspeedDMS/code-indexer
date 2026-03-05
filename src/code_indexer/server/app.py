@@ -2054,6 +2054,16 @@ def create_app() -> FastAPI:
         extra={"correlation_id": get_correlation_id()},
     )
 
+    # Register index memory provider with metrics collector
+    from .services.system_metrics_collector import get_system_metrics_collector
+    from .cache import get_total_index_memory_mb
+    metrics_collector = get_system_metrics_collector()
+    metrics_collector.set_index_memory_provider(get_total_index_memory_mb)
+    logger.info(
+        "Index memory provider registered with system metrics collector",
+        extra={"correlation_id": get_correlation_id()},
+    )
+
     # Initialize exception logger EARLY for server mode
     from ..utils.exception_logger import ExceptionLogger
 

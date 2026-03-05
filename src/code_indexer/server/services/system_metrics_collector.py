@@ -17,7 +17,7 @@ import os
 import threading
 import time
 from threading import Lock
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import psutil
 
@@ -66,6 +66,7 @@ class SystemMetricsCollector:
         self._last_cache_time: float = 0.0
         self._cache_lock = Lock()
         self._stop_event = threading.Event()
+        self._index_memory_provider: Optional[Callable[[], float]] = None
 
         # Start background refresh thread (daemon: won't block process shutdown)
         self._refresh_thread = threading.Thread(
@@ -104,14 +105,13 @@ class SystemMetricsCollector:
         # Swap
         swap = psutil.swap_memory()
 
-        # Mmap file-backed total
-        mmap_total_mb = 0.0
-        try:
-            maps = process.memory_maps(grouped=True)
-            mmap_total_mb = sum(m.size for m in maps if m.path.startswith("/")) / (1024 * 1024)
-        except (psutil.AccessDenied, psutil.Error, OSError) as e:
-            logger.warning("Failed to collect mmap metrics (background): %s", e)
-            mmap_total_mb = 0.0
+        # Index memory from caches (replaces misleading process.memory_maps)
+        index_memory_mb = 0.0
+        if self._index_memory_provider is not None:
+            try:
+                index_memory_mb = self._index_memory_provider()
+            except Exception as e:
+                logger.warning("Failed to collect index memory metrics: %s", e)
 
         new_metrics = {
             "cpu_usage": psutil.cpu_percent(interval=None),
@@ -129,7 +129,7 @@ class SystemMetricsCollector:
                 "transmit_bytes": net_io.bytes_sent if net_io else 0,
             },
             "process_rss_mb": process_rss_mb,
-            "mmap_total_mb": mmap_total_mb,
+            "index_memory_mb": index_memory_mb,
             "swap_used_mb": swap.used / (1024 * 1024),
             "swap_total_mb": swap.total / (1024 * 1024),
         }
@@ -158,13 +158,13 @@ class SystemMetricsCollector:
 
         swap = psutil.swap_memory()
 
-        mmap_total_mb = 0.0
-        try:
-            maps = process.memory_maps(grouped=True)
-            mmap_total_mb = sum(m.size for m in maps if m.path.startswith("/")) / (1024 * 1024)
-        except (psutil.AccessDenied, psutil.Error, OSError) as e:
-            logger.warning("Failed to collect mmap metrics (legacy): %s", e)
-            mmap_total_mb = 0.0
+        # Index memory from caches (replaces misleading process.memory_maps)
+        index_memory_mb = 0.0
+        if self._index_memory_provider is not None:
+            try:
+                index_memory_mb = self._index_memory_provider()
+            except Exception as e:
+                logger.warning("Failed to collect index memory metrics: %s", e)
 
         self._cached_metrics = {
             "cpu_usage": psutil.cpu_percent(interval=None),
@@ -182,7 +182,7 @@ class SystemMetricsCollector:
                 "transmit_bytes": net_io.bytes_sent if net_io else 0,
             },
             "process_rss_mb": process_rss_mb,
-            "mmap_total_mb": mmap_total_mb,
+            "index_memory_mb": index_memory_mb,
             "swap_used_mb": swap.used / (1024 * 1024),
             "swap_total_mb": swap.total / (1024 * 1024),
         }
@@ -274,13 +274,17 @@ class SystemMetricsCollector:
             assert self._cached_metrics is not None
             return float(self._cached_metrics.get("process_rss_mb", 0.0))
 
-    def get_mmap_usage(self) -> float:
-        """Get total memory-mapped file size in MB."""
+    def set_index_memory_provider(self, provider: Callable[[], float]) -> None:
+        """Register a callback that returns total index memory in MB."""
+        self._index_memory_provider = provider
+
+    def get_index_memory(self) -> float:
+        """Get total index memory (HNSW + FTS) in MB."""
         with self._cache_lock:
             if self._cached_metrics is None:
                 self._refresh_cache()
             assert self._cached_metrics is not None
-            return float(self._cached_metrics.get("mmap_total_mb", 0.0))
+            return float(self._cached_metrics.get("index_memory_mb", 0.0))
 
     def get_swap_usage(self) -> dict:
         """Get swap usage metrics."""
