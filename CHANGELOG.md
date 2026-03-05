@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.95
+
+### Enhancements
+
+- feat: Debounced cidx-meta refresh on batch repository registration (Story #345). When multiple repos are registered in rapid succession, DuplicateJobError from concurrent refresh attempts is now caught and deferred via a CidxMetaRefreshDebouncer. The debouncer coalesces signals into a single refresh after a 30-second cooldown, with automatic retry if the refresh slot is still occupied.
+- feat: Self-Monitoring tab pagination (Story #344). Both the Scan History and Created Issues tables now have client-side pagination with selectable page sizes (10/20/50/100). Each table paginates independently with Prev/Next navigation and boundary handling.
+
 ## v9.3.94
 
 ### Enhancements
