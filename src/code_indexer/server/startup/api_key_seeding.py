@@ -1,8 +1,9 @@
 """
-API Key Auto-Seeding on Server Startup.
+API Key Sync on Server Startup.
 
-Provides functionality to auto-seed API keys from environment variables
-and config files when the server starts and config keys are blank.
+Syncs API keys from server config to the process environment on startup.
+Config is the source of truth — keys are never read from environment
+variables and written back into config.
 
 Story #20: API Key Management for Claude CLI and VoyageAI
 """
@@ -10,7 +11,6 @@ Story #20: API Key Management for Claude CLI and VoyageAI
 import logging
 import os
 from typing import Any, Dict, Optional
-from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +21,12 @@ def seed_api_keys_on_startup(
     systemd_env_path: Optional[str] = None,
 ) -> Dict[str, bool]:
     """
-    Auto-seed API keys on server startup if server config is blank.
+    Sync API keys from server config to process environment on startup.
 
-    This function should be called during server startup (lifespan function)
-    to populate API keys from environment variables or config files when
-    the server's persisted configuration doesn't have them.
+    Config is the source of truth. If config has a key, it is synced to
+    os.environ so that subprocesses (Claude CLI, VoyageAI SDK) can use it.
+    If config is blank, no action is taken — keys are never auto-seeded
+    from environment variables back into config.
 
     Args:
         config_service: The ConfigService instance for accessing server config
@@ -34,13 +35,10 @@ def seed_api_keys_on_startup(
 
     Returns:
         Dict with keys:
-        - anthropic_seeded: True if Anthropic key was seeded
-        - voyageai_seeded: True if VoyageAI key was seeded
+        - anthropic_seeded: Always False (nothing is seeded into config)
+        - voyageai_seeded: Always False (nothing is seeded into config)
     """
-    from code_indexer.server.services.api_key_management import (
-        ApiKeyAutoSeeder,
-        ApiKeySyncService,
-    )
+    from code_indexer.server.services.api_key_management import ApiKeySyncService
 
     result = {
         "anthropic_seeded": False,
@@ -48,62 +46,52 @@ def seed_api_keys_on_startup(
     }
 
     try:
-        # Get current server config
         config = config_service.get_config()
 
-        # Initialize seeder and sync service
-        auto_seeder = ApiKeyAutoSeeder()
-
         # Build sync service kwargs
-        sync_kwargs = {}
+        sync_kwargs: Dict[str, str] = {}
         if claude_config_path:
             sync_kwargs["claude_config_path"] = claude_config_path
         if systemd_env_path:
             sync_kwargs["systemd_env_path"] = systemd_env_path
-
         sync_service = ApiKeySyncService(**sync_kwargs)
 
-        # Auto-seed Anthropic key if blank
-        if not config.claude_integration_config.anthropic_api_key:
-            seeded_anthropic_key = auto_seeder.get_anthropic_key()
-            if seeded_anthropic_key:
-                sync_result = sync_service.sync_anthropic_key(seeded_anthropic_key)
-                if sync_result.success:
-                    config.claude_integration_config.anthropic_api_key = (
-                        seeded_anthropic_key
-                    )
-                    result["anthropic_seeded"] = True
-                    logger.info("Auto-seeded Anthropic API key from environment/config")
+        # Anthropic: config → env (unidirectional)
+        # Config has key → sync to env; config blank → clear env
+        if config.claude_integration_config.anthropic_api_key:
+            sync_service.sync_anthropic_key(
+                config.claude_integration_config.anthropic_api_key
+            )
+            logger.info(
+                "Synced Anthropic API key from server config to process environment"
+            )
         else:
-            # Config has a key — ensure os.environ matches (config is source of truth)
-            os.environ["ANTHROPIC_API_KEY"] = config.claude_integration_config.anthropic_api_key
-            logger.info("Synced Anthropic API key from server config to process environment")
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            logger.info(
+                "Cleared Anthropic API key from process environment (config is blank)"
+            )
 
-        # Auto-seed VoyageAI key if blank
-        if not config.claude_integration_config.voyageai_api_key:
-            seeded_voyageai_key = auto_seeder.get_voyageai_key()
-            if seeded_voyageai_key:
-                sync_result = sync_service.sync_voyageai_key(seeded_voyageai_key)
-                if sync_result.success:
-                    config.claude_integration_config.voyageai_api_key = (
-                        seeded_voyageai_key
-                    )
-                    result["voyageai_seeded"] = True
-                    logger.info("Auto-seeded VoyageAI API key from environment")
+        # VoyageAI: config → env (unidirectional)
+        # Config has key → set env; config blank → clear env
+        if config.claude_integration_config.voyageai_api_key:
+            os.environ["VOYAGE_API_KEY"] = (
+                config.claude_integration_config.voyageai_api_key
+            )
+            logger.info(
+                "Synced VoyageAI API key from server config to process environment"
+            )
         else:
-            # Config has a key — ensure os.environ matches (config is source of truth)
-            os.environ["VOYAGE_API_KEY"] = config.claude_integration_config.voyageai_api_key
-            logger.info("Synced VoyageAI API key from server config to process environment")
-
-        # Save config if any keys were seeded
-        if result["anthropic_seeded"] or result["voyageai_seeded"]:
-            config_service.config_manager.save_config(config)
-            logger.info("Saved auto-seeded API keys to server config")
+            os.environ.pop("VOYAGE_API_KEY", None)
+            logger.info(
+                "Cleared VoyageAI API key from process environment (config is blank)"
+            )
 
     except Exception as e:
+        from code_indexer.server.logging_utils import format_error_log
+
         logger.warning(
             format_error_log(
-                "MCP-GENERAL-194", f"Failed to auto-seed API keys on startup: {e}"
+                "MCP-GENERAL-194", f"Failed to sync API keys on startup: {e}"
             )
         )
 
