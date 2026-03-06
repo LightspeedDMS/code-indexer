@@ -541,7 +541,8 @@ class BackgroundJobsConfig:
 
     # Story #267: Maximum age in hours for completed/failed/cancelled jobs
     # Jobs older than this are cleaned up from SQLite on startup and during cleanup
-    cleanup_max_age_hours: int = 24
+    # Story #360: Changed default from 24 to 720 (30 days) for configurable retention
+    cleanup_max_age_hours: int = 720
 
 
 @dataclass

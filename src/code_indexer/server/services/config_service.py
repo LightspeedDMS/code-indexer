@@ -323,9 +323,11 @@ class ConfigService:
                 "omni_pattern_metacharacters": config.multi_search_limits_config.omni_pattern_metacharacters,
             },
             # Story #26 - Background jobs configuration, Story #27 - SubprocessExecutor max_workers
+            # Story #360 - Configurable job history retention period
             "background_jobs": {
                 "max_concurrent_background_jobs": config.background_jobs_config.max_concurrent_background_jobs,
                 "subprocess_max_workers": config.background_jobs_config.subprocess_max_workers,
+                "cleanup_max_age_hours": config.background_jobs_config.cleanup_max_age_hours,
             },
             # Story #223 - AC4: Indexing configuration
             "indexing": {
@@ -941,6 +943,9 @@ class ConfigService:
         elif key == "subprocess_max_workers":
             # Story #27: SubprocessExecutor max_workers configuration
             background_jobs.subprocess_max_workers = int(value)
+        elif key == "cleanup_max_age_hours":
+            # Story #360: Configurable job history retention period
+            background_jobs.cleanup_max_age_hours = int(value)
         else:
             raise ValueError(f"Unknown background jobs setting: {key}")
 
