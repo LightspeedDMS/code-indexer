@@ -209,6 +209,200 @@
     </article>
 </details>
 
+<!-- Subscription Mode Section (Story #367) -->
+<details class="config-section" id="section-subscription-mode">
+    <summary>
+        <h2>Subscription Mode (LLM Credentials Provider)</h2>
+    </summary>
+    <p class="section-description">
+        Configure how Claude CLI obtains Anthropic credentials. In <strong>API Key</strong> mode the
+        Anthropic API key you enter above is used directly. In <strong>Subscription</strong> mode
+        credentials are leased at runtime from an external llm-creds-provider service — no static
+        API key is stored on this server.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-subscription-mode">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Authentication Mode</td>
+                        <td class="config-value">
+                            {% if config.claude_cli.claude_auth_mode == "subscription" %}
+                            <strong>Subscription</strong> (credentials leased at runtime)
+                            {% else %}
+                            API Key (static key)
+                            {% endif %}
+                        </td>
+                        <td class="config-note"></td>
+                    </tr>
+                    {% if config.claude_cli.claude_auth_mode == "subscription" %}
+                    <tr>
+                        <td class="config-label">Provider URL</td>
+                        <td class="config-value">{{ config.claude_cli.llm_creds_provider_url or "—" }}</td>
+                        <td class="config-note"></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Consumer ID</td>
+                        <td class="config-value">{{ config.claude_cli.llm_creds_provider_consumer_id or "cidx-server" }}</td>
+                        <td class="config-note"></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Lease Status</td>
+                        <td class="config-value">
+                            <span id="lease-status-value">Loading...</span>
+                        </td>
+                        <td class="config-actions">
+                            <button type="button" class="outline small" onclick="refreshLeaseStatus()">Refresh</button>
+                        </td>
+                    </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('subscription-mode')">Edit</button>
+            </div>
+        </div>
+
+        <!-- Edit Mode -->
+        <div id="edit-form-subscription-mode" style="display: none;">
+            <div id="subscription-mode-message"></div>
+            <div class="form-grid">
+                <label>
+                    Authentication Mode
+                    <select id="subscription-auth-mode" onchange="toggleSubscriptionFields()">
+                        <option value="api_key" {% if config.claude_cli.claude_auth_mode != "subscription" %}selected{% endif %}>API Key (static)</option>
+                        <option value="subscription" {% if config.claude_cli.claude_auth_mode == "subscription" %}selected{% endif %}>Subscription (leased credentials)</option>
+                    </select>
+                    <small>Switch between static API key and runtime credential lease</small>
+                </label>
+            </div>
+
+            <div id="subscription-fields" style="{% if config.claude_cli.claude_auth_mode != 'subscription' %}display:none{% endif %}">
+                <div class="form-grid">
+                    <label for="llm-provider-url">
+                        Provider URL
+                        <input type="url" id="llm-provider-url" name="llm_creds_provider_url"
+                               value="{{ config.claude_cli.llm_creds_provider_url or '' }}"
+                               placeholder="http://creds-provider:8080">
+                        <small>Base URL of the llm-creds-provider service</small>
+                    </label>
+                    <label for="llm-provider-api-key">
+                        Provider API Key
+                        <input type="password" id="llm-provider-api-key" name="llm_creds_provider_api_key"
+                               value=""
+                               placeholder="Enter provider API key">
+                        <small>API key used to authenticate with the provider</small>
+                    </label>
+                    <label for="llm-consumer-id">
+                        Consumer ID
+                        <input type="text" id="llm-consumer-id" name="llm_creds_provider_consumer_id"
+                               value="{{ config.claude_cli.llm_creds_provider_consumer_id or 'cidx-server' }}"
+                               placeholder="cidx-server">
+                        <small>Identifier sent to the provider on credential checkout</small>
+                    </label>
+                </div>
+                <div class="form-actions-inline">
+                    <button type="button" class="outline small" onclick="testLlmConnection()">Test Connection</button>
+                    <span id="llm-test-status" class="key-status"></span>
+                </div>
+            </div>
+
+            <div class="form-actions">
+                <button type="button" class="primary" onclick="saveLlmCredsConfig()">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('subscription-mode')">Cancel</button>
+            </div>
+        </div>
+    </article>
+</details>
+
+<script>
+function toggleSubscriptionFields() {
+    var mode = document.getElementById('subscription-auth-mode').value;
+    var fields = document.getElementById('subscription-fields');
+    if (fields) {
+        fields.style.display = (mode === 'subscription') ? '' : 'none';
+    }
+}
+
+function refreshLeaseStatus() {
+    var el = document.getElementById('lease-status-value');
+    if (!el) return;
+    fetch('/api/llm-creds/lease-status', {
+        headers: {'Authorization': 'Bearer ' + (window._cidxToken || '')}
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        el.textContent = data.status + (data.error ? ' (' + data.error + ')' : '');
+    })
+    .catch(function(e) { el.textContent = 'Error: ' + e; });
+}
+
+function testLlmConnection() {
+    var url = document.getElementById('llm-provider-url').value;
+    var key = document.getElementById('llm-provider-api-key').value;
+    var statusEl = document.getElementById('llm-test-status');
+    if (!url || !key) {
+        if (statusEl) { statusEl.textContent = 'Enter URL and API key first'; statusEl.className = 'key-status error'; }
+        return;
+    }
+    if (statusEl) { statusEl.textContent = 'Testing...'; statusEl.className = 'key-status'; }
+    fetch('/api/llm-creds/test-connection', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (window._cidxToken || '')},
+        body: JSON.stringify({provider_url: url, api_key: key})
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (statusEl) {
+            statusEl.textContent = data.success ? 'Connection OK' : ('Failed: ' + (data.error || 'unknown'));
+            statusEl.className = 'key-status ' + (data.success ? 'success' : 'error');
+        }
+    })
+    .catch(function(e) {
+        if (statusEl) { statusEl.textContent = 'Error: ' + e; statusEl.className = 'key-status error'; }
+    });
+}
+
+function saveLlmCredsConfig() {
+    var mode = document.getElementById('subscription-auth-mode').value;
+    var url = (document.getElementById('llm-provider-url') || {}).value || '';
+    var key = (document.getElementById('llm-provider-api-key') || {}).value || '';
+    var consumerId = (document.getElementById('llm-consumer-id') || {}).value || 'cidx-server';
+    var msgEl = document.getElementById('subscription-mode-message');
+
+    fetch('/api/llm-creds/save-config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (window._cidxToken || '')},
+        body: JSON.stringify({
+            claude_auth_mode: mode,
+            llm_creds_provider_url: url,
+            llm_creds_provider_api_key: key,
+            llm_creds_provider_consumer_id: consumerId
+        })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.success) {
+            if (msgEl) { msgEl.textContent = 'Saved successfully.'; msgEl.className = ''; }
+            setTimeout(function() { location.reload(); }, 800);
+        } else {
+            if (msgEl) { msgEl.textContent = 'Error: ' + (data.error || 'unknown'); msgEl.className = 'validation-error'; }
+        }
+    })
+    .catch(function(e) {
+        if (msgEl) { msgEl.textContent = 'Error: ' + e; msgEl.className = 'validation-error'; }
+    });
+}
+
+// Auto-load lease status on page load if in subscription mode
+(function() {
+    if (document.getElementById('lease-status-value')) {
+        refreshLeaseStatus();
+    }
+})();
+</script>
+
 
 <details class="config-section" id="section-mcp_session">
     <summary>

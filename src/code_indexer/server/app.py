@@ -96,6 +96,7 @@ from .routers.diagnostics import router as diagnostics_router
 from .routers.research_assistant import router as research_assistant_router
 from .routers.repository_health import router as repository_health_router
 from .routers.activated_repos import router as activated_repos_router
+from .routers.llm_creds import router as llm_creds_router
 from .services.maintenance_service import get_maintenance_state
 from .routers.groups import (
     router as groups_router,
@@ -2541,6 +2542,8 @@ def create_app() -> FastAPI:
                     "LLM lease lifecycle started: %s",
                     llm_lifecycle_service.get_status().status.value,
                 )
+                # Store in app.state so /api/llm-creds/lease-status can read it
+                app.state.llm_lifecycle_service = llm_lifecycle_service
             else:
                 logger.warning(
                     "Subscription mode enabled but provider URL/API key not configured"
@@ -3325,9 +3328,10 @@ def create_app() -> FastAPI:
                 )
 
         # --- LLM Lease Lifecycle shutdown ---
-        if llm_lifecycle_service is not None:
+        _llm_svc = getattr(app.state, "llm_lifecycle_service", None)
+        if _llm_svc is not None:
             try:
-                llm_lifecycle_service.stop()
+                _llm_svc.stop()
                 logger.info("LLM lease lifecycle stopped")
             except Exception as e:
                 logger.error("Error stopping LLM lease lifecycle: %s", e)
@@ -8572,6 +8576,7 @@ def create_app() -> FastAPI:
     app.include_router(delegation_callbacks_router)
     app.include_router(maintenance_router)
     app.include_router(api_keys_router)
+    app.include_router(llm_creds_router)
     app.include_router(diagnostics_router)
     app.include_router(research_assistant_router)
     app.include_router(repository_health_router)
