@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.100
+
+### Bug Fixes
+
+- fix: LLM lease lifecycle ignores api_key credential type from provider (Bug found during E2E testing of Epic #363). When the llm-creds-provider returns an api_key credential (instead of OAuth tokens), the lifecycle now sets ANTHROPIC_API_KEY in os.environ instead of writing empty tokens to .credentials.json. Also fixed crash recovery to branch on credential_type (persisted in LlmLeaseState), and reset _credential_type on failed start to prevent stale state.
+
 ## v9.3.99
 
 ### Enhancements
