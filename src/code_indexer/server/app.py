@@ -2515,6 +2515,37 @@ def create_app() -> FastAPI:
                 )
             )
 
+        # --- LLM Lease Lifecycle (subscription credential mode) ---
+        llm_lifecycle_service = None
+        claude_config = server_config.claude_integration_config
+        if claude_config and claude_config.claude_auth_mode == "subscription":
+            if claude_config.llm_creds_provider_url and claude_config.llm_creds_provider_api_key:
+                from code_indexer.server.services.llm_creds_client import LlmCredsClient
+                from code_indexer.server.config.llm_lease_state import LlmLeaseStateManager
+                from code_indexer.server.services.claude_credentials_file_manager import ClaudeCredentialsFileManager
+                from code_indexer.server.services.llm_lease_lifecycle import LlmLeaseLifecycleService
+
+                llm_client = LlmCredsClient(
+                    provider_url=claude_config.llm_creds_provider_url,
+                    api_key=claude_config.llm_creds_provider_api_key,
+                )
+                llm_lifecycle_service = LlmLeaseLifecycleService(
+                    client=llm_client,
+                    state_manager=LlmLeaseStateManager(),
+                    credentials_manager=ClaudeCredentialsFileManager(),
+                )
+                llm_lifecycle_service.start(
+                    consumer_id=claude_config.llm_creds_provider_consumer_id
+                )
+                logger.info(
+                    "LLM lease lifecycle started: %s",
+                    llm_lifecycle_service.get_status().status.value,
+                )
+            else:
+                logger.warning(
+                    "Subscription mode enabled but provider URL/API key not configured"
+                )
+
         # Startup: Initialize ClaudeCliManager singleton (Story #23)
         logger.info(
             "Server startup: Initializing ClaudeCliManager",
@@ -3292,6 +3323,14 @@ def create_app() -> FastAPI:
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
+
+        # --- LLM Lease Lifecycle shutdown ---
+        if llm_lifecycle_service is not None:
+            try:
+                llm_lifecycle_service.stop()
+                logger.info("LLM lease lifecycle stopped")
+            except Exception as e:
+                logger.error("Error stopping LLM lease lifecycle: %s", e)
 
         # Shutdown: Stop cidx-meta refresh debouncer (Story #345)
         cidx_meta_debouncer_state = getattr(app.state, "cidx_meta_debouncer", None)
