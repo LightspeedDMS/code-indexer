@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.102
+
+### Bug Fixes
+
+- fix: Lease lifecycle api_key path didn't write to ~/.claude.json (Bug #363). Claude CLI reads apiKey from ~/.claude.json, not ANTHROPIC_API_KEY env var. Added _write_claude_api_key() and _clear_claude_api_key() helpers to the lifecycle service. Both credential paths (api_key and oauth) now clean up ~/.claude.json on stop/crash-recovery, preventing stale credentials from surviving mode switches. File written with 0o600 permissions.
+
 ## v9.3.101
 
 ### Bug Fixes
