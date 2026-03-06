@@ -1101,7 +1101,11 @@ class ResearchAssistantService:
                     except Exception as e:
                         logger.debug(f"Failed to mark job {job_id} complete in tracker: {e}")
             else:
-                error = result.stderr.strip()
+                error = (
+                    result.stderr.strip()
+                    or result.stdout.strip()
+                    or f"Exit code {result.returncode}"
+                )
                 logger.error(f"Claude CLI failed: {error}")
 
                 with self._jobs_lock:
