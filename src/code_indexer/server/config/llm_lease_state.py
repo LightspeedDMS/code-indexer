@@ -42,6 +42,7 @@ class LlmLeaseState:
 
     lease_id: str
     credential_id: str
+    credential_type: str = "oauth"   # "oauth" | "api_key"
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +147,7 @@ class LlmLeaseStateManager:
         plaintext = json.dumps({
             "lease_id": state.lease_id,
             "credential_id": state.credential_id,
+            "credential_type": state.credential_type,
         })
         encrypted_blob = self._encrypt(plaintext)
 
@@ -183,6 +185,7 @@ class LlmLeaseStateManager:
         return LlmLeaseState(
             lease_id=data["lease_id"],
             credential_id=data["credential_id"],
+            credential_type=data.get("credential_type", "oauth"),
         )
 
     def clear_state(self) -> None:

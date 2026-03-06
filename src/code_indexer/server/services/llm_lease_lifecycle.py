@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
@@ -72,6 +72,7 @@ class LlmLeaseLifecycleService:
         self._creds_mgr = credentials_manager
         self._lock = threading.Lock()
         self._status = LeaseStatusInfo(status=LeaseLifecycleStatus.INACTIVE)
+        self._credential_type: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -99,7 +100,10 @@ class LlmLeaseLifecycleService:
                     "Found residual lease state on startup: lease_id=%s — performing crash recovery",
                     residual.lease_id,
                 )
-                self._do_checkin_with_writeback(residual.lease_id, residual.credential_id)
+                if getattr(residual, "credential_type", "oauth") == "api_key":
+                    self._do_plain_checkin(residual.lease_id, residual.credential_id)
+                else:
+                    self._do_checkin_with_writeback(residual.lease_id, residual.credential_id)
                 self._state_mgr.clear_state()
 
             # Step 2: Remove ANTHROPIC_API_KEY from env to prevent interference
@@ -109,15 +113,21 @@ class LlmLeaseLifecycleService:
             try:
                 response = self._client.checkout(vendor="anthropic", consumer_id=consumer_id)
 
-                # Step 4: Write credentials file and state
-                self._creds_mgr.write_credentials(
-                    access_token=response.access_token or "",
-                    refresh_token=response.refresh_token or "",
-                )
+                # Step 4: Store credentials based on type returned by provider
+                if response.api_key:
+                    self._credential_type = "api_key"
+                    os.environ["ANTHROPIC_API_KEY"] = response.api_key
+                else:
+                    self._credential_type = "oauth"
+                    self._creds_mgr.write_credentials(
+                        access_token=response.access_token or "",
+                        refresh_token=response.refresh_token or "",
+                    )
                 self._state_mgr.save_state(
                     LlmLeaseState(
                         lease_id=response.lease_id,
                         credential_id=response.credential_id,
+                        credential_type=self._credential_type or "oauth",
                     )
                 )
 
@@ -136,6 +146,7 @@ class LlmLeaseLifecycleService:
                 logger.error(
                     "Failed to checkout credential from LLM provider: %s", exc
                 )
+                self._credential_type = None
                 self._status = LeaseStatusInfo(
                     status=LeaseLifecycleStatus.DEGRADED,
                     error=str(exc),
@@ -155,7 +166,7 @@ class LlmLeaseLifecycleService:
         No-op if status is already INACTIVE or DEGRADED.
         """
         with self._lock:
-            if self._status.status not in (LeaseLifecycleStatus.ACTIVE,):
+            if self._status.status != LeaseLifecycleStatus.ACTIVE:
                 self._status = LeaseStatusInfo(status=LeaseLifecycleStatus.INACTIVE)
                 return
 
@@ -169,11 +180,17 @@ class LlmLeaseLifecycleService:
             )
 
             if lease_id:
-                self._do_checkin_with_writeback(lease_id, credential_id)
+                if self._credential_type == "api_key":
+                    # Plain checkin — no token writeback for api_key credentials
+                    self._do_plain_checkin(lease_id, credential_id)
+                    os.environ.pop("ANTHROPIC_API_KEY", None)
+                else:
+                    # OAuth: read current tokens from file and write them back
+                    self._do_checkin_with_writeback(lease_id, credential_id)
+                    self._creds_mgr.delete_credentials()
 
-            # Cleanup files
-            self._creds_mgr.delete_credentials()
             self._state_mgr.clear_state()
+            self._credential_type = None
 
             self._status = LeaseStatusInfo(status=LeaseLifecycleStatus.INACTIVE)
             logger.info("Lease lifecycle stopped, credentials cleaned up")
@@ -202,6 +219,26 @@ class LlmLeaseLifecycleService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _do_plain_checkin(
+        self, lease_id: str, credential_id: Optional[str]
+    ) -> None:
+        """
+        Checkin without token writeback — used for api_key credential type.
+
+        Failures are logged as warnings and swallowed — checkin failure must
+        not prevent the rest of shutdown from completing.
+        """
+        try:
+            self._client.checkin(
+                lease_id=lease_id,
+                credential_id=credential_id,
+            )
+            logger.info("Plain checkin successful: lease_id=%s", lease_id)
+        except Exception as exc:
+            logger.warning(
+                "Checkin failed for lease_id=%s (non-fatal): %s", lease_id, exc
+            )
 
     def _do_checkin_with_writeback(
         self, lease_id: str, credential_id: Optional[str]

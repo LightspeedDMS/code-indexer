@@ -16,6 +16,7 @@ Uses:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import httpx
@@ -211,3 +212,109 @@ class TestStop:
 
         svc.stop()  # Should not raise
         assert svc.get_status().status == LeaseLifecycleStatus.INACTIVE
+
+
+# ---------------------------------------------------------------------------
+# TestStopWithApiKeyCredential
+# ---------------------------------------------------------------------------
+
+
+def _api_key_checkout_response(
+    lease_id: str = "lease-002",
+    credential_id: str = "cred-002",
+    api_key: str = "sk-ant-api03-test-key",
+) -> httpx.Response:
+    """Checkout response for api_key credential type (no access/refresh tokens)."""
+    return httpx.Response(
+        200,
+        json={
+            "lease_id": lease_id,
+            "credential_id": credential_id,
+            "api_key": api_key,
+        },
+    )
+
+
+def _make_api_key_service(
+    tmp_path: Path,
+    checkin_handler=None,
+) -> LlmLeaseLifecycleService:
+    """Build a service whose provider returns api_key credentials."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/checkout" in str(request.url):
+            return _api_key_checkout_response()
+        if "/checkin" in str(request.url):
+            if checkin_handler is not None:
+                return checkin_handler(request)
+            return _checkin_response()
+        return httpx.Response(404, text="Not found")
+
+    transport = _make_transport(handler)
+    client = LlmCredsClient(
+        provider_url="http://fake-provider",
+        api_key="test-api-key",
+        transport=transport,
+    )
+    state_manager = LlmLeaseStateManager(server_dir_path=str(tmp_path / "state"))
+    creds_manager = ClaudeCredentialsFileManager(
+        credentials_path=tmp_path / "creds" / ".credentials.json"
+    )
+    return LlmLeaseLifecycleService(
+        client=client,
+        state_manager=state_manager,
+        credentials_manager=creds_manager,
+    )
+
+
+class TestStopWithApiKeyCredential:
+    """stop() after a start() that used api_key credential type (3 tests).
+
+    Covers api_key cleanup path and OAuth contrast to document differences.
+    """
+
+    def test_stop_with_api_key_removes_environ(self, tmp_path, monkeypatch):
+        """After start with api_key, stop() must remove ANTHROPIC_API_KEY from env."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        svc = _make_api_key_service(tmp_path)
+        svc.start()
+        assert os.environ.get("ANTHROPIC_API_KEY") == "sk-ant-api03-test-key"
+
+        svc.stop()
+        assert "ANTHROPIC_API_KEY" not in os.environ
+
+    def test_stop_with_api_key_does_plain_checkin(self, tmp_path):
+        """After start with api_key, stop() calls checkin with lease_id only (no tokens)."""
+        checkin_bodies = []
+
+        def checkin_handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            checkin_bodies.append(body)
+            return _checkin_response()
+
+        svc = _make_api_key_service(tmp_path, checkin_handler=checkin_handler)
+        svc.start()
+        svc.stop()
+
+        stop_checkin = checkin_bodies[-1]
+        assert stop_checkin["lease_id"] == "lease-002"
+        assert "access_token" not in stop_checkin
+        assert "refresh_token" not in stop_checkin
+
+    def test_stop_with_oauth_does_token_writeback(self, tmp_path):
+        """Contrast: after OAuth start, stop() includes access/refresh tokens in checkin."""
+        checkin_bodies = []
+
+        def checkin_handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            checkin_bodies.append(body)
+            return _checkin_response()
+
+        svc = _make_service(tmp_path, checkin_handler=checkin_handler)
+        svc.start()
+        svc.stop()
+
+        stop_checkin = checkin_bodies[-1]
+        assert stop_checkin["lease_id"] == "lease-001"
+        assert "access_token" in stop_checkin
+        assert "refresh_token" in stop_checkin
