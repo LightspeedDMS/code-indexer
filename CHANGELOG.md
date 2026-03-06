@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.104
+
+### Bug Fixes
+
+- fix: directory_explorer crashes with PermissionError on symlinks to restricted system files (Bug #368). Extended iterdir() and per-entry stat() error handling to catch both PermissionError and OSError, gracefully skipping inaccessible entries instead of crashing.
+- fix: research_assistant_service logs empty error when Claude CLI fails (Bug #370). Added three-tier fallback chain for error messages: stderr, then stdout, then exit code. Error messages are never empty now.
+
 ## v9.3.103
 
 ### Bug Fixes

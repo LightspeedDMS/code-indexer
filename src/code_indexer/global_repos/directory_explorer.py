@@ -190,7 +190,7 @@ class DirectoryExplorerService:
             # Get directory contents
             try:
                 entries = list(current_path.iterdir())
-            except PermissionError:
+            except (PermissionError, OSError):
                 return TreeNode(
                     name=name,
                     path=relative_path,
@@ -208,23 +208,28 @@ class DirectoryExplorerService:
                     f"{relative_path}/{entry.name}" if relative_path else entry.name
                 )
 
-                # Skip excluded entries
-                if should_exclude(entry.name, entry.is_dir(), entry_rel_path):
-                    continue
+                try:
+                    # Skip excluded entries
+                    if should_exclude(entry.name, entry.is_dir(), entry_rel_path):
+                        continue
 
-                # Skip symlinks to prevent loops
-                if entry.is_symlink():
-                    # Include as a file but don't follow
-                    if entry.is_file() or not entry.is_dir():
+                    # Skip symlinks to prevent loops
+                    if entry.is_symlink():
+                        # Include as a file but don't follow
+                        if entry.is_file() or not entry.is_dir():
+                            if should_include_file(entry.name, entry_rel_path):
+                                files.append(entry)
+                        continue
+
+                    if entry.is_dir():
+                        dirs.append(entry)
+                    elif entry.is_file():
                         if should_include_file(entry.name, entry_rel_path):
                             files.append(entry)
+                except (PermissionError, OSError):
+                    # Skip entries we cannot stat (e.g., symlinks to restricted files,
+                    # device files, or other inaccessible filesystem entries)
                     continue
-
-                if entry.is_dir():
-                    dirs.append(entry)
-                elif entry.is_file():
-                    if should_include_file(entry.name, entry_rel_path):
-                        files.append(entry)
 
             # Sort alphabetically (case-insensitive)
             dirs.sort(key=lambda e: e.name.lower())
