@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.99
+
+### Enhancements
+
+- feat: LLM Creds Provider integration for subscription-based Claude credentials (Epic #363). Added subscription auth mode where CIDX server checks out OAuth credentials from an external llm-creds-provider service instead of using a static API key. Includes: HTTP client with typed exceptions (Story #365), encrypted lease state persistence with AES-256-CBC (Story #365), Claude credentials file manager writing .credentials.json in claudeAiOauth format (Story #365), lifecycle service with crash recovery and token writeback on checkin (Story #366), mode guard making ApiKeySyncService a no-op in subscription mode (Story #366), server startup/shutdown hooks (Story #366), Config UI section with test-connection, save-config, and lease-status endpoints (Story #367), and 409 guard preventing API key save in subscription mode (Story #367). 137 new unit tests.
+
 ## v9.3.98
 
 ### Bug Fixes

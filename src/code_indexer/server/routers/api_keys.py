@@ -306,6 +306,17 @@ def save_anthropic_key(
     - os.environ["ANTHROPIC_API_KEY"]
     - systemd environment file
     """
+    # 409 guard: block manual key save when subscription mode is active
+    _cfg = get_config_service().load_config()
+    if _cfg.claude_integration_config.claude_auth_mode == "subscription":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Cannot save Anthropic API key while subscription mode is active. "
+                "Switch claude_auth_mode to 'api_key' first via /api/llm-creds/save-config."
+            ),
+        )
+
     # Validate format
     validation = ApiKeyValidator.validate_anthropic_format(request.api_key)
     if not validation.valid:

@@ -448,6 +448,15 @@ class ClaudeIntegrationConfig:
     dependency_map_pass2_max_turns: int = 50  # Fix 6: Reduced from 60
     # Delta analysis max turns (default: 30, for future incremental updates)
     dependency_map_delta_max_turns: int = 30
+    # Story #366: Subscription mode credential lifecycle
+    # Authentication mode: "api_key" (default) or "subscription"
+    claude_auth_mode: str = "api_key"
+    # LLM credentials provider base URL (e.g. http://creds-provider:8080)
+    llm_creds_provider_url: str = ""
+    # API key for the LLM credentials provider (stored as-is; config.json is local-only)
+    llm_creds_provider_api_key: str = ""
+    # Consumer ID sent to the provider on checkout (default: "cidx-server")
+    llm_creds_provider_consumer_id: str = "cidx-server"
 
 
 @dataclass

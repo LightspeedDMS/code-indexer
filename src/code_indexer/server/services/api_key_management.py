@@ -102,6 +102,10 @@ class ApiKeySyncService:
         Returns:
             SyncResult indicating success/failure and idempotency status
         """
+        # Story #366: Subscription mode guard — credentials managed by lease lifecycle
+        if self._is_subscription_mode():
+            return SyncResult(success=True, already_synced=True)
+
         with self._sync_lock:
             # Check if already synced (idempotent)
             if self._is_anthropic_key_synced(api_key):
@@ -168,6 +172,21 @@ class ApiKeySyncService:
                     )
                 )
                 return SyncResult(success=False, error=str(e))
+
+    def _is_subscription_mode(self) -> bool:
+        """Return True if the server is in subscription credential mode (Story #366)."""
+        try:
+            from code_indexer.server.services.config_service import get_config_service
+
+            config = get_config_service().get_config()
+            claude_config = config.claude_integration_config
+            return (
+                claude_config is not None
+                and claude_config.claude_auth_mode == "subscription"
+            )
+        except Exception as exc:
+            logger.warning("Failed to check subscription mode, defaulting to api_key: %s", exc)
+            return False
 
     def _is_voyageai_key_synced(self, api_key: str) -> bool:
         """Check if VoyageAI key is already synced to os.environ."""
