@@ -11,6 +11,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Dict, Optional, TypeVar
 
@@ -770,6 +771,35 @@ class DatabaseConnectionManager:
         self._local = threading.local()
         self._connections: Dict[int, sqlite3.Connection] = {}
         self._lock = threading.Lock()
+        self._last_cleanup: float = 0.0
+        self.CLEANUP_INTERVAL: float = 60.0
+
+    def _cleanup_stale_connections(self) -> None:
+        """
+        Close and remove connections for threads that are no longer alive.
+
+        Called periodically (throttled by CLEANUP_INTERVAL) to prevent
+        unbounded memory and file descriptor growth from thread pool churn.
+        """
+        with self._lock:
+            self._last_cleanup = time.time()
+            alive_thread_ids = {t.ident for t in threading.enumerate()}
+            stale_ids = [
+                tid for tid in self._connections if tid not in alive_thread_ids
+            ]
+            for tid in stale_ids:
+                try:
+                    self._connections[tid].close()
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to close stale connection for thread {tid}: {e}"
+                    )
+                del self._connections[tid]
+
+            if stale_ids:
+                logger.info(
+                    f"Cleaned up {len(stale_ids)} stale SQLite connections"
+                )
 
     def get_connection(self) -> sqlite3.Connection:
         """
@@ -785,13 +815,17 @@ class DatabaseConnectionManager:
 
         # Check if connection exists for this thread
         if not hasattr(self._local, "connection") or self._local.connection is None:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
             conn.execute("PRAGMA foreign_keys = ON")
             self._local.connection = conn
 
             # Track connection for cleanup
             with self._lock:
                 self._connections[thread_id] = conn
+
+        # Piggyback stale connection cleanup (throttled)
+        if (time.time() - self._last_cleanup) > self.CLEANUP_INTERVAL:
+            self._cleanup_stale_connections()
 
         connection: sqlite3.Connection = self._local.connection
         return connection
