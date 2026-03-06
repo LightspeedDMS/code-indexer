@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.101
+
+### Bug Fixes
+
+- fix: API key auto-seeding was bidirectional, preventing operators from clearing keys (Bug found during Epic #363 staging validation). When an operator removed the Anthropic API key from config, the auto-seeder would read it back from the systemd environment variable and re-write it to config. Rewrote api_key_seeding.py to be strictly unidirectional: config is the single source of truth, keys flow config-to-env only, and blank config actively clears the environment variable. Never writes back to config.
+
 ## v9.3.100
 
 ### Bug Fixes
