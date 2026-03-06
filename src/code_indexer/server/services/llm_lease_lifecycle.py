@@ -9,11 +9,13 @@ Orchestrates the full credential lease lifecycle:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Optional
 
 from code_indexer.server.config.llm_lease_state import LlmLeaseState, LlmLeaseStateManager
@@ -66,10 +68,12 @@ class LlmLeaseLifecycleService:
         client: LlmCredsClient,
         state_manager: LlmLeaseStateManager,
         credentials_manager: ClaudeCredentialsFileManager,
+        claude_json_path: Optional[Path] = None,
     ) -> None:
         self._client = client
         self._state_mgr = state_manager
         self._creds_mgr = credentials_manager
+        self._claude_json_path = claude_json_path or (Path.home() / ".claude.json")
         self._lock = threading.Lock()
         self._status = LeaseStatusInfo(status=LeaseLifecycleStatus.INACTIVE)
         self._credential_type: Optional[str] = None
@@ -102,6 +106,7 @@ class LlmLeaseLifecycleService:
                 )
                 if getattr(residual, "credential_type", "oauth") == "api_key":
                     self._do_plain_checkin(residual.lease_id, residual.credential_id)
+                    self._clear_claude_api_key()
                 else:
                     self._do_checkin_with_writeback(residual.lease_id, residual.credential_id)
                 self._state_mgr.clear_state()
@@ -117,6 +122,7 @@ class LlmLeaseLifecycleService:
                 if response.api_key:
                     self._credential_type = "api_key"
                     os.environ["ANTHROPIC_API_KEY"] = response.api_key
+                    self._write_claude_api_key(response.api_key)
                 else:
                     self._credential_type = "oauth"
                     self._creds_mgr.write_credentials(
@@ -184,10 +190,12 @@ class LlmLeaseLifecycleService:
                     # Plain checkin — no token writeback for api_key credentials
                     self._do_plain_checkin(lease_id, credential_id)
                     os.environ.pop("ANTHROPIC_API_KEY", None)
+                    self._clear_claude_api_key()
                 else:
                     # OAuth: read current tokens from file and write them back
                     self._do_checkin_with_writeback(lease_id, credential_id)
                     self._creds_mgr.delete_credentials()
+                    self._clear_claude_api_key()
 
             self._state_mgr.clear_state()
             self._credential_type = None
@@ -267,3 +275,41 @@ class LlmLeaseLifecycleService:
             logger.warning(
                 "Checkin failed for lease_id=%s (non-fatal): %s", lease_id, exc
             )
+
+    def _write_claude_api_key(self, api_key: str) -> None:
+        """Write apiKey to ~/.claude.json, preserving existing fields."""
+        config: dict = {}
+        if self._claude_json_path.exists():
+            try:
+                config = json.loads(self._claude_json_path.read_text())
+            except json.JSONDecodeError:
+                logger.warning(
+                    "Invalid JSON in %s, overwriting with fresh config",
+                    self._claude_json_path,
+                )
+                config = {}
+        config["apiKey"] = api_key
+        self._claude_json_path.parent.mkdir(parents=True, exist_ok=True)
+        self._claude_json_path.write_text(json.dumps(config, indent=2))
+        os.chmod(self._claude_json_path, 0o600)
+
+    def _clear_claude_api_key(self) -> None:
+        """Remove apiKey from ~/.claude.json, preserving other fields.
+
+        If the file does not exist or has no apiKey, this is a no-op.
+        If apiKey was the only field, the file is left as an empty object {}.
+        """
+        if not self._claude_json_path.exists():
+            return
+        try:
+            config = json.loads(self._claude_json_path.read_text())
+        except json.JSONDecodeError:
+            logger.warning(
+                "Invalid JSON in %s when clearing apiKey — skipping",
+                self._claude_json_path,
+            )
+            return
+        if "apiKey" not in config:
+            return
+        del config["apiKey"]
+        self._claude_json_path.write_text(json.dumps(config, indent=2))
