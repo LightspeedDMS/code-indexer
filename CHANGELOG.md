@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.103
+
+### Bug Fixes
+
+- fix: SQLite thread-local connection leak causing unbounded memory growth (Story #369). Added piggyback cleanup to DatabaseConnectionManager and SQLiteLogHandler that detects dead threads via threading.enumerate() and closes their orphaned connections. Cleanup is throttled to every 60 seconds to avoid overhead. SQLiteLogHandler.close() now closes ALL tracked connections, not just the calling thread's. Added check_same_thread=False to DatabaseConnectionManager for cross-thread cleanup safety.
+
 ## v9.3.102
 
 ### Bug Fixes
