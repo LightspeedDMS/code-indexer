@@ -186,6 +186,14 @@ class ConfigService:
                 "refinement_enabled": config.claude_integration_config.refinement_enabled,
                 "refinement_interval_hours": config.claude_integration_config.refinement_interval_hours,
                 "refinement_domains_per_run": config.claude_integration_config.refinement_domains_per_run,
+                "claude_auth_mode": config.claude_integration_config.claude_auth_mode,
+                "llm_creds_provider_url": config.claude_integration_config.llm_creds_provider_url,
+                "llm_creds_provider_api_key": (
+                    config.claude_integration_config.llm_creds_provider_api_key[:6] + "***"
+                    if config.claude_integration_config.llm_creds_provider_api_key
+                    else None
+                ),
+                "llm_creds_provider_consumer_id": config.claude_integration_config.llm_creds_provider_consumer_id,
             },
             # OIDC/SSO authentication
             "oidc": {
@@ -574,6 +582,20 @@ class ConfigService:
             claude_config.refinement_interval_hours = max(1, int(value))
         elif key == "refinement_domains_per_run":
             claude_config.refinement_domains_per_run = min(50, max(1, int(value)))
+        elif key == "claude_auth_mode":
+            allowed = {"api_key", "subscription"}
+            str_value = str(value)
+            if str_value not in allowed:
+                raise ValueError(
+                    f"Invalid claude_auth_mode '{value}': must be one of {sorted(allowed)}"
+                )
+            claude_config.claude_auth_mode = str_value
+        elif key == "llm_creds_provider_url":
+            claude_config.llm_creds_provider_url = str(value) if value else ""
+        elif key == "llm_creds_provider_api_key":
+            claude_config.llm_creds_provider_api_key = str(value) if value else ""
+        elif key == "llm_creds_provider_consumer_id":
+            claude_config.llm_creds_provider_consumer_id = str(value) if value else ""
         else:
             raise ValueError(f"Unknown claude_cli setting: {key}")
 

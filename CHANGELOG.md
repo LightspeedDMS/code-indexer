@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.107
+
+### Bug Fixes
+
+- fix: Subscription mode config display always showed "API Key" regardless of actual setting (Story #367). The `get_all_settings()` method was missing 4 subscription-related fields (`claude_auth_mode`, `llm_creds_provider_url`, `llm_creds_provider_api_key`, `llm_creds_provider_consumer_id`) from the `claude_cli` dict, causing the Web UI config page to always render the default "API Key" mode. Also added input validation for `claude_auth_mode` in `_update_claude_cli_setting()`.
+
 ## v9.3.106
 
 ### Features
