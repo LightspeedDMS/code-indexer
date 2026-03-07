@@ -448,6 +448,13 @@ class ClaudeIntegrationConfig:
     dependency_map_pass2_max_turns: int = 50  # Fix 6: Reduced from 60
     # Delta analysis max turns (default: 30, for future incremental updates)
     dependency_map_delta_max_turns: int = 30
+    # Story #359: Refinement job configuration
+    # Enable/disable continuous dependency document refinement
+    refinement_enabled: bool = False
+    # Refinement interval in hours (default: 24 = once per day)
+    refinement_interval_hours: int = 24
+    # Number of domains to refine per scheduled run (default: 3)
+    refinement_domains_per_run: int = 3
     # Story #366: Subscription mode credential lifecycle
     # Authentication mode: "api_key" (default) or "subscription"
     claude_auth_mode: str = "api_key"

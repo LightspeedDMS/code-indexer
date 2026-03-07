@@ -183,6 +183,9 @@ class ConfigService:
                 "dependency_map_pass1_max_turns": config.claude_integration_config.dependency_map_pass1_max_turns,
                 "dependency_map_pass2_max_turns": config.claude_integration_config.dependency_map_pass2_max_turns,
                 "dependency_map_delta_max_turns": config.claude_integration_config.dependency_map_delta_max_turns,
+                "refinement_enabled": config.claude_integration_config.refinement_enabled,
+                "refinement_interval_hours": config.claude_integration_config.refinement_interval_hours,
+                "refinement_domains_per_run": config.claude_integration_config.refinement_domains_per_run,
             },
             # OIDC/SSO authentication
             "oidc": {
@@ -565,6 +568,12 @@ class ConfigService:
             claude_config.dependency_map_pass2_max_turns = max(5, int(value))
         elif key == "dependency_map_delta_max_turns":
             claude_config.dependency_map_delta_max_turns = max(5, int(value))
+        elif key == "refinement_enabled":
+            claude_config.refinement_enabled = value in ["true", True, "True"]
+        elif key == "refinement_interval_hours":
+            claude_config.refinement_interval_hours = max(1, int(value))
+        elif key == "refinement_domains_per_run":
+            claude_config.refinement_domains_per_run = min(50, max(1, int(value)))
         else:
             raise ValueError(f"Unknown claude_cli setting: {key}")
 

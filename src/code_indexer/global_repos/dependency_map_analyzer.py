@@ -2527,3 +2527,89 @@ Rules:
             subprocess.TimeoutExpired: If timeout is exceeded
         """
         return self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None)
+
+    def build_refinement_prompt(
+        self,
+        domain_name: str,
+        existing_body: str,
+        participating_repos: List[str],
+    ) -> str:
+        """
+        Build editorial fact-checking prompt for refining an existing domain file (Story #359).
+
+        This is EDITORIAL (fact-checking existing docs against source code), not
+        AUTHORIAL (not rewriting from scratch). The prompt instructs Claude to verify
+        existing claims, correct inaccuracies, and preserve the document structure.
+
+        Args:
+            domain_name: Name of the domain being refined
+            existing_body: Existing document body (without frontmatter)
+            participating_repos: List of repo aliases in this domain
+
+        Returns:
+            Refinement prompt string
+        """
+        prompt = f"# Refine Domain Document: {domain_name}\n\n"
+
+        prompt += "## Task\n\n"
+        prompt += (
+            f"Fact-check and refine the existing domain analysis for '{domain_name}'. "
+            "This is an EDITORIAL task: verify existing claims against source code, "
+            "correct inaccuracies, and preserve the document structure. "
+            "Do NOT rewrite from scratch.\n\n"
+        )
+
+        prompt += "## Participating Repositories\n\n"
+        for alias in participating_repos:
+            prompt += f"- {alias}\n"
+        prompt += "\n"
+
+        prompt += "## Existing Document\n\n"
+        prompt += existing_body
+        prompt += "\n"
+
+        prompt += "## Refinement Instructions\n\n"
+        prompt += "Review the existing document above against the actual source code and:\n\n"
+        prompt += "1. **Verify** all stated dependencies against source code evidence\n"
+        prompt += "2. **Correct** any inaccurate or outdated information\n"
+        prompt += "3. **Preserve** the document structure and all sections\n"
+        prompt += "4. **Retain** all accurate, evidence-supported content\n"
+        prompt += "5. **Remove** only claims not supported by source code evidence\n\n"
+
+        prompt += "## PROHIBITED Content\n\n"
+        prompt += "Do NOT include any of the following in your output:\n"
+        prompt += "- YAML frontmatter blocks (the system adds these automatically)\n"
+        prompt += "- Speculative sections like 'Recommendations', 'Potential Integration Opportunities', or 'Future Considerations'\n"
+        prompt += "- Advisory content about what SHOULD be done or COULD be integrated\n"
+        prompt += "- Any content not directly supported by source code evidence\n\n"
+        prompt += "Document ONLY verified, factual dependencies and relationships.\n\n"
+
+        prompt += "## Output Format\n\n"
+        prompt += f"Return the full refined document body starting with '# Domain Analysis: {domain_name}'.\n"
+        prompt += "Output ONLY the content body (no YAML frontmatter, no markdown code blocks, no preamble).\n"
+        prompt += "Maintain the same section structure as the existing document.\n"
+
+        return prompt
+
+    def invoke_refinement(self, prompt: str, timeout: int, max_turns: int) -> str:
+        """
+        Invoke Claude CLI for domain document refinement (Story #359).
+
+        Public method for refinement invocations that maintains encapsulation
+        by wrapping the private _invoke_claude_cli method. Refinement uses all
+        MCP tools (allowed_tools=None) to enable full code exploration for
+        fact-checking.
+
+        Args:
+            prompt: Refinement prompt to send to Claude
+            timeout: Timeout in seconds
+            max_turns: Maximum number of agentic turns
+
+        Returns:
+            Claude CLI stdout output (refined domain document body)
+
+        Raises:
+            subprocess.CalledProcessError: If Claude CLI fails
+            subprocess.TimeoutExpired: If timeout is exceeded
+        """
+        return self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None)

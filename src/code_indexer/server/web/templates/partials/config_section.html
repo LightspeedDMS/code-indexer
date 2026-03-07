@@ -1853,6 +1853,23 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ config.claude_cli.dependency_map_delta_max_turns }}</td>
                         <td class="config-note"><small>Max turns for incremental delta analysis (default: 30)</small></td>
                     </tr>
+                    <!-- Refinement Settings (Story #359) -->
+                    <tr><td colspan="3" style="padding-top: 1em;"><strong>Document Refinement</strong></td></tr>
+                    <tr>
+                        <td class="config-label">Refinement Enabled</td>
+                        <td class="config-value">{{ 'Yes' if config.claude_cli.refinement_enabled else 'No' }}</td>
+                        <td class="config-note"><small>Enable scheduled fact-checking of dependency documents (default: No)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Refinement Interval (hours)</td>
+                        <td class="config-value">{{ config.claude_cli.refinement_interval_hours }}</td>
+                        <td class="config-note"><small>How often to run refinement cycles (default: 24)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Domains Per Run</td>
+                        <td class="config-value">{{ config.claude_cli.refinement_domains_per_run }}</td>
+                        <td class="config-note"><small>Number of domains to refine per cycle (default: 3)</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -1922,6 +1939,25 @@ function saveLlmCredsConfig() {
                     Delta Max Turns
                     <input type="number" id="depmap-delta-turns" name="dependency_map_delta_max_turns" value="{{ config.claude_cli.dependency_map_delta_max_turns }}" min="5">
                     <small>Max turns for incremental delta analysis (min: 5, default: 30)</small>
+                </label>
+                <!-- Refinement Settings (Story #359) -->
+                <label for="refinement-enabled">
+                    Refinement Enabled
+                    <select id="refinement-enabled" name="refinement_enabled">
+                        <option value="true" {% if config.claude_cli.refinement_enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.claude_cli.refinement_enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Enable scheduled fact-checking of dependency documents against source code (default: No)</small>
+                </label>
+                <label for="refinement-interval">
+                    Refinement Interval (hours)
+                    <input type="number" id="refinement-interval" name="refinement_interval_hours" value="{{ config.claude_cli.refinement_interval_hours }}" min="1">
+                    <small>How often to run refinement cycles (default: 24 hours)</small>
+                </label>
+                <label for="refinement-domains-per-run">
+                    Domains Per Run
+                    <input type="number" id="refinement-domains-per-run" name="refinement_domains_per_run" value="{{ config.claude_cli.refinement_domains_per_run }}" min="1" max="50">
+                    <small>Number of domains to refine per cycle (default: 3)</small>
                 </label>
             </div>
             <div class="form-actions">

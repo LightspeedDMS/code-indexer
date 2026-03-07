@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.106
+
+### Features
+
+- feat: Continuous dependency document refinement (Story #359). Added scheduled refinement job that fact-checks existing dependency domain documents against source code using Claude CLI. Refinement is editorial (corrects/verifies existing content) not authorial (does not rewrite from scratch). Features cursor-based round-robin domain cycling, truncation guard rejecting output less than 50% of original body, no-op detection for unchanged content, and three-way domain dispatch (create/refine/normal). Configurable via Web UI: refinement_enabled, refinement_interval_hours, refinement_domains_per_run. Adds last_refined timestamp to document frontmatter while preserving last_analyzed.
+
 ## v9.3.105
 
 ### Features
