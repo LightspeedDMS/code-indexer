@@ -183,6 +183,9 @@ class ConfigService:
                 "dependency_map_pass1_max_turns": config.claude_integration_config.dependency_map_pass1_max_turns,
                 "dependency_map_pass2_max_turns": config.claude_integration_config.dependency_map_pass2_max_turns,
                 "dependency_map_delta_max_turns": config.claude_integration_config.dependency_map_delta_max_turns,
+                "refinement_enabled": config.claude_integration_config.refinement_enabled,
+                "refinement_interval_hours": config.claude_integration_config.refinement_interval_hours,
+                "refinement_domains_per_run": config.claude_integration_config.refinement_domains_per_run,
             },
             # OIDC/SSO authentication
             "oidc": {
@@ -323,9 +326,11 @@ class ConfigService:
                 "omni_pattern_metacharacters": config.multi_search_limits_config.omni_pattern_metacharacters,
             },
             # Story #26 - Background jobs configuration, Story #27 - SubprocessExecutor max_workers
+            # Story #360 - Configurable job history retention period
             "background_jobs": {
                 "max_concurrent_background_jobs": config.background_jobs_config.max_concurrent_background_jobs,
                 "subprocess_max_workers": config.background_jobs_config.subprocess_max_workers,
+                "cleanup_max_age_hours": config.background_jobs_config.cleanup_max_age_hours,
             },
             # Story #223 - AC4: Indexing configuration
             "indexing": {
@@ -563,6 +568,12 @@ class ConfigService:
             claude_config.dependency_map_pass2_max_turns = max(5, int(value))
         elif key == "dependency_map_delta_max_turns":
             claude_config.dependency_map_delta_max_turns = max(5, int(value))
+        elif key == "refinement_enabled":
+            claude_config.refinement_enabled = value in ["true", True, "True"]
+        elif key == "refinement_interval_hours":
+            claude_config.refinement_interval_hours = max(1, int(value))
+        elif key == "refinement_domains_per_run":
+            claude_config.refinement_domains_per_run = min(50, max(1, int(value)))
         else:
             raise ValueError(f"Unknown claude_cli setting: {key}")
 
@@ -941,6 +952,9 @@ class ConfigService:
         elif key == "subprocess_max_workers":
             # Story #27: SubprocessExecutor max_workers configuration
             background_jobs.subprocess_max_workers = int(value)
+        elif key == "cleanup_max_age_hours":
+            # Story #360: Configurable job history retention period
+            background_jobs.cleanup_max_age_hours = int(value)
         else:
             raise ValueError(f"Unknown background jobs setting: {key}")
 

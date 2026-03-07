@@ -448,6 +448,13 @@ class ClaudeIntegrationConfig:
     dependency_map_pass2_max_turns: int = 50  # Fix 6: Reduced from 60
     # Delta analysis max turns (default: 30, for future incremental updates)
     dependency_map_delta_max_turns: int = 30
+    # Story #359: Refinement job configuration
+    # Enable/disable continuous dependency document refinement
+    refinement_enabled: bool = False
+    # Refinement interval in hours (default: 24 = once per day)
+    refinement_interval_hours: int = 24
+    # Number of domains to refine per scheduled run (default: 3)
+    refinement_domains_per_run: int = 3
     # Story #366: Subscription mode credential lifecycle
     # Authentication mode: "api_key" (default) or "subscription"
     claude_auth_mode: str = "api_key"
@@ -541,7 +548,8 @@ class BackgroundJobsConfig:
 
     # Story #267: Maximum age in hours for completed/failed/cancelled jobs
     # Jobs older than this are cleaned up from SQLite on startup and during cleanup
-    cleanup_max_age_hours: int = 24
+    # Story #360: Changed default from 24 to 720 (30 days) for configurable retention
+    cleanup_max_age_hours: int = 720
 
 
 @dataclass

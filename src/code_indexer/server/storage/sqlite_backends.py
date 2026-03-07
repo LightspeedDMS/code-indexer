@@ -9,6 +9,7 @@ eliminating race conditions from concurrent GlobalRegistry instances.
 
 import json
 import logging
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1919,17 +1920,20 @@ class DependencyMapTrackingBackend:
 
         Initializes the singleton row if it doesn't exist.
         Also ensures run_history table exists for AC9 compatibility.
+        Also ensures refinement columns exist for Story #359 compatibility.
 
         Returns:
             Dictionary with tracking data (id, last_run, next_run, status,
-            commit_hashes, error_message)
+            commit_hashes, error_message, refinement_cursor, refinement_next_run)
         """
         self._ensure_run_history_table()
+        self._ensure_refinement_columns()
         conn = self._conn_manager.get_connection()
 
         # Try to fetch existing singleton row
         cursor = conn.execute(
-            """SELECT id, last_run, next_run, status, commit_hashes, error_message
+            """SELECT id, last_run, next_run, status, commit_hashes, error_message,
+                      refinement_cursor, refinement_next_run
                FROM dependency_map_tracking WHERE id = 1"""
         )
         row = cursor.fetchone()
@@ -1947,7 +1951,8 @@ class DependencyMapTrackingBackend:
 
             # Fetch newly created row
             cursor = conn.execute(
-                """SELECT id, last_run, next_run, status, commit_hashes, error_message
+                """SELECT id, last_run, next_run, status, commit_hashes, error_message,
+                          refinement_cursor, refinement_next_run
                    FROM dependency_map_tracking WHERE id = 1"""
             )
             row = cursor.fetchone()
@@ -1959,6 +1964,8 @@ class DependencyMapTrackingBackend:
             "status": row[3],
             "commit_hashes": row[4],
             "error_message": row[5],
+            "refinement_cursor": row[6],
+            "refinement_next_run": row[7],
         }
 
     def update_tracking(
@@ -1968,6 +1975,8 @@ class DependencyMapTrackingBackend:
         status: Optional[str] = _UNSET,
         commit_hashes: Optional[str] = _UNSET,
         error_message: Optional[str] = _UNSET,
+        refinement_cursor: Optional[int] = _UNSET,
+        refinement_next_run: Optional[str] = _UNSET,
     ) -> None:
         """
         Update the singleton tracking record.
@@ -1980,6 +1989,8 @@ class DependencyMapTrackingBackend:
             status: Analysis status (pending/running/completed/failed)
             commit_hashes: JSON string mapping repo alias to commit hash
             error_message: Error message if analysis failed (None clears the error)
+            refinement_cursor: Index of next domain to refine (Story #359)
+            refinement_next_run: ISO timestamp of next refinement cycle (Story #359)
         """
         # Build UPDATE statement for provided fields only
         updates = []
@@ -2004,6 +2015,14 @@ class DependencyMapTrackingBackend:
         if error_message is not _UNSET:
             updates.append("error_message = ?")
             params.append(error_message)
+
+        if refinement_cursor is not _UNSET:
+            updates.append("refinement_cursor = ?")
+            params.append(refinement_cursor)
+
+        if refinement_next_run is not _UNSET:
+            updates.append("refinement_next_run = ?")
+            params.append(refinement_next_run)
 
         if not updates:
             return  # No fields to update
@@ -2052,6 +2071,26 @@ class DependencyMapTrackingBackend:
             return None
 
         self._conn_manager.execute_atomic(operation)
+
+    def _ensure_refinement_columns(self) -> None:
+        """Add refinement tracking columns if they don't exist (Story #359).
+
+        Idempotent: safe to call on both new and existing databases.
+        Uses ALTER TABLE for backward-compatible schema migration.
+        Probes each column independently to handle half-migration scenarios.
+        """
+        conn = self._conn_manager.get_connection()
+        for col, col_type in [
+            ("refinement_cursor", "INTEGER DEFAULT 0"),
+            ("refinement_next_run", "TEXT"),
+        ]:
+            try:
+                conn.execute(f"SELECT {col} FROM dependency_map_tracking LIMIT 1")
+            except sqlite3.OperationalError:
+                conn.execute(
+                    f"ALTER TABLE dependency_map_tracking ADD COLUMN {col} {col_type}"
+                )
+        conn.commit()
 
     def record_run_metrics(self, metrics: Dict[str, Any]) -> None:
         """

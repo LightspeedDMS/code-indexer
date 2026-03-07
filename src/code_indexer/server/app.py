@@ -5503,19 +5503,26 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/admin/jobs/cleanup", response_model=JobCleanupResponse)
     def cleanup_old_jobs(
-        max_age_hours: int = 24,
+        max_age_hours: Optional[int] = None,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
         """
         Clean up old completed/failed jobs (admin only).
 
         Args:
-            max_age_hours: Maximum age of jobs to keep in hours (default: 24)
+            max_age_hours: Maximum age of jobs to keep in hours.
+                If not provided, uses the configured default from
+                background_jobs_config.cleanup_max_age_hours (default: 720, i.e. 30 days).
             current_user: Current authenticated admin user
 
         Returns:
             Number of jobs cleaned up
         """
+        # Story #360: Use configured default when no explicit value provided
+        if max_age_hours is None:
+            from code_indexer.server.services.config_service import get_config_service
+            _config_service = get_config_service()
+            max_age_hours = _config_service.get_config().background_jobs_config.cleanup_max_age_hours
         if max_age_hours < 1:
             max_age_hours = 1
         if max_age_hours > 8760:  # 1 year

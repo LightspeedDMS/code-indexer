@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 # Constants
 SCHEDULER_POLL_INTERVAL_SECONDS = 60  # Story #193: Delta refresh polling interval
 THREAD_JOIN_TIMEOUT_SECONDS = 5.0  # Story #193: Daemon thread join timeout
+REFINEMENT_TRUNCATION_MIN_BODY_LENGTH = 500  # Story #359: truncation guard threshold
+REFINEMENT_TRUNCATION_MIN_RATIO = 0.5  # Story #359: result must be >= 50% of body
 
 
 class DependencyMapService:
@@ -1195,6 +1197,49 @@ class DependencyMapService:
                         )
                         self.run_delta_analysis()
 
+                # Story #359: Check refinement schedule (independent of delta analysis)
+                try:
+                    ref_config = self._config_manager.get_claude_integration_config()
+                    if ref_config and ref_config.refinement_enabled:
+                        ref_tracking = self._tracking_backend.get_tracking()
+                        refinement_next = ref_tracking.get("refinement_next_run")
+                        now = datetime.now(timezone.utc)
+
+                        if refinement_next:
+                            ref_next_dt = datetime.fromisoformat(refinement_next)
+                            if now >= ref_next_dt:
+                                logger.info("Scheduled refinement cycle triggered")
+                                self.run_refinement_cycle()
+                                next_refinement = (
+                                    now
+                                    + timedelta(
+                                        hours=ref_config.refinement_interval_hours
+                                    )
+                                ).isoformat()
+                                self._tracking_backend.update_tracking(
+                                    refinement_next_run=next_refinement
+                                )
+                        else:
+                            # Bootstrap: first refinement run (no refinement_next_run set yet)
+                            # Running-status guard (cf. Bug #326): skip if analysis already running
+                            tracking_for_status = self._tracking_backend.get_tracking()
+                            if tracking_for_status.get("status") != "running":
+                                logger.info(
+                                    "Bootstrap: triggering first refinement cycle (no refinement_next_run set)"
+                                )
+                                self.run_refinement_cycle()
+                                next_refinement = (
+                                    datetime.now(timezone.utc)
+                                    + timedelta(hours=ref_config.refinement_interval_hours)
+                                ).isoformat()
+                                self._tracking_backend.update_tracking(
+                                    refinement_next_run=next_refinement
+                                )
+                except Exception as ref_e:
+                    logger.error(
+                        f"Error in refinement scheduler: {ref_e}", exc_info=True
+                    )
+
             except Exception as e:
                 logger.error(
                     f"Error in dependency map scheduler loop: {e}", exc_info=True
@@ -2126,3 +2171,301 @@ class DependencyMapService:
             # to satisfy AC5 (no trigger on exception).
             if _delta_succeeded and self._refresh_scheduler is not None:
                 self._refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
+
+    # ---------------------------------------------------------------------------
+    # Story #359: Domain Document Refinement
+    # ---------------------------------------------------------------------------
+
+    def _select_domain_batch(
+        self,
+        domain_list_sorted: List[Dict[str, Any]],
+        cursor: int,
+        domains_per_run: int,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """
+        Select a batch of N domains starting from cursor (with wrap-around).
+
+        Args:
+            domain_list_sorted: Sorted list of domain dicts
+            cursor: Current cursor position (may be past end of list)
+            domains_per_run: Number of domains to process per cycle
+
+        Returns:
+            Tuple of (batch list, effective_cursor after wrap-around)
+        """
+        total = len(domain_list_sorted)
+        effective_cursor = cursor % total
+        batch = []
+        for i in range(domains_per_run):
+            idx = (effective_cursor + i) % total
+            batch.append(domain_list_sorted[idx])
+        return batch, effective_cursor
+
+    def run_refinement_cycle(self) -> None:
+        """
+        Run one refinement cycle: process N domains from the persistent cursor position.
+
+        Reads domain list from versioned cidx-meta path, selects a batch using the
+        cursor, calls refine_or_create_domain() for each, regenerates _index.md if
+        any domain changed, and advances the cursor in tracking.
+
+        AC7: Non-blocking lock prevents concurrent writes with delta analysis.
+        Acquires RefreshScheduler write lock so CoW clone is skipped during writes.
+
+        Returns None in all cases (early exit when disabled or no domains).
+        """
+        config = self._config_manager.get_claude_integration_config()
+        if not config or not config.refinement_enabled:
+            logger.debug("Refinement disabled, skipping refinement cycle")
+            return None
+
+        # AC7: Non-blocking lock to prevent concurrent writes with delta analysis
+        if not self._lock.acquire(blocking=False):
+            logger.info("Refinement cycle skipped - analysis already in progress")
+            return None
+
+        # Acquire write lock so RefreshScheduler skips CoW clone during writes
+        _write_lock_acquired = False
+        if self._refresh_scheduler is not None:
+            _write_lock_acquired = self._refresh_scheduler.acquire_write_lock(
+                "cidx-meta", owner_name="dependency_map_service"
+            )
+
+        any_changed = False
+        try:
+            golden_repos_dir = Path(self._golden_repos_manager.golden_repos_dir)
+            cidx_meta_read_path = self._get_cidx_meta_read_path()
+            dependency_map_read_dir = cidx_meta_read_path / "dependency-map"
+            dependency_map_dir = golden_repos_dir / "cidx-meta" / "dependency-map"
+
+            domains_json_path = dependency_map_read_dir / "_domains.json"
+            if not domains_json_path.exists():
+                logger.info("Refinement: _domains.json not found, skipping cycle")
+                return None
+
+            try:
+                raw_list = json.loads(domains_json_path.read_text())
+            except Exception as e:
+                logger.warning("Refinement: Failed to read _domains.json: %s", e)
+                return None
+
+            if not raw_list:
+                logger.info("Refinement: domain list is empty, skipping cycle")
+                return None
+
+            # Preserve original JSON order (cursor positions defined by list order in _domains.json)
+            domain_list_ordered = raw_list
+            tracking = self._tracking_backend.get_tracking()
+            cursor = tracking.get("refinement_cursor", 0) or 0
+
+            batch, effective_cursor = self._select_domain_batch(
+                domain_list_ordered, cursor, config.refinement_domains_per_run
+            )
+
+            for domain_info in batch:
+                domain_name = domain_info.get("name", "")
+                if not domain_name:
+                    continue
+                try:
+                    changed = self.refine_or_create_domain(
+                        domain_name=domain_name,
+                        domain_info=domain_info,
+                        dependency_map_dir=dependency_map_dir,
+                        dependency_map_read_dir=dependency_map_read_dir,
+                        config=config,
+                    )
+                    if changed:
+                        any_changed = True
+                except Exception as e:
+                    logger.warning(
+                        "Refinement: Failed to refine domain '%s': %s", domain_name, e
+                    )
+
+            if any_changed:
+                try:
+                    self._analyzer._generate_index_md(
+                        dependency_map_dir, domain_list_ordered, []
+                    )
+                except Exception as e:
+                    logger.warning("Refinement: Failed to regenerate _index.md: %s", e)
+
+            new_cursor = effective_cursor + config.refinement_domains_per_run
+            self._tracking_backend.update_tracking(refinement_cursor=new_cursor)
+
+        finally:
+            self._lock.release()
+            if _write_lock_acquired and self._refresh_scheduler is not None:
+                self._refresh_scheduler.release_write_lock(
+                    "cidx-meta", owner_name="dependency_map_service"
+                )
+            if any_changed and self._refresh_scheduler is not None:
+                self._refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
+
+        return None
+
+    def _build_refinement_frontmatter(
+        self, existing_content: str, new_body: str, domain_name: str
+    ) -> str:
+        """
+        Build updated file content with frontmatter for a refined domain (Story #359).
+
+        Preserves all existing frontmatter fields (including last_analyzed).
+        Adds or updates last_refined to the current UTC timestamp.
+
+        Args:
+            existing_content: Original domain file content (may include frontmatter)
+            new_body: Refined document body from Claude CLI
+            domain_name: Domain name (used when no frontmatter exists)
+
+        Returns:
+            Complete content string: YAML frontmatter block + body
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        frontmatter_match = re.match(
+            r"^---\n(.*?)\n---\n(.*)$", existing_content, re.DOTALL
+        )
+        if not frontmatter_match:
+            return (
+                f"---\ndomain: {domain_name}\nlast_refined: {now}\n---\n\n{new_body}"
+            )
+
+        lines = frontmatter_match.group(1).split("\n")
+        updated, found_refined = [], False
+        for line in lines:
+            if line.startswith("last_refined:"):
+                updated.append(f"last_refined: {now}")
+                found_refined = True
+            else:
+                updated.append(line)  # Preserve last_analyzed and all other fields
+        if not found_refined:
+            updated.append(f"last_refined: {now}")
+        frontmatter_body = "\n".join(updated)
+        return f"---\n{frontmatter_body}\n---\n\n{new_body}"
+
+    def _refine_existing_domain(
+        self,
+        domain_name: str,
+        existing_content: str,
+        participating_repos: List[str],
+        write_file: Path,
+        dependency_map_dir: Path,
+        config,
+    ) -> bool:
+        """
+        Refine an existing domain file via Claude CLI (Story #359).
+
+        Applies truncation guard and no-op check before writing.
+
+        Returns:
+            True if file was updated, False if guard fired or content identical.
+        """
+        frontmatter_match = re.match(
+            r"^---\n(.*?)\n---\n(.*)$", existing_content, re.DOTALL
+        )
+        existing_body = (
+            frontmatter_match.group(2).lstrip("\n")
+            if frontmatter_match
+            else existing_content
+        )
+
+        prompt = self._analyzer.build_refinement_prompt(
+            domain_name=domain_name,
+            existing_body=existing_body,
+            participating_repos=participating_repos,
+        )
+        result_body = self._analyzer.invoke_refinement(
+            prompt, config.dependency_map_pass_timeout_seconds,
+            config.dependency_map_delta_max_turns,
+        )
+
+        body_len = len(existing_body)
+        if (
+            body_len > REFINEMENT_TRUNCATION_MIN_BODY_LENGTH
+            and len(result_body) < body_len * REFINEMENT_TRUNCATION_MIN_RATIO
+        ):
+            logger.warning(
+                "Refinement truncation guard fired for domain '%s': "
+                "result %d chars < %.0f%% of body %d chars, skipping write",
+                domain_name, len(result_body),
+                REFINEMENT_TRUNCATION_MIN_RATIO * 100, body_len,
+            )
+            return False
+
+        if result_body.strip() == existing_body.strip():
+            logger.debug(
+                "Refinement no-op for domain '%s': content identical", domain_name
+            )
+            return False
+
+        updated_content = self._build_refinement_frontmatter(
+            existing_content=existing_content,
+            new_body=result_body,
+            domain_name=domain_name,
+        )
+        dependency_map_dir.mkdir(parents=True, exist_ok=True)
+        write_file.write_text(updated_content)
+        return True
+
+    def refine_or_create_domain(
+        self,
+        domain_name: str,
+        domain_info: Dict[str, Any],
+        dependency_map_dir: Path,
+        dependency_map_read_dir: Path,
+        config,
+    ) -> bool:
+        """
+        Refine an existing domain file or create it if missing (Story #359).
+
+        Reads from dependency_map_read_dir (versioned/read path).
+        Writes to dependency_map_dir (live/write path).
+
+        For missing files: uses build_new_domain_prompt + invoke_refinement to create.
+        For existing files: delegates to _refine_existing_domain() for truncation guard,
+            no-op detection, and frontmatter management.
+
+        Returns:
+            True if the domain file was created or updated, False otherwise.
+        """
+        participating_repos = domain_info.get("participating_repos", [])
+        timeout = config.dependency_map_pass_timeout_seconds
+        max_turns = config.dependency_map_delta_max_turns
+
+        read_file = dependency_map_read_dir / f"{domain_name}.md"
+        write_file = dependency_map_dir / f"{domain_name}.md"
+
+        if not read_file.exists() and not write_file.exists():
+            # Truly orphaned - create new from scratch
+            prompt = self._analyzer.build_new_domain_prompt(
+                domain_name=domain_name,
+                participating_repos=participating_repos,
+            )
+            result_body = self._analyzer.invoke_refinement(prompt, timeout, max_turns)
+            now = datetime.now(timezone.utc).isoformat()
+            new_content = (
+                f"---\ndomain: {domain_name}\nlast_refined: {now}\n---\n\n{result_body}"
+            )
+            dependency_map_dir.mkdir(parents=True, exist_ok=True)
+            write_file.write_text(new_content)
+            return True
+        elif not read_file.exists() and write_file.exists():
+            # Write path has content from a prior cycle not yet snapshotted - refine from that
+            existing_content = write_file.read_text()
+            return self._refine_existing_domain(
+                domain_name=domain_name,
+                existing_content=existing_content,
+                participating_repos=participating_repos,
+                write_file=write_file,
+                dependency_map_dir=dependency_map_dir,
+                config=config,
+            )
+
+        existing_content = read_file.read_text()
+        return self._refine_existing_domain(
+            domain_name=domain_name,
+            existing_content=existing_content,
+            participating_repos=participating_repos,
+            write_file=write_file,
+            dependency_map_dir=dependency_map_dir,
+            config=config,
+        )

@@ -5723,6 +5723,16 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             except (ValueError, TypeError):
                 return "Subprocess Max Workers must be a valid number"
 
+        # Story #360: Job history retention period
+        cleanup_max_age = data.get("cleanup_max_age_hours")
+        if cleanup_max_age is not None:
+            try:
+                val_int = int(cleanup_max_age)
+                if val_int < 1 or val_int > 8760:
+                    return "Cleanup Max Age Hours must be between 1 and 8760"
+            except (ValueError, TypeError):
+                return "Cleanup Max Age Hours must be a valid number"
+
     elif section == "omni_search":
         # Story #28: Omni-search configuration
         max_workers = data.get("max_workers")
