@@ -169,6 +169,13 @@ jobs:
         # Extract version
         VERSION="${{ needs.check-version.outputs.current_version }}"
 
+        # Check if release already exists (created from prior branch push)
+        if gh release view "v$VERSION" &>/dev/null; then
+          echo "Release v$VERSION already exists -- uploading dist artifacts only"
+          gh release upload "v$VERSION" dist/* --clobber || true
+          exit 0
+        fi
+
         # Create GitHub release with auto-generated notes using existing tag
         gh release create "v$VERSION" \
           --title "Release v$VERSION" \
