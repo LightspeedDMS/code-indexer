@@ -842,6 +842,26 @@ curl -s -X POST http://localhost:8000/mcp \
 
 ---
 
+## CRITICAL: Background Job Implementation Checklist
+
+**ANY** new background job or long-running operation MUST follow these two mandatory steps:
+
+1. **Integrate with the job tracking engine**: Register the job with `BackgroundJobManager` (`src/code_indexer/server/repositories/background_jobs.py`) and, when available, with `JobTracker` (`src/code_indexer/server/services/job_tracker.py`) for unified cross-service visibility. Report progress updates, completion, and errors through these services so the job appears in the dashboard and admin UI.
+
+2. **Confirm frontend reporting with the user**: Before implementing, ask the user how they want progress and status reported in the Web UI -- progress bar, status text, polling interval, which tab/page it appears on, error display format, etc. Do not assume a UI pattern; get explicit confirmation.
+
+**Key files**:
+- `BackgroundJobManager`: `src/code_indexer/server/repositories/background_jobs.py` -- job queuing, execution, concurrency limits, persistence
+- `JobTracker`: `src/code_indexer/server/services/job_tracker.py` -- hybrid in-memory + SQLite unified tracking (Story #311/Epic #261)
+- `BackgroundJobsSqliteBackend`: `src/code_indexer/server/storage/sqlite_backends.py` -- SQLite persistence layer
+- Dashboard UI: `src/code_indexer/server/web/templates/partials/dashboard_recent_jobs.html`
+
+**VIOLATION**: Adding a background job without job tracking integration or without confirming UI reporting expectations = incomplete implementation.
+
+*Recorded 2026-03-06*
+
+---
+
 ## 12. Where to Find More
 
 - **Architecture**: `/docs/architecture.md`
