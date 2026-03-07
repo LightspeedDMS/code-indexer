@@ -2313,6 +2313,12 @@ class DependencyMapService:
         config = self._config_manager.get_claude_integration_config()
         if not config or not config.refinement_enabled:
             logger.debug("Refinement disabled, skipping refinement cycle")
+            try:
+                journal_dir = Path(os.path.expanduser("~/.tmp/depmap-refinement-journal/"))
+                self._activity_journal.init(journal_dir)
+                self._activity_journal.log("Refinement: disabled in config, skipping cycle")
+            except Exception as e:
+                logger.debug(f"Non-fatal journal log error (disabled path): {e}")
             return None
 
         # AC7: Non-blocking lock to prevent concurrent writes with delta analysis
@@ -2329,6 +2335,13 @@ class DependencyMapService:
 
         any_changed = False
         try:
+            # Initialize activity journal for this refinement cycle run
+            try:
+                journal_dir = Path(os.path.expanduser("~/.tmp/depmap-refinement-journal/"))
+                self._activity_journal.init(journal_dir)
+                self._activity_journal.log("Starting refinement cycle")
+            except Exception as e:
+                logger.debug(f"Non-fatal journal init error: {e}")
             golden_repos_dir = Path(self._golden_repos_manager.golden_repos_dir)
             cidx_meta_read_path = self._get_cidx_meta_read_path()
             dependency_map_read_dir = cidx_meta_read_path / "dependency-map"
@@ -2337,16 +2350,28 @@ class DependencyMapService:
             domains_json_path = dependency_map_read_dir / "_domains.json"
             if not domains_json_path.exists():
                 logger.info("Refinement: _domains.json not found, skipping cycle")
+                try:
+                    self._activity_journal.log("Refinement: no domains found, skipping")
+                except Exception as e:
+                    logger.debug(f"Non-fatal journal log error: {e}")
                 return None
 
             try:
                 raw_list = json.loads(domains_json_path.read_text())
             except Exception as e:
                 logger.warning("Refinement: Failed to read _domains.json: %s", e)
+                try:
+                    self._activity_journal.log(f"Refinement: failed to read _domains.json: {e}")
+                except Exception as journal_err:
+                    logger.debug(f"Non-fatal journal log error: {journal_err}")
                 return None
 
             if not raw_list:
                 logger.info("Refinement: domain list is empty, skipping cycle")
+                try:
+                    self._activity_journal.log("Refinement: domain list empty, skipping")
+                except Exception as e:
+                    logger.debug(f"Non-fatal journal log error: {e}")
                 return None
 
             # Preserve original JSON order (cursor positions defined by list order in _domains.json)
@@ -2358,10 +2383,26 @@ class DependencyMapService:
                 domain_list_ordered, cursor, config.refinement_domains_per_run
             )
 
-            for domain_info in batch:
+            try:
+                self._activity_journal.log(
+                    f"Refinement: processing batch of {len(batch)} domains (cursor at {effective_cursor})"
+                )
+            except Exception as e:
+                logger.debug(f"Non-fatal journal log error: {e}")
+
+            domains_processed = 0
+            domains_changed = 0
+            domains_failed = 0
+            for domain_idx, domain_info in enumerate(batch):
                 domain_name = domain_info.get("name", "")
                 if not domain_name:
                     continue
+                try:
+                    self._activity_journal.log(
+                        f"Refining domain '{domain_name}' ({domain_idx + 1}/{len(batch)})"
+                    )
+                except Exception as e:
+                    logger.debug(f"Non-fatal journal log error: {e}")
                 try:
                     changed = self.refine_or_create_domain(
                         domain_name=domain_name,
@@ -2370,14 +2411,41 @@ class DependencyMapService:
                         dependency_map_read_dir=dependency_map_read_dir,
                         config=config,
                     )
+                    domains_processed += 1
                     if changed:
                         any_changed = True
+                        domains_changed += 1
+                        try:
+                            self._activity_journal.log(
+                                f"Domain '{domain_name}' refined successfully (changed)"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Non-fatal journal log error: {e}")
+                    else:
+                        try:
+                            self._activity_journal.log(
+                                f"Domain '{domain_name}' refined (no changes)"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Non-fatal journal log error: {e}")
                 except Exception as e:
+                    domains_processed += 1
+                    domains_failed += 1
+                    try:
+                        self._activity_journal.log(
+                            f"Domain '{domain_name}' refinement failed: {str(e)[:80]}"
+                        )
+                    except Exception as journal_err:
+                        logger.debug(f"Non-fatal journal log error: {journal_err}")
                     logger.warning(
                         "Refinement: Failed to refine domain '%s': %s", domain_name, e
                     )
 
             if any_changed:
+                try:
+                    self._activity_journal.log("Regenerating _index.md")
+                except Exception as e:
+                    logger.debug(f"Non-fatal journal log error: {e}")
                 try:
                     self._analyzer._generate_index_md(
                         dependency_map_dir, domain_list_ordered, []
@@ -2387,6 +2455,13 @@ class DependencyMapService:
 
             new_cursor = effective_cursor + config.refinement_domains_per_run
             self._tracking_backend.update_tracking(refinement_cursor=new_cursor)
+            try:
+                self._activity_journal.log(
+                    f"Refinement cycle complete: {domains_processed} domains processed, "
+                    f"{domains_changed} changed, {domains_failed} failed"
+                )
+            except Exception as e:
+                logger.debug(f"Non-fatal journal log error: {e}")
 
         finally:
             self._lock.release()
