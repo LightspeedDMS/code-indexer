@@ -104,7 +104,8 @@ def trigger_catchup_on_api_key_save(api_key: Optional[str]) -> bool:
             try:
                 tracked_job_id = f"immediate-catchup-{uuid.uuid4().hex[:8]}"
                 tracker.register_job(
-                    tracked_job_id, "immediate_catchup", username="system"
+                    tracked_job_id, "immediate_catchup", username="system",
+                    repo_alias="server",
                 )
                 tracker.update_status(tracked_job_id, status="running")
             except Exception as e:

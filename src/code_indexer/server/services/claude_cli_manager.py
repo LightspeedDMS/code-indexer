@@ -360,6 +360,7 @@ class ClaudeCliManager:
                     tracked_job_id,
                     "catchup_processing",
                     username="system",
+                    repo_alias="server",
                 )
                 self._job_tracker.update_status(tracked_job_id, status="running")
             except Exception as e:

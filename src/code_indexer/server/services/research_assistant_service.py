@@ -903,7 +903,8 @@ class ResearchAssistantService:
         if self._job_tracker is not None:
             try:
                 self._job_tracker.register_job(
-                    job_id, "research_assistant_chat", username="system"
+                    job_id, "research_assistant_chat", username="system",
+                    repo_alias="server",
                 )
                 self._job_tracker.update_status(job_id, status="running")
             except Exception:

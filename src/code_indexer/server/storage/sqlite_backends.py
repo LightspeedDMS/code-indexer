@@ -2037,6 +2037,41 @@ class DependencyMapTrackingBackend:
         self._conn_manager.execute_atomic(operation)
         logger.debug("Updated dependency map tracking record")
 
+    def cleanup_stale_status_on_startup(self) -> bool:
+        """Reset stale running/pending status to failed on server startup.
+
+        Called once during server startup. If the singleton row has status
+        'running' or 'pending', the previous server process was killed
+        mid-analysis. Reset to 'failed' so new jobs can be triggered.
+
+        Returns:
+            True if a stale status was cleaned up, False otherwise.
+        """
+
+        def operation(conn):
+            cursor = conn.execute(
+                "SELECT status FROM dependency_map_tracking WHERE id = 1"
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return False
+            status = row[0]
+            if status in ("running", "pending"):
+                conn.execute(
+                    "UPDATE dependency_map_tracking SET status = 'failed', "
+                    "error_message = 'orphaned - server restarted' "
+                    "WHERE id = 1",
+                )
+                return True
+            return False
+
+        cleaned = self._conn_manager.execute_atomic(operation)
+        if cleaned:
+            logger.info(
+                "DependencyMapTrackingBackend: reset stale status to 'failed' on startup"
+            )
+        return cleaned
+
     def _ensure_run_history_table(self) -> None:
         """Ensure dependency_map_run_history table exists (idempotent).
 
