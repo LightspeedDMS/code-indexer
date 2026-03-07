@@ -2201,6 +2201,102 @@ class DependencyMapService:
             batch.append(domain_list_sorted[idx])
         return batch, effective_cursor
 
+    def run_tracked_refinement(self, job_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Run refinement cycle with job tracking (Bug #371).
+
+        Wraps run_refinement_cycle() with JobTracker registration, conflict
+        detection, progress updates, and completion/failure reporting.
+
+        Args:
+            job_id: Optional caller-provided job ID. When None, a new
+                    dep-map-refinement-XXXX ID is generated.
+
+        Returns:
+            Dict with status='completed' on success.
+
+        Raises:
+            DuplicateJobError: If job_tracker detects a concurrent refinement.
+            Exception: Any exception from run_refinement_cycle() propagates.
+        """
+        # Conflict detection via JobTracker.
+        if self._job_tracker is not None:
+            try:
+                from .job_tracker import DuplicateJobError
+
+                self._job_tracker.check_operation_conflict("dependency_map_refinement")
+            except DuplicateJobError:
+                raise
+            except Exception as tracker_err:
+                logger.warning(
+                    f"JobTracker conflict check failed (non-fatal): {tracker_err}"
+                )
+
+        # Register job with JobTracker.
+        _tracked_job_id: Optional[str] = None
+        if self._job_tracker is not None:
+            try:
+                _tracked_job_id = job_id or f"dep-map-refinement-{uuid.uuid4().hex[:8]}"
+                self._job_tracker.register_job(
+                    _tracked_job_id,
+                    "dependency_map_refinement",
+                    username="system",
+                    repo_alias="server",
+                )
+                self._job_tracker.update_status(_tracked_job_id, status="running")
+            except Exception as tracker_err:
+                logger.warning(
+                    f"JobTracker registration failed (non-fatal): {tracker_err}"
+                )
+                _tracked_job_id = None
+
+        _refinement_succeeded = False
+        try:
+            if _tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.update_status(
+                        _tracked_job_id, progress=10, progress_info="Starting refinement cycle"
+                    )
+                except Exception as e:
+                    logger.debug(f"Non-fatal: Failed to update progress (start): {e}")
+
+            self.run_refinement_cycle()
+
+            if _tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.update_status(
+                        _tracked_job_id, progress=90, progress_info="Finalizing refinement"
+                    )
+                except Exception as e:
+                    logger.debug(f"Non-fatal: Failed to update progress (finalizing): {e}")
+
+            _refinement_succeeded = True
+            return {"status": "completed"}
+
+        except Exception as e:
+            if _tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    self._job_tracker.fail_job(_tracked_job_id, error=str(e))
+                    _tracked_job_id = None  # Prevent double-call in finally
+                except Exception as tracker_err:
+                    logger.warning(
+                        f"JobTracker fail_job failed (non-fatal): {tracker_err}"
+                    )
+            raise
+
+        finally:
+            if (
+                _refinement_succeeded
+                and _tracked_job_id is not None
+                and self._job_tracker is not None
+            ):
+                try:
+                    self._job_tracker.complete_job(_tracked_job_id)
+                except Exception as tracker_err:
+                    logger.warning(
+                        f"JobTracker complete_job failed (non-fatal): {tracker_err}"
+                    )
+
     def run_refinement_cycle(self) -> None:
         """
         Run one refinement cycle: process N domains from the persistent cursor position.

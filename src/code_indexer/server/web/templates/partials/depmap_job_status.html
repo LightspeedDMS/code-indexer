@@ -118,6 +118,14 @@
                         style="flex: 1; font-size: 0.85rem; padding: 0.4rem 0.6rem;">
                     Delta Refresh
                 </button>
+                <button class="outline small"
+                        hx-post="/admin/dependency-map/trigger-refinement"
+                        hx-swap="none"
+                        hx-headers='{"X-Requested-With": "XMLHttpRequest"}'
+                        style="flex: 1; font-size: 0.85rem; padding: 0.4rem 0.6rem;"
+                        title="Fact-check and refine existing dependency domain documents">
+                    Refinement Pass
+                </button>
             </div>
             <div id="depmap-trigger-status" style="font-size: 0.9rem;"></div>
             <!-- Story #342: Conditional Repair Button -->
