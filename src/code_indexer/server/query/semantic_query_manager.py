@@ -1024,34 +1024,6 @@ class SemanticQueryManager:
                 # For hybrid mode, continue to semantic search and merge results
                 # Fall through to semantic search below
 
-            # For non-composite repos with semantic search, warn if advanced filters are used
-            # (they are not supported by SemanticSearchService)
-            # Story #725: Only warn when non-default filters are explicitly set
-            # Note: accuracy="balanced" is the default, so we only warn if accuracy
-            # is set to something other than "balanced" or None
-            has_non_default_filters = any(
-                [
-                    language,  # None is default
-                    exclude_language,  # None is default
-                    path_filter,  # None is default
-                    exclude_path,  # None is default
-                    accuracy and accuracy != "balanced",  # "balanced" is default
-                ]
-            )
-            if search_mode in ["semantic", "hybrid"] and has_non_default_filters:
-                logger.warning(
-                    format_error_log(
-                        "QUERY-MIGRATE-007",
-                        "Advanced filter parameters not fully supported for semantic search",
-                        language=language,
-                        exclude_language=exclude_language,
-                        path_filter=path_filter,
-                        exclude_path=exclude_path,
-                        accuracy=accuracy,
-                    ),
-                    extra=get_log_extra("QUERY-MIGRATE-007"),
-                )
-
             # SEMANTIC SEARCH
             # Import SemanticSearchService and related models
             from ..services.search_service import SemanticSearchService
@@ -1060,9 +1032,16 @@ class SemanticQueryManager:
             # Create search service instance
             search_service = SemanticSearchService()
 
-            # Create search request
+            # Create search request — Story #375: wire filter params through
             search_request = SemanticSearchRequest(
-                query=query_text, limit=limit, include_source=True
+                query=query_text,
+                limit=limit,
+                include_source=True,
+                path_filter=path_filter,
+                language=language,
+                exclude_language=exclude_language,
+                exclude_path=exclude_path,
+                accuracy=accuracy,
             )
 
             # Perform search on the repository using direct path

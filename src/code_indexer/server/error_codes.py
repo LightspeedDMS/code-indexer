@@ -5077,9 +5077,9 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
     ),
     "QUERY-MIGRATE-007": ErrorDefinition(
         code="QUERY-MIGRATE-007",
-        description="Query execution warning",
-        severity=Severity.WARNING,
-        action="Review query parameters",
+        description="Advanced filter parameters supported in semantic search (Story #375)",
+        severity=Severity.INFO,
+        action="No action required - filters are now wired through to vector store",
     ),
     "QUERY-MIGRATE-008": ErrorDefinition(
         code="QUERY-MIGRATE-008",
