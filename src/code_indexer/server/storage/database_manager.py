@@ -758,7 +758,37 @@ class DatabaseConnectionManager:
 
     Each thread gets its own SQLite connection, enabling concurrent reads
     while maintaining proper isolation for writes.
+
+    Bug #378: Use get_instance(db_path) to obtain a shared instance for a
+    given database path. This singleton-per-path pattern prevents FD
+    accumulation when multiple backend classes all open the same db file.
     """
+
+    # Singleton registry: absolute db_path -> instance
+    _instances: Dict[str, "DatabaseConnectionManager"] = {}
+    _instance_lock: threading.Lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls, db_path: str) -> "DatabaseConnectionManager":
+        """
+        Get the shared DatabaseConnectionManager instance for a given db_path.
+
+        Uses double-checked locking to ensure thread-safe singleton creation.
+        Normalises the path via os.path.abspath so that relative and absolute
+        paths pointing to the same file share a single instance.
+
+        Args:
+            db_path: Path to the SQLite database file.
+
+        Returns:
+            The shared DatabaseConnectionManager instance for that file.
+        """
+        resolved = os.path.abspath(db_path)
+        if resolved not in cls._instances:
+            with cls._instance_lock:
+                if resolved not in cls._instances:
+                    cls._instances[resolved] = cls(db_path)
+        return cls._instances[resolved]
 
     def __init__(self, db_path: str) -> None:
         """
@@ -817,6 +847,7 @@ class DatabaseConnectionManager:
         if not hasattr(self._local, "connection") or self._local.connection is None:
             conn = sqlite3.connect(self.db_path, check_same_thread=False)
             conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA busy_timeout = 30000")
             self._local.connection = conn
 
             # Track connection for cleanup

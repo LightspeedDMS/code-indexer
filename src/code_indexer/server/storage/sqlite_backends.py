@@ -36,7 +36,7 @@ class GlobalReposSqliteBackend:
         Args:
             db_path: Path to SQLite database file.
         """
-        self._conn_manager = DatabaseConnectionManager(db_path)
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
     def register_repo(
         self,
@@ -303,7 +303,7 @@ class UsersSqliteBackend:
 
     def __init__(self, db_path: str) -> None:
         """Initialize the backend."""
-        self._conn_manager = DatabaseConnectionManager(db_path)
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
     def create_user(
         self,
@@ -841,7 +841,7 @@ class SyncJobsSqliteBackend:
 
     def __init__(self, db_path: str) -> None:
         """Initialize the backend."""
-        self._conn_manager = DatabaseConnectionManager(db_path)
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
     def create_job(
         self,
@@ -973,7 +973,7 @@ class CITokensSqliteBackend:
 
     def __init__(self, db_path: str) -> None:
         """Initialize the backend."""
-        self._conn_manager = DatabaseConnectionManager(db_path)
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
     def save_token(
         self, platform: str, encrypted_token: str, base_url: Optional[str] = None
@@ -1041,7 +1041,7 @@ class SessionsSqliteBackend:
 
     def __init__(self, db_path: str) -> None:
         """Initialize the backend."""
-        self._conn_manager = DatabaseConnectionManager(db_path)
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
     def invalidate_session(self, username: str, token_id: str) -> None:
         """Invalidate a specific session token."""
@@ -1157,7 +1157,7 @@ class DescriptionRefreshTrackingBackend:
 
     def __init__(self, db_path: str) -> None:
         """Initialize the backend."""
-        self._conn_manager = DatabaseConnectionManager(db_path)
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
     def get_tracking_record(self, repo_alias: str) -> Optional[Dict[str, Any]]:
         """
@@ -1346,7 +1346,7 @@ class SSHKeysSqliteBackend:
 
     def __init__(self, db_path: str) -> None:
         """Initialize the backend."""
-        self._conn_manager = DatabaseConnectionManager(db_path)
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
     def create_key(
         self,
@@ -1505,7 +1505,7 @@ class GoldenRepoMetadataSqliteBackend:
         Args:
             db_path: Path to SQLite database file.
         """
-        self._conn_manager = DatabaseConnectionManager(db_path)
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
     def ensure_table_exists(self) -> None:
         """Ensure the golden_repos_metadata table exists (idempotent)."""
@@ -1912,7 +1912,7 @@ class DependencyMapTrackingBackend:
 
     def __init__(self, db_path: str) -> None:
         """Initialize the backend."""
-        self._conn_manager = DatabaseConnectionManager(db_path)
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
     def get_tracking(self) -> Dict[str, Any]:
         """
@@ -2180,7 +2180,7 @@ class BackgroundJobsSqliteBackend:
 
     def __init__(self, db_path: str) -> None:
         """Initialize the backend."""
-        self._conn_manager = DatabaseConnectionManager(db_path)
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
     def save_job(
         self,

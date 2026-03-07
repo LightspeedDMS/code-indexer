@@ -30,7 +30,7 @@ class RepoCategorySqliteBackend:
         Args:
             db_path: Path to SQLite database file.
         """
-        self._conn_manager = DatabaseConnectionManager(db_path)
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
     def create_category(self, name: str, pattern: str, priority: int) -> int:
         """

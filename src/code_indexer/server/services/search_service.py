@@ -347,6 +347,17 @@ class SemanticSearchService:
 
             return formatted_results
 
+        except ValueError as e:
+            # Graceful handling for repos with missing/incomplete index configuration
+            # (e.g. orphaned repos registered without a valid .code-indexer/ directory)
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-171",
+                    f"Skipping repo {repo_path}: no valid index configured",
+                    error=str(e),
+                )
+            )
+            return []
         except Exception as e:
             logger.error(
                 format_error_log(
