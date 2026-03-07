@@ -272,6 +272,11 @@ class MultiSearchService:
             query=request.query,
             limit=min(request.limit, self.config.max_results_per_repo),
             include_source=True,  # Must be True to return content in results
+            language=request.language,
+            path_filter=request.path_filter,
+            exclude_language=request.exclude_language,
+            exclude_path=request.exclude_path,
+            accuracy=request.accuracy,
         )
 
         # Execute search using path resolved via GlobalRegistry (Story #43)

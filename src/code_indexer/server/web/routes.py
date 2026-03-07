@@ -4054,6 +4054,8 @@ def query_submit(
                         query=query_text.strip(),
                         limit=limit,
                         include_source=True,
+                        language=language if language else None,
+                        path_filter=path_pattern if path_pattern else None,
                     )
 
                     try:
@@ -4525,6 +4527,8 @@ def query_results_partial_post(
                         query=query_text.strip(),
                         limit=limit,
                         include_source=True,
+                        language=language if language else None,
+                        path_filter=path_pattern if path_pattern else None,
                     )
 
                     try:
