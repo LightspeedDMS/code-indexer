@@ -2324,6 +2324,12 @@ class DependencyMapService:
         # AC7: Non-blocking lock to prevent concurrent writes with delta analysis
         if not self._lock.acquire(blocking=False):
             logger.info("Refinement cycle skipped - analysis already in progress")
+            try:
+                journal_dir = Path(os.path.expanduser("~/.tmp/depmap-refinement-journal/"))
+                self._activity_journal.init(journal_dir)
+                self._activity_journal.log("Refinement: skipped - analysis already in progress")
+            except Exception as e:
+                logger.debug(f"Non-fatal journal log error (lock-skip path): {e}")
             return None
 
         # Acquire write lock so RefreshScheduler skips CoW clone during writes
