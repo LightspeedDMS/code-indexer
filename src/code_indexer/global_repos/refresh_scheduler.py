@@ -1129,6 +1129,13 @@ class RefreshScheduler:
             )
             logger.info("cidx index (semantic+FTS) on source completed successfully")
         except subprocess.CalledProcessError as e:
+            if e.returncode == -15:  # SIGTERM — server restart interrupted indexing
+                logger.warning(
+                    f"Indexing (semantic+FTS) on source interrupted by server shutdown for {alias_name}"
+                )
+                raise RuntimeError(
+                    f"Indexing interrupted by server shutdown for {alias_name}"
+                )
             logger.error(
                 f"Indexing (semantic+FTS) on source failed for {alias_name}: {type(e).__name__}: {e.stderr}",
                 exc_info=True,
@@ -1194,6 +1201,13 @@ class RefreshScheduler:
                 )
                 logger.info("cidx index (temporal) on source completed successfully")
             except subprocess.CalledProcessError as e:
+                if e.returncode == -15:  # SIGTERM — server restart interrupted indexing
+                    logger.warning(
+                        f"Temporal indexing on source interrupted by server shutdown for {alias_name}"
+                    )
+                    raise RuntimeError(
+                        f"Indexing interrupted by server shutdown for {alias_name}"
+                    )
                 logger.error(
                     f"Temporal indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}",
                     exc_info=True,
@@ -1236,6 +1250,13 @@ class RefreshScheduler:
                 )
                 logger.info("cidx scip generate on source completed successfully")
             except subprocess.CalledProcessError as e:
+                if e.returncode == -15:  # SIGTERM — server restart interrupted indexing
+                    logger.warning(
+                        f"SCIP indexing on source interrupted by server shutdown for {alias_name}"
+                    )
+                    raise RuntimeError(
+                        f"Indexing interrupted by server shutdown for {alias_name}"
+                    )
                 logger.error(
                     f"SCIP indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}",
                     exc_info=True,

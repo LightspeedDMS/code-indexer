@@ -161,6 +161,9 @@ class BackgroundJobManager:
         """Get the maximum number of concurrent background jobs (Story #26)."""
         return self._background_jobs_config.max_concurrent_background_jobs
 
+    # Staleness threshold buffer added to cidx_index_timeout (Bug #374 defense-in-depth)
+    STALE_JOB_BUFFER_SECONDS: int = 300
+
     def _check_operation_conflict(
         self, operation_type: str, repo_alias: str
     ) -> Optional[str]:
@@ -168,6 +171,11 @@ class BackgroundJobManager:
 
         Bug #133: Prevent duplicate jobs with same (operation_type, repo_alias)
         from running concurrently.
+
+        Bug #374: Auto-expire stale RUNNING jobs that exceeded the indexing
+        timeout plus buffer. This handles cases where the job's thread was
+        killed (e.g., by SIGTERM during server restart) but the job status
+        was not persisted as FAILED due to SQLite contention.
 
         Returns job_id of conflicting job, or None if no conflict.
         Must be called while holding self._lock.
@@ -179,12 +187,28 @@ class BackgroundJobManager:
         Returns:
             Job ID of conflicting job if found, None otherwise
         """
+        stale_threshold = getattr(
+            self.resource_config, "cidx_index_timeout", 3600
+        ) + self.STALE_JOB_BUFFER_SECONDS
+
         for job in self.jobs.values():
             if (
                 job.operation_type == operation_type
                 and job.repo_alias == repo_alias
                 and job.status in (JobStatus.PENDING, JobStatus.RUNNING)
             ):
+                # Bug #374: Check if job is stale (exceeded timeout + buffer)
+                if job.started_at is not None:
+                    elapsed = (datetime.now(timezone.utc) - job.started_at).total_seconds()
+                    if elapsed > stale_threshold:
+                        logging.warning(
+                            f"Auto-expiring stale job {job.job_id} for {repo_alias} "
+                            f"(running for {elapsed:.0f}s, threshold {stale_threshold}s)"
+                        )
+                        job.status = JobStatus.FAILED
+                        job.completed_at = datetime.now(timezone.utc)
+                        job.error = f"Auto-expired: exceeded stale threshold ({elapsed:.0f}s > {stale_threshold}s)"
+                        return None  # Allow new submission
                 return job.job_id
         return None
 

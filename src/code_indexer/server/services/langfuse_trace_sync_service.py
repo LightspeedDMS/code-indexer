@@ -251,10 +251,13 @@ class LangfuseTraceSyncService:
         # 4. Trigger refresh for each per-user repo that received writes (Story #227).
         #    Each per-user repo has its own entry in RefreshScheduler's registry.
         if self._refresh_scheduler is not None:
+            from code_indexer.server.repositories.background_jobs import DuplicateJobError
             for repo_folder_name in modified_repos:
                 trigger_alias = f"{repo_folder_name}-global"
                 try:
                     self._refresh_scheduler.trigger_refresh_for_repo(trigger_alias)
+                except DuplicateJobError:
+                    logger.debug(f"Refresh already in progress for '{trigger_alias}', skipping")
                 except Exception as e:
                     logger.warning(f"Failed to trigger refresh for '{trigger_alias}': {e}")
 
