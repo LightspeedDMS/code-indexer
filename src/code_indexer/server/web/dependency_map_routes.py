@@ -910,6 +910,7 @@ def _run_repair_with_feedback(
                 job_id,
                 "dependency_map_repair",
                 username="system",
+                repo_alias="server",
             )
         except Exception as e:
             logger.warning("Failed to register repair job in job tracker: %s", e)
