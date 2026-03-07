@@ -915,10 +915,17 @@ def _run_repair_with_feedback(
         except Exception as e:
             logger.warning("Failed to register repair job in job tracker: %s", e)
 
+    # Bug #381: Transition job from pending to running (matches full/delta/refinement pattern)
+    if job_tracker is not None:
+        try:
+            job_tracker.update_status(job_id, status="running")
+        except Exception as e:
+            logger.warning("Failed to transition repair job to running: %s", e)
+
     # AC1: Mark tracking backend as running
     if tracking_backend is not None:
         try:
-            tracking_backend.update_tracking(status="running")
+            tracking_backend.update_tracking(status="running", error_message=None)
         except Exception as e:
             logger.warning("Failed to update tracking backend to running: %s", e)
 
@@ -944,7 +951,10 @@ def _run_repair_with_feedback(
         terminal_status = "completed" if success else "failed"
         if tracking_backend is not None:
             try:
-                tracking_backend.update_tracking(status=terminal_status)
+                tracking_backend.update_tracking(
+                    status=terminal_status,
+                    error_message=None if success else "Repair failed",
+                )
             except Exception as e:
                 logger.warning(
                     "Failed to update tracking backend to %s: %s", terminal_status, e
