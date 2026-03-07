@@ -1156,15 +1156,10 @@ def trigger_refinement(request: Request):
     job_id = f"dep-map-refinement-{_uuid.uuid4().hex[:8]}"
 
     def _run_refinement():
-        if not dep_map_service._lock.acquire(blocking=False):
-            logger.warning("Refinement aborted: analysis lock unavailable")
-            return
         try:
             dep_map_service.run_tracked_refinement(job_id)
         except Exception as e:
             logger.error("Background refinement failed: %s", e)
-        finally:
-            dep_map_service._lock.release()
 
     thread = threading.Thread(target=_run_refinement, daemon=True)
     thread.start()
