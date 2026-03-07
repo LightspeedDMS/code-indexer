@@ -1187,15 +1187,11 @@ class DependencyMapService:
                         self.run_delta_analysis()
 
                 else:
-                    # Bug #326: Bootstrap first scheduled run when next_run is NULL.
-                    # next_run is only set after a successful analysis completes,
-                    # so on fresh init the scheduler would never trigger without this.
-                    status = tracking.get("status")
-                    if status != "running":
-                        logger.info(
-                            "Bootstrap: triggering first scheduled delta refresh (no next_run set)"
-                        )
-                        self.run_delta_analysis()
+                    # No next_run set yet — wait for user to trigger manually
+                    # or for a successful analysis to schedule the next run.
+                    logger.debug(
+                        "Delta refresh: no next_run scheduled, waiting for manual trigger"
+                    )
 
                 # Story #359: Check refinement schedule (independent of delta analysis)
                 try:
@@ -1220,21 +1216,11 @@ class DependencyMapService:
                                     refinement_next_run=next_refinement
                                 )
                         else:
-                            # Bootstrap: first refinement run (no refinement_next_run set yet)
-                            # Running-status guard (cf. Bug #326): skip if analysis already running
-                            tracking_for_status = self._tracking_backend.get_tracking()
-                            if tracking_for_status.get("status") != "running":
-                                logger.info(
-                                    "Bootstrap: triggering first refinement cycle (no refinement_next_run set)"
-                                )
-                                self.run_refinement_cycle()
-                                next_refinement = (
-                                    datetime.now(timezone.utc)
-                                    + timedelta(hours=ref_config.refinement_interval_hours)
-                                ).isoformat()
-                                self._tracking_backend.update_tracking(
-                                    refinement_next_run=next_refinement
-                                )
+                            # No refinement_next_run set yet — wait for user to
+                            # trigger manually or for a completed cycle to schedule next.
+                            logger.debug(
+                                "Refinement: no refinement_next_run scheduled, waiting for manual trigger"
+                            )
                 except Exception as ref_e:
                     logger.error(
                         f"Error in refinement scheduler: {ref_e}", exc_info=True
