@@ -181,15 +181,23 @@ class TestJournalInitIsCalled:
             f"Actual calls: {[str(c) for c in mock_journal.log.call_args_list]}"
         )
 
-    def test_journal_not_called_when_lock_fails(self, tmp_path):
-        """init() must NOT be called when lock acquisition fails (early exit)."""
+    def test_journal_logs_skipped_when_lock_fails(self, tmp_path):
+        """init() IS called when lock fails to log the skip reason."""
         domains = [{"name": "domain-A"}]
         service, mock_journal = _make_service(tmp_path, domains)
         service._lock.acquire.return_value = False
 
         service.run_refinement_cycle()
 
-        mock_journal.init.assert_not_called()
+        mock_journal.init.assert_called_once()
+        skipped_calls = [
+            c for c in mock_journal.log.call_args_list
+            if c.args and "skipped" in str(c.args[0]).lower()
+        ]
+        assert len(skipped_calls) >= 1, (
+            "A 'skipped - analysis already in progress' journal entry should be logged. "
+            f"Actual calls: {[str(c) for c in mock_journal.log.call_args_list]}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
