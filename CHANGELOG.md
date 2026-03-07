@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.3.108
+
+### Features
+
+- feat: Refinement job invokable from Dependency Map tab with background job tracking (Bug #371). Added "Refinement Pass" button to the Dependency Map dashboard that triggers a manual refinement cycle. The refinement job registers with the background job tracker system (operation_type: dependency_map_refinement), providing status/progress visibility. Includes lock acquisition to prevent concurrent refinement/analysis races, conflict detection (409 when busy), and proper job completion/failure tracking.
+
 ## v9.3.107
 
 ### Bug Fixes

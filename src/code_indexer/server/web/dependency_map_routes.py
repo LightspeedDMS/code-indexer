@@ -2,12 +2,13 @@
 Web routes for Dependency Map page (Story #212, #342).
 
 Provides:
-  GET  /admin/dependency-map                          -> Full page
-  GET  /admin/partials/depmap-job-status              -> HTMX partial (admin only)
-  GET  /admin/partials/depmap-activity-journal        -> HTMX journal partial (Story #329)
-  POST /admin/dependency-map/trigger                  -> Trigger analysis (admin only, JSON)
-  GET  /admin/dependency-map/health                   -> Health report JSON (Story #342)
-  POST /admin/dependency-map/repair                   -> Trigger repair (Story #342, JSON)
+  GET  /admin/dependency-map                                -> Full page
+  GET  /admin/partials/depmap-job-status                    -> HTMX partial (admin only)
+  GET  /admin/partials/depmap-activity-journal              -> HTMX journal partial (Story #329)
+  POST /admin/dependency-map/trigger                        -> Trigger analysis (admin only, JSON)
+  GET  /admin/dependency-map/health                         -> Health report JSON (Story #342)
+  POST /admin/dependency-map/repair                         -> Trigger repair (Story #342, JSON)
+  POST /admin/dependency-map/trigger-refinement             -> Trigger refinement cycle (Bug #371)
 """
 
 import html
@@ -187,6 +188,7 @@ def _get_progress_from_service(dep_map_service) -> tuple:
                 "dependency_map_full",
                 "dependency_map_delta",
                 "dependency_map_repair",
+                "dependency_map_refinement",
             ):
                 return job.progress or 0, job.progress_info or ""
     except Exception as e:
@@ -1115,3 +1117,59 @@ def trigger_dependency_map(
             content={"success": True, "message": "Delta refresh triggered"},
             status_code=202,
         )
+
+
+@dependency_map_router.post("/dependency-map/trigger-refinement")
+def trigger_refinement(request: Request):
+    """
+    Trigger a manual refinement cycle (Bug #371).
+
+    POST /admin/dependency-map/trigger-refinement
+
+    Admin-only. Returns JSON with success or error.
+    Refinement runs in a background daemon thread with job tracking.
+    """
+    import uuid as _uuid
+
+    session = _require_admin_session(request)
+    if not session:
+        return JSONResponse(
+            content={"error": "Admin access required"},
+            status_code=401,
+        )
+
+    dep_map_service = _get_dep_map_service_from_state()
+    if dep_map_service is None:
+        return JSONResponse(
+            content={
+                "error": "Dependency map service not available (disabled or not initialized)"
+            },
+            status_code=503,
+        )
+
+    if not dep_map_service.is_available():
+        return JSONResponse(
+            content={"error": "Analysis already in progress"},
+            status_code=409,
+        )
+
+    job_id = f"dep-map-refinement-{_uuid.uuid4().hex[:8]}"
+
+    def _run_refinement():
+        if not dep_map_service._lock.acquire(blocking=False):
+            logger.warning("Refinement aborted: analysis lock unavailable")
+            return
+        try:
+            dep_map_service.run_tracked_refinement(job_id)
+        except Exception as e:
+            logger.error("Background refinement failed: %s", e)
+        finally:
+            dep_map_service._lock.release()
+
+    thread = threading.Thread(target=_run_refinement, daemon=True)
+    thread.start()
+
+    return JSONResponse(
+        content={"success": True, "message": "Refinement triggered", "job_id": job_id},
+        status_code=202,
+    )
