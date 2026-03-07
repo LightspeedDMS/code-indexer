@@ -50,14 +50,17 @@
     window._depmapJournalListenerRegistered = true;
 
     document.body.addEventListener('htmx:afterRequest', function(evt) {
-        // Handle Run Now trigger response
-        if (evt.detail.elt.hasAttribute('hx-post') &&
-            evt.detail.elt.getAttribute('hx-post') === '/admin/dependency-map/trigger') {
+        // Handle Run Now / Refinement trigger response
+        var triggerPost = evt.detail.elt.hasAttribute('hx-post') ? evt.detail.elt.getAttribute('hx-post') : '';
+        if (triggerPost === '/admin/dependency-map/trigger' ||
+            triggerPost === '/admin/dependency-map/trigger-refinement') {
             var statusDiv = document.getElementById('depmap-trigger-status');
             if (!statusDiv) return;
 
+            var isRefinement = triggerPost.indexOf('refinement') !== -1;
             if (evt.detail.successful) {
-                statusDiv.innerHTML = '<span style="color: var(--pico-color-green-550);">Analysis triggered</span>';
+                statusDiv.innerHTML = '<span style="color: var(--pico-color-green-550);">' +
+                    (isRefinement ? 'Refinement triggered' : 'Analysis triggered') + '</span>';
 
                 // Reset journal and offset on new analysis trigger
                 var entriesEl = document.getElementById('depmap-activity-entries');
@@ -75,7 +78,8 @@
                     });
                 }, 3000);
             } else {
-                statusDiv.innerHTML = '<span style="color: var(--pico-color-red-550);">Failed to trigger analysis</span>';
+                statusDiv.innerHTML = '<span style="color: var(--pico-color-red-550);">Failed to trigger ' +
+                    (isRefinement ? 'refinement' : 'analysis') + '</span>';
             }
 
             // Clear status after 8 seconds
