@@ -2757,6 +2757,7 @@ def create_app() -> FastAPI:
 
             # Create tracking backend
             tracking_backend = DependencyMapTrackingBackend(db_path)
+            tracking_backend.cleanup_stale_status_on_startup()
 
             # Create analyzer
             cidx_meta_path = Path(golden_repos_dir) / "cidx-meta"
