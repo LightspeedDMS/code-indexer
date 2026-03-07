@@ -133,6 +133,11 @@ class SemanticSearchService:
             search_request.query,
             search_request.limit,
             search_request.include_source,
+            path_filter=search_request.path_filter,
+            language=search_request.language,
+            exclude_language=search_request.exclude_language,
+            exclude_path=search_request.exclude_path,
+            accuracy=search_request.accuracy,
         )
 
         return SemanticSearchResponse(
@@ -141,8 +146,70 @@ class SemanticSearchService:
             total=len(search_results),
         )
 
+    def _build_filter_conditions(
+        self,
+        path_filter: Optional[str],
+        language: Optional[str],
+        exclude_language: Optional[str],
+        exclude_path: Optional[str],
+    ) -> dict:
+        """
+        Build filter_conditions dict for FilesystemVectorStore.search().
+
+        Uses LanguageMapper for proper language-to-extension mapping,
+        following the same pattern as the CLI (cli.py).
+
+        Returns an empty dict when no filters are given (no filtering applied).
+        """
+        from code_indexer.services.language_mapper import LanguageMapper
+
+        mapper = LanguageMapper()
+        must = []
+        must_not = []
+
+        if path_filter:
+            must.append({"key": "path", "match": {"text": path_filter}})
+
+        if language:
+            lang_filter = mapper.build_language_filter(language)
+            must.append(lang_filter)
+
+        if exclude_language:
+            extensions = mapper.get_extensions(exclude_language)
+            if extensions:
+                for ext in sorted(extensions):
+                    must_not.append({"key": "language", "match": {"value": ext}})
+            else:
+                # Treat as raw extension/value (direct pass-through)
+                must_not.append({"key": "language", "match": {"value": exclude_language}})
+
+        if exclude_path:
+            from code_indexer.services.path_filter_builder import PathFilterBuilder
+
+            builder = PathFilterBuilder()
+            exclusion = builder.build_exclusion_filter([exclude_path])
+            if exclusion.get("must_not"):
+                must_not.extend(exclusion["must_not"])
+
+        result: dict = {}
+        if must:
+            result["must"] = must
+        if must_not:
+            result["must_not"] = must_not
+
+        return result
+
     def _perform_semantic_search(
-        self, repo_path: str, query: str, limit: int, include_source: bool
+        self,
+        repo_path: str,
+        query: str,
+        limit: int,
+        include_source: bool,
+        path_filter: Optional[str] = None,
+        language: Optional[str] = None,
+        exclude_language: Optional[str] = None,
+        exclude_path: Optional[str] = None,
+        accuracy: Optional[str] = None,
     ) -> List[SearchResultItem]:
         """
         Perform real semantic search using repository-specific configuration.
@@ -155,6 +222,11 @@ class SemanticSearchService:
             query: Search query
             limit: Maximum number of results
             include_source: Whether to include source code in results
+            path_filter: Optional path pattern filter (e.g. '*/src/*')
+            language: Optional language filter (e.g. 'python')
+            exclude_language: Optional language to exclude (e.g. 'javascript')
+            exclude_path: Optional path pattern to exclude (e.g. '*/tests/*')
+            accuracy: Optional accuracy profile ('fast', 'balanced', 'high') - reserved
 
         Returns:
             List of search results ranked by semantic similarity
@@ -201,6 +273,14 @@ class SemanticSearchService:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+            # Build filter_conditions from request parameters (Story #375)
+            filter_conditions = self._build_filter_conditions(
+                path_filter=path_filter,
+                language=language,
+                exclude_language=exclude_language,
+                exclude_path=exclude_path,
+            )
+
             # Real vector search - different parameter patterns for different backends
             # FilesystemVectorStore: parallel execution (query + embedding_provider)
             # Backend: sequential execution (pre-computed query_vector)
@@ -209,13 +289,22 @@ class SemanticSearchService:
             if isinstance(vector_store_client, FilesystemVectorStore):
                 # FilesystemVectorStore: parallel execution with query string and provider
                 # Embedding generation happens in parallel with index loading
-                search_results, _ = vector_store_client.search(
+
+                # Map accuracy to HNSW ef parameter
+                accuracy_to_ef = {"fast": 20, "balanced": 50, "high": 200}
+                ef_value = accuracy_to_ef.get(accuracy, 50) if accuracy else 50
+
+                search_kwargs = dict(
                     query=query,
                     embedding_provider=embedding_service,
                     collection_name=collection_name,
                     limit=limit,
                     return_timing=True,
+                    ef=ef_value,
                 )
+                if filter_conditions:
+                    search_kwargs["filter_conditions"] = filter_conditions
+                search_results, _ = vector_store_client.search(**search_kwargs)
             else:
                 # Backend: sequential execution with pre-computed embedding
                 query_embedding = embedding_service.get_embedding(query)

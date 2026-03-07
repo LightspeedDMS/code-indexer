@@ -212,6 +212,27 @@ class SemanticSearchRequest(BaseModel):
     include_source: bool = Field(
         default=True, description="Whether to include source code in results"
     )
+    # Filter parameters (Story #375): wire through to vector store search
+    path_filter: Optional[str] = Field(
+        default=None,
+        description="Filter by file path pattern (e.g. '*/src/*')",
+    )
+    language: Optional[str] = Field(
+        default=None,
+        description="Filter by programming language (e.g. 'python')",
+    )
+    exclude_language: Optional[str] = Field(
+        default=None,
+        description="Exclude files of specified language",
+    )
+    exclude_path: Optional[str] = Field(
+        default=None,
+        description="Exclude files matching path pattern (e.g. '*/tests/*')",
+    )
+    accuracy: Optional[str] = Field(
+        default=None,
+        description="Search accuracy profile ('fast', 'balanced', 'high')",
+    )
 
 
 class SearchResultItem(BaseModel):
