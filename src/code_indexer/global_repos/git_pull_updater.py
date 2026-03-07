@@ -218,13 +218,18 @@ class GitPullUpdater(UpdateStrategy):
                 timeout=10,
             )
 
+            modified_files = []
             if status_result.returncode == 0 and status_result.stdout.strip():
+                # Filter out untracked files (??) - only warn/reset for tracked modifications
+                all_files = status_result.stdout.strip().splitlines()
+                modified_files = [f for f in all_files if not f.startswith("??")]
+
+            if modified_files:
                 # Local modifications detected - log warning and reset
-                modified_files = status_result.stdout.strip()
                 logger.warning(
                     f"Local modifications detected in {self.repo_path}, "
                     f"resetting to HEAD before pull. "
-                    f"Modified files: {modified_files}"
+                    f"Modified files: {' '.join(modified_files)}"
                 )
 
                 # Reset local modifications to allow clean pull

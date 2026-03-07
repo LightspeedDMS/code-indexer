@@ -218,7 +218,7 @@ class JobTracker:
         Args:
             db_path: Path to the SQLite database file containing background_jobs.
         """
-        self._conn_manager = DatabaseConnectionManager(db_path)
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
         self._active_jobs: Dict[str, TrackedJob] = {}
         self._lock = threading.Lock()
 
