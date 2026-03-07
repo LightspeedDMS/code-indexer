@@ -146,6 +146,51 @@
             return;
         }
 
+        // Bug #371: Handle Refinement Pass button response (same pattern as trigger)
+        if (evt.detail.elt.hasAttribute('hx-post') &&
+            evt.detail.elt.getAttribute('hx-post') === '/admin/dependency-map/trigger-refinement') {
+            var refStatusDiv = document.getElementById('depmap-trigger-status');
+            if (evt.detail.successful) {
+                if (refStatusDiv) {
+                    refStatusDiv.innerHTML = '<span style="color: var(--pico-color-green-550);">Refinement triggered</span>';
+                }
+
+                // Reset journal entries and offset, reinstate polling
+                var refEntriesEl = document.getElementById('depmap-activity-entries');
+                if (refEntriesEl) {
+                    refEntriesEl.innerHTML = '';
+                    refEntriesEl.setAttribute('hx-get',
+                        '/admin/partials/depmap-activity-journal?offset=0');
+                    refEntriesEl.setAttribute('hx-trigger', 'every 3s');
+                    htmx.process(refEntriesEl);
+                }
+                showPanel();
+
+                // Reset progress bar
+                updateProgressUI(0, '');
+
+                // Refresh job status after 3 seconds so Running badge appears
+                setTimeout(function() {
+                    htmx.ajax('GET', '/admin/partials/depmap-job-status', {
+                        target: '#depmap-job-status',
+                        swap: 'innerHTML'
+                    });
+                }, 3000);
+            } else {
+                if (refStatusDiv) {
+                    refStatusDiv.innerHTML = '<span style="color: var(--pico-color-red-550);">Failed to trigger refinement</span>';
+                }
+            }
+
+            // Clear status after 8 seconds
+            if (refStatusDiv) {
+                setTimeout(function() {
+                    refStatusDiv.innerHTML = '';
+                }, 8000);
+            }
+            return;
+        }
+
         // Story #352: Handle Repair button response (same pattern as trigger)
         if (evt.detail.elt.hasAttribute('hx-post') &&
             evt.detail.elt.getAttribute('hx-post') === '/admin/dependency-map/repair') {
