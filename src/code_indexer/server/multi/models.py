@@ -20,6 +20,9 @@ class MultiSearchRequest(BaseModel):
         min_score: Minimum similarity score (optional, for semantic/FTS)
         language: Filter by programming language (optional)
         path_filter: Filter by file path pattern (optional)
+        exclude_language: Exclude files of specified language (optional)
+        exclude_path: Exclude files matching path pattern (optional)
+        accuracy: Search accuracy profile - fast, balanced, high (optional)
     """
 
     repositories: List[str] = Field(
@@ -37,6 +40,9 @@ class MultiSearchRequest(BaseModel):
     )
     language: Optional[str] = Field(None, description="Filter by programming language")
     path_filter: Optional[str] = Field(None, description="Filter by file path pattern")
+    exclude_language: Optional[str] = Field(None, description="Exclude files of specified language")
+    exclude_path: Optional[str] = Field(None, description="Exclude files matching path pattern")
+    accuracy: Optional[str] = Field(None, description="Search accuracy profile ('fast', 'balanced', 'high')")
 
     @field_validator("repositories")
     @classmethod

@@ -1012,6 +1012,9 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         min_score=_coerce_float(params.get("min_score"), 0.0) if params.get("min_score") is not None else None,
         language=params.get("language"),
         path_filter=params.get("path_filter"),
+        exclude_language=params.get("exclude_language"),
+        exclude_path=params.get("exclude_path"),
+        accuracy=params.get("accuracy", "balanced"),
     )
 
     # Story #36: Delegate to MultiSearchService for parallel execution
