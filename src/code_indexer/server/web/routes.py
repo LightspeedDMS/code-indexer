@@ -2504,9 +2504,25 @@ def toggle_wiki_enabled(
             actual_path = AliasManager(aliases_dir).read_alias(f"{alias}-global")
             if actual_path:
                 svc = WikiService()
+                # Fetch wiki_config so enable_views_seeding toggle is respected (Story #323)
+                wiki_config = None
+                try:
+                    wiki_config = get_config_service().get_config().wiki_config
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to fetch wiki_config for view seeding of %s, "
+                        "proceeding with defaults: %s",
+                        alias,
+                        exc,
+                    )
                 threading.Thread(
                     target=svc.populate_views_from_front_matter,
-                    args=(alias, Path(actual_path), cache),
+                    kwargs={
+                        "repo_alias": alias,
+                        "repo_path": Path(actual_path),
+                        "wiki_cache": cache,
+                        "wiki_config": wiki_config,
+                    },
                     daemon=True,
                 ).start()
         except Exception as exc:
@@ -4941,6 +4957,18 @@ def _get_current_config() -> dict:
         "content_limits": settings.get("content_limits", asdict(ContentLimitsConfig())),
         # Story #223: Indexing configuration
         "indexing": settings.get("indexing", asdict(IndexingConfig())),
+        # Story #323: Wiki metadata fields configuration
+        # Story #325: Configurable metadata display order
+        "wiki_config": settings.get(
+            "wiki_config",
+            {
+                "enable_header_block_parsing": True,
+                "enable_article_number": True,
+                "enable_publication_status": True,
+                "enable_views_seeding": True,
+                "metadata_display_order": "",
+            },
+        ),
     }
 
 
@@ -6560,6 +6588,8 @@ async def update_config_section(
         "claude_cli",
         # Story #223 - Indexing configuration
         "indexing",
+        # Story #323 - Wiki metadata fields configuration
+        "wiki",
     ]
     if section not in valid_sections:
         return _create_config_page_response(

@@ -83,6 +83,28 @@ def _reset_wiki_cache():
     _wiki_cache = None
 
 
+def _get_wiki_config(request: Request):
+    """Return the WikiConfig from ConfigService, or a default WikiConfig.
+
+    Follows the same pattern as _get_wiki_cache(). Retrieves wiki_config
+    from the ConfigService stored on app.state.config_service so that all
+    four metadata toggles configured in the Web UI are honoured at render time.
+    Falls back to a default all-True WikiConfig when config_service is not
+    available (e.g. in tests that don't configure it).
+    """
+    from ..utils.config_manager import WikiConfig
+
+    try:
+        config_service = request.app.state.config_service
+        server_config = config_service.get_config()
+        wiki_config = server_config.wiki_config
+        if wiki_config is None:
+            return WikiConfig()
+        return wiki_config
+    except AttributeError:
+        return WikiConfig()
+
+
 def _check_user_wiki_access(
     request: Request, username: str, alias: str, current_user: User
 ) -> str:
@@ -227,6 +249,7 @@ def serve_user_wiki_root(
 
     home_md = repo_dir / "home.md"
     cache = _get_wiki_cache(request)
+    wiki_config = _get_wiki_config(request)
 
     sidebar = cache.get_sidebar(cache_repo_alias, repo_dir)
     if sidebar is None:
@@ -242,7 +265,7 @@ def serve_user_wiki_root(
             cached_meta = cached_article.get("metadata") or {}
             metadata_panel = (
                 _wiki_service.prepare_metadata_context(
-                    cached_meta, url_prefix, "", cache
+                    cached_meta, url_prefix, "", cache, wiki_config=wiki_config
                 )
                 or None
             )
@@ -259,7 +282,7 @@ def serve_user_wiki_root(
                     "metadata_panel": metadata_panel,
                 },
             )
-        result = _wiki_service.render_article(home_md, url_prefix)
+        result = _wiki_service.render_article(home_md, url_prefix, wiki_config=wiki_config)
         cache.put_article(
             cache_repo_alias, "", result["html"], result["title"], home_md,
             metadata=result.get("metadata"),
@@ -268,7 +291,7 @@ def serve_user_wiki_root(
         breadcrumbs = _wiki_service.build_breadcrumbs("", url_prefix)
         metadata_panel = (
             _wiki_service.prepare_metadata_context(
-                result.get("metadata") or {}, url_prefix, "", cache
+                result.get("metadata") or {}, url_prefix, "", cache, wiki_config=wiki_config
             )
             or None
         )
@@ -340,6 +363,7 @@ def serve_user_wiki_article(
     article_rel_path = str(rel_path.with_suffix(""))
 
     cache = _get_wiki_cache(request)
+    wiki_config = _get_wiki_config(request)
     cache.increment_view(cache_repo_alias, article_rel_path)
 
     sidebar = cache.get_sidebar(cache_repo_alias, repo_dir)
@@ -356,7 +380,7 @@ def serve_user_wiki_article(
         cached_meta = cached_article.get("metadata") or {}
         metadata_panel = (
             _wiki_service.prepare_metadata_context(
-                cached_meta, url_prefix, article_rel_path, cache
+                cached_meta, url_prefix, article_rel_path, cache, wiki_config=wiki_config
             )
             or None
         )
@@ -375,7 +399,7 @@ def serve_user_wiki_article(
         )
 
     try:
-        result = _wiki_service.render_article(article_path, url_prefix)
+        result = _wiki_service.render_article(article_path, url_prefix, wiki_config=wiki_config)
     except (UnicodeDecodeError, OSError):
         raise HTTPException(status_code=404, detail="Not found")
 
@@ -392,7 +416,8 @@ def serve_user_wiki_article(
     breadcrumbs = _wiki_service.build_breadcrumbs(article_rel_path, url_prefix)
     metadata_panel = (
         _wiki_service.prepare_metadata_context(
-            result.get("metadata") or {}, url_prefix, article_rel_path, cache
+            result.get("metadata") or {}, url_prefix, article_rel_path, cache,
+            wiki_config=wiki_config,
         )
         or None
     )
@@ -443,6 +468,7 @@ def serve_wiki_root(repo_alias: str, request: Request,
     repo_dir = Path(actual_path)
     home_md = repo_dir / "home.md"
     cache = _get_wiki_cache(request)
+    wiki_config = _get_wiki_config(request)
 
     sidebar = cache.get_sidebar(repo_alias, repo_dir)
     if sidebar is None:
@@ -456,18 +482,22 @@ def serve_wiki_root(repo_alias: str, request: Request,
             html = _wiki_service.rewrite_links(cached_article["html"], repo_alias, "")
             breadcrumbs = _wiki_service.build_breadcrumbs("", repo_alias)
             cached_meta = cached_article.get("metadata") or {}
-            metadata_panel = _wiki_service.prepare_metadata_context(cached_meta, repo_alias, "", cache) or None
+            metadata_panel = _wiki_service.prepare_metadata_context(
+                cached_meta, repo_alias, "", cache, wiki_config=wiki_config
+            ) or None
             return wiki_templates.TemplateResponse("article.html", {
                 "request": request, "title": cached_article["title"],
                 "content": html, "repo_alias": repo_alias,
                 "sidebar": sidebar, "breadcrumbs": breadcrumbs,
                 "current_path": "", "metadata_panel": metadata_panel,
             })
-        result = _wiki_service.render_article(home_md, repo_alias)
+        result = _wiki_service.render_article(home_md, repo_alias, wiki_config=wiki_config)
         cache.put_article(repo_alias, "", result["html"], result["title"], home_md, metadata=result.get("metadata"))
         html = _wiki_service.rewrite_links(result["html"], repo_alias, "")
         breadcrumbs = _wiki_service.build_breadcrumbs("", repo_alias)
-        metadata_panel = _wiki_service.prepare_metadata_context(result.get("metadata") or {}, repo_alias, "", cache) or None
+        metadata_panel = _wiki_service.prepare_metadata_context(
+            result.get("metadata") or {}, repo_alias, "", cache, wiki_config=wiki_config
+        ) or None
         return wiki_templates.TemplateResponse("article.html", {
             "request": request, "title": result["title"],
             "content": html, "repo_alias": repo_alias,
@@ -589,6 +619,7 @@ def serve_wiki_article(repo_alias: str, path: str, request: Request,
     article_rel_path = str(rel_path.with_suffix(""))
 
     cache = _get_wiki_cache(request)
+    wiki_config = _get_wiki_config(request)
     cache.increment_view(repo_alias, article_rel_path)
 
     sidebar = cache.get_sidebar(repo_alias, repo_dir)
@@ -601,7 +632,9 @@ def serve_wiki_article(repo_alias: str, path: str, request: Request,
         html = _wiki_service.rewrite_links(cached_article["html"], repo_alias, current_dir)
         breadcrumbs = _wiki_service.build_breadcrumbs(article_rel_path, repo_alias)
         cached_meta = cached_article.get("metadata") or {}
-        metadata_panel = _wiki_service.prepare_metadata_context(cached_meta, repo_alias, article_rel_path, cache) or None
+        metadata_panel = _wiki_service.prepare_metadata_context(
+            cached_meta, repo_alias, article_rel_path, cache, wiki_config=wiki_config
+        ) or None
         return wiki_templates.TemplateResponse("article.html", {
             "request": request, "title": cached_article["title"],
             "content": html, "repo_alias": repo_alias,
@@ -610,7 +643,7 @@ def serve_wiki_article(repo_alias: str, path: str, request: Request,
         })
 
     try:
-        result = _wiki_service.render_article(article_path, repo_alias)
+        result = _wiki_service.render_article(article_path, repo_alias, wiki_config=wiki_config)
     except (UnicodeDecodeError, OSError):
         raise HTTPException(status_code=404, detail="Not found")
 
@@ -622,7 +655,8 @@ def serve_wiki_article(repo_alias: str, path: str, request: Request,
     html = _wiki_service.rewrite_links(result["html"], repo_alias, current_dir)
     breadcrumbs = _wiki_service.build_breadcrumbs(article_rel_path, repo_alias)
     metadata_panel = _wiki_service.prepare_metadata_context(
-        result.get("metadata") or {}, repo_alias, article_rel_path, cache
+        result.get("metadata") or {}, repo_alias, article_rel_path, cache,
+        wiki_config=wiki_config,
     ) or None
 
     return wiki_templates.TemplateResponse("article.html", {

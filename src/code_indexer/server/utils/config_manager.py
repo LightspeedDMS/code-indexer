@@ -677,6 +677,32 @@ class LangfuseConfig:
 
 
 @dataclass
+class WikiConfig:
+    """
+    Wiki metadata fields configuration (Story #323).
+
+    Controls which knowledge-base-specific metadata behaviors are active.
+    All toggles default to True to preserve current behavior for existing deployments.
+    Set individual toggles to False to suppress KB-specific fields for generic wikis.
+    """
+
+    # Parse and strip legacy header block (Article Number / Title / Publication Status lines)
+    enable_header_block_parsing: bool = True
+    # Display article_number / original_article in the metadata panel
+    enable_article_number: bool = True
+    # Display publication_status in the metadata panel
+    enable_publication_status: bool = True
+    # Seed wiki_article_views DB from front matter 'views' field; also controls
+    # whether the 'views' key appears in the metadata panel as "Salesforce Views"
+    enable_views_seeding: bool = True
+    # Comma-separated list of metadata field keys controlling display order in the
+    # metadata panel. Empty string = preserve current behavior (article_number first,
+    # remaining in YAML key order). Non-empty = sort according to configured order,
+    # unlisted fields appended alphabetically. Disabled fields excluded regardless.
+    metadata_display_order: str = ""
+
+
+@dataclass
 class MCPSelfRegistrationConfig:
     """
     MCP self-registration credentials (Story #203).
@@ -759,6 +785,9 @@ class ServerConfig:
     # Story #203 - MCP self-registration credentials
     mcp_self_registration: Optional[MCPSelfRegistrationConfig] = None
 
+    # Story #323 - Wiki metadata fields configuration
+    wiki_config: Optional[WikiConfig] = None
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:
@@ -826,6 +855,9 @@ class ServerConfig:
         # Story #203 - Initialize MCP self-registration config
         if self.mcp_self_registration is None:
             self.mcp_self_registration = MCPSelfRegistrationConfig()
+        # Story #323 - Initialize wiki config
+        if self.wiki_config is None:
+            self.wiki_config = WikiConfig()
 
 
 class ServerConfigManager:
@@ -1233,6 +1265,14 @@ class ServerConfigManager:
             ):
                 config_dict["mcp_self_registration"] = MCPSelfRegistrationConfig(
                     **config_dict["mcp_self_registration"]
+                )
+
+            # Story #323: Convert wiki_config dict to WikiConfig
+            if "wiki_config" in config_dict and isinstance(
+                config_dict["wiki_config"], dict
+            ):
+                config_dict["wiki_config"] = WikiConfig(
+                    **config_dict["wiki_config"]
                 )
 
             # Remove obsolete reindexing_config field (deleted in previous commit)

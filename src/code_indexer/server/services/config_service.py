@@ -348,6 +348,35 @@ class ConfigService:
                     else []
                 ),
             },
+            # Story #323 - Wiki metadata fields configuration
+            # Story #325 - Configurable metadata display order
+            "wiki_config": {
+                "enable_header_block_parsing": (
+                    config.wiki_config.enable_header_block_parsing
+                    if config.wiki_config is not None
+                    else True
+                ),
+                "enable_article_number": (
+                    config.wiki_config.enable_article_number
+                    if config.wiki_config is not None
+                    else True
+                ),
+                "enable_publication_status": (
+                    config.wiki_config.enable_publication_status
+                    if config.wiki_config is not None
+                    else True
+                ),
+                "enable_views_seeding": (
+                    config.wiki_config.enable_views_seeding
+                    if config.wiki_config is not None
+                    else True
+                ),
+                "metadata_display_order": (
+                    config.wiki_config.metadata_display_order
+                    if config.wiki_config is not None
+                    else ""
+                ),
+            },
         }
 
         return settings
@@ -440,6 +469,9 @@ class ConfigService:
             self._update_indexing_setting(key, value)
             # _update_indexing_setting saves config internally, so skip normal save below
             return
+        # Story #323 - Wiki metadata fields configuration
+        elif category == "wiki":
+            self._update_wiki_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
 
@@ -742,6 +774,30 @@ class ConfigService:
             ]
         else:
             raise ValueError(f"Unknown langfuse setting: {key}")
+
+    def _update_wiki_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a wiki metadata configuration setting (Story #323)."""
+        from ..utils.config_manager import WikiConfig
+
+        if config.wiki_config is None:
+            config.wiki_config = WikiConfig()
+        wiki = config.wiki_config
+        bool_value = value in ["true", True, "True", "1"]
+        if key == "enable_header_block_parsing":
+            wiki.enable_header_block_parsing = bool_value
+        elif key == "enable_article_number":
+            wiki.enable_article_number = bool_value
+        elif key == "enable_publication_status":
+            wiki.enable_publication_status = bool_value
+        elif key == "enable_views_seeding":
+            wiki.enable_views_seeding = bool_value
+        elif key == "metadata_display_order":
+            # String field — store as-is (not a boolean toggle)
+            wiki.metadata_display_order = str(value)
+        else:
+            raise ValueError(f"Unknown wiki setting: {key}")
 
     def _update_search_limits_setting(
         self, config: ServerConfig, key: str, value: Any
