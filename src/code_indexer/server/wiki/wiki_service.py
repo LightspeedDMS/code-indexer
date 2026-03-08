@@ -15,11 +15,28 @@ logger = logging.getLogger(__name__)
 class WikiService:
     """Renders markdown articles with front matter parsing and image path rewriting."""
 
-    def render_article(self, file_path: Path, repo_alias: str) -> Dict[str, Any]:
-        """Render a markdown file to HTML with metadata extraction."""
+    def render_article(
+        self,
+        file_path: Path,
+        repo_alias: str,
+        wiki_config: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Render a markdown file to HTML with metadata extraction.
+
+        Args:
+            file_path: Path to the markdown file.
+            repo_alias: Repository alias for image path rewriting.
+            wiki_config: Optional WikiConfig controlling KB-specific behaviors.
+                         None means "use all defaults" (same as WikiConfig()).
+        """
         raw_content = file_path.read_text(encoding="utf-8")
         metadata, content = self._strip_front_matter(raw_content)
-        content = self._strip_header_block(content, metadata)
+        # AC1/AC2: Skip header block parsing when toggle is OFF
+        header_parsing_enabled = True
+        if wiki_config is not None and not wiki_config.enable_header_block_parsing:
+            header_parsing_enabled = False
+        if header_parsing_enabled:
+            content = self._strip_header_block(content, metadata)
         title = self._extract_title(metadata, file_path)
         html = self._render_markdown(content)
         html = self._rewrite_image_paths(html, repo_alias)
@@ -210,11 +227,20 @@ class WikiService:
         repo_alias: str,
         article_path: str,
         wiki_cache: "WikiCache",
+        wiki_config: Optional[Any] = None,
     ) -> List[tuple]:
         """Prepare template context for the metadata panel (Story #289).
 
         Returns a list of (label, value) tuples for display.  An empty list
         signals to the template not to render the panel.
+
+        Args:
+            metadata: Front matter metadata dict from the article.
+            repo_alias: Repository alias (used for view count lookup).
+            article_path: Relative article path (used for view count lookup).
+            wiki_cache: WikiCache instance for view count retrieval.
+            wiki_config: Optional WikiConfig controlling KB-specific field visibility.
+                         None means "use all defaults" (same as WikiConfig()).
         """
         # Build a working dict of all displayable fields
         fields: Dict[str, Any] = {}
@@ -237,6 +263,20 @@ class WikiService:
         elif "original_article" in fields:
             del fields["original_article"]
 
+        # AC4: Remove article_number when toggle is OFF
+        if wiki_config is not None and not wiki_config.enable_article_number:
+            fields.pop("article_number", None)
+            fields.pop("original_article", None)
+
+        # AC6: Remove publication_status when toggle is OFF
+        if wiki_config is not None and not wiki_config.enable_publication_status:
+            fields.pop("publication_status", None)
+
+        # AC8: Remove 'views' front-matter key when views_seeding is OFF
+        # (front-matter 'views' is labeled "Salesforce Views" — KB-specific)
+        if wiki_config is not None and not wiki_config.enable_views_seeding:
+            fields.pop("views", None)
+
         # Draft flag → visibility
         if fields.get("draft") is True:
             fields["visibility"] = "draft"
@@ -256,14 +296,18 @@ class WikiService:
         if real_views > 0:
             fields["real_views"] = real_views
 
-        # Build (label, value) list — strip empty values
-        # Article number always first
-        result: List[tuple] = []
+        # Build keyed list [(key, label, value)] — strip empty values
+        # Article number always first in the keyed list (ordering applied after)
+        keyed: List[tuple] = []
         if "article_number" in fields:
             val = str(fields.pop("article_number")).strip()
             if val:
-                result.append(
-                    (self._METADATA_LABELS.get("article_number", "Article"), val)
+                keyed.append(
+                    (
+                        "article_number",
+                        self._METADATA_LABELS.get("article_number", "Article"),
+                        val,
+                    )
                 )
 
         for key, value in fields.items():
@@ -271,9 +315,60 @@ class WikiService:
             if not str_value:
                 continue
             label = self._METADATA_LABELS.get(key, key.replace("_", " ").title())
-            result.append((label, str_value))
+            keyed.append((key, label, str_value))
 
-        return result
+        # Apply display order when wiki_config specifies a non-empty order string
+        order_str = (
+            wiki_config.metadata_display_order
+            if wiki_config is not None
+            else ""
+        )
+        if order_str and order_str.strip():
+            keyed = self._apply_display_order(keyed, order_str)
+
+        # Strip keys, return [(label, value), ...]
+        return [(label, value) for _key, label, value in keyed]
+
+    @staticmethod
+    def _apply_display_order(
+        keyed: List[tuple], order_str: str
+    ) -> List[tuple]:
+        """Re-order keyed (key, label, value) list according to order_str.
+
+        order_str is a comma-separated list of metadata field keys.
+        - Listed keys appear first, in configured order (duplicates ignored after first).
+        - Unlisted keys are appended after, sorted alphabetically by key.
+        - Keys in order_str that don't exist in keyed are silently ignored.
+        """
+        # Parse order string: split, strip, lowercase, deduplicate preserving first order
+        raw_keys = [k.strip().lower() for k in order_str.split(",")]
+        seen: set = set()
+        unique_order: List[str] = []
+        for k in raw_keys:
+            if k and k not in seen:
+                unique_order.append(k)
+                seen.add(k)
+
+        # Index keyed items by key for O(1) lookup
+        keyed_by_key = {item[0]: item for item in keyed}
+
+        ordered: List[tuple] = []
+        placed_keys: set = set()
+
+        # Place items in configured order
+        for key in unique_order:
+            if key in keyed_by_key:
+                ordered.append(keyed_by_key[key])
+                placed_keys.add(key)
+
+        # Append remaining items sorted alphabetically by key
+        remaining = sorted(
+            (item for item in keyed if item[0] not in placed_keys),
+            key=lambda item: item[0],
+        )
+        ordered.extend(remaining)
+
+        return ordered
 
     # ------------------------------------------------------------------
     # Story #282: Sidebar navigation, link rewriting, breadcrumbs
@@ -384,7 +479,11 @@ class WikiService:
     # ------------------------------------------------------------------
 
     def populate_views_from_front_matter(
-        self, repo_alias: str, repo_path: Path, wiki_cache: "WikiCache"
+        self,
+        repo_alias: str,
+        repo_path: Path,
+        wiki_cache: "WikiCache",
+        wiki_config: Optional[Any] = None,
     ) -> None:
         """Scan all .md files in repo_path and seed wiki_article_views from front matter.
 
@@ -392,7 +491,18 @@ class WikiService:
         Skips files without a numeric 'views' field in front matter (AC2).
         Skips hidden directories (any path component starting with '.').
         The article_path stored is the relative path from repo root without .md extension.
+
+        Args:
+            repo_alias: Repository alias used as key for view counts.
+            repo_path: Path to the repository root directory.
+            wiki_cache: WikiCache instance for inserting initial views.
+            wiki_config: Optional WikiConfig. When enable_views_seeding=False,
+                         returns immediately without processing any files (AC8).
         """
+        # AC8: No-op when views seeding is disabled
+        if wiki_config is not None and not wiki_config.enable_views_seeding:
+            return
+
         existing = wiki_cache.get_all_view_counts(repo_alias)
         if existing:
             logger.debug(

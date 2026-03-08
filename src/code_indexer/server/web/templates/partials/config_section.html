@@ -2671,6 +2671,113 @@ function saveLlmCredsConfig() {
 
 </div>
 
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- GROUP: Wiki -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="config-group">
+    <h3 class="config-group-header">Wiki</h3>
+
+<!-- Wiki Configuration Section (Story #323) -->
+<details class="config-section" id="section-wiki">
+    <summary>
+        <h2>Wiki Configuration</h2>
+    </summary>
+    <article>
+        <p class="section-description">
+            Controls which knowledge-base-specific metadata behaviors are active in the wiki. All toggles default to enabled to preserve current behavior. Disable individual toggles to suppress KB-specific fields for generic wikis.
+        </p>
+        <!-- Display Mode -->
+        <div id="display-wiki">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Header Block Parsing</td>
+                        <td class="config-value">{{ 'Yes' if config.wiki_config.enable_header_block_parsing else 'No' }}</td>
+                        <td class="config-note"><small>Strip legacy Article Number / Title / Status header blocks from body</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Article Number Field</td>
+                        <td class="config-value">{{ 'Yes' if config.wiki_config.enable_article_number else 'No' }}</td>
+                        <td class="config-note"><small>Show article_number / original_article in metadata panel</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Publication Status Field</td>
+                        <td class="config-value">{{ 'Yes' if config.wiki_config.enable_publication_status else 'No' }}</td>
+                        <td class="config-note"><small>Show publication_status in metadata panel</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Views Seeding</td>
+                        <td class="config-value">{{ 'Yes' if config.wiki_config.enable_views_seeding else 'No' }}</td>
+                        <td class="config-note"><small>Seed view counts from front matter views field; also shows Salesforce Views in panel</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Metadata Display Order</td>
+                        <td class="config-value">{{ config.wiki_config.metadata_display_order if config.wiki_config.metadata_display_order else '(default)' }}</td>
+                        <td class="config-note"><small>Comma-separated list of metadata field keys controlling panel order</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('wiki')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-wiki" method="post" action="/admin/config/wiki" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.wiki %}
+            <div class="validation-error">{{ validation_errors.wiki }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="wiki-header-parsing">
+                    Header Block Parsing
+                    <select id="wiki-header-parsing" name="enable_header_block_parsing">
+                        <option value="true" {% if config.wiki_config.enable_header_block_parsing %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.wiki_config.enable_header_block_parsing %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Strip legacy Article Number / Title / Status header blocks from body</small>
+                </label>
+                <label for="wiki-article-number">
+                    Article Number Field
+                    <select id="wiki-article-number" name="enable_article_number">
+                        <option value="true" {% if config.wiki_config.enable_article_number %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.wiki_config.enable_article_number %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Show article_number / original_article in metadata panel</small>
+                </label>
+                <label for="wiki-pub-status">
+                    Publication Status Field
+                    <select id="wiki-pub-status" name="enable_publication_status">
+                        <option value="true" {% if config.wiki_config.enable_publication_status %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.wiki_config.enable_publication_status %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Show publication_status in metadata panel</small>
+                </label>
+                <label for="wiki-views-seeding">
+                    Views Seeding
+                    <select id="wiki-views-seeding" name="enable_views_seeding">
+                        <option value="true" {% if config.wiki_config.enable_views_seeding %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.wiki_config.enable_views_seeding %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Seed view counts from front matter views field; also shows Salesforce Views in panel</small>
+                </label>
+                <label for="wiki-display-order">
+                    Metadata Display Order
+                    <input type="text" id="wiki-display-order" name="metadata_display_order"
+                           value="{{ config.wiki_config.metadata_display_order }}"
+                           placeholder="e.g. author,created,modified,visibility">
+                    <small>Comma-separated list of metadata field keys. Fields not listed appear after listed ones, sorted alphabetically. Leave empty to use default order.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('wiki')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+</div>
+
 <script>
 // Provider API Keys JavaScript (Story #20)
 

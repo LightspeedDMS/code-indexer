@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.4.0
+
+### Features
+
+- feat: Wiki Settings Generalization (Epic #322). Made the wiki module fully generic by converting 5 hard-coded Salesforce Knowledge Base assumptions into settings-driven behavior exposed through the Config Web UI. Added WikiConfig dataclass with 4 boolean toggles (enable_header_block_parsing, enable_article_number, enable_publication_status, enable_views_seeding) and a metadata_display_order comma-separated string for controlling metadata panel field ordering. All defaults match current behavior for backward compatibility. All toggles OFF produces a clean generic wiki with no KB-specific artifacts. Settings take effect without server restart. Includes comprehensive regression tests for every toggle ON/OFF state.
+
 ## v9.3.108
 
 ### Features
