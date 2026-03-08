@@ -2759,6 +2759,22 @@ def create_app() -> FastAPI:
             tracking_backend = DependencyMapTrackingBackend(db_path)
             tracking_backend.cleanup_stale_status_on_startup()
 
+            # Bug #383: Clean stale staging directory on server startup.
+            # A prior crashed analysis may have left dependency-map.staging/ behind.
+            # RefreshScheduler would index it and bake it into versioned snapshots,
+            # polluting semantic search. Remove it before the scheduler starts.
+            try:
+                staging_dir = Path(golden_repos_dir) / "cidx-meta" / "dependency-map.staging"
+                if staging_dir.exists():
+                    import shutil as _shutil
+                    _shutil.rmtree(staging_dir)
+                    logger.info(
+                        "Cleaned stale dependency-map.staging directory on startup (Bug #383)",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+            except Exception as _staging_err:
+                logger.debug(f"Staging dir startup cleanup failed (non-fatal): {_staging_err}")
+
             # Create analyzer
             cidx_meta_path = Path(golden_repos_dir) / "cidx-meta"
             analyzer = DependencyMapAnalyzer(

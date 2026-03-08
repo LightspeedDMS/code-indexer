@@ -636,24 +636,39 @@ class DescriptionRefreshScheduler:
             logger.warning(f"CLI output too short ({output_len} chars), likely an error")
             return False
 
-        # Known error patterns from Claude CLI
-        error_patterns = [
+        # Infrastructure error patterns — always checked.
+        # These strings can never appear in valid YAML description content.
+        infrastructure_errors = [
             "Invalid API key",
             "Fix external API key",
             "cannot be launched inside another",
             "Nested sessions share runtime",
             "CLAUDECODE environment variable",
-            "Error:",
             "Authentication failed",
-            "rate limit",
-            "quota exceeded",
         ]
 
         output_lower = output.lower()
-        for pattern in error_patterns:
+        for pattern in infrastructure_errors:
             if pattern.lower() in output_lower:
                 logger.warning(f"CLI output contains error pattern: '{pattern}'")
                 return False
+
+        # Content-ambiguous patterns — only checked when output lacks YAML frontmatter.
+        # Valid descriptions always start with "---" (YAML frontmatter).
+        # Real API errors (rate limit, quota exceeded, Error:) arrive as plain text
+        # without frontmatter.  When frontmatter IS present the output is a real
+        # description even if it mentions these terms as domain concepts (Bug #382).
+        has_frontmatter = output.startswith("---")
+        if not has_frontmatter:
+            content_ambiguous_errors = [
+                "rate limit",
+                "quota exceeded",
+                "Error:",
+            ]
+            for pattern in content_ambiguous_errors:
+                if pattern.lower() in output_lower:
+                    logger.warning(f"CLI output contains error pattern: '{pattern}'")
+                    return False
 
         return True
 
