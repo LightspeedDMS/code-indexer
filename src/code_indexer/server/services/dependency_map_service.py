@@ -297,6 +297,27 @@ class DependencyMapService:
                 # Log but don't re-raise - cleanup failure should not prevent lock release or mask original error
                 logger.debug(f"CLAUDE.md cleanup failed (non-fatal): {cleanup_error}")
 
+            # Bug #383: Clean up stale staging directory on failure.
+            # On success, _stage_then_swap() already consumed the staging dir.
+            if not _analysis_succeeded:
+                try:
+                    staging_path = (
+                        paths["staging_dir"]
+                        if "paths" in locals() and "staging_dir" in paths
+                        else Path(self._golden_repos_manager.golden_repos_dir)
+                        / "cidx-meta"
+                        / "dependency-map.staging"
+                    )
+                    if staging_path.exists():
+                        shutil.rmtree(staging_path)
+                        logger.info(
+                            f"Bug #383: Cleaned stale staging dir on failure: {staging_path}"
+                        )
+                except Exception as staging_cleanup_error:
+                    logger.debug(
+                        f"Staging dir cleanup failed (non-fatal): {staging_cleanup_error}"
+                    )
+
             self._lock.release()
 
             # Story #312: Complete job in tracker on success (AC7). Defensive - never re-raises.

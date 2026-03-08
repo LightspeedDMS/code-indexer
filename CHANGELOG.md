@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.4.1
+
+### Bug Fixes
+
+- fix: Description refresh scheduler false positive error detection (Bug #382). Split error pattern validation into two tiers: infrastructure errors (always checked) and content-ambiguous patterns like "rate limit" and "quota exceeded" (only checked when output lacks YAML frontmatter). Valid repository descriptions mentioning rate limiting are no longer incorrectly rejected.
+- fix: Clean stale dependency-map.staging/ directory after failed analysis and on server startup (Bug #383). Added staging directory cleanup in the finally block of run_full_analysis() when analysis fails, and startup cleanup in app.py to remove orphaned staging directories from prior crashes. Prevents stale staging content from polluting semantic search results via RefreshScheduler indexing.
+
 ## v9.4.0
 
 ### Features

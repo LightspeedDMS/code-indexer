@@ -432,6 +432,149 @@ def test_validate_cli_output_error_pattern_nested_session(
     assert scheduler._validate_cli_output(error_output) is False
 
 
+# --- Bug #382: false positive error detection for 'rate limit' substring ---
+
+
+def test_validate_cli_output_rejects_short_output(scheduler: DescriptionRefreshScheduler):
+    """Test _validate_cli_output rejects output shorter than 100 chars."""
+    short_output = "This output is less than one hundred characters long."
+    assert scheduler._validate_cli_output(short_output) is False
+
+
+def test_validate_cli_output_rejects_empty_output(scheduler: DescriptionRefreshScheduler):
+    """Test _validate_cli_output rejects None-equivalent empty string."""
+    assert scheduler._validate_cli_output("") is False
+
+
+def test_validate_cli_output_rejects_infrastructure_error_api_key(
+    scheduler: DescriptionRefreshScheduler,
+):
+    """Test _validate_cli_output always rejects 'Invalid API key' infrastructure error."""
+    error_output = (
+        "Invalid API key provided. Please check your ANTHROPIC_API_KEY environment "
+        "variable and ensure it is set to a valid key from the Anthropic console. "
+        "Visit https://console.anthropic.com to manage your keys."
+    )
+    assert scheduler._validate_cli_output(error_output) is False
+
+
+def test_validate_cli_output_rejects_infrastructure_error_nested_session(
+    scheduler: DescriptionRefreshScheduler,
+):
+    """Test _validate_cli_output always rejects 'cannot be launched inside another' error."""
+    error_output = (
+        "Claude Code cannot be launched inside another Claude Code session. "
+        "Nested sessions share runtime state and can lead to unpredictable behavior. "
+        "Please close the outer session before starting a new one."
+    )
+    assert scheduler._validate_cli_output(error_output) is False
+
+
+def test_validate_cli_output_rejects_rate_limit_without_frontmatter(
+    scheduler: DescriptionRefreshScheduler,
+):
+    """Test _validate_cli_output rejects plain-text output containing 'rate limit'."""
+    # Plain-text error with no YAML frontmatter — this is a real API error
+    error_output = (
+        "Request failed: you have exceeded the rate limit for your current plan. "
+        "Please wait before retrying or upgrade your plan for higher throughput. "
+        "See https://docs.anthropic.com/rate-limits for more information."
+    )
+    assert scheduler._validate_cli_output(error_output) is False
+
+
+def test_validate_cli_output_rejects_quota_exceeded_without_frontmatter(
+    scheduler: DescriptionRefreshScheduler,
+):
+    """Test _validate_cli_output rejects plain-text output containing 'quota exceeded'."""
+    # Plain-text error with no YAML frontmatter — this is a real API error
+    error_output = (
+        "API call failed: quota exceeded for this billing period. "
+        "Your account has reached its monthly token limit. "
+        "Please check your usage at https://console.anthropic.com/billing."
+    )
+    assert scheduler._validate_cli_output(error_output) is False
+
+
+def test_validate_cli_output_accepts_valid_yaml_with_rate_limit_mention(
+    scheduler: DescriptionRefreshScheduler,
+):
+    """Test _validate_cli_output accepts YAML frontmatter description mentioning 'rate limit'.
+
+    This is the KEY bug fix test (Bug #382): a repository that implements rate limiting
+    as a feature will produce a valid description containing 'rate limit'. The old code
+    falsely rejected such descriptions. The fix uses YAML frontmatter as a signal that
+    the output is a real description, not an API error.
+    """
+    valid_description_with_rate_limit = (
+        "---\n"
+        "last_analyzed: \"2026-03-07T12:00:00Z\"\n"
+        "---\n"
+        "# api-gateway\n\n"
+        "This repository implements an API gateway service with built-in rate limit "
+        "enforcement. The rate limit middleware uses a token bucket algorithm to "
+        "prevent abuse. Clients exceeding the rate limit receive HTTP 429 responses. "
+        "Configuration supports per-user and per-endpoint rate limit thresholds."
+    )
+    assert scheduler._validate_cli_output(valid_description_with_rate_limit) is True
+
+
+def test_validate_cli_output_accepts_valid_yaml_with_quota_mention(
+    scheduler: DescriptionRefreshScheduler,
+):
+    """Test _validate_cli_output accepts YAML frontmatter description mentioning 'quota exceeded'.
+
+    A repository that implements quota management will produce a valid description
+    containing 'quota exceeded'. With YAML frontmatter present, this must not be
+    treated as an error (Bug #382 fix).
+    """
+    valid_description_with_quota = (
+        "---\n"
+        "last_analyzed: \"2026-03-07T12:00:00Z\"\n"
+        "---\n"
+        "# billing-service\n\n"
+        "This billing service tracks resource consumption and enforces usage quotas. "
+        "When a user's monthly allocation is consumed and their quota exceeded, the "
+        "service emits a quota exceeded event to the notification pipeline. "
+        "Administrators can view quota exceeded incidents in the audit dashboard."
+    )
+    assert scheduler._validate_cli_output(valid_description_with_quota) is True
+
+
+def test_validate_cli_output_accepts_valid_description(
+    scheduler: DescriptionRefreshScheduler,
+):
+    """Test _validate_cli_output accepts a clean YAML frontmatter description."""
+    valid_description = (
+        "---\n"
+        "last_analyzed: \"2026-03-07T12:00:00Z\"\n"
+        "---\n"
+        "# my-service\n\n"
+        "This service handles user authentication and authorization workflows. "
+        "It provides JWT-based session management with configurable expiry policies "
+        "and supports OAuth2 integration with external identity providers."
+    )
+    assert scheduler._validate_cli_output(valid_description) is True
+
+
+def test_validate_cli_output_rejects_infrastructure_error_even_with_frontmatter(
+    scheduler: DescriptionRefreshScheduler,
+):
+    """Test _validate_cli_output rejects infrastructure errors even when output starts with '---'.
+
+    Infrastructure errors (e.g. Invalid API key) must always be rejected regardless
+    of whether the output accidentally begins with '---'.
+    """
+    # Pathological case: output starts with '---' but contains an infrastructure error
+    error_output = (
+        "---\n"
+        "Invalid API key provided. This is not a valid YAML description. "
+        "The authentication credentials are incorrect and must be updated. "
+        "Please verify the ANTHROPIC_API_KEY value in your configuration."
+    )
+    assert scheduler._validate_cli_output(error_output) is False
+
+
 def test_invoke_cli_strips_bare_esc_bytes(
     scheduler: DescriptionRefreshScheduler, tmp_path: Path
 ):
