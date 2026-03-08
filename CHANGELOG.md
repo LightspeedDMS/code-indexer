@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.4.2
+
+### Performance
+
+- perf: Cache-first HF tokenizer loading eliminates unnecessary network calls (Story #384). `Tokenizer.from_pretrained()` was contacting HuggingFace Hub on every process startup (~2.8s) even when the tokenizer was already cached on disk. Now uses `Tokenizer.from_file()` to load directly from the local HF cache (~417ms), falling back to network only on first-ever use or corrupted cache. Saves ~2.4 seconds per reindex process, eliminating HF Hub rate-limit warnings during multi-repo branch change operations.
+
 ## v9.4.1
 
 ### Bug Fixes
