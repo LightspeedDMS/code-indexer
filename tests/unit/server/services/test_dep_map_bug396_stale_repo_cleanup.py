@@ -277,6 +277,67 @@ class TestRunDeltaAnalysisStaleRepoCleanup:
         removed_aliases = [r.get("alias") for r in call_kwargs["removed_repos"]]
         assert "deleted-repo" in removed_aliases
 
+    def test_cleanup_called_via_early_return_when_no_affected_domains_but_removed_repos(
+        self, tmp_path
+    ):
+        """Bug #396 (early-return path): _remove_stale_repos_from_domains_json is called even
+        when identify_affected_domains returns empty (stale _index.md cannot map removed repo
+        to any domain), causing the early return at 'if not affected_domains'.
+
+        Before the fix, the early return at line 2074 would fire and skip the cleanup block
+        that appears later in run_delta_analysis(), leaving stale repo aliases in _domains.json.
+        """
+        svc = _make_service(tmp_path)
+
+        depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
+        depmap_dir.mkdir(parents=True)
+        # _index.md is stale: deleted-repo does NOT appear in the matrix.
+        # This causes identify_affected_domains to return empty set even though
+        # deleted-repo is in removed_repos.
+        (depmap_dir / "_index.md").write_text(
+            "---\nschema_version: 1.0\n---\n\n"
+            "## Repo-to-Domain Matrix\n\n"
+            "| Repository | Domain |\n|---|---|\n"
+            # Note: deleted-repo intentionally absent (stale _index.md)
+        )
+        (depmap_dir / "_domains.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "name": "backend",
+                        "description": "Backend",
+                        "participating_repos": ["deleted-repo", "live-repo"],
+                    }
+                ]
+            )
+        )
+
+        removed_repo = {"alias": "deleted-repo", "clone_path": str(tmp_path / "deleted-repo")}
+
+        with patch.object(
+            svc, "detect_changes", return_value=([], [], [removed_repo])
+        ), patch.object(
+            # Simulate stale _index.md: no domain found for deleted-repo → empty set
+            svc, "identify_affected_domains", return_value=set()
+        ), patch.object(
+            svc, "_finalize_delta_tracking"
+        ), patch.object(
+            svc, "_get_activated_repos", return_value=[]
+        ), patch.object(
+            svc, "_remove_stale_repos_from_domains_json", return_value=True
+        ) as mock_cleanup:
+            result = svc.run_delta_analysis()
+
+        assert result == {"status": "completed", "affected_domains": 0}
+        mock_cleanup.assert_called_once()
+        call_kwargs = mock_cleanup.call_args[1]
+        assert "removed_repos" in call_kwargs
+        removed_aliases = [r.get("alias") for r in call_kwargs["removed_repos"]]
+        assert "deleted-repo" in removed_aliases, (
+            "_remove_stale_repos_from_domains_json must be called with deleted-repo "
+            "even when identify_affected_domains returns empty set"
+        )
+
     def test_cleanup_not_called_when_no_removed_repos(self, tmp_path):
         """Bug #396: When no repos removed, cleanup method is NOT called."""
         svc = _make_service(tmp_path)

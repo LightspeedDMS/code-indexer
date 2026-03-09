@@ -2073,6 +2073,14 @@ class DependencyMapService:
 
             if not affected_domains:
                 logger.info("No affected domains identified")
+                # Bug #396: Still clean stale repos from _domains.json even when
+                # no affected domains were identified (e.g. stale _index.md
+                # prevents domain mapping for removed repos)
+                if removed_repos:
+                    self._remove_stale_repos_from_domains_json(
+                        removed_repos=removed_repos,
+                        dependency_map_dir=dependency_map_dir,
+                    )
                 all_repos = self._get_activated_repos()
                 self._finalize_delta_tracking(config, all_repos)
                 _delta_succeeded = True
