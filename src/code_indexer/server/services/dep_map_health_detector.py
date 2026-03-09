@@ -4,13 +4,15 @@ DepMapHealthDetector service for Story #342.
 Inspects a dependency map output directory and produces a structured HealthReport
 with all detected anomalies. Pure inspection -- no side effects, no writes.
 
-Health Detection Algorithm (6 checks):
+Health Detection Algorithm (7 checks):
   Check 1: Missing or 0-char domain files (from _domains.json)
   Check 2: Orphan .md files not in _domains.json
   Check 3: _domains.json count vs .md file count mismatch
   Check 4: _index.md missing or stale (repo matrix comparison)
   Check 5: Domain .md files missing required sections
   Check 6: Golden repos not assigned to any domain (requires known_repos parameter)
+  Check 7: Repos in _domains.json participating_repos that no longer exist as golden repos
+           (requires known_repos parameter -- symmetric inverse of Check 6)
 
 Status escalation:
   critical     -- if any anomaly with type in (missing_domain_file, zero_char_domain)
@@ -144,7 +146,7 @@ class DepMapHealthDetector:
     Inspects a dependency map output directory and produces a HealthReport.
 
     Pure inspection service -- no side effects, no writes to disk.
-    Call detect(output_dir) to perform all 5 health checks.
+    Call detect(output_dir) to perform all 7 health checks.
     """
 
     def detect(
@@ -160,8 +162,10 @@ class DepMapHealthDetector:
                         (e.g. cidx-meta/dependency-map/)
             known_repos: Optional set of golden repo names from the database.
                          When provided, Check 6 runs to flag repos not covered
-                         by any domain in _domains.json. Pass None to skip Check 6
-                         (backward-compatible default).
+                         by any domain in _domains.json, and Check 7 runs to flag
+                         stale repos in _domains.json that no longer exist as golden
+                         repos. Pass None to skip both checks (backward-compatible
+                         default).
 
         Returns:
             HealthReport with status and list of Anomaly objects.
@@ -211,6 +215,12 @@ class DepMapHealthDetector:
         # Check 6: Repos not covered by any domain (requires known_repos)
         if known_repos is not None:
             anomalies.extend(self._check_uncovered_repos(domain_list, known_repos))
+
+        # Check 7: Stale repos in participating_repos that no longer exist as golden repos
+        if known_repos is not None:
+            anomalies.extend(
+                self._check_stale_participating_repos(domain_list, known_repos)
+            )
 
         # Determine overall status
         status = self._compute_status(anomalies)
@@ -439,6 +449,40 @@ class DepMapHealthDetector:
                     type="uncovered_repo",
                     missing_repos=uncovered,
                     detail=f"{len(uncovered)} repo(s) not in any domain",
+                )
+            ]
+        return []
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Check 7: Stale repos in participating_repos not in known_repos
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _check_stale_participating_repos(
+        self,
+        domain_list: List[Dict[str, Any]],
+        known_repos: Set[str],
+    ) -> List[Anomaly]:
+        """Check for repos in participating_repos that no longer exist as golden repos.
+
+        This is the symmetric inverse of Check 6 (_check_uncovered_repos):
+          Check 6: known_repos - covered_repos  (DB → _domains.json direction)
+          Check 7: covered_repos - known_repos  (_domains.json → DB direction)
+
+        cidx-meta is always excluded -- it is the meta repo, not a domain participant.
+        """
+        covered_repos: Set[str] = set()
+        for domain in domain_list:
+            participating = domain.get("participating_repos", [])
+            if isinstance(participating, list):
+                covered_repos.update(str(r) for r in participating)
+
+        stale = sorted(covered_repos - known_repos - {"cidx-meta"})
+        if stale:
+            return [
+                Anomaly(
+                    type="stale_participating_repo",
+                    missing_repos=stale,
+                    detail=f"{len(stale)} repo(s) in domains but not in known repos",
                 )
             ]
         return []

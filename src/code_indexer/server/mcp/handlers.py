@@ -4092,6 +4092,37 @@ def _is_write_mode_active(repo_alias: str, golden_repos_dir: Optional[str]) -> b
     return marker_file.exists()
 
 
+def _is_writable_repo(repo_alias: str, resolved_repo_path: Optional[str], golden_repos_dir: Optional[str]) -> bool:
+    """Return True if write operations are allowed for this repo.
+
+    Bug #391: Activated repos (user workspaces) are always writable without a
+    write-mode marker. Write-mode markers are only for special golden repos
+    like cidx-meta that require explicit write mode activation.
+
+    A repo is writable if:
+    1. It has a write-mode marker (existing check for golden repos in write mode), OR
+    2. Its resolved path is an activated repo workspace (contains /activated-repos/)
+
+    Args:
+        repo_alias: Repository alias (with or without -global suffix)
+        resolved_repo_path: The filesystem path resolved for this repo, or None
+        golden_repos_dir: Path to the golden repos root directory (may be None)
+
+    Returns:
+        True if write operations are permitted, False otherwise
+    """
+    # Check write-mode marker first (for golden repos in explicit write mode)
+    if _is_write_mode_active(repo_alias, golden_repos_dir):
+        return True
+
+    # Bug #391: activated repo workspaces are inherently writable
+    # They are identified by their path containing /activated-repos/
+    if resolved_repo_path and "/activated-repos/" in resolved_repo_path:
+        return True
+
+    return False
+
+
 def _write_mode_acquire_lock(refresh_scheduler: Any, alias: str) -> Tuple[bool, str]:
     """Acquire write lock; return (acquired, owner_if_held)."""
     acquired = refresh_scheduler.acquire_write_lock(alias, owner_name="mcp_write_mode")
@@ -4818,6 +4849,16 @@ def _resolve_git_repo_path(
                 f"Repository '{repository_alias}' is a local repository "
                 "and does not support git operations."
             )
+
+        # Story #387: Group access check - invisible repo pattern
+        # Strip -global suffix to match base name stored in accessible repos set
+        access_filtering_service = _get_access_filtering_service()
+        if access_filtering_service is not None:
+            base_alias = repository_alias[: -len("-global")]
+            accessible = access_filtering_service.get_accessible_repos(username)
+            if base_alias not in accessible:
+                return None, f"Repository '{repository_alias}' not found."
+
         return resolved, None
 
     activated_repo_manager = ActivatedRepoManager()
@@ -6957,8 +6998,67 @@ def git_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
+def _get_pat_credential_for_remote(
+    repo_path: str, remote: str, username: str
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], Optional[str]]:
+    """Resolve PAT credential for a git remote's forge host.
+
+    Story #387: Extracts remote URL, identifies forge host, and fetches
+    the stored PAT credential for the given username.
+
+    Returns:
+        (credential, remote_url, error_msg) tuple. If error_msg is not None,
+        caller should return error to user. credential and remote_url are None on error.
+    """
+    from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+    from code_indexer.utils.git_runner import run_git_command as _run_git_cmd
+    from ..services.config_service import get_config_service
+    from ..services.git_credential_manager import GitCredentialManager
+
+    # Get remote URL to determine forge host
+    remote_url = ""
+    try:
+        url_result = _run_git_cmd(
+            ["git", "remote", "get-url", remote],
+            cwd=Path(repo_path),
+            check=True,
+        )
+        remote_url = url_result.stdout.strip()
+    except Exception as e:
+        logger.warning(f"Failed to get remote URL for '{remote}': {e}")
+        return None, None, f"Failed to get remote URL for '{remote}': {e}"
+
+    forge_host = GitCredentialHelper.extract_host_from_remote_url(remote_url) if remote_url else None
+    if not forge_host:
+        return None, None, (
+            f"Unable to determine forge host from remote '{remote}'. "
+            "Ensure the repository has a valid remote URL configured."
+        )
+
+    # Look up stored PAT credential for this forge host
+    config_service = get_config_service()
+    db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+    manager = GitCredentialManager(db_path)
+    credential = manager.get_credential_for_host(username, forge_host)
+
+    if credential is None:
+        return None, None, (
+            f"No git credential configured for {forge_host}. "
+            "Use configure_git_credential to set up your PAT."
+        )
+
+    return credential, remote_url, None
+
+
 def git_push(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for git_push tool - push commits to remote."""
+    """Handler for git_push tool - push commits to remote using PAT authentication.
+
+    Story #387: PAT-Authenticated Git Push with User Attribution & Security Hardening.
+
+    Requires a git credential configured via configure_git_credential for the
+    repository's forge host. Push uses HTTPS with GIT_ASKPASS and sets
+    author/committer identity from stored forge credentials.
+    """
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
@@ -6966,14 +7066,27 @@ def git_push(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        # Bug #639: Call push_to_remote wrapper to trigger migration if needed
         remote = args.get("remote", "origin")
         branch = args.get("branch")
-        result = git_operations_service.push_to_remote(
-            repo_alias=repository_alias,
-            username=user.username,
-            remote=remote,
-            branch=branch,
+
+        # Resolve repo path (includes group access check for global repos)
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg:
+            return _mcp_response({"success": False, "error": error_msg})
+
+        # Trigger migration before push if needed (Bug #639)
+        git_operations_service._trigger_migration_if_needed(
+            repo_path, user.username, repository_alias
+        )
+
+        # Story #387: Look up PAT credential for the remote's forge host
+        credential, remote_url, cred_error = _get_pat_credential_for_remote(repo_path, remote, user.username)
+        if cred_error:
+            return _mcp_response({"success": False, "error": cred_error})
+
+        # Push with PAT via GIT_ASKPASS (pass pre-resolved remote_url to avoid double fetch)
+        result = git_operations_service.git_push_with_pat(
+            Path(repo_path), remote, branch, credential, remote_url=remote_url
         )
         return _mcp_response(result)
 
@@ -7262,6 +7375,201 @@ def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     except Exception as e:
         logger.exception(
             f"Unexpected error in git_clean: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+def git_merge(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Handler for git_merge tool - merge a branch into current branch.
+
+    Story #388: Git Merge with Conflict Detection.
+
+    Merges the specified source branch into the current branch. On clean
+    merge returns success=True with an empty conflicts list. On conflict
+    returns success=False with a list of conflicted files including their
+    git status code, conflict type, and binary flag.
+
+    Requires write mode to be active. Use git_merge_abort to roll back
+    after a conflicted merge.
+    """
+    repository_alias = args.get("repository_alias")
+    if not repository_alias:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: repository_alias"}
+        )
+
+    source_branch = args.get("source_branch")
+    if not source_branch:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: source_branch"}
+        )
+
+    try:
+        # Resolve repo path (includes group access check for global repos)
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg:
+            return _mcp_response({"success": False, "error": error_msg})
+
+        # Write mode enforcement (Bug #391: also allow activated repo workspaces)
+        golden_repos_dir = getattr(app_module.app.state, "golden_repos_dir", None)
+        if not _is_writable_repo(repository_alias, repo_path, golden_repos_dir):
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        "Write mode required for git merge. "
+                        "Use enter_write_mode first, or activate the repository "
+                        "to create a writable workspace."
+                    ),
+                }
+            )
+
+        result = git_operations_service.merge_branch(Path(repo_path), source_branch)
+
+        # Invalidate wiki cache on merge (conflict or clean)
+        try:
+            from code_indexer.server.wiki.wiki_cache_invalidator import (
+                wiki_cache_invalidator,
+            )
+
+            wiki_cache_invalidator.invalidate_repo(repository_alias)
+        except Exception as e:
+            logger.debug(f"Wiki cache invalidation skipped for git_merge: {e}")
+
+        return _mcp_response(result)
+
+    except GitCommandError as e:
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-216",
+                f"git_merge failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return _mcp_response(
+            {
+                "success": False,
+                "error_type": "GitCommandError",
+                "error": str(e),
+                "stderr": e.stderr,
+                "command": e.command,
+            }
+        )
+    except FileNotFoundError as e:
+        return _mcp_response({"success": False, "error": str(e)})
+    except Exception as e:
+        logger.exception(
+            f"Unexpected error in git_merge: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+def git_conflict_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Handler for git_conflict_status tool - get detailed merge conflict status."""
+    repository_alias = args.get("repository_alias")
+    if not repository_alias:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: repository_alias"}
+        )
+
+    try:
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg:
+            return _mcp_response({"success": False, "error": error_msg})
+
+        result = git_operations_service.git_conflict_status(Path(repo_path))
+        return _mcp_response(result)
+
+    except GitCommandError as e:
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-217",
+                f"git_conflict_status failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return _mcp_response({
+            "success": False,
+            "error_type": "GitCommandError",
+            "error": str(e),
+            "stderr": e.stderr,
+            "command": e.command,
+        })
+    except FileNotFoundError as e:
+        return _mcp_response({"success": False, "error": str(e)})
+    except Exception as e:
+        logger.exception(
+            f"Unexpected error in git_conflict_status: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+def git_mark_resolved(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Handler for git_mark_resolved tool - mark a conflicted file as resolved."""
+    repository_alias = args.get("repository_alias")
+    if not repository_alias:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: repository_alias"}
+        )
+
+    file_path = args.get("file_path")
+    if not file_path:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: file_path"}
+        )
+
+    try:
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg:
+            return _mcp_response({"success": False, "error": error_msg})
+
+        # Write mode enforcement (Bug #391: also allow activated repo workspaces)
+        golden_repos_dir = getattr(app_module.app.state, "golden_repos_dir", None)
+        if not _is_writable_repo(repository_alias, repo_path, golden_repos_dir):
+            return _mcp_response({
+                "success": False,
+                "error": (
+                    "Write mode required for git mark_resolved. Use enter_write_mode first, "
+                    "or activate the repository to create a writable workspace."
+                ),
+            })
+
+        result = git_operations_service.git_mark_resolved(Path(repo_path), file_path)
+
+        # Invalidate wiki cache after resolving conflict
+        try:
+            from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+            wiki_cache_invalidator.invalidate_repo(repository_alias)
+        except Exception as e:
+            logger.debug(f"Wiki cache invalidation skipped for git_mark_resolved: {e}")
+
+        return _mcp_response(result)
+
+    except GitCommandError as e:
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-218",
+                f"git_mark_resolved failed: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return _mcp_response({
+            "success": False,
+            "error_type": "GitCommandError",
+            "error": str(e),
+            "stderr": e.stderr,
+            "command": e.command,
+        })
+    except ValueError as e:
+        return _mcp_response({"success": False, "error": str(e)})
+    except FileNotFoundError as e:
+        return _mcp_response({"success": False, "error": str(e)})
+    except Exception as e:
+        logger.exception(
+            f"Unexpected error in git_mark_resolved: {e}",
             extra={"correlation_id": get_correlation_id()},
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -7620,12 +7928,107 @@ HANDLER_REGISTRY["git_pull"] = git_pull
 HANDLER_REGISTRY["git_fetch"] = git_fetch
 HANDLER_REGISTRY["git_reset"] = git_reset
 HANDLER_REGISTRY["git_clean"] = git_clean
+HANDLER_REGISTRY["git_merge"] = git_merge
 HANDLER_REGISTRY["git_merge_abort"] = git_merge_abort
+HANDLER_REGISTRY["git_conflict_status"] = git_conflict_status
+HANDLER_REGISTRY["git_mark_resolved"] = git_mark_resolved
 HANDLER_REGISTRY["git_checkout_file"] = git_checkout_file
 HANDLER_REGISTRY["git_branch_list"] = git_branch_list
 HANDLER_REGISTRY["git_branch_create"] = git_branch_create
 HANDLER_REGISTRY["git_branch_switch"] = git_branch_switch
 HANDLER_REGISTRY["git_branch_delete"] = git_branch_delete
+
+
+def configure_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Handler for configure_git_credential - store a git forge PAT with identity discovery."""
+    import asyncio
+    forge_type = args.get("forge_type")
+    forge_host = args.get("forge_host")
+    token = args.get("token")
+    name = args.get("name")
+
+    if not forge_type or not forge_host or not token:
+        return _mcp_response({"success": False, "error": "Missing required parameters: forge_type, forge_host, token"})
+
+    if forge_type not in ("github", "gitlab"):
+        return _mcp_response({"success": False, "error": "forge_type must be 'github' or 'gitlab'"})
+
+    try:
+        from ..services.config_service import get_config_service
+        from ..services.git_credential_manager import GitCredentialManager
+
+        config_service = get_config_service()
+        db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+        manager = GitCredentialManager(db_path)
+
+        # Run async configure in sync handler
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(
+                manager.configure_credential(
+                    username=user.username,
+                    forge_type=forge_type,
+                    forge_host=forge_host,
+                    token=token,
+                    name=name,
+                )
+            )
+        finally:
+            loop.close()
+
+        return _mcp_response(result)
+
+    except Exception as e:
+        logger.exception(f"configure_git_credential failed: {e}", extra={"correlation_id": get_correlation_id()})
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+def list_git_credentials(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Handler for list_git_credentials - list user's configured git forge credentials."""
+    try:
+        from ..services.config_service import get_config_service
+        from ..services.git_credential_manager import GitCredentialManager
+
+        config_service = get_config_service()
+        db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+        manager = GitCredentialManager(db_path)
+        credentials = manager.list_credentials(user.username)
+
+        return _mcp_response({"success": True, "credentials": credentials, "count": len(credentials)})
+
+    except Exception as e:
+        logger.exception(f"list_git_credentials failed: {e}", extra={"correlation_id": get_correlation_id()})
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+def delete_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Handler for delete_git_credential - remove a git forge credential."""
+    credential_id = args.get("credential_id")
+    if not credential_id:
+        return _mcp_response({"success": False, "error": "Missing required parameter: credential_id"})
+
+    try:
+        from ..services.config_service import get_config_service
+        from ..services.git_credential_manager import GitCredentialManager
+
+        config_service = get_config_service()
+        db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+        manager = GitCredentialManager(db_path)
+        manager.delete_credential(user.username, credential_id)
+
+        return _mcp_response({"success": True, "message": f"Credential {credential_id} deleted"})
+
+    except PermissionError as e:
+        return _mcp_response({"success": False, "error": str(e)})
+    except Exception as e:
+        logger.exception(f"delete_git_credential failed: {e}", extra={"correlation_id": get_correlation_id()})
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+# Story #386: Git Credential Management
+HANDLER_REGISTRY["configure_git_credential"] = configure_git_credential
+HANDLER_REGISTRY["list_git_credentials"] = list_git_credentials
+HANDLER_REGISTRY["delete_git_credential"] = delete_git_credential
 
 
 def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -7733,6 +8136,194 @@ def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 
 HANDLER_REGISTRY["git_log"] = git_log
+
+
+# =============================================================================
+# Story #390: Pull/Merge Request Creation
+# =============================================================================
+
+
+def create_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Handler for create_pull_request tool - create a GitHub PR or GitLab MR.
+
+    Story #390: Pull/Merge Request Creation via MCP.
+
+    Auto-detects forge type (github/gitlab) from the repository's remote URL.
+    Requires write mode to be active for the repository (AC4).
+    Returns the PR/MR URL and number on success (AC6).
+    """
+    repository_alias = args.get("repository_alias")
+    title = args.get("title")
+    body = args.get("body", "")
+    head = args.get("head")
+    base = args.get("base")
+    token = args.get("token")
+
+    # Validate required parameters
+    if not repository_alias:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: repository_alias"}
+        )
+    if not title:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: title"}
+        )
+    if not head:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: head"}
+        )
+    if not base:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: base"}
+        )
+
+    try:
+        from code_indexer.utils.git_runner import run_git_command as _run_git_cmd
+        from code_indexer.server.clients.forge_client import (
+            detect_forge_type,
+            extract_owner_repo,
+            GitHubForgeClient,
+            GitLabForgeClient,
+            ForgeAuthenticationError,
+        )
+        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+
+        # Resolve repository path
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
+
+        # AC4: Require write mode or activated workspace (Bug #391)
+        golden_repos_dir = _get_golden_repos_dir()
+        if not _is_writable_repo(repository_alias, repo_path, golden_repos_dir):
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"Write mode is not active for '{repository_alias}'. "
+                        "Use enter_write_mode before creating a pull request, "
+                        "or activate the repository to create a writable workspace."
+                    ),
+                }
+            )
+
+        # Bug #392: Auto-fetch PAT from stored credentials when not provided
+        if not token:
+            credential, _remote_url, cred_error = _get_pat_credential_for_remote(
+                repo_path, "origin", user.username
+            )
+            if cred_error:
+                return _mcp_response({"success": False, "error": cred_error})
+            token = credential["token"]
+
+        # Get remote URL to detect forge type (AC3)
+        try:
+            url_result = _run_git_cmd(
+                ["git", "remote", "get-url", "origin"],
+                cwd=Path(repo_path),
+            )
+            remote_url = url_result.stdout.strip()
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-219",
+                    f"create_pull_request: failed to get remote URL: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return _mcp_response(
+                {"success": False, "error": f"Failed to get remote URL: {e}"}
+            )
+
+        # AC3: Auto-detect forge type
+        forge_type = detect_forge_type(remote_url)
+        if forge_type is None:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"Cannot determine forge type from remote URL '{remote_url}'. "
+                        "Only github and gitlab are supported."
+                    ),
+                }
+            )
+
+        # Extract owner and repo from remote URL
+        owner, repo = extract_owner_repo(remote_url)
+        host = GitCredentialHelper.extract_host_from_remote_url(remote_url) or (
+            "github.com" if forge_type == "github" else "gitlab.com"
+        )
+
+        # AC1/AC2: Create PR or MR via forge API
+        if forge_type == "github":
+            client = GitHubForgeClient()
+            result = client.create_pull_request(
+                token=token,
+                host=host,
+                owner=owner,
+                repo=repo,
+                title=title,
+                body=body,
+                head=head,
+                base=base,
+            )
+        else:
+            client = GitLabForgeClient()
+            result = client.create_merge_request(
+                token=token,
+                host=host,
+                owner=owner,
+                repo=repo,
+                title=title,
+                body=body,
+                source_branch=head,
+                target_branch=base,
+            )
+
+        logger.info(
+            f"create_pull_request: created {forge_type} PR/MR #{result['number']} "
+            f"for '{repository_alias}'",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+        # AC6: Return PR/MR URL and number on success
+        return _mcp_response(
+            {
+                "success": True,
+                "pr_url": result["url"],
+                "pr_number": result["number"],
+                "forge_type": forge_type,
+            }
+        )
+
+    except ForgeAuthenticationError as e:
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-219",
+                f"create_pull_request: authentication error: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+    except ValueError as e:
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-219",
+                f"create_pull_request: validation error: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+    except Exception as e:
+        logger.exception(
+            f"Unexpected error in create_pull_request: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+# Story #390: Register create_pull_request handler
+HANDLER_REGISTRY["create_pull_request"] = create_pull_request
 
 
 # =============================================================================

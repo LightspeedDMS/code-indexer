@@ -177,6 +177,7 @@ class FileCRUDService:
 
         Raises:
             ValueError: If repo not found in either exceptions or activated repos
+            FileNotFoundError: If activated repo path does not exist on disk (Bug #394, #395)
         """
         # Check write exceptions first (Story #197 AC1)
         if repo_alias in self._global_write_exceptions:
@@ -186,7 +187,20 @@ class FileCRUDService:
         repo_path_str = self.activated_repo_manager.get_activated_repo_path(
             username=username, user_alias=repo_alias
         )
-        return Path(repo_path_str)
+        repo_path = Path(repo_path_str)
+
+        # Bug #394/#395: Validate the activated repo path actually exists on disk.
+        # get_activated_repo_path() always constructs a path string without checking
+        # existence. If the alias is not a real activated workspace, the path won't
+        # exist. Deny operations on non-existent paths with a clear error message.
+        if not repo_path.exists():
+            raise FileNotFoundError(
+                f"Repository '{repo_alias}' is not an activated workspace for user "
+                f"'{username}'. Use activate_repository to create a writable workspace, "
+                f"or check the repository alias is correct."
+            )
+
+        return repo_path
 
     def create_file(
         self, repo_alias: str, file_path: str, content: str, username: str

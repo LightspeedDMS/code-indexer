@@ -61,81 +61,111 @@ class TestGitPushHandler:
 
     def test_git_push_success(self, mock_user, mock_git_service, mock_repo_manager):
         """Test successful git push operation."""
-        # Bug #639: Mock wrapper method instead of low-level git_push
-        mock_git_service.push_to_remote.return_value = {
+        mock_credential = {
+            "token": "ghp_test123",
+            "git_user_name": "Test User",
+            "git_user_email": "test@example.com",
+        }
+        mock_git_service.git_push_with_pat.return_value = {
             "success": True,
             "pushed_commits": 3,
-            "remote": "origin",
-            "branch": "main",
         }
 
-        params = {
-            "repository_alias": "test-repo",
-            "remote": "origin",
-            "branch": "main",
-        }
+        with patch(
+            "code_indexer.server.mcp.handlers._resolve_git_repo_path"
+        ) as mock_resolve, patch(
+            "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
+        ) as mock_get_pat:
+            mock_resolve.return_value = ("/tmp/test-repo", None)
+            mock_get_pat.return_value = (mock_credential, "https://github.com/owner/repo.git", None)
 
-        mcp_response = handlers.git_push(params, mock_user)
-        data = _extract_response_data(mcp_response)
+            params = {
+                "repository_alias": "test-repo",
+                "remote": "origin",
+                "branch": "main",
+            }
 
-        assert data["success"] is True
-        assert data["pushed_commits"] == 3
-        assert data["remote"] == "origin"
-        mock_git_service.push_to_remote.assert_called_once_with(
-            repo_alias="test-repo", username="testuser", remote="origin", branch="main"
-        )
+            mcp_response = handlers.git_push(params, mock_user)
+            data = _extract_response_data(mcp_response)
+
+            assert data["success"] is True
+            assert data["pushed_commits"] == 3
 
     def test_git_push_authentication_error(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git push with authentication error."""
+        mock_credential = {
+            "token": "ghp_test123",
+            "git_user_name": "Test User",
+            "git_user_email": "test@example.com",
+        }
         error = GitCommandError(
             message="git push failed",
             stderr="fatal: Authentication failed for 'https://github.com/user/repo.git'",
             returncode=128,
             command=["git", "push", "origin", "main"],
         )
-        # Bug #639: Mock wrapper method instead of low-level git_push
-        mock_git_service.push_to_remote.side_effect = error
+        mock_git_service.git_push_with_pat.side_effect = error
 
-        params = {
-            "repository_alias": "test-repo",
-            "remote": "origin",
-            "branch": "main",
-        }
+        with patch(
+            "code_indexer.server.mcp.handlers._resolve_git_repo_path"
+        ) as mock_resolve, patch(
+            "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
+        ) as mock_get_pat:
+            mock_resolve.return_value = ("/tmp/test-repo", None)
+            mock_get_pat.return_value = (mock_credential, "https://github.com/owner/repo.git", None)
 
-        mcp_response = handlers.git_push(params, mock_user)
-        data = _extract_response_data(mcp_response)
+            params = {
+                "repository_alias": "test-repo",
+                "remote": "origin",
+                "branch": "main",
+            }
 
-        assert data["success"] is False
-        assert data["error_type"] == "GitCommandError"
-        assert "Authentication failed" in data["stderr"]
+            mcp_response = handlers.git_push(params, mock_user)
+            data = _extract_response_data(mcp_response)
+
+            assert data["success"] is False
+            assert data["error_type"] == "GitCommandError"
+            assert "Authentication failed" in data["stderr"]
 
     def test_git_push_network_error(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
         """Test git push with network connectivity error."""
+        mock_credential = {
+            "token": "ghp_test123",
+            "git_user_name": "Test User",
+            "git_user_email": "test@example.com",
+        }
         error = GitCommandError(
             message="git push failed",
             stderr="fatal: unable to access 'https://github.com/user/repo.git/': Could not resolve host",
             returncode=128,
             command=["git", "push", "origin", "main"],
         )
-        # Bug #639: Mock wrapper method instead of low-level git_push
-        mock_git_service.push_to_remote.side_effect = error
+        mock_git_service.git_push_with_pat.side_effect = error
 
-        params = {
-            "repository_alias": "test-repo",
-            "remote": "origin",
-            "branch": "main",
-        }
+        with patch(
+            "code_indexer.server.mcp.handlers._resolve_git_repo_path"
+        ) as mock_resolve, patch(
+            "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
+        ) as mock_get_pat:
+            mock_resolve.return_value = ("/tmp/test-repo", None)
+            mock_get_pat.return_value = (mock_credential, "https://github.com/owner/repo.git", None)
 
-        mcp_response = handlers.git_push(params, mock_user)
-        data = _extract_response_data(mcp_response)
+            params = {
+                "repository_alias": "test-repo",
+                "remote": "origin",
+                "branch": "main",
+            }
 
-        assert data["success"] is False
-        assert data["error_type"] == "GitCommandError"
-        assert "unable to access" in data["stderr"]
+            mcp_response = handlers.git_push(params, mock_user)
+            data = _extract_response_data(mcp_response)
+
+            assert data["success"] is False
+            assert data["error_type"] == "GitCommandError"
+            assert "unable to access" in data["stderr"]
 
 
 class TestGitPullHandler:

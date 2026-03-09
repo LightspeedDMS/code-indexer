@@ -7253,6 +7253,141 @@ def admin_system_credentials_api(request: Request):
 
 
 # =============================================================================
+# Admin Git Credentials (Story #385 - Admin is a user too)
+# =============================================================================
+
+
+@web_router.get("/git-credentials", response_class=HTMLResponse)
+def admin_git_credentials_page(request: Request):
+    """Admin Git Credentials management page - manage personal git forge PATs."""
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+
+    return _create_admin_git_credentials_page_response(request, session)
+
+
+def _create_admin_git_credentials_page_response(
+    request: Request,
+    session: SessionData,
+    success_message: Optional[str] = None,
+    error_message: Optional[str] = None,
+) -> HTMLResponse:
+    """Create admin git credentials page response."""
+    from ..services.config_service import get_config_service
+    from ..services.git_credential_manager import GitCredentialManager
+
+    config_service = get_config_service()
+    db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+    manager = GitCredentialManager(db_path)
+    credentials = manager.list_credentials(session.username)
+
+    response = templates.TemplateResponse(
+        request,
+        "admin_git_credentials.html",
+        {
+            "show_nav": True,
+            "current_page": "git-credentials",
+            "username": session.username,
+            "git_credentials": credentials,
+            "success_message": success_message,
+            "error_message": error_message,
+            "csrf_token": session.csrf_token,
+        },
+    )
+    return response
+
+
+@web_router.get("/partials/git-credentials-list", response_class=HTMLResponse)
+def admin_git_credentials_list_partial(request: Request):
+    """Partial for admin git credentials list (HTMX refresh)."""
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(
+            content="<p>Session expired. Please refresh the page.</p>", status_code=401
+        )
+
+    from ..services.config_service import get_config_service
+    from ..services.git_credential_manager import GitCredentialManager
+
+    config_service = get_config_service()
+    db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+    manager = GitCredentialManager(db_path)
+    credentials = manager.list_credentials(session.username)
+
+    response = templates.TemplateResponse(
+        request,
+        "partials/git_credentials_list.html",
+        {"git_credentials": credentials},
+    )
+    return response
+
+
+@web_router.post("/git-credentials")
+async def admin_git_credentials_add(request: Request):
+    """Add a new git credential via admin form submission."""
+    session = _require_admin_session(request)
+    if not session:
+        return JSONResponse({"success": False, "error": "Session expired"}, status_code=401)
+
+    from ..services.config_service import get_config_service
+    from ..services.git_credential_manager import GitCredentialManager
+    from ..clients.forge_client import ForgeAuthenticationError
+
+    try:
+        body = await request.json()
+        forge_type = body.get("forge_type")
+        forge_host = body.get("forge_host")
+        token = body.get("token")
+        name = body.get("name")
+
+        if not forge_type or not forge_host or not token:
+            return JSONResponse({"success": False, "error": "Missing required fields"}, status_code=400)
+
+        config_service = get_config_service()
+        db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+        manager = GitCredentialManager(db_path)
+
+        result = await manager.configure_credential(
+            username=session.username,
+            forge_type=forge_type,
+            forge_host=forge_host,
+            token=token,
+            name=name,
+        )
+        return JSONResponse(result)
+
+    except ForgeAuthenticationError as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@web_router.delete("/git-credentials/{credential_id}")
+def admin_git_credentials_delete(request: Request, credential_id: str):
+    """Delete a git credential from admin interface."""
+    session = _require_admin_session(request)
+    if not session:
+        return JSONResponse({"success": False, "error": "Session expired"}, status_code=401)
+
+    from ..services.config_service import get_config_service
+    from ..services.git_credential_manager import GitCredentialManager
+
+    try:
+        config_service = get_config_service()
+        db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+        manager = GitCredentialManager(db_path)
+        manager.delete_credential(session.username, credential_id)
+
+        return JSONResponse({"success": True, "message": "Credential deleted"})
+
+    except PermissionError as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=403)
+    except Exception as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+# =============================================================================
 # User Self-Service Routes (Any Authenticated User)
 # =============================================================================
 
@@ -7386,6 +7521,141 @@ def user_mcp_credentials_list_partial(request: Request):
         {"mcp_credentials": credentials},
     )
     return response
+
+
+# =============================================================================
+# Git Credentials Management (Story #386)
+# =============================================================================
+
+
+@user_router.get("/git-credentials", response_class=HTMLResponse)
+def user_git_credentials_page(request: Request):
+    """Git Credentials management page - manage personal git forge PATs."""
+    session = _require_authenticated_session(request)
+    if not session:
+        return _create_login_redirect(request)
+
+    return _create_user_git_credentials_page_response(request, session)
+
+
+def _create_user_git_credentials_page_response(
+    request: Request,
+    session: SessionData,
+    success_message: Optional[str] = None,
+    error_message: Optional[str] = None,
+) -> HTMLResponse:
+    """Create user git credentials page response."""
+    from ..services.config_service import get_config_service
+    from ..services.git_credential_manager import GitCredentialManager
+
+    config_service = get_config_service()
+    db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+    manager = GitCredentialManager(db_path)
+    credentials = manager.list_credentials(session.username)
+
+    response = templates.TemplateResponse(
+        request,
+        "user_git_credentials.html",
+        {
+            "show_nav": True,
+            "current_page": "git-credentials",
+            "username": session.username,
+            "git_credentials": credentials,
+            "success_message": success_message,
+            "error_message": error_message,
+            "csrf_token": session.csrf_token,
+        },
+    )
+    return response
+
+
+@user_router.get("/partials/git-credentials-list", response_class=HTMLResponse)
+def user_git_credentials_list_partial(request: Request):
+    """Partial for git credentials list (HTMX refresh)."""
+    session = _require_authenticated_session(request)
+    if not session:
+        return HTMLResponse(
+            content="<p>Session expired. Please refresh the page.</p>", status_code=401
+        )
+
+    from ..services.config_service import get_config_service
+    from ..services.git_credential_manager import GitCredentialManager
+
+    config_service = get_config_service()
+    db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+    manager = GitCredentialManager(db_path)
+    credentials = manager.list_credentials(session.username)
+
+    response = templates.TemplateResponse(
+        request,
+        "partials/git_credentials_list.html",
+        {"git_credentials": credentials},
+    )
+    return response
+
+
+@user_router.post("/git-credentials")
+async def user_git_credentials_add(request: Request):
+    """Add a new git credential via form submission."""
+    session = _require_authenticated_session(request)
+    if not session:
+        return JSONResponse({"success": False, "error": "Session expired"}, status_code=401)
+
+    from ..services.config_service import get_config_service
+    from ..services.git_credential_manager import GitCredentialManager
+    from ..clients.forge_client import ForgeAuthenticationError
+
+    try:
+        body = await request.json()
+        forge_type = body.get("forge_type")
+        forge_host = body.get("forge_host")
+        token = body.get("token")
+        name = body.get("name")
+
+        if not forge_type or not forge_host or not token:
+            return JSONResponse({"success": False, "error": "Missing required fields"}, status_code=400)
+
+        config_service = get_config_service()
+        db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+        manager = GitCredentialManager(db_path)
+
+        result = await manager.configure_credential(
+            username=session.username,
+            forge_type=forge_type,
+            forge_host=forge_host,
+            token=token,
+            name=name,
+        )
+        return JSONResponse(result)
+
+    except ForgeAuthenticationError as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@user_router.delete("/git-credentials/{credential_id}")
+def user_git_credentials_delete(request: Request, credential_id: str):
+    """Delete a git credential."""
+    session = _require_authenticated_session(request)
+    if not session:
+        return JSONResponse({"success": False, "error": "Session expired"}, status_code=401)
+
+    from ..services.config_service import get_config_service
+    from ..services.git_credential_manager import GitCredentialManager
+
+    try:
+        config_service = get_config_service()
+        db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+        manager = GitCredentialManager(db_path)
+        manager.delete_credential(session.username, credential_id)
+
+        return JSONResponse({"success": True, "message": "Credential deleted"})
+
+    except PermissionError as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=403)
+    except Exception as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
 @user_router.get("/logout")

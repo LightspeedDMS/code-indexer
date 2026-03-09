@@ -373,6 +373,24 @@ class DatabaseSchema:
         )
     """
 
+    # Story #386: Git Credential Management with Identity Discovery
+    CREATE_USER_GIT_CREDENTIALS_TABLE = """
+        CREATE TABLE IF NOT EXISTS user_git_credentials (
+            credential_id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            forge_type TEXT NOT NULL,
+            forge_host TEXT NOT NULL,
+            encrypted_token TEXT NOT NULL,
+            git_user_name TEXT,
+            git_user_email TEXT,
+            forge_username TEXT,
+            name TEXT,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT,
+            UNIQUE(username, forge_type, forge_host)
+        )
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -449,6 +467,8 @@ class DatabaseSchema:
             # Story #283: Wiki render cache tables
             conn.execute(self.CREATE_WIKI_CACHE_TABLE)
             conn.execute(self.CREATE_WIKI_SIDEBAR_CACHE_TABLE)
+            # Story #386: Git Credential Management
+            conn.execute(self.CREATE_USER_GIT_CREDENTIALS_TABLE)
             # Story #269: Justified performance indexes (created on fresh databases)
             conn.execute(self.CREATE_IDX_BACKGROUND_JOBS_STATUS)
             conn.execute(self.CREATE_IDX_BACKGROUND_JOBS_STATUS_CREATED)
@@ -474,11 +494,23 @@ class DatabaseSchema:
             self._migrate_wiki_cache_tables(conn)
             # Epic #261: JobTracker schema additions
             self._migrate_background_jobs_job_tracker(conn)
+            # Story #386: Git Credential Management
+            self._migrate_user_git_credentials(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
         finally:
             conn.close()
+
+    def _migrate_user_git_credentials(self, conn: sqlite3.Connection) -> None:
+        """
+        Add user_git_credentials table if it doesn't exist (Story #386).
+
+        Idempotent: uses CREATE TABLE IF NOT EXISTS so safe to run on any database.
+        """
+        conn.execute(self.CREATE_USER_GIT_CREDENTIALS_TABLE)
+        conn.commit()
+        logger.debug("Ensured user_git_credentials table exists")
 
     def _migrate_background_jobs_job_tracker(self, conn: sqlite3.Connection) -> None:
         """

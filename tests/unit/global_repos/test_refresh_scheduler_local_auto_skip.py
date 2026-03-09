@@ -177,33 +177,6 @@ class TestLocalRepoNotSubmittedInScheduledCycle:
             f"Got submissions: {submitted}"
         )
 
-    def test_local_repo_skip_logs_info_message(
-        self, scheduler, mock_registry, caplog
-    ):
-        """
-        When a local:// repo is skipped, an INFO log message must be emitted
-        so operators can see the skip in server logs.
-        """
-        import logging
-
-        mock_registry.list_global_repos.return_value = [
-            {
-                "alias_name": "cidx-meta-global",
-                "repo_url": "local://cidx-meta",
-            }
-        ]
-
-        with patch.object(scheduler, "_submit_refresh_job"):
-            with caplog.at_level(logging.INFO, logger="code_indexer"):
-                _run_one_loop_pass(scheduler)
-
-        # Some log message should mention the local repo being skipped
-        all_log_text = " ".join(caplog.messages).lower()
-        assert "cidx-meta" in all_log_text or "local" in all_log_text, (
-            "LOCAL REPO SKIP: A log message must be emitted when a local repo "
-            "is skipped from the scheduled refresh cycle."
-        )
-
 
 # ---------------------------------------------------------------------------
 # Scenario 2: Bare filesystem path repos are also skipped

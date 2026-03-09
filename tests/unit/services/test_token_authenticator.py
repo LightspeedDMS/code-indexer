@@ -13,7 +13,10 @@ import pytest
 
 from src.code_indexer.server.services.ci_token_manager import CITokenManager
 from src.code_indexer.server.services.git_state_manager import TokenAuthenticator
-from src.code_indexer.server.storage.database_manager import DatabaseSchema
+from src.code_indexer.server.storage.database_manager import (
+    DatabaseConnectionManager,
+    DatabaseSchema,
+)
 
 
 class TestTokenAuthenticatorResolveToken:
@@ -29,15 +32,25 @@ class TestTokenAuthenticatorResolveToken:
     def mock_home(self, temp_server_dir):
         """Mock Path.home() to use temporary directory."""
         with patch("pathlib.Path.home") as mock:
-            mock.return_value = temp_server_dir.parent
+            # Use temp_server_dir itself as home (not its parent) so that
+            # server_dir = temp_server_dir / ".cidx-server" is unique per test.
+            # Using temp_server_dir.parent (/tmp) caused all tests to share
+            # /tmp/.cidx-server which is also used by the dev server and other
+            # test processes, causing SQLite lock contention.
+            mock.return_value = temp_server_dir
             # Ensure .cidx-server exists in temp location
-            server_dir = temp_server_dir.parent / ".cidx-server"
+            server_dir = temp_server_dir / ".cidx-server"
             server_dir.mkdir(parents=True, exist_ok=True)
 
             # Clean up any existing database for test isolation
             db_path = server_dir / "data" / "cidx_server.db"
             if db_path.exists():
                 db_path.unlink()
+
+            # Clear the DatabaseConnectionManager singleton cache so this test
+            # gets a fresh connection instead of reusing a cached connection from
+            # a prior test that may contain tokens written by that test.
+            DatabaseConnectionManager._instances.clear()
 
             # Set up fresh SQLite database for Story #702 migration
             db_path.parent.mkdir(parents=True, exist_ok=True)

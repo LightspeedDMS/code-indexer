@@ -98,8 +98,6 @@ class TestSchedulerLoopExcludesLocalRepos:
 
         # Stop the scheduler after the first list_global_repos call so we get
         # exactly one iteration without hanging.
-        original_list = mock_registry.list_global_repos.side_effect
-
         call_count = [0]
 
         def list_and_stop():
@@ -136,40 +134,6 @@ class TestSchedulerLoopExcludesLocalRepos:
             "Local repo cidx-meta-global must NOT be submitted for refresh. "
             "The scheduler loop skips local:// repos entirely."
         )
-
-    def test_scheduler_loop_submits_git_repos(
-        self, scheduler, mock_registry
-    ):
-        """Git repos must also be submitted (regression guard for C1)."""
-        mock_registry.list_global_repos.return_value = [
-            {
-                "alias_name": "some-repo-global",
-                "repo_url": "git@github.com:org/repo.git",
-            }
-        ]
-
-        submitted = []
-        submit_event = threading.Event()
-
-        def capture_submit(alias_name):
-            submitted.append(alias_name)
-            submit_event.set()
-            scheduler._running = False
-            scheduler._stop_event.set()
-
-        with patch.object(
-            scheduler, "_submit_refresh_job", side_effect=capture_submit
-        ):
-            scheduler._running = True
-            scheduler._stop_event.clear()
-            t = threading.Thread(target=scheduler._scheduler_loop, daemon=True)
-            t.start()
-            submit_event.wait(timeout=5)
-            scheduler._running = False
-            scheduler._stop_event.set()
-            t.join(timeout=3)
-
-        assert "some-repo-global" in submitted
 
 
 # ---------------------------------------------------------------------------

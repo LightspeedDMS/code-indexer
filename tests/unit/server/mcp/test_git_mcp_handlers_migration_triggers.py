@@ -102,23 +102,34 @@ class TestGitPushMigrationTrigger:
         self, mock_user, real_git_service_with_mocked_migration, mock_repo_manager
     ):
         """
-        Test that git_push MCP handler calls push_to_remote wrapper (which triggers migration).
+        Test that git_push MCP handler calls _trigger_migration_if_needed before push.
 
-        EXPECTED BEHAVIOR (after fix):
-        - MCP handler calls push_to_remote() wrapper
-        - Wrapper calls _trigger_migration_if_needed()
-        - Wrapper calls git_push() low-level method
-
-        CURRENT BEHAVIOR (before fix):
-        - MCP handler calls git_push() directly
-        - Migration trigger is NEVER called
-        - This test will FAIL initially
+        Story #387: Handler now directly calls _trigger_migration_if_needed
+        and git_push_with_pat (instead of going through push_to_remote wrapper).
         """
-        # Patch git_operations_service in handlers module with our real service
+        # Mock git_push_with_pat on the real service
+        real_git_service_with_mocked_migration.git_push_with_pat = MagicMock(
+            return_value={
+                "success": True,
+                "pushed_commits": 2,
+            }
+        )
+
         with patch(
             "code_indexer.server.mcp.handlers.git_operations_service",
             real_git_service_with_mocked_migration,
-        ):
+        ), patch(
+            "code_indexer.server.mcp.handlers._resolve_git_repo_path"
+        ) as mock_resolve, patch(
+            "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
+        ) as mock_get_pat:
+            mock_resolve.return_value = ("/tmp/test-repo", None)
+            mock_get_pat.return_value = (
+                {"token": "ghp_test", "git_user_name": "Test", "git_user_email": "test@example.com"},
+                "https://github.com/owner/repo.git",
+                None,
+            )
+
             params = {
                 "repository_alias": "test-repo",
                 "remote": "origin",
@@ -132,7 +143,6 @@ class TestGitPushMigrationTrigger:
             assert data["success"] is True
 
             # CRITICAL ASSERTION: Migration trigger must be called
-            # This will FAIL before fix because handlers call git_push() directly
             real_git_service_with_mocked_migration._trigger_migration_if_needed.assert_called_once()
 
             # Verify it was called with correct parameters
@@ -147,9 +157,10 @@ class TestGitPushMigrationTrigger:
         self, mock_user, real_git_service_with_mocked_migration, mock_repo_manager
     ):
         """
-        Test that migration trigger is called BEFORE git_push operation.
+        Test that migration trigger is called BEFORE git_push_with_pat operation.
 
-        This ensures migration happens before attempting remote operation.
+        Story #387: Handler calls _trigger_migration_if_needed directly,
+        then git_push_with_pat.
         """
         call_order = []
 
@@ -157,18 +168,28 @@ class TestGitPushMigrationTrigger:
         real_git_service_with_mocked_migration._trigger_migration_if_needed.side_effect = lambda *args, **kwargs: call_order.append(
             "migration"
         )
-        original_git_push = real_git_service_with_mocked_migration.git_push
-        real_git_service_with_mocked_migration.git_push = MagicMock(
+        real_git_service_with_mocked_migration.git_push_with_pat = MagicMock(
             side_effect=lambda *args, **kwargs: (
-                call_order.append("git_push"),
-                original_git_push(*args, **kwargs),
+                call_order.append("git_push_with_pat"),
+                {"success": True, "pushed_commits": 1},
             )[1]
         )
 
         with patch(
             "code_indexer.server.mcp.handlers.git_operations_service",
             real_git_service_with_mocked_migration,
-        ):
+        ), patch(
+            "code_indexer.server.mcp.handlers._resolve_git_repo_path"
+        ) as mock_resolve, patch(
+            "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
+        ) as mock_get_pat:
+            mock_resolve.return_value = ("/tmp/test-repo", None)
+            mock_get_pat.return_value = (
+                {"token": "ghp_test", "git_user_name": "Test", "git_user_email": "test@example.com"},
+                "https://github.com/owner/repo.git",
+                None,
+            )
+
             params = {
                 "repository_alias": "test-repo",
                 "remote": "origin",
@@ -177,8 +198,8 @@ class TestGitPushMigrationTrigger:
 
             handlers.git_push(params, mock_user)
 
-            # Verify migration was called before git_push
-            assert call_order == ["migration", "git_push"]
+            # Verify migration was called before git_push_with_pat
+            assert call_order == ["migration", "git_push_with_pat"]
 
 
 class TestGitPullMigrationTrigger:

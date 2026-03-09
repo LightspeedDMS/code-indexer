@@ -432,6 +432,10 @@ class GitOperationsService:
         """
         Push commits to remote repository (REST API wrapper).
 
+        Uses the server's configured SSH key for authentication (not user
+        PAT credentials). This is the code path invoked from the REST API.
+        The MCP git_push handler uses git_push_with_pat() for PAT-based push.
+
         Args:
             repo_alias: User's repository alias
             username: Username for repository lookup
@@ -1359,6 +1363,104 @@ class GitOperationsService:
         except subprocess.TimeoutExpired as e:
             raise GitCommandError(f"git push timed out after {e.timeout}s", stderr="")
 
+    def git_push_with_pat(
+        self,
+        repo_path: Path,
+        remote: str,
+        branch: Optional[str],
+        credential: Dict[str, Any],
+        remote_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Push commits using PAT authentication via GIT_ASKPASS.
+
+        Story #387: PAT-Authenticated Git Push with User Attribution.
+
+        Uses GIT_ASKPASS to provide the PAT, converts SSH remotes to HTTPS,
+        and sets GIT_AUTHOR/COMMITTER env vars from stored identity.
+
+        Args:
+            repo_path: Path to git repository
+            remote: Remote name (e.g., "origin")
+            branch: Optional branch name
+            credential: Dict with token, git_user_name, git_user_email
+            remote_url: Pre-resolved remote URL (avoids redundant subprocess call)
+
+        Returns:
+            Dict with success flag and push details
+
+        Raises:
+            GitCommandError: If git push fails
+        """
+        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+
+        helper = GitCredentialHelper()
+
+        # Use provided URL or fetch it
+        if remote_url is None:
+            try:
+                url_result = run_git_command(
+                    ["git", "remote", "get-url", remote],
+                    cwd=repo_path,
+                    check=True,
+                )
+                remote_url = url_result.stdout.strip()
+            except subprocess.CalledProcessError as e:
+                raise GitCommandError(
+                    f"Failed to get remote URL for '{remote}': {e}",
+                    stderr=getattr(e, "stderr", ""),
+                    returncode=e.returncode,
+                )
+
+        # Convert SSH to HTTPS for PAT-based auth
+        https_url = helper.convert_ssh_to_https(remote_url)
+
+        # Create askpass script
+        askpass_path = helper.create_askpass_script(credential["token"])
+        try:
+            # Build environment with PAT auth and user identity
+            env = os.environ.copy()
+            env["GIT_ASKPASS"] = str(askpass_path)
+            env["GIT_TERMINAL_PROMPT"] = "0"
+
+            # Set author/committer from stored identity
+            if credential.get("git_user_name"):
+                env["GIT_AUTHOR_NAME"] = credential["git_user_name"]
+                env["GIT_COMMITTER_NAME"] = credential["git_user_name"]
+            if credential.get("git_user_email"):
+                env["GIT_AUTHOR_EMAIL"] = credential["git_user_email"]
+                env["GIT_COMMITTER_EMAIL"] = credential["git_user_email"]
+
+            # Push using HTTPS URL directly (not modifying remote config)
+            cmd = ["git", "push", https_url]
+            if branch:
+                cmd.append(branch)
+
+            result = run_git_command(
+                cmd,
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_remote_timeout,
+                check=True,
+                env=env,
+            )
+
+            pushed_commits = 0
+            if ".." in result.stdout:
+                pushed_commits = 1
+
+            return {"success": True, "pushed_commits": pushed_commits}
+
+        except subprocess.CalledProcessError as e:
+            stderr = getattr(e, "stderr", "")
+            raise GitCommandError(
+                f"git push failed: {stderr or e}",
+                stderr=stderr,
+                returncode=e.returncode,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise GitCommandError(f"git push timed out after {e.timeout}s", stderr="")
+        finally:
+            helper.cleanup_askpass_script(askpass_path)
+
     def git_pull(
         self, repo_path: Path, remote: str = "origin", branch: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -1588,6 +1690,358 @@ class GitOperationsService:
             raise GitCommandError(
                 f"git merge --abort timed out after {e.timeout}s", stderr=""
             )
+
+    def merge_branch(self, repo_path: Path, source_branch: str) -> Dict[str, Any]:
+        """Merge source_branch into current branch with conflict detection.
+
+        Args:
+            repo_path: Path to git repository
+            source_branch: Branch name to merge into current branch
+
+        Returns:
+            Dict with:
+              - success: bool
+              - merge_summary: str (git merge stdout)
+              - conflicts: list of conflict dicts (empty if clean merge)
+
+        Raises:
+            GitCommandError: If merge fails for a reason other than conflicts
+        """
+        try:
+            result = run_git_command(
+                ["git", "merge", source_branch],
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_local_timeout,
+                check=False,  # Don't raise on conflicts (non-zero exit)
+            )
+        except subprocess.TimeoutExpired as e:
+            raise GitCommandError(
+                f"git merge timed out after {e.timeout}s", stderr=""
+            )
+
+        if result.returncode == 0:
+            return {
+                "success": True,
+                "merge_summary": result.stdout.strip(),
+                "conflicts": [],
+            }
+
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+
+        if "CONFLICT" in stdout:
+            conflicts = self._parse_conflicts(stdout, repo_path)
+            return {
+                "success": False,
+                "merge_summary": stdout.strip(),
+                "conflicts": conflicts,
+            }
+
+        # Other failure (invalid branch, already in progress, etc.)
+        error_msg = stderr.strip() or stdout.strip()
+        raise GitCommandError(
+            f"git merge failed: {error_msg}",
+            stderr=stderr,
+            returncode=result.returncode,
+        )
+
+    def _parse_conflicts(
+        self, merge_output: str, repo_path: Path
+    ) -> List[Dict[str, Any]]:
+        """Parse conflict information from git merge output and git status.
+
+        Two-phase detection:
+        1. Parse CONFLICT lines from merge stdout for type info
+        2. Augment with git status --porcelain for definitive file list with
+           status codes
+
+        Args:
+            merge_output: stdout from the failed git merge command
+            repo_path: Path to the repository for git status call
+
+        Returns:
+            List of conflict dicts with file, status, conflict_type, is_binary
+        """
+        # Phase 1: Parse CONFLICT lines for human-readable type info
+        conflict_types: Dict[str, str] = {}  # file_path -> conflict_type
+        for line in merge_output.split("\n"):
+            if "CONFLICT" not in line:
+                continue
+            type_match = re.search(r"CONFLICT \(([^)]+)\)", line)
+            conflict_type = type_match.group(1) if type_match else "unknown"
+
+            # Try "Merge conflict in <path>" first
+            path_match = re.search(r"Merge conflict in (.+)$", line)
+            if path_match:
+                file_path = path_match.group(1).strip()
+                conflict_types[file_path] = conflict_type
+            else:
+                # Try "CONFLICT (...): <path> deleted in..." or similar
+                path_match = re.search(
+                    r"CONFLICT \([^)]+\): (.+?)(?:\s+deleted|\s+renamed|\s+added)",
+                    line,
+                )
+                if path_match:
+                    file_path = path_match.group(1).strip()
+                    conflict_types[file_path] = conflict_type
+
+        # Phase 2: git status --porcelain for definitive conflict list
+        conflicts: List[Dict[str, Any]] = []
+        try:
+            status_result = run_git_command(
+                ["git", "status", "--porcelain"],
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_local_timeout,
+                check=True,
+            )
+            for line in status_result.stdout.split("\n"):
+                if len(line) < 4:
+                    continue
+                status_code = line[:2]
+                file_path = line[3:]
+                # Unmerged status codes
+                if status_code in ("UU", "AA", "DD", "AU", "UA", "DU", "UD"):
+                    is_binary = self._check_if_binary_conflict(repo_path, file_path)
+                    conflict_entry: Dict[str, Any] = {
+                        "file": file_path,
+                        "status": status_code,
+                        "conflict_type": conflict_types.get(file_path, "unknown"),
+                        "is_binary": is_binary,
+                    }
+                    conflicts.append(conflict_entry)
+        except (subprocess.CalledProcessError, GitCommandError) as e:
+            logger.warning(
+                f"git status --porcelain failed after merge conflict, falling back to CONFLICT line parsing: {e}"
+            )
+            # If status fails, fall back to CONFLICT line parsing only
+            for file_path, conflict_type in conflict_types.items():
+                conflicts.append(
+                    {
+                        "file": file_path,
+                        "status": "UU",  # Assume both modified
+                        "conflict_type": conflict_type,
+                        "is_binary": False,
+                    }
+                )
+
+        return conflicts
+
+    def _check_if_binary_conflict(self, repo_path: Path, file_path: str) -> bool:
+        """Check if a conflicted file is binary (has no conflict markers).
+
+        A binary file will not contain the '<<<<<<< ' conflict marker text.
+        If the file cannot be read as UTF-8 text it is also treated as binary.
+
+        Args:
+            repo_path: Path to the repository root
+            file_path: Relative path to the conflicted file
+
+        Returns:
+            True if the file is binary or unreadable, False if it contains
+            text conflict markers
+        """
+        try:
+            full_path = repo_path / file_path
+            content = full_path.read_text(encoding="utf-8", errors="strict")
+            return "<<<<<<< " not in content
+        except (UnicodeDecodeError, OSError):
+            return True  # Cannot read as text — treat as binary
+
+    def _safe_repo_file_path(self, repo_path: Path, file_path: str) -> Path:
+        """Resolve file_path relative to repo_path, ensuring it stays within the repo."""
+        repo_resolved = repo_path.resolve()
+        resolved = (repo_path / file_path).resolve()
+        if not resolved.is_relative_to(repo_resolved):
+            raise ValueError(f"File path escapes repository boundary: {file_path}")
+        return resolved
+
+    def git_conflict_status(self, repo_path: Path) -> Dict[str, Any]:
+        """Get detailed conflict status including conflict marker regions.
+
+        Returns:
+            Dict with:
+              - in_merge: bool (whether merge is in progress)
+              - conflicted_files: list of file dicts with regions
+              - total_conflicts: int
+        """
+        # Check if merge is in progress
+        merge_head = repo_path / ".git" / "MERGE_HEAD"
+        in_merge = merge_head.exists()
+
+        # Get conflicted files from git status
+        result = run_git_command(
+            ["git", "status", "--porcelain"],
+            cwd=repo_path,
+            timeout=self._git_timeouts.git_local_timeout,
+            check=True,
+        )
+
+        conflicted_files = []
+        for line in result.stdout.split("\n"):
+            if len(line) < 4:
+                continue
+            status_code = line[:2]
+            file_path = line[3:]
+            if status_code not in ("UU", "AA", "DD", "AU", "UA", "DU", "UD"):
+                continue
+
+            if status_code == "DD":
+                conflicted_files.append({
+                    "file": file_path,
+                    "status": "both_deleted",
+                    "regions": [],
+                    "is_binary": False,
+                })
+                continue
+
+            regions = self.parse_conflict_markers(repo_path, file_path)
+            conflicted_files.append({
+                "file": file_path,
+                "status": status_code,
+                "regions": regions,
+                "is_binary": len(regions) == 0,
+            })
+
+        return {
+            "in_merge": in_merge,
+            "conflicted_files": conflicted_files,
+            "total_conflicts": len(conflicted_files),
+        }
+
+    def parse_conflict_markers(self, repo_path: Path, file_path: str) -> List[Dict[str, Any]]:
+        """Parse conflict markers from a file, extracting ours/theirs regions.
+
+        Returns list of region dicts with:
+          - start_line: int (1-based)
+          - end_line: int (1-based)
+          - ours_label: str (e.g., "HEAD")
+          - theirs_label: str (e.g., "feature-branch")
+          - ours_content: str
+          - theirs_content: str
+        """
+        try:
+            full_path = self._safe_repo_file_path(repo_path, file_path)
+            content = full_path.read_text(encoding="utf-8", errors="strict")
+            lines = content.split("\n")
+        except (UnicodeDecodeError, OSError):
+            return []
+
+        regions = []
+        current_region = None
+        section = None  # "ours" or "theirs"
+        ours_lines: List[str] = []
+        theirs_lines: List[str] = []
+
+        for i, line in enumerate(lines):
+            if line.startswith("<<<<<<< "):
+                current_region = {
+                    "start_line": i + 1,
+                    "ours_label": line[8:],
+                }
+                section = "ours"
+                ours_lines = []
+                theirs_lines = []
+            elif line.startswith("=======") and current_region is not None:
+                section = "theirs"
+            elif line.startswith(">>>>>>> ") and current_region is not None:
+                current_region["end_line"] = i + 1
+                current_region["theirs_label"] = line[8:]
+                current_region["ours_content"] = "\n".join(ours_lines)
+                current_region["theirs_content"] = "\n".join(theirs_lines)
+                regions.append(current_region)
+                current_region = None
+                section = None
+            elif current_region is not None:
+                if section == "ours":
+                    ours_lines.append(line)
+                else:
+                    theirs_lines.append(line)
+
+        return regions
+
+    def git_mark_resolved(self, repo_path: Path, file_path: str) -> Dict[str, Any]:
+        """Mark a conflicted file as resolved by staging it.
+
+        Validates that conflict markers are removed before staging.
+
+        Returns:
+            Dict with success, file, remaining_conflicts, all_resolved, message
+
+        Raises:
+            GitCommandError: If git add fails
+            ValueError: If file is not conflicted or still has markers
+        """
+        # Verify file is currently conflicted
+        status_result = run_git_command(
+            ["git", "status", "--porcelain", "--", file_path],
+            cwd=repo_path,
+            timeout=self._git_timeouts.git_local_timeout,
+            check=True,
+        )
+
+        is_conflicted = False
+        for line in status_result.stdout.split("\n"):
+            if len(line) < 4:
+                continue
+            status_code = line[:2]
+            if status_code in ("UU", "AA", "DD", "AU", "UA", "DU", "UD"):
+                is_conflicted = True
+                break
+
+        if not is_conflicted:
+            raise ValueError(f"File '{file_path}' is not in a conflicted state.")
+
+        # Check that conflict markers are removed (for text files)
+        full_path = self._safe_repo_file_path(repo_path, file_path)
+        if full_path.exists():
+            try:
+                content = full_path.read_text(encoding="utf-8", errors="strict")
+                if "<<<<<<< " in content:
+                    raise ValueError(
+                        "File still contains conflict markers. "
+                        "Edit the file to resolve conflicts before marking as resolved."
+                    )
+            except UnicodeDecodeError:
+                pass  # Binary file — no markers to check
+
+        # Stage the resolved file
+        run_git_command(
+            ["git", "add", "--", file_path],
+            cwd=repo_path,
+            timeout=self._git_timeouts.git_local_timeout,
+            check=True,
+        )
+
+        # Count remaining conflicts
+        remaining_result = run_git_command(
+            ["git", "status", "--porcelain"],
+            cwd=repo_path,
+            timeout=self._git_timeouts.git_local_timeout,
+            check=True,
+        )
+
+        remaining_conflicts = 0
+        for line in remaining_result.stdout.split("\n"):
+            if len(line) < 4:
+                continue
+            status_code = line[:2]
+            if status_code in ("UU", "AA", "DD", "AU", "UA", "DU", "UD"):
+                remaining_conflicts += 1
+
+        all_resolved = remaining_conflicts == 0
+        message = (
+            "All conflicts resolved. Run git_commit to complete the merge."
+            if all_resolved
+            else f"{remaining_conflicts} conflict(s) remaining."
+        )
+
+        return {
+            "success": True,
+            "file": file_path,
+            "remaining_conflicts": remaining_conflicts,
+            "all_resolved": all_resolved,
+            "message": message,
+        }
 
     def git_checkout_file(self, repo_path: Path, file_path: str) -> Dict[str, Any]:
         """

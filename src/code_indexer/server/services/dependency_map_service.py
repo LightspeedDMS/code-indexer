@@ -1831,6 +1831,71 @@ class DependencyMapService:
             logger.warning(f"Failed to write updated _domains.json: {e}")
             return affected, False
 
+    def _remove_stale_repos_from_domains_json(
+        self,
+        removed_repos: List[str],
+        dependency_map_dir: Path,
+    ) -> bool:
+        """Remove stale repo aliases from _domains.json participating_repos (Bug #396).
+
+        Deterministic Python cleanup — not LLM-dependent. Called after domain .md
+        updates complete, before finalization.
+
+        Args:
+            removed_repos: List of removed repo aliases
+            dependency_map_dir: Path to live dependency-map directory for writing
+
+        Returns:
+            True if cleanup succeeded or was not needed, False on write failure
+        """
+        if not removed_repos:
+            return True
+
+        removed_set = set(removed_repos)
+
+        # READ from versioned path (consistent with other read patterns)
+        read_domains_file = (
+            self._get_cidx_meta_read_path() / "dependency-map" / "_domains.json"
+        )
+        if not read_domains_file.exists():
+            return True
+
+        try:
+            domain_list = json.loads(read_domains_file.read_text())
+        except Exception as e:
+            logger.warning(f"Failed to read _domains.json for stale repo cleanup: {e}")
+            return False
+
+        # Strip removed aliases from every domain's participating_repos
+        modified = False
+        for domain in domain_list:
+            repos = domain.get("participating_repos", [])
+            filtered = [r for r in repos if r not in removed_set]
+            if len(filtered) != len(repos):
+                domain["participating_repos"] = filtered
+                removed_from_domain = set(repos) - set(filtered)
+                logger.info(
+                    f"Removed stale repo(s) {removed_from_domain} from domain "
+                    f"'{domain.get('name', '?')}'"
+                )
+                modified = True
+
+        if not modified:
+            return True
+
+        # WRITE to live path
+        write_domains_file = dependency_map_dir / "_domains.json"
+        try:
+            dependency_map_dir.mkdir(parents=True, exist_ok=True)
+            write_domains_file.write_text(json.dumps(domain_list, indent=2))
+            logger.info(
+                f"Cleaned _domains.json: removed {len(removed_set)} stale repo alias(es)"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to write _domains.json after stale repo cleanup: {e}")
+            return False
+
     def _finalize_delta_tracking(self, config, all_repos: List[Dict[str, Any]]) -> None:
         """
         Finalize delta analysis tracking updates (Story #193, AC8).
@@ -2072,6 +2137,13 @@ class DependencyMapService:
                 removed_repos,
                 config,
             )
+
+            # Bug #396: Remove stale repo aliases from _domains.json
+            if removed_repos:
+                self._remove_stale_repos_from_domains_json(
+                    removed_repos=removed_repos,
+                    dependency_map_dir=dependency_map_dir,
+                )
 
             try:
                 self._activity_journal.log("Delta analysis complete")
