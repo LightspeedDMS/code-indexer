@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.4.4
+
+### Bug Fixes
+
+- fix: Delta analysis early-return path now also cleans stale repos from _domains.json (Bug #396 follow-up). When a deleted repo's _index.md was stale, identify_affected_domains() returned empty, triggering an early return before the Bug #396 cleanup code could execute. The stale repo cleanup now runs in both the early-return and normal code paths.
+
 ## v9.4.3
 
 ### Bug Fixes
