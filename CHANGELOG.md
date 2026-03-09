@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.4.3
+
+### Bug Fixes
+
+- fix: Git write operations bug fixes (Epic #385, Bugs #391-#396). Fixed activated repo write detection for git push/commit operations (Bug #391). Made PAT token optional in create_pull_request by auto-resolving from stored git credentials (Bug #392). Added git credential CRUD UI to admin and user dashboards (Bug #393). Implemented forge client for GitHub/GitLab identity validation during credential storage (Bug #394). Implemented AES-256 encrypted credential storage with SQLite backend (Bug #395).
+- fix: Delta analysis now removes stale repo aliases from _domains.json participating_repos when golden repos are deleted (Bug #396). Previously, deleting a golden repo left phantom references in domain participating_repos lists, causing downstream inconsistencies in domain coverage reporting.
+
+### Improvements
+
+- feat: Dependency map anomaly detection Check 7 -- stale participating repos (complements Bug #396). DepMapHealthDetector now detects repo aliases in _domains.json participating_repos that no longer exist as golden repos. This is the symmetric inverse of existing Check 6 (repos in DB but not in any domain). Anomaly type: stale_participating_repo, severity: needs_repair.
+
 ## v9.4.2
 
 ### Performance

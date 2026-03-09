@@ -2585,3 +2585,143 @@ class BackgroundJobsSqliteBackend:
     def close(self) -> None:
         """Close database connections."""
         self._conn_manager.close_all()
+
+
+class GitCredentialsSqliteBackend:
+    """SQLite backend for user git credentials storage.
+
+    Story #386: Git Credential Management with Identity Discovery.
+    Stores encrypted PATs per user per forge host with discovered identity fields.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        """Initialize the backend."""
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
+
+    def upsert_credential(
+        self,
+        credential_id: str,
+        username: str,
+        forge_type: str,
+        forge_host: str,
+        encrypted_token: str,
+        git_user_name: Optional[str] = None,
+        git_user_email: Optional[str] = None,
+        forge_username: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> None:
+        """Insert or update a credential by (username, forge_type, forge_host) uniqueness."""
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn):
+            conn.execute(
+                """INSERT INTO user_git_credentials
+                       (credential_id, username, forge_type, forge_host, encrypted_token,
+                        git_user_name, git_user_email, forge_username, name, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(username, forge_type, forge_host) DO UPDATE SET
+                       credential_id = excluded.credential_id,
+                       encrypted_token = excluded.encrypted_token,
+                       git_user_name = excluded.git_user_name,
+                       git_user_email = excluded.git_user_email,
+                       forge_username = excluded.forge_username,
+                       name = excluded.name""",
+                (
+                    credential_id,
+                    username,
+                    forge_type,
+                    forge_host,
+                    encrypted_token,
+                    git_user_name,
+                    git_user_email,
+                    forge_username,
+                    name,
+                    now,
+                ),
+            )
+            return None
+
+        self._conn_manager.execute_atomic(operation)
+        logger.debug(f"Upserted git credential for user={username} host={forge_host}")
+
+    def list_credentials(self, username: str) -> List[Dict[str, Any]]:
+        """Return all credentials belonging to the given username."""
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            """SELECT credential_id, username, forge_type, forge_host, encrypted_token,
+                      git_user_name, git_user_email, forge_username, name, created_at,
+                      last_used_at
+               FROM user_git_credentials
+               WHERE username = ?
+               ORDER BY created_at DESC""",
+            (username,),
+        )
+        rows = cursor.fetchall()
+        return [
+            {
+                "credential_id": row[0],
+                "username": row[1],
+                "forge_type": row[2],
+                "forge_host": row[3],
+                "encrypted_token": row[4],
+                "git_user_name": row[5],
+                "git_user_email": row[6],
+                "forge_username": row[7],
+                "name": row[8],
+                "created_at": row[9],
+                "last_used_at": row[10],
+            }
+            for row in rows
+        ]
+
+    def delete_credential(self, username: str, credential_id: str) -> bool:
+        """Delete a credential by id AND username (ownership enforced). Returns True if deleted."""
+
+        def operation(conn):
+            cursor = conn.execute(
+                "DELETE FROM user_git_credentials WHERE credential_id = ? AND username = ?",
+                (credential_id, username),
+            )
+            return cursor.rowcount > 0
+
+        deleted: bool = self._conn_manager.execute_atomic(operation)
+        if deleted:
+            logger.debug(
+                f"Deleted git credential {credential_id} for user={username}"
+            )
+        return deleted
+
+    def get_credential_for_host(
+        self, username: str, forge_host: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return credential dict for (username, forge_host) or None if absent."""
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            """SELECT credential_id, username, forge_type, forge_host, encrypted_token,
+                      git_user_name, git_user_email, forge_username, name, created_at,
+                      last_used_at
+               FROM user_git_credentials
+               WHERE username = ? AND forge_host = ?
+               LIMIT 1""",
+            (username, forge_host),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "credential_id": row[0],
+            "username": row[1],
+            "forge_type": row[2],
+            "forge_host": row[3],
+            "encrypted_token": row[4],
+            "git_user_name": row[5],
+            "git_user_email": row[6],
+            "forge_username": row[7],
+            "name": row[8],
+            "created_at": row[9],
+            "last_used_at": row[10],
+        }
+
+    def close(self) -> None:
+        """Close database connections."""
+        self._conn_manager.close_all()

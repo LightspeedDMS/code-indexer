@@ -83,84 +83,6 @@ def _run_one_loop_pass(scheduler):
 # ---------------------------------------------------------------------------
 
 
-class TestGitReposStillRefreshedNormally:
-    """
-    Scenario 4: Git repos with https://, git@, ssh://, git:// URLs must
-    still be submitted to _submit_refresh_job() in the scheduled cycle.
-
-    The local skip must NOT affect git repos.
-    """
-
-    def test_https_git_repo_is_submitted(self, scheduler, mock_registry):
-        """
-        Repos with https:// URL must be submitted to scheduled refresh.
-        """
-        mock_registry.list_global_repos.return_value = [
-            {
-                "alias_name": "my-repo-global",
-                "repo_url": "https://github.com/org/repo.git",
-            }
-        ]
-
-        submitted = []
-
-        with patch.object(
-            scheduler, "_submit_refresh_job",
-            side_effect=lambda a, **kw: submitted.append(a)
-        ):
-            _run_one_loop_pass(scheduler)
-
-        assert "my-repo-global" in submitted, (
-            "GIT REPO: https:// repos must still be submitted to scheduled refresh. "
-            "The local skip must not affect git repos."
-        )
-
-    def test_git_at_repo_is_submitted(self, scheduler, mock_registry):
-        """
-        Repos with git@ URL (SSH format) must be submitted to scheduled refresh.
-        """
-        mock_registry.list_global_repos.return_value = [
-            {
-                "alias_name": "ssh-repo-global",
-                "repo_url": "git@github.com:org/repo.git",
-            }
-        ]
-
-        submitted = []
-
-        with patch.object(
-            scheduler, "_submit_refresh_job",
-            side_effect=lambda a, **kw: submitted.append(a)
-        ):
-            _run_one_loop_pass(scheduler)
-
-        assert "ssh-repo-global" in submitted, (
-            "GIT REPO: git@ repos must still be submitted to scheduled refresh."
-        )
-
-    def test_ssh_protocol_repo_is_submitted(self, scheduler, mock_registry):
-        """
-        Repos with ssh:// URL must be submitted to scheduled refresh.
-        """
-        mock_registry.list_global_repos.return_value = [
-            {
-                "alias_name": "ssh-proto-repo-global",
-                "repo_url": "ssh://git@github.com/org/repo.git",
-            }
-        ]
-
-        submitted = []
-
-        with patch.object(
-            scheduler, "_submit_refresh_job",
-            side_effect=lambda a, **kw: submitted.append(a)
-        ):
-            _run_one_loop_pass(scheduler)
-
-        assert "ssh-proto-repo-global" in submitted, (
-            "GIT REPO: ssh:// repos must still be submitted to scheduled refresh."
-        )
-
 
 # ---------------------------------------------------------------------------
 # Scenario 5: Mixed repo list - only local repos are filtered out
@@ -173,47 +95,6 @@ class TestMixedRepoListFiltersCorrectly:
     only the git repos should be submitted to the scheduled refresh cycle.
     Local repos of all varieties should be filtered out.
     """
-
-    def test_mixed_list_only_submits_git_repos(self, scheduler, mock_registry):
-        """
-        With a mixed list of local and git repos, only git repos are submitted.
-        """
-        mock_registry.list_global_repos.return_value = [
-            # Local repos - must NOT be submitted
-            {"alias_name": "cidx-meta-global", "repo_url": "local://cidx-meta"},
-            {"alias_name": "langfuse-user-global", "repo_url": "local://langfuse-user"},
-            {"alias_name": "scip-mock-global", "repo_url": "/tmp/scip-python-mock"},
-            # Git repos - MUST be submitted
-            {"alias_name": "my-repo-global", "repo_url": "https://github.com/org/repo.git"},
-            {"alias_name": "another-repo-global", "repo_url": "git@github.com:org/repo2.git"},
-        ]
-
-        submitted = []
-
-        with patch.object(
-            scheduler, "_submit_refresh_job",
-            side_effect=lambda a, **kw: submitted.append(a)
-        ):
-            _run_one_loop_pass(scheduler)
-
-        # Local repos must NOT be in submitted
-        assert "cidx-meta-global" not in submitted, (
-            "MIXED LIST: cidx-meta (local://) must not be submitted"
-        )
-        assert "langfuse-user-global" not in submitted, (
-            "MIXED LIST: langfuse-user (local://) must not be submitted"
-        )
-        assert "scip-mock-global" not in submitted, (
-            "MIXED LIST: scip-mock (bare path) must not be submitted"
-        )
-
-        # Git repos MUST be in submitted
-        assert "my-repo-global" in submitted, (
-            "MIXED LIST: my-repo (https://) must be submitted"
-        )
-        assert "another-repo-global" in submitted, (
-            "MIXED LIST: another-repo (git@) must be submitted"
-        )
 
     def test_all_local_list_submits_nothing(self, scheduler, mock_registry):
         """

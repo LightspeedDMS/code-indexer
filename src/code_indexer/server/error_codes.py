@@ -3824,6 +3824,30 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.WARNING,
         action="TODO",
     ),
+    "MCP-GENERAL-216": ErrorDefinition(
+        code="MCP-GENERAL-216",
+        description="git_merge failed",
+        severity=Severity.ERROR,
+        action="Check branch name and repository state",
+    ),
+    "MCP-GENERAL-217": ErrorDefinition(
+        code="MCP-GENERAL-217",
+        description="git_conflict_status failed",
+        severity=Severity.ERROR,
+        action="Check repository merge state",
+    ),
+    "MCP-GENERAL-218": ErrorDefinition(
+        code="MCP-GENERAL-218",
+        description="git_mark_resolved failed",
+        severity=Severity.ERROR,
+        action="Check file path and conflict state",
+    ),
+    "MCP-GENERAL-219": ErrorDefinition(
+        code="MCP-GENERAL-219",
+        description="create_pull_request failed",
+        severity=Severity.ERROR,
+        action="Check forge token, repository remote URL, and write mode status",
+    ),
     "QUERY-GENERAL-008": ErrorDefinition(
         code="QUERY-GENERAL-008",
         description="TODO",
@@ -5078,7 +5102,7 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
     "QUERY-MIGRATE-007": ErrorDefinition(
         code="QUERY-MIGRATE-007",
         description="Advanced filter parameters supported in semantic search (Story #375)",
-        severity=Severity.INFO,
+        severity=Severity.WARNING,
         action="No action required - filters are now wired through to vector store",
     ),
     "QUERY-MIGRATE-008": ErrorDefinition(
