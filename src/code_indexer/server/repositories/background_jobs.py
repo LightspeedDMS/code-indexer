@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import (
         ServerResourceConfig,
         BackgroundJobsConfig,
+        DataRetentionConfig,
     )
     from code_indexer.server.storage.sqlite_backends import BackgroundJobsSqliteBackend
     from code_indexer.server.services.job_tracker import JobTracker
@@ -94,6 +95,7 @@ class BackgroundJobManager:
         db_path: Optional[str] = None,
         background_jobs_config: Optional["BackgroundJobsConfig"] = None,
         job_tracker: Optional["JobTracker"] = None,
+        data_retention_config: Optional["DataRetentionConfig"] = None,
     ):
         """Initialize enhanced background job manager.
 
@@ -106,6 +108,8 @@ class BackgroundJobManager:
             job_tracker: Optional JobTracker for unified job tracking (Story #311).
                 When provided, jobs are also registered with the tracker for
                 cross-service visibility. When None, behavior is unchanged.
+            data_retention_config: Data retention configuration (Story #400).
+                Controls how long completed/failed/cancelled jobs are kept.
         """
         self.jobs: Dict[str, BackgroundJob] = {}
         self._lock = threading.Lock()
@@ -145,6 +149,13 @@ class BackgroundJobManager:
 
             background_jobs_config = BackgroundJobsConfig()
         self._background_jobs_config = background_jobs_config
+
+        # Story #400: Data retention configuration (job history cleanup period)
+        if data_retention_config is None:
+            from code_indexer.server.utils.config_manager import DataRetentionConfig
+
+            data_retention_config = DataRetentionConfig()
+        self._data_retention_config = data_retention_config
 
         # Story #26: Semaphore for limiting concurrent job execution
         self._job_semaphore = threading.Semaphore(
@@ -1245,7 +1256,8 @@ class BackgroundJobManager:
                 )
 
             # Story #267 Component 6: Startup cleanup of old completed/failed jobs
-            max_age = self._background_jobs_config.cleanup_max_age_hours
+            # Story #400 - AC5: Use DataRetentionConfig.background_jobs_retention_hours
+            max_age = self._data_retention_config.background_jobs_retention_hours
             old_cleaned = self._sqlite_backend.cleanup_old_jobs(max_age)
             if old_cleaned > 0:
                 logging.info(

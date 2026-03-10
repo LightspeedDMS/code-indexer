@@ -14,7 +14,10 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, List, Optional
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.audit_log_service import AuditLogService
 
 from .constants import (
     CIDX_META_REPO,
@@ -114,8 +117,22 @@ class GroupAccessManager:
         self.db_path = Path(db_path)
         # Bug #338: Callbacks invoked after any repo access change (grant or revoke)
         self._on_repo_change_callbacks: List[Callable[[], None]] = []
+        # Story #399: Optional AuditLogService delegation
+        self._audit_service: Optional["AuditLogService"] = None
         self._ensure_schema()
         self._bootstrap_default_groups()
+
+    def set_audit_service(self, audit_service: "AuditLogService") -> None:
+        """
+        Inject AuditLogService for audit event delegation (Story #399).
+
+        When set, log_audit() and get_audit_logs() delegate to the service
+        instead of operating directly on the audit_logs table.
+
+        Args:
+            audit_service: AuditLogService instance
+        """
+        self._audit_service = audit_service
 
     def register_on_repo_change(self, callback: Callable[[], None]) -> None:
         """
@@ -1038,6 +1055,7 @@ class GroupAccessManager:
         Record an audit log entry.
 
         Story #710: AC7 - Audit Log for Administrative Actions
+        Story #399: Delegates to AuditLogService when injected.
 
         Args:
             admin_id: ID of the admin performing the action
@@ -1046,6 +1064,16 @@ class GroupAccessManager:
             target_id: ID of the target
             details: Optional JSON details about the action
         """
+        if self._audit_service is not None:
+            self._audit_service.log(
+                admin_id=admin_id,
+                action_type=action_type,
+                target_type=target_type,
+                target_id=target_id,
+                details=details,
+            )
+            return
+
         conn = self._get_connection()
         try:
             cursor = conn.cursor()
@@ -1072,11 +1100,13 @@ class GroupAccessManager:
         date_to: Optional[str] = None,
         limit: Optional[int] = None,
         offset: int = 0,
+        exclude_target_type: Optional[str] = None,
     ) -> tuple[List[dict], int]:
         """
         Get audit log entries with optional filters.
 
         Story #710: AC8 - Get Audit Logs
+        Story #399: Delegates to AuditLogService when injected.
 
         Args:
             action_type: Filter by action type
@@ -1086,10 +1116,23 @@ class GroupAccessManager:
             date_to: Filter logs up to this date (ISO format YYYY-MM-DD)
             limit: Maximum number of entries to return
             offset: Number of entries to skip
+            exclude_target_type: Exclude entries with this target_type (AC5)
 
         Returns:
             Tuple of (list of log dicts, total count)
         """
+        if self._audit_service is not None:
+            return self._audit_service.query(
+                action_type=action_type,
+                target_type=target_type,
+                admin_id=admin_id,
+                date_from=date_from,
+                date_to=date_to,
+                limit=limit,
+                offset=offset,
+                exclude_target_type=exclude_target_type,
+            )
+
         conn = self._get_connection()
         try:
             cursor = conn.cursor()

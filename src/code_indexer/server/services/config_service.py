@@ -334,11 +334,19 @@ class ConfigService:
                 "omni_pattern_metacharacters": config.multi_search_limits_config.omni_pattern_metacharacters,
             },
             # Story #26 - Background jobs configuration, Story #27 - SubprocessExecutor max_workers
-            # Story #360 - Configurable job history retention period
+            # Note: job history retention period moved to data_retention section (Story #400 - AC5)
             "background_jobs": {
                 "max_concurrent_background_jobs": config.background_jobs_config.max_concurrent_background_jobs,
                 "subprocess_max_workers": config.background_jobs_config.subprocess_max_workers,
-                "cleanup_max_age_hours": config.background_jobs_config.cleanup_max_age_hours,
+            },
+            # Story #400 - Unified data retention configuration
+            "data_retention": {
+                "operational_logs_retention_hours": config.data_retention_config.operational_logs_retention_hours,
+                "audit_logs_retention_hours": config.data_retention_config.audit_logs_retention_hours,
+                "sync_jobs_retention_hours": config.data_retention_config.sync_jobs_retention_hours,
+                "dep_map_history_retention_hours": config.data_retention_config.dep_map_history_retention_hours,
+                "background_jobs_retention_hours": config.data_retention_config.background_jobs_retention_hours,
+                "cleanup_interval_hours": config.data_retention_config.cleanup_interval_hours,
             },
             # Story #223 - AC4: Indexing configuration
             "indexing": {
@@ -464,6 +472,9 @@ class ConfigService:
         # Story #26 - Background jobs
         elif category == "background_jobs":
             self._update_background_jobs_setting(config, key, value)
+        # Story #400 - Data retention configuration
+        elif category == "data_retention":
+            self._update_data_retention_setting(config, key, value)
         # Story #223 - AC4: Indexing configuration
         elif category == "indexing":
             self._update_indexing_setting(key, value)
@@ -1030,11 +1041,29 @@ class ConfigService:
         elif key == "subprocess_max_workers":
             # Story #27: SubprocessExecutor max_workers configuration
             background_jobs.subprocess_max_workers = int(value)
-        elif key == "cleanup_max_age_hours":
-            # Story #360: Configurable job history retention period
-            background_jobs.cleanup_max_age_hours = int(value)
         else:
             raise ValueError(f"Unknown background jobs setting: {key}")
+
+    def _update_data_retention_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a data_retention setting (Story #400)."""
+        data_retention = config.data_retention_config
+        assert data_retention is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "operational_logs_retention_hours":
+            data_retention.operational_logs_retention_hours = int(value)
+        elif key == "audit_logs_retention_hours":
+            data_retention.audit_logs_retention_hours = int(value)
+        elif key == "sync_jobs_retention_hours":
+            data_retention.sync_jobs_retention_hours = int(value)
+        elif key == "dep_map_history_retention_hours":
+            data_retention.dep_map_history_retention_hours = int(value)
+        elif key == "background_jobs_retention_hours":
+            data_retention.background_jobs_retention_hours = int(value)
+        elif key == "cleanup_interval_hours":
+            data_retention.cleanup_interval_hours = int(value)
+        else:
+            raise ValueError(f"Unknown data retention setting: {key}")
 
     def save_all_settings(self, settings: Dict[str, Dict[str, Any]]) -> None:
         """

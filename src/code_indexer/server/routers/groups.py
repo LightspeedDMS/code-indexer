@@ -773,6 +773,9 @@ def get_audit_logs(
     - date_from: Filter logs from this date (YYYY-MM-DD)
     - date_to: Filter logs up to this date (YYYY-MM-DD)
     """
+    # If no target_type specified, exclude auth events from groups audit
+    effective_exclude = None if target_type else "auth"
+
     logs, total = group_manager.get_audit_logs(
         action_type=action_type,
         target_type=target_type,
@@ -781,6 +784,7 @@ def get_audit_logs(
         date_to=date_to,
         limit=limit,
         offset=offset,
+        exclude_target_type=effective_exclude,
     )
 
     return AuditLogsListResponse(
