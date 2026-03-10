@@ -7235,7 +7235,7 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         result = git_operations_service.git_reset(
             Path(repo_path),
             mode=mode,
-            target=target,
+            commit_hash=target,
             confirmation_token=confirmation_token,
         )
 

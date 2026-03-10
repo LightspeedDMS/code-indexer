@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.1
+
+### Bug Fixes
+
+- fix: git_reset MCP handler parameter name mismatch (Bug #397). Handler passed `target=target` but service expects `commit_hash=commit_hash`, causing every git_reset call to silently ignore the target commit and default to HEAD. Fixed to `commit_hash=target`. Corrected 2 pre-existing test assertions that were validating the buggy call signature.
+
 ## v9.5.0
 
 ### Features

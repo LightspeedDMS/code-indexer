@@ -84,7 +84,7 @@ class TestGitResetHandler:
         mock_git_service.git_reset.assert_called_once_with(
             Path("/tmp/test-repo"),
             mode="soft",
-            target="HEAD~1",
+            commit_hash="HEAD~1",
             confirmation_token=None,
         )
 
@@ -137,8 +137,40 @@ class TestGitResetHandler:
         mock_git_service.git_reset.assert_called_once_with(
             Path("/tmp/test-repo"),
             mode="hard",
-            target="HEAD",
+            commit_hash="HEAD",
             confirmation_token="ABC123",
+        )
+
+    def test_git_reset_passes_commit_hash_not_target(
+        self, mock_user, mock_git_service, mock_repo_manager
+    ):
+        """Test that git_reset handler passes commit_hash (not target) to service.
+
+        Bug #397: Handler was calling git_reset(target=target) but service
+        expects commit_hash=commit_hash. This test verifies the correct
+        parameter name is used so the value actually reaches the service.
+        """
+        mock_git_service.git_reset.return_value = {
+            "success": True,
+            "mode": "soft",
+            "target": "abc1234",
+        }
+
+        params = {
+            "repository_alias": "test-repo",
+            "mode": "soft",
+            "target": "abc1234",
+        }
+
+        mcp_response = handlers.git_reset(params, mock_user)
+        data = _extract_response_data(mcp_response)
+
+        assert data["success"] is True
+        mock_git_service.git_reset.assert_called_once_with(
+            Path("/tmp/test-repo"),
+            mode="soft",
+            commit_hash="abc1234",
+            confirmation_token=None,
         )
 
     def test_git_reset_missing_repository(self, mock_user):
