@@ -535,6 +535,7 @@ class BackgroundJobsConfig:
 
     Default value per resource audit recommendation: 5 concurrent jobs.
     Story #27: Also configures SubprocessExecutor max_workers.
+    Note: Job history retention period moved to DataRetentionConfig (Story #400).
     """
 
     # Maximum number of concurrent background jobs (default: 5)
@@ -546,10 +547,38 @@ class BackgroundJobsConfig:
     # Default 2 per resource audit recommendation (was hardcoded to 1)
     subprocess_max_workers: int = 2
 
-    # Story #267: Maximum age in hours for completed/failed/cancelled jobs
-    # Jobs older than this are cleaned up from SQLite on startup and during cleanup
-    # Story #360: Changed default from 24 to 720 (30 days) for configurable retention
-    cleanup_max_age_hours: int = 720
+
+@dataclass
+class DataRetentionConfig:
+    """
+    Unified data retention configuration (Story #400).
+
+    Configures retention periods for all 5 data stores, replacing the
+    per-store cleanup_max_age_hours scattered across individual config classes.
+    Provides a single place to manage how long data is kept before cleanup.
+
+    All retention values are in hours. Cleanup interval controls how often
+    the periodic cleanup job runs.
+    """
+
+    # Operational logs retention (default: 168 hours = 7 days)
+    operational_logs_retention_hours: int = 168
+
+    # Audit logs retention (default: 2160 hours = 90 days)
+    audit_logs_retention_hours: int = 2160
+
+    # Sync jobs retention (default: 720 hours = 30 days)
+    sync_jobs_retention_hours: int = 720
+
+    # Dependency map history retention (default: 2160 hours = 90 days)
+    dep_map_history_retention_hours: int = 2160
+
+    # Background jobs retention (default: 720 hours = 30 days)
+    # Replaces BackgroundJobsConfig.cleanup_max_age_hours (Story #400 - AC5)
+    background_jobs_retention_hours: int = 720
+
+    # How often the cleanup job runs (default: 1 hour)
+    cleanup_interval_hours: int = 1
 
 
 @dataclass
@@ -788,6 +817,9 @@ class ServerConfig:
     # Story #323 - Wiki metadata fields configuration
     wiki_config: Optional[WikiConfig] = None
 
+    # Story #400 - Unified data retention configuration
+    data_retention_config: Optional[DataRetentionConfig] = None
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:
@@ -858,6 +890,9 @@ class ServerConfig:
         # Story #323 - Initialize wiki config
         if self.wiki_config is None:
             self.wiki_config = WikiConfig()
+        # Story #400 - Initialize data retention config
+        if self.data_retention_config is None:
+            self.data_retention_config = DataRetentionConfig()
 
 
 class ServerConfigManager:
@@ -1226,6 +1261,24 @@ class ServerConfigManager:
                     **config_dict["multi_search_limits_config"]
                 )
 
+            # Story #400 - AC5: Migrate old BackgroundJobsConfig.cleanup_max_age_hours
+            # to DataRetentionConfig.background_jobs_retention_hours.
+            # Must run BEFORE BackgroundJobsConfig conversion since we read the raw dict.
+            # Only migrates if data_retention_config is not already explicitly set.
+            if "data_retention_config" not in config_dict:
+                old_bg_jobs = config_dict.get("background_jobs_config")
+                if isinstance(old_bg_jobs, dict) and "cleanup_max_age_hours" in old_bg_jobs:
+                    config_dict["data_retention_config"] = {
+                        "background_jobs_retention_hours": old_bg_jobs["cleanup_max_age_hours"]
+                    }
+
+            # Story #400: Remove obsolete cleanup_max_age_hours from background_jobs_config dict
+            # before converting to BackgroundJobsConfig (field no longer exists on dataclass).
+            if "background_jobs_config" in config_dict and isinstance(
+                config_dict["background_jobs_config"], dict
+            ):
+                config_dict["background_jobs_config"].pop("cleanup_max_age_hours", None)
+
             # Story #26: Convert background_jobs_config dict to BackgroundJobsConfig
             if "background_jobs_config" in config_dict and isinstance(
                 config_dict["background_jobs_config"], dict
@@ -1273,6 +1326,14 @@ class ServerConfigManager:
             ):
                 config_dict["wiki_config"] = WikiConfig(
                     **config_dict["wiki_config"]
+                )
+
+            # Story #400: Convert data_retention_config dict to DataRetentionConfig
+            if "data_retention_config" in config_dict and isinstance(
+                config_dict["data_retention_config"], dict
+            ):
+                config_dict["data_retention_config"] = DataRetentionConfig(
+                    **config_dict["data_retention_config"]
                 )
 
             # Remove obsolete reindexing_config field (deleted in previous commit)
@@ -1763,6 +1824,26 @@ class ServerConfigManager:
             if not (1 <= config.background_jobs_config.subprocess_max_workers <= 50):
                 raise ValueError(
                     f"subprocess_max_workers must be between 1 and 50, got {config.background_jobs_config.subprocess_max_workers}"
+                )
+
+        # Validate data_retention_config (Story #400)
+        if config.data_retention_config:
+            dr = config.data_retention_config
+            retention_fields = [
+                ("operational_logs_retention_hours", dr.operational_logs_retention_hours),
+                ("audit_logs_retention_hours", dr.audit_logs_retention_hours),
+                ("sync_jobs_retention_hours", dr.sync_jobs_retention_hours),
+                ("dep_map_history_retention_hours", dr.dep_map_history_retention_hours),
+                ("background_jobs_retention_hours", dr.background_jobs_retention_hours),
+            ]
+            for field_name, field_value in retention_fields:
+                if not (1 <= field_value <= 8760):
+                    raise ValueError(
+                        f"{field_name} must be between 1 and 8760, got {field_value}"
+                    )
+            if not (1 <= dr.cleanup_interval_hours <= 24):
+                raise ValueError(
+                    f"cleanup_interval_hours must be between 1 and 24, got {dr.cleanup_interval_hours}"
                 )
 
         # Validate content_limits_config (Story #32)

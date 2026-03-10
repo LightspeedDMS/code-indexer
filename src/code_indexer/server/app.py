@@ -2318,6 +2318,38 @@ def create_app() -> FastAPI:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+            # Story #399: Initialize AuditLogService and inject into GroupAccessManager
+            # Fail fast on init — AuditLogService is required for correct operation
+            from code_indexer.server.services.audit_log_service import (
+                AuditLogService,
+                migrate_flat_file_to_sqlite,
+            )
+
+            audit_service = AuditLogService(groups_db_path)
+            app.state.audit_service = audit_service
+            group_manager.set_audit_service(audit_service)
+            # Inject into the module-level singleton so all log/query
+            # calls from password_audit_logger also route to SQLite
+            password_audit_logger.set_audit_service(audit_service)
+
+            logger.info(
+                "Story #399: AuditLogService initialized and injected into GroupAccessManager",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+            # AC4: Migration is recoverable — historical data loss, not functional failure
+            try:
+                flat_file = Path(server_data_dir) / "password_audit.log"
+                migrated, skipped = migrate_flat_file_to_sqlite(flat_file, audit_service)
+                if migrated > 0 or skipped > 0:
+                    logger.info(
+                        f"Story #399: Migrated {migrated} entries from password_audit.log, "
+                        f"skipped {skipped} unparseable lines",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+            except Exception as e:
+                logger.warning("Flat file migration failed (non-fatal): %s", e)
+
             # Inject GroupAccessManager into GoldenRepoManager for auto-assignment (Story #706)
             if (
                 hasattr(app.state, "golden_repo_manager")
@@ -2727,6 +2759,46 @@ def create_app() -> FastAPI:
                 format_error_log(
                     "APP-GENERAL-021",
                     f"Failed to initialize description refresh scheduler: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Startup: Initialize Data Retention Scheduler (Story #401)
+        data_retention_scheduler = None
+        logger.info(
+            "Server startup: Initializing data retention scheduler",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.data_retention_scheduler import (
+                DataRetentionScheduler as _DataRetentionScheduler,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+
+            _drp_config_service = get_config_service()
+            _drp_log_db_path = Path(server_data_dir) / "logs.db"
+            _drp_main_db_path = Path(server_data_dir) / "data" / "cidx_server.db"
+            _drp_groups_db_path = Path(server_data_dir) / "groups.db"
+
+            data_retention_scheduler = _DataRetentionScheduler(
+                log_db_path=_drp_log_db_path,
+                main_db_path=_drp_main_db_path,
+                groups_db_path=_drp_groups_db_path,
+                config_service=_drp_config_service,
+                job_tracker=job_tracker,
+            )
+            data_retention_scheduler.start()
+            app.state.data_retention_scheduler = data_retention_scheduler
+            logger.info(
+                "Data retention scheduler started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            # Log error but don't block server startup
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-033",
+                    f"Failed to initialize data retention scheduler: {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
@@ -3323,6 +3395,27 @@ def create_app() -> FastAPI:
                     )
                 )
 
+        # Shutdown: Stop data retention scheduler (Story #401)
+        data_retention_scheduler_state = getattr(
+            app.state, "data_retention_scheduler", None
+        )
+        if data_retention_scheduler_state is not None:
+            try:
+                data_retention_scheduler_state.stop()
+                logger.info(
+                    "Data retention scheduler stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-034",
+                        f"Error stopping data retention scheduler: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
         # Shutdown: Stop description refresh scheduler (Story #190)
         description_refresh_scheduler_state = getattr(
             app.state, "description_refresh_scheduler", None
@@ -3609,6 +3702,7 @@ def create_app() -> FastAPI:
         db_path=db_path_str,
         background_jobs_config=server_config.background_jobs_config,
         job_tracker=job_tracker,
+        data_retention_config=server_config.data_retention_config,
     )
     # Inject BackgroundJobManager into GoldenRepoManager for async operations
     golden_repo_manager.background_job_manager = background_job_manager
@@ -5529,17 +5623,17 @@ def create_app() -> FastAPI:
         Args:
             max_age_hours: Maximum age of jobs to keep in hours.
                 If not provided, uses the configured default from
-                background_jobs_config.cleanup_max_age_hours (default: 720, i.e. 30 days).
+                data_retention_config.background_jobs_retention_hours (default: 720, i.e. 30 days).
             current_user: Current authenticated admin user
 
         Returns:
             Number of jobs cleaned up
         """
-        # Story #360: Use configured default when no explicit value provided
+        # Story #400 - AC5: Use DataRetentionConfig.background_jobs_retention_hours
         if max_age_hours is None:
             from code_indexer.server.services.config_service import get_config_service
             _config_service = get_config_service()
-            max_age_hours = _config_service.get_config().background_jobs_config.cleanup_max_age_hours
+            max_age_hours = _config_service.get_config().data_retention_config.background_jobs_retention_hours
         if max_age_hours < 1:
             max_age_hours = 1
         if max_age_hours > 8760:  # 1 year
@@ -5637,13 +5731,14 @@ def create_app() -> FastAPI:
         Returns:
             Audit log entries for PR creations
         """
-        from code_indexer.server.auth.audit_logger import password_audit_logger
-
-        logs = password_audit_logger.get_pr_logs(
-            repo_alias=repo_alias, limit=limit, offset=offset
-        )
-
-        return {"logs": logs, "total": len(logs)}
+        try:
+            logs = app.state.audit_service.get_pr_logs(
+                repo_alias=repo_alias, limit=limit, offset=offset
+            )
+            return {"logs": logs, "total": len(logs)}
+        except Exception as e:
+            logger.error("Error fetching PR history: %s", e)
+            raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/admin/scip-git-cleanup-history")
     def get_scip_git_cleanup_history(
@@ -5663,13 +5758,14 @@ def create_app() -> FastAPI:
         Returns:
             Audit log entries for git cleanup operations
         """
-        from code_indexer.server.auth.audit_logger import password_audit_logger
-
-        logs = password_audit_logger.get_cleanup_logs(
-            repo_path=repo_path, limit=limit, offset=offset
-        )
-
-        return {"logs": logs, "total": len(logs)}
+        try:
+            logs = app.state.audit_service.get_cleanup_logs(
+                repo_path=repo_path, limit=limit, offset=offset
+            )
+            return {"logs": logs, "total": len(logs)}
+        except Exception as e:
+            logger.error("Error fetching git cleanup history: %s", e)
+            raise HTTPException(status_code=500, detail=str(e))
 
     @app.delete("/api/admin/golden-repos/{alias}", status_code=204)
     def remove_golden_repo(

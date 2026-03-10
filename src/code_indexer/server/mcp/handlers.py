@@ -7235,7 +7235,7 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         result = git_operations_service.git_reset(
             Path(repo_path),
             mode=mode,
-            target=target,
+            commit_hash=target,
             confirmation_token=confirmation_token,
         )
 
@@ -12356,6 +12356,49 @@ def _filter_audit_entries(
     return filtered[:limit]
 
 
+def _parse_log_details(row: dict) -> dict:
+    """Parse the details JSON field of an audit_logs row into a flat dict.
+
+    When AuditLogService rows are used instead of flat-file parsed dicts the
+    payload lives inside the ``details`` JSON column.  This helper merges the
+    top-level row fields with the decoded details so callers get the same shape
+    that the old PasswordChangeAuditLogger flat-file parsing produced.
+    """
+    flat = dict(row)
+    details_str = row.get("details") or "{}"
+    try:
+        inner = json.loads(details_str)
+    except (ValueError, TypeError) as e:
+        logger.warning("Failed to parse audit log details JSON: %s", e)
+        inner = {}
+    flat.update(inner)
+    return flat
+
+
+def _get_pr_logs_from_service(limit: int, repo_alias: str = None) -> list:
+    """Fetch PR logs from AuditLogService."""
+    import code_indexer.server.app as app_module
+
+    svc = getattr(getattr(app_module, "app", None), "state", None)
+    audit_service = getattr(svc, "audit_service", None) if svc else None
+    if audit_service is None:
+        raise RuntimeError("AuditLogService not available on app.state")
+    rows = audit_service.get_pr_logs(repo_alias=repo_alias, limit=limit)
+    return [_parse_log_details(r) for r in rows]
+
+
+def _get_cleanup_logs_from_service(limit: int, repo_path: str = None) -> list:
+    """Fetch cleanup logs from AuditLogService."""
+    import code_indexer.server.app as app_module
+
+    svc = getattr(getattr(app_module, "app", None), "state", None)
+    audit_service = getattr(svc, "audit_service", None) if svc else None
+    if audit_service is None:
+        raise RuntimeError("AuditLogService not available on app.state")
+    rows = audit_service.get_cleanup_logs(repo_path=repo_path, limit=limit)
+    return [_parse_log_details(r) for r in rows]
+
+
 def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Query security audit logs with optional filtering (admin only)."""
     try:
@@ -12367,17 +12410,15 @@ def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
-        from code_indexer.server.auth.audit_logger import password_audit_logger
-
         limit = _coerce_int(args.get("limit"), DEFAULT_AUDIT_LOG_LIMIT)
-        pr_logs = password_audit_logger.get_pr_logs(limit=limit)
-        cleanup_logs = password_audit_logger.get_cleanup_logs(limit=limit)
+        pr_logs = _get_pr_logs_from_service(limit=limit)
+        cleanup_logs = _get_cleanup_logs_from_service(limit=limit)
 
         all_entries = [
             {
                 "timestamp": log.get("timestamp", ""),
                 "user": log.get("repo_alias", ""),
-                "action": log.get("event_type", ""),
+                "action": log.get("event_type") or log.get("action_type", ""),
                 "resource": log.get("pr_url", ""),
                 "details": log,
             }
@@ -12386,7 +12427,7 @@ def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {
                 "timestamp": log.get("timestamp", ""),
                 "user": "system",
-                "action": log.get("event_type", ""),
+                "action": log.get("event_type") or log.get("action_type", ""),
                 "resource": log.get("repo_path", ""),
                 "details": log,
             }
@@ -12403,6 +12444,11 @@ def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
         return _mcp_response(
             {"success": True, "entries": filtered, "total": len(filtered)}
+        )
+    except RuntimeError as e:
+        logger.critical("AuditLogService configuration error: %s", e)
+        return _mcp_response(
+            {"success": False, "error": f"Server configuration error: {e}"}
         )
     except Exception as e:
         logger.error(
@@ -12522,10 +12568,8 @@ def handle_scip_pr_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
-        from code_indexer.server.auth.audit_logger import password_audit_logger
-
         limit = _coerce_int(args.get("limit"), DEFAULT_AUDIT_LOG_LIMIT)
-        pr_logs = password_audit_logger.get_pr_logs(limit=limit)
+        pr_logs = _get_pr_logs_from_service(limit=limit)
 
         history = [
             {
@@ -12536,7 +12580,7 @@ def handle_scip_pr_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "indexed_at": log.get("timestamp", ""),
                 "status": (
                     "success"
-                    if log.get("event_type") == "pr_creation_success"
+                    if (log.get("event_type") or log.get("action_type")) == "pr_creation_success"
                     else "failed"
                 ),
                 "pr_url": log.get("pr_url"),
@@ -12548,6 +12592,11 @@ def handle_scip_pr_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         return _mcp_response(
             {"success": True, "history": history, "total": len(history)}
+        )
+    except RuntimeError as e:
+        logger.critical("AuditLogService configuration error: %s", e)
+        return _mcp_response(
+            {"success": False, "error": f"Server configuration error: {e}"}
         )
     except Exception as e:
         logger.error(
@@ -12571,10 +12620,8 @@ def handle_scip_cleanup_history(args: Dict[str, Any], user: User) -> Dict[str, A
                 }
             )
 
-        from code_indexer.server.auth.audit_logger import password_audit_logger
-
         limit = _coerce_int(args.get("limit"), DEFAULT_AUDIT_LOG_LIMIT)
-        cleanup_logs = password_audit_logger.get_cleanup_logs(limit=limit)
+        cleanup_logs = _get_cleanup_logs_from_service(limit=limit)
 
         history = [
             {
@@ -12584,13 +12631,18 @@ def handle_scip_cleanup_history(args: Dict[str, Any], user: User) -> Dict[str, A
                 "started_at": log.get("timestamp", ""),
                 "completed_at": log.get("timestamp", ""),
                 "workspaces_cleaned": len(log.get("files_cleared", [])),
-                "repo_path": log.get("repo_path"),
+                "repo_path": log.get("repo_path") or log.get("target_id"),
             }
             for log in cleanup_logs
         ]
 
         return _mcp_response(
             {"success": True, "history": history, "total": len(history)}
+        )
+    except RuntimeError as e:
+        logger.critical("AuditLogService configuration error: %s", e)
+        return _mcp_response(
+            {"success": False, "error": f"Server configuration error: {e}"}
         )
     except Exception as e:
         logger.error(

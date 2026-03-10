@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.1
+
+### Bug Fixes
+
+- fix: git_reset MCP handler parameter name mismatch (Bug #397). Handler passed `target=target` but service expects `commit_hash=commit_hash`, causing every git_reset call to silently ignore the target commit and default to HEAD. Fixed to `commit_hash=target`. Corrected 2 pre-existing test assertions that were validating the buggy call signature.
+
+## v9.5.0
+
+### Features
+
+- feat: Audit log consolidation -- AuditLogService extracted from GroupAccessManager via delegation pattern (Epic #398, Story #399). Flat-file password_audit.log migrated to SQLite (groups.db audit_logs table) at server startup. MCP handlers and REST endpoints now query AuditLogService directly. GroupAccessManager retains log_audit()/get_audit_logs() API but delegates to AuditLogService when injected.
+- feat: Configurable data retention periods for 5 data stores via Web UI config screen (Epic #398, Story #400). Replaces the single cleanup_max_age_hours with granular retention settings: operational logs (7d), audit logs (90d), sync jobs (30d), dependency map history (90d), background jobs (30d). All configurable from /admin/config without server restart.
+- feat: DataRetentionScheduler periodic cleanup job as daemon thread (Epic #398, Story #401). Batched DELETEs (1000 rows/batch) across 3 SQLite databases (logs.db, cidx_server.db, groups.db). Tracked via JobTracker for dashboard visibility. Re-reads config each cycle for hot-reload of retention settings.
+
 ## v9.4.4
 
 ### Bug Fixes

@@ -3,6 +3,9 @@ Comprehensive audit logging for password change attempts.
 
 Implements secure audit logging with IP addresses and timestamps.
 Following CLAUDE.md principles: NO MOCKS - Real audit logging implementation.
+
+Story #399: When audit_service (AuditLogService) is provided, all events are
+written to the audit_logs SQLite table instead of a flat file.
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
@@ -11,7 +14,10 @@ import logging
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.audit_log_service import AuditLogService
 
 # Module-level logger for authentication events
 logger = logging.getLogger(__name__)
@@ -25,16 +31,33 @@ class PasswordChangeAuditLogger:
     - Log all password change attempts (successful and failed)
     - Include IP addresses, timestamps, and usernames
     - Structured logging format for analysis
-    - Separate audit log file for security monitoring
+    - Separate audit log file for security monitoring (legacy path)
+    - SQLite via AuditLogService (Story #399 preferred path)
     """
 
-    def __init__(self, log_file_path: Optional[str] = None):
+    def __init__(
+        self,
+        log_file_path: Optional[str] = None,
+        audit_service: Optional["AuditLogService"] = None,
+    ):
         """
         Initialize audit logger.
 
         Args:
-            log_file_path: Optional custom path for audit log file
+            log_file_path:  Optional custom path for audit log file (legacy).
+            audit_service:  AuditLogService instance.  When provided, all events
+                            are written to the audit_logs SQLite table and no
+                            file handler is created (Story #399).
         """
+        self._audit_service = audit_service
+
+        if audit_service is not None:
+            # SQLite path: no file handler needed
+            self.audit_logger = None
+            self.log_file_path = None
+            return
+
+        # Legacy flat-file path
         if log_file_path:
             self.log_file_path = log_file_path
         else:
@@ -67,6 +90,56 @@ class PasswordChangeAuditLogger:
         self.audit_logger.addHandler(file_handler)
         self.audit_logger.propagate = False  # Don't propagate to root logger
 
+    def set_audit_service(self, audit_service: "AuditLogService") -> None:
+        """Switch from flat-file to SQLite mode (Story #399).
+
+        Closes and removes the file handler to avoid resource leaks.
+        """
+        self._audit_service = audit_service
+        if self.audit_logger is not None:
+            for handler in self.audit_logger.handlers[:]:
+                handler.close()
+                self.audit_logger.removeHandler(handler)
+            self.audit_logger = None
+        self.log_file_path = None
+
+    # ------------------------------------------------------------------
+    # Internal: SQLite routing helper (Story #399)
+    # ------------------------------------------------------------------
+
+    def _log_to_service(
+        self,
+        event_type: str,
+        actor: str,
+        target_id: str,
+        event_dict: dict,
+    ) -> None:
+        """
+        Write one event to AuditLogService (Story #399 AC2).
+
+        Field mapping:
+            admin_id    <- actor  (username, 'system', etc.)
+            action_type <- event_type
+            target_type <- "auth"  (all PasswordChangeAuditLogger events)
+            target_id   <- target_id (username / repo_alias / repo_path)
+            details     <- JSON-encoded event_dict
+
+        Note: ALL PasswordChangeAuditLogger events use target_type="auth", including
+        PR creation and git cleanup events. This is intentional — these events are
+        distinguished by action_type, not target_type. The Groups UI uses
+        exclude_target_type="auth" to filter out all PasswordChangeAuditLogger events
+        from the group management view.
+        """
+        if self._audit_service is None:
+            return
+        self._audit_service.log(
+            admin_id=actor,
+            action_type=event_type,
+            target_type="auth",
+            target_id=target_id,
+            details=json.dumps(event_dict),
+        )
+
     def log_password_change_success(
         self,
         username: str,
@@ -91,6 +164,10 @@ class PasswordChangeAuditLogger:
             "user_agent": user_agent,
             "additional_context": additional_context or {},
         }
+
+        if self._audit_service is not None:
+            self._log_to_service("password_change_success", username, username, log_entry)
+            return
 
         self.audit_logger.info(
             f"PASSWORD_CHANGE_SUCCESS: {json.dumps(log_entry)}",
@@ -125,11 +202,13 @@ class PasswordChangeAuditLogger:
             "additional_context": additional_context or {},
         }
 
-        logger.warning(
-            format_error_log(
-                "AUTH-MIGRATE-001", f"PASSWORD_CHANGE_FAILURE: {json.dumps(log_entry)}"
-            ),
-            extra=get_log_extra("AUTH-MIGRATE-001"),
+        if self._audit_service is not None:
+            self._log_to_service("password_change_failure", username, username, log_entry)
+            return
+
+        self.audit_logger.warning(
+            f"PASSWORD_CHANGE_FAILURE: {json.dumps(log_entry)}",
+            extra={"correlation_id": get_correlation_id()},
         )
 
     def log_rate_limit_triggered(
@@ -157,12 +236,13 @@ class PasswordChangeAuditLogger:
             "user_agent": user_agent,
         }
 
-        logger.warning(
-            format_error_log(
-                "AUTH-MIGRATE-002",
-                f"PASSWORD_CHANGE_RATE_LIMIT: {json.dumps(log_entry)}",
-            ),
-            extra=get_log_extra("AUTH-MIGRATE-002"),
+        if self._audit_service is not None:
+            self._log_to_service("password_change_rate_limit", username, username, log_entry)
+            return
+
+        self.audit_logger.warning(
+            f"PASSWORD_CHANGE_RATE_LIMIT: {json.dumps(log_entry)}",
+            extra={"correlation_id": get_correlation_id()},
         )
 
     def log_concurrent_change_conflict(
@@ -184,12 +264,13 @@ class PasswordChangeAuditLogger:
             "user_agent": user_agent,
         }
 
-        logger.warning(
-            format_error_log(
-                "AUTH-MIGRATE-003",
-                f"PASSWORD_CHANGE_CONCURRENT_CONFLICT: {json.dumps(log_entry)}",
-            ),
-            extra=get_log_extra("AUTH-MIGRATE-003"),
+        if self._audit_service is not None:
+            self._log_to_service("password_change_concurrent_conflict", username, username, log_entry)
+            return
+
+        self.audit_logger.warning(
+            f"PASSWORD_CHANGE_CONCURRENT_CONFLICT: {json.dumps(log_entry)}",
+            extra={"correlation_id": get_correlation_id()},
         )
 
     def log_token_refresh_success(
@@ -219,6 +300,10 @@ class PasswordChangeAuditLogger:
             "user_agent": user_agent,
             "additional_context": additional_context or {},
         }
+
+        if self._audit_service is not None:
+            self._log_to_service("token_refresh_success", username, username, log_entry)
+            return
 
         self.audit_logger.info(
             f"TOKEN_REFRESH_SUCCESS: {json.dumps(log_entry)}",
@@ -256,6 +341,10 @@ class PasswordChangeAuditLogger:
             "additional_context": additional_context or {},
         }
 
+        if self._audit_service is not None:
+            self._log_to_service("token_refresh_failure", username, username, log_entry)
+            return
+
         # Log as warning for security incidents, info for normal failures
         log_level = (
             self.audit_logger.warning if security_incident else self.audit_logger.info
@@ -290,11 +379,13 @@ class PasswordChangeAuditLogger:
             "additional_context": additional_context or {},
         }
 
-        logger.error(
-            format_error_log(
-                "AUTH-MIGRATE-004", f"SECURITY_INCIDENT: {json.dumps(log_entry)}"
-            ),
-            extra=get_log_extra("AUTH-MIGRATE-004"),
+        if self._audit_service is not None:
+            self._log_to_service("security_incident", username, username, log_entry)
+            return
+
+        self.audit_logger.warning(
+            f"SECURITY_INCIDENT: {json.dumps(log_entry)}",
+            extra={"correlation_id": get_correlation_id()},
         )
 
     def log_authentication_failure(
@@ -322,11 +413,13 @@ class PasswordChangeAuditLogger:
             "additional_context": additional_context or {},
         }
 
-        logger.warning(
-            format_error_log(
-                "AUTH-MIGRATE-005", f"AUTHENTICATION_FAILURE: {json.dumps(log_entry)}"
-            ),
-            extra=get_log_extra("AUTH-MIGRATE-005"),
+        if self._audit_service is not None:
+            self._log_to_service("authentication_failure", username, username, log_entry)
+            return
+
+        self.audit_logger.warning(
+            f"AUTHENTICATION_FAILURE: {json.dumps(log_entry)}",
+            extra={"correlation_id": get_correlation_id()},
         )
 
     def log_registration_attempt(
@@ -355,6 +448,10 @@ class PasswordChangeAuditLogger:
         }
 
         log_message = f"REGISTRATION_{'SUCCESS' if success else 'ATTEMPT'}: {json.dumps(log_entry)}"
+
+        if self._audit_service is not None:
+            self._log_to_service("registration_attempt", email, email, log_entry)
+            return
 
         if success:
             self.audit_logger.info(
@@ -391,6 +488,10 @@ class PasswordChangeAuditLogger:
             "additional_context": additional_context or {},
         }
 
+        if self._audit_service is not None:
+            self._log_to_service("password_reset_attempt", email, email, log_entry)
+            return
+
         self.audit_logger.info(
             f"PASSWORD_RESET_ATTEMPT: {json.dumps(log_entry)}",
             extra={"correlation_id": get_correlation_id()},
@@ -414,6 +515,10 @@ class PasswordChangeAuditLogger:
             "user_agent": user_agent,
             "additional_context": additional_context or {},
         }
+        if self._audit_service is not None:
+            self._log_to_service("oauth_client_registration", client_id, client_id, log_entry)
+            return
+
         self.audit_logger.info(
             f"OAUTH_CLIENT_REGISTRATION: {json.dumps(log_entry)}",
             extra={"correlation_id": get_correlation_id()},
@@ -432,6 +537,11 @@ class PasswordChangeAuditLogger:
             "user_agent": user_agent,
             "additional_context": additional_context or {},
         }
+
+        if self._audit_service is not None:
+            self._log_to_service("oauth_authorization", username, username, log_entry)
+            return
+
         self.audit_logger.info(
             f"OAUTH_AUTHORIZATION: {json.dumps(log_entry)}",
             extra={"correlation_id": get_correlation_id()},
@@ -457,6 +567,11 @@ class PasswordChangeAuditLogger:
             "user_agent": user_agent,
             "additional_context": additional_context or {},
         }
+
+        if self._audit_service is not None:
+            self._log_to_service("oauth_token_exchange", username, username, log_entry)
+            return
+
         self.audit_logger.info(
             f"OAUTH_TOKEN_EXCHANGE: {json.dumps(log_entry)}",
             extra={"correlation_id": get_correlation_id()},
@@ -475,6 +590,11 @@ class PasswordChangeAuditLogger:
             "user_agent": user_agent,
             "additional_context": additional_context or {},
         }
+
+        if self._audit_service is not None:
+            self._log_to_service("oauth_token_revocation", username, username, log_entry)
+            return
+
         self.audit_logger.info(
             f"OAUTH_TOKEN_REVOCATION: {json.dumps(log_entry)}",
             extra={"correlation_id": get_correlation_id()},
@@ -514,6 +634,10 @@ class PasswordChangeAuditLogger:
             "additional_context": additional_context or {},
         }
 
+        if self._audit_service is not None:
+            self._log_to_service("pr_creation_success", "system", repo_alias, log_entry)
+            return
+
         self.audit_logger.info(
             f"PR_CREATION_SUCCESS: {json.dumps(log_entry)}",
             extra={"correlation_id": get_correlation_id()},
@@ -547,11 +671,13 @@ class PasswordChangeAuditLogger:
             "additional_context": additional_context or {},
         }
 
-        logger.warning(
-            format_error_log(
-                "AUTH-MIGRATE-007", f"PR_CREATION_FAILURE: {json.dumps(log_entry)}"
-            ),
-            extra=get_log_extra("AUTH-MIGRATE-007"),
+        if self._audit_service is not None:
+            self._log_to_service("pr_creation_failure", "system", repo_alias, log_entry)
+            return
+
+        self.audit_logger.warning(
+            f"PR_CREATION_FAILURE: {json.dumps(log_entry)}",
+            extra={"correlation_id": get_correlation_id()},
         )
 
     def log_pr_creation_disabled(
@@ -575,6 +701,10 @@ class PasswordChangeAuditLogger:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "additional_context": additional_context or {},
         }
+
+        if self._audit_service is not None:
+            self._log_to_service("pr_creation_disabled", "system", repo_alias, log_entry)
+            return
 
         self.audit_logger.info(
             f"PR_CREATION_DISABLED: {json.dumps(log_entry)}",
@@ -602,6 +732,10 @@ class PasswordChangeAuditLogger:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "additional_context": additional_context or {},
         }
+
+        if self._audit_service is not None:
+            self._log_to_service("git_cleanup", "system", repo_path, log_entry)
+            return
 
         self.audit_logger.info(
             f"GIT_CLEANUP: {json.dumps(log_entry)}",
@@ -641,6 +775,10 @@ class PasswordChangeAuditLogger:
             "additional_context": additional_context or {},
         }
 
+        if self._audit_service is not None:
+            self._log_to_service("impersonation_set", actor_username, target_username, log_entry)
+            return
+
         self.audit_logger.info(
             f"IMPERSONATION_SET: {json.dumps(log_entry)}",
             extra={"correlation_id": get_correlation_id()},
@@ -678,6 +816,10 @@ class PasswordChangeAuditLogger:
             "user_agent": user_agent,
             "additional_context": additional_context or {},
         }
+
+        if self._audit_service is not None:
+            self._log_to_service("impersonation_cleared", actor_username, previous_target, log_entry)
+            return
 
         self.audit_logger.info(
             f"IMPERSONATION_CLEARED: {json.dumps(log_entry)}",
@@ -722,11 +864,13 @@ class PasswordChangeAuditLogger:
             "additional_context": additional_context or {},
         }
 
-        logger.warning(
-            format_error_log(
-                "AUTH-MIGRATE-008", f"IMPERSONATION_DENIED: {json.dumps(log_entry)}"
-            ),
-            extra=get_log_extra("AUTH-MIGRATE-008"),
+        if self._audit_service is not None:
+            self._log_to_service("impersonation_denied", actor_username, target_username, log_entry)
+            return
+
+        self.audit_logger.warning(
+            f"IMPERSONATION_DENIED: {json.dumps(log_entry)}",
+            extra={"correlation_id": get_correlation_id()},
         )
 
     def get_pr_logs(
@@ -738,6 +882,9 @@ class PasswordChangeAuditLogger:
         """
         Query PR creation audit logs with filtering and pagination.
 
+        When an AuditLogService is injected, delegates to it.
+        Otherwise falls back to parsing the flat log file.
+
         Args:
             repo_alias: Filter by repository alias (optional)
             limit: Maximum number of records to return
@@ -746,6 +893,11 @@ class PasswordChangeAuditLogger:
         Returns:
             List of PR creation log entries (dicts)
         """
+        if self._audit_service is not None:
+            return self._audit_service.get_pr_logs(
+                repo_alias=repo_alias, limit=limit, offset=offset
+            )
+
         logs = self._parse_logs_by_prefix("PR_CREATION")
 
         # Filter by repo_alias if provided
@@ -764,6 +916,9 @@ class PasswordChangeAuditLogger:
         """
         Query git cleanup audit logs with filtering and pagination.
 
+        When an AuditLogService is injected, delegates to it.
+        Otherwise falls back to parsing the flat log file.
+
         Args:
             repo_path: Filter by repository path (optional)
             limit: Maximum number of records to return
@@ -772,6 +927,11 @@ class PasswordChangeAuditLogger:
         Returns:
             List of git cleanup log entries (dicts)
         """
+        if self._audit_service is not None:
+            return self._audit_service.get_cleanup_logs(
+                repo_path=repo_path, limit=limit, offset=offset
+            )
+
         logs = self._parse_logs_by_prefix("GIT_CLEANUP")
 
         # Filter by repo_path if provided
@@ -791,6 +951,9 @@ class PasswordChangeAuditLogger:
         Returns:
             List of parsed log entries (dicts) in reverse chronological order
         """
+        if self.log_file_path is None:
+            return []  # SQLite mode: flat file not available
+
         log_entries = []
         log_file = Path(self.log_file_path)
 

@@ -1183,8 +1183,10 @@ def _create_groups_page_response(
         for g in group_manager.get_all_groups()
     ]
 
-    # Get audit logs (limited to 100 most recent)
-    audit_logs, total_count = group_manager.get_audit_logs(limit=100)
+    # Get audit logs (limited to 100 most recent, exclude auth events per AC5)
+    audit_logs, total_count = group_manager.get_audit_logs(
+        limit=100, exclude_target_type="auth"
+    )
     for log in audit_logs:
         log["timestamp"] = _format_datetime_display(
             log.get("timestamp"), "%Y-%m-%d %H:%M:%S"
@@ -1537,6 +1539,7 @@ def groups_audit_logs_partial(
         date_from=date_from or None,
         date_to=date_to or None,
         limit=100,
+        exclude_target_type="auth",
     )
 
     for log in audit_logs:
@@ -4764,6 +4767,8 @@ def _get_current_config() -> dict:
         ContentLimitsConfig,
         # Story #223 - Indexing configuration
         IndexingConfig,
+        # Story #400 - Data retention configuration
+        DataRetentionConfig,
     )
     from dataclasses import asdict
 
@@ -4969,6 +4974,8 @@ def _get_current_config() -> dict:
                 "metadata_display_order": "",
             },
         ),
+        # Story #400: Data retention configuration
+        "data_retention": settings.get("data_retention", asdict(DataRetentionConfig())),
     }
 
 
@@ -5755,15 +5762,33 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             except (ValueError, TypeError):
                 return "Subprocess Max Workers must be a valid number"
 
-        # Story #360: Job history retention period
-        cleanup_max_age = data.get("cleanup_max_age_hours")
-        if cleanup_max_age is not None:
+    elif section == "data_retention":
+        # Story #400: Data retention configuration validation
+        retention_fields = [
+            ("operational_logs_retention_hours", "Operational Logs Retention"),
+            ("audit_logs_retention_hours", "Audit Logs Retention"),
+            ("sync_jobs_retention_hours", "Sync Jobs Retention"),
+            ("dep_map_history_retention_hours", "Dependency Map History Retention"),
+            ("background_jobs_retention_hours", "Background Jobs Retention"),
+        ]
+        for field_name, label in retention_fields:
+            field_value = data.get(field_name)
+            if field_value is not None:
+                try:
+                    val_int = int(field_value)
+                    if val_int < 1 or val_int > 8760:
+                        return f"{label} hours must be between 1 and 8760"
+                except (ValueError, TypeError):
+                    return f"{label} hours must be a valid number"
+
+        cleanup_interval = data.get("cleanup_interval_hours")
+        if cleanup_interval is not None:
             try:
-                val_int = int(cleanup_max_age)
-                if val_int < 1 or val_int > 8760:
-                    return "Cleanup Max Age Hours must be between 1 and 8760"
+                val_int = int(cleanup_interval)
+                if val_int < 1 or val_int > 24:
+                    return "Cleanup Interval hours must be between 1 and 24"
             except (ValueError, TypeError):
-                return "Cleanup Max Age Hours must be a valid number"
+                return "Cleanup Interval hours must be a valid number"
 
     elif section == "omni_search":
         # Story #28: Omni-search configuration
@@ -6590,6 +6615,8 @@ async def update_config_section(
         "indexing",
         # Story #323 - Wiki metadata fields configuration
         "wiki",
+        # Story #400 - Data retention configuration
+        "data_retention",
     ]
     if section not in valid_sections:
         return _create_config_page_response(
