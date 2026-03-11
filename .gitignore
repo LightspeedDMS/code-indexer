@@ -108,6 +108,7 @@ code-indexing-structure.md
 
 # Development and debugging scripts (should not be committed)
 debug_*.py
+!src/code_indexer/server/routers/debug_routes.py
 test_*_quick.py
 experiment/
 experiments/

@@ -460,6 +460,173 @@ function saveLlmCredsConfig() {
 
 <!-- Health Monitoring Settings Section (Story #3 Phase 2) -->
 
+<details class="config-section" id="section-background-jobs">
+    <summary>
+        <h2>Background Task Workers</h2>
+    </summary>
+    <article>
+        <p class="section-description">Controls the <strong>BackgroundJobManager</strong> for async background tasks. <strong>Affected operations:</strong> Add Golden Repository, Remove Golden Repository, SCIP Self-Healing, and SCIP index generation. <strong>Subprocess Max Workers</strong> controls parallelism of external process execution (ripgrep/grep for regex search). These are separate from SyncJob queue operations.</p>
+        <!-- Display Mode -->
+        <div id="display-background-jobs">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Max Concurrent Background Jobs</td>
+                        <td class="config-value">{{ config.background_jobs.max_concurrent_background_jobs }}</td>
+                        <td class="config-note">
+                            {% if 'max_concurrent_background_jobs' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Maximum number of concurrent background jobs (default: 5)</small>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Subprocess Max Workers</td>
+                        <td class="config-value">{{ config.background_jobs.subprocess_max_workers }}</td>
+                        <td class="config-note">
+                            {% if 'subprocess_max_workers' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Max concurrent workers for subprocess operations like regex search (default: 2)</small>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('background-jobs')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-background-jobs" method="post" action="/admin/config/background_jobs" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.background_jobs %}
+            <div class="validation-error">{{ validation_errors.background_jobs }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="max-concurrent-background-jobs">
+                    Max Concurrent Background Jobs
+                    <input type="number" id="max-concurrent-background-jobs" name="max_concurrent_background_jobs" value="{{ config.background_jobs.max_concurrent_background_jobs }}" min="1" max="100">
+                    <small>Range: 1-100 jobs (default: 5). Jobs exceeding this limit stay in PENDING until a slot is available.</small>
+                </label>
+                <label for="subprocess-max-workers">
+                    Subprocess Max Workers
+                    <input type="number" id="subprocess-max-workers" name="subprocess_max_workers" value="{{ config.background_jobs.subprocess_max_workers }}" min="1" max="50">
+                    <small>Range: 1-50 workers (default: 2). Controls parallelism of subprocess-based operations like regex search.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('background-jobs')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+<!-- Data Retention Settings Section (Story #400) -->
+<details class="config-section" id="section-data-retention">
+    <summary>
+        <h2>Data Retention</h2>
+    </summary>
+    <article>
+        <p class="section-description">Controls how long data is kept in each of the 5 data stores before automatic cleanup. All values are in hours. <strong>Cleanup Interval</strong> controls how often the periodic cleanup job runs.</p>
+        <!-- Display Mode -->
+        <div id="display-data-retention">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Operational Logs Retention (hours)</td>
+                        <td class="config-value">{{ config.data_retention.operational_logs_retention_hours }}</td>
+                        <td class="config-note">
+                            <small>Retention period for operational server logs (default: 168, i.e. 7 days)</small>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Audit Logs Retention (hours)</td>
+                        <td class="config-value">{{ config.data_retention.audit_logs_retention_hours }}</td>
+                        <td class="config-note">
+                            <small>Retention period for audit logs (default: 2160, i.e. 90 days)</small>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Sync Jobs Retention (hours)</td>
+                        <td class="config-value">{{ config.data_retention.sync_jobs_retention_hours }}</td>
+                        <td class="config-note">
+                            <small>Retention period for sync job history (default: 720, i.e. 30 days)</small>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Dependency Map History Retention (hours)</td>
+                        <td class="config-value">{{ config.data_retention.dep_map_history_retention_hours }}</td>
+                        <td class="config-note">
+                            <small>Retention period for dependency map history (default: 2160, i.e. 90 days)</small>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Background Jobs Retention (hours)</td>
+                        <td class="config-value">{{ config.data_retention.background_jobs_retention_hours }}</td>
+                        <td class="config-note">
+                            <small>Retention period for completed/failed/cancelled background job history (default: 720, i.e. 30 days)</small>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Cleanup Interval (hours)</td>
+                        <td class="config-value">{{ config.data_retention.cleanup_interval_hours }}</td>
+                        <td class="config-note">
+                            <small>How often the periodic cleanup job runs (default: 1 hour, range: 1-24)</small>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('data-retention')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-data-retention" method="post" action="/admin/config/data_retention" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.data_retention %}
+            <div class="validation-error">{{ validation_errors.data_retention }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="operational-logs-retention-hours">
+                    Operational Logs Retention (hours)
+                    <input type="number" id="operational-logs-retention-hours" name="operational_logs_retention_hours" value="{{ config.data_retention.operational_logs_retention_hours }}" min="1" max="8760">
+                    <small>Range: 1-8760 hours (default: 168, i.e. 7 days).</small>
+                </label>
+                <label for="audit-logs-retention-hours">
+                    Audit Logs Retention (hours)
+                    <input type="number" id="audit-logs-retention-hours" name="audit_logs_retention_hours" value="{{ config.data_retention.audit_logs_retention_hours }}" min="1" max="8760">
+                    <small>Range: 1-8760 hours (default: 2160, i.e. 90 days).</small>
+                </label>
+                <label for="sync-jobs-retention-hours">
+                    Sync Jobs Retention (hours)
+                    <input type="number" id="sync-jobs-retention-hours" name="sync_jobs_retention_hours" value="{{ config.data_retention.sync_jobs_retention_hours }}" min="1" max="8760">
+                    <small>Range: 1-8760 hours (default: 720, i.e. 30 days).</small>
+                </label>
+                <label for="dep-map-history-retention-hours">
+                    Dependency Map History Retention (hours)
+                    <input type="number" id="dep-map-history-retention-hours" name="dep_map_history_retention_hours" value="{{ config.data_retention.dep_map_history_retention_hours }}" min="1" max="8760">
+                    <small>Range: 1-8760 hours (default: 2160, i.e. 90 days).</small>
+                </label>
+                <label for="background-jobs-retention-hours">
+                    Background Jobs Retention (hours)
+                    <input type="number" id="background-jobs-retention-hours" name="background_jobs_retention_hours" value="{{ config.data_retention.background_jobs_retention_hours }}" min="1" max="8760">
+                    <small>Range: 1-8760 hours (default: 720, i.e. 30 days). Maximum age for completed/failed/cancelled job history before cleanup.</small>
+                </label>
+                <label for="cleanup-interval-hours">
+                    Cleanup Interval (hours)
+                    <input type="number" id="cleanup-interval-hours" name="cleanup_interval_hours" value="{{ config.data_retention.cleanup_interval_hours }}" min="1" max="24">
+                    <small>Range: 1-24 hours (default: 1). How often the periodic cleanup job runs.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('data-retention')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -873,7 +1040,7 @@ function saveLlmCredsConfig() {
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="config-group">
     <h3 class="config-group-header">Repository Management</h3>
-    
+
 <!-- Golden Repos Settings Section -->
 <details class="config-section" id="section-golden_repos">
     <summary>
@@ -1107,175 +1274,6 @@ function saveLlmCredsConfig() {
             <div class="form-actions">
                 <button type="submit" class="primary">Save</button>
                 <button type="button" class="secondary" onclick="cancelEdit('job_queue')">Cancel</button>
-            </div>
-        </form>
-    </article>
-</details>
-
-
-<details class="config-section" id="section-background-jobs">
-    <summary>
-        <h2>Background Task Workers</h2>
-    </summary>
-    <article>
-        <p class="section-description">Controls the <strong>BackgroundJobManager</strong> for async background tasks. <strong>Affected operations:</strong> Add Golden Repository, Remove Golden Repository, SCIP Self-Healing, and SCIP index generation. <strong>Subprocess Max Workers</strong> controls parallelism of external process execution (ripgrep/grep for regex search). These are separate from SyncJob queue operations.</p>
-        <!-- Display Mode -->
-        <div id="display-background-jobs">
-            <table class="config-table">
-                <tbody>
-                    <tr>
-                        <td class="config-label">Max Concurrent Background Jobs</td>
-                        <td class="config-value">{{ config.background_jobs.max_concurrent_background_jobs }}</td>
-                        <td class="config-note">
-                            {% if 'max_concurrent_background_jobs' in restart_required_fields %}
-                            <small class="restart-note">Requires server restart</small>
-                            {% endif %}
-                            <small>Maximum number of concurrent background jobs (default: 5)</small>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Subprocess Max Workers</td>
-                        <td class="config-value">{{ config.background_jobs.subprocess_max_workers }}</td>
-                        <td class="config-note">
-                            {% if 'subprocess_max_workers' in restart_required_fields %}
-                            <small class="restart-note">Requires server restart</small>
-                            {% endif %}
-                            <small>Max concurrent workers for subprocess operations like regex search (default: 2)</small>
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
-            <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('background-jobs')">Edit</button>
-            </div>
-        </div>
-        <!-- Edit Mode -->
-        <form id="edit-form-background-jobs" method="post" action="/admin/config/background_jobs" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.background_jobs %}
-            <div class="validation-error">{{ validation_errors.background_jobs }}</div>
-            {% endif %}
-            <div class="form-grid">
-                <label for="max-concurrent-background-jobs">
-                    Max Concurrent Background Jobs
-                    <input type="number" id="max-concurrent-background-jobs" name="max_concurrent_background_jobs" value="{{ config.background_jobs.max_concurrent_background_jobs }}" min="1" max="100">
-                    <small>Range: 1-100 jobs (default: 5). Jobs exceeding this limit stay in PENDING until a slot is available.</small>
-                </label>
-                <label for="subprocess-max-workers">
-                    Subprocess Max Workers
-                    <input type="number" id="subprocess-max-workers" name="subprocess_max_workers" value="{{ config.background_jobs.subprocess_max_workers }}" min="1" max="50">
-                    <small>Range: 1-50 workers (default: 2). Controls parallelism of subprocess-based operations like regex search.</small>
-                </label>
-            </div>
-            <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('background-jobs')">Cancel</button>
-            </div>
-        </form>
-    </article>
-</details>
-
-
-<!-- Data Retention Settings Section (Story #400) -->
-<details class="config-section" id="section-data-retention">
-    <summary>
-        <h2>Data Retention</h2>
-    </summary>
-    <article>
-        <p class="section-description">Controls how long data is kept in each of the 5 data stores before automatic cleanup. All values are in hours. <strong>Cleanup Interval</strong> controls how often the periodic cleanup job runs.</p>
-        <!-- Display Mode -->
-        <div id="display-data-retention">
-            <table class="config-table">
-                <tbody>
-                    <tr>
-                        <td class="config-label">Operational Logs Retention (hours)</td>
-                        <td class="config-value">{{ config.data_retention.operational_logs_retention_hours }}</td>
-                        <td class="config-note">
-                            <small>Retention period for operational server logs (default: 168, i.e. 7 days)</small>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Audit Logs Retention (hours)</td>
-                        <td class="config-value">{{ config.data_retention.audit_logs_retention_hours }}</td>
-                        <td class="config-note">
-                            <small>Retention period for audit logs (default: 2160, i.e. 90 days)</small>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Sync Jobs Retention (hours)</td>
-                        <td class="config-value">{{ config.data_retention.sync_jobs_retention_hours }}</td>
-                        <td class="config-note">
-                            <small>Retention period for sync job history (default: 720, i.e. 30 days)</small>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Dependency Map History Retention (hours)</td>
-                        <td class="config-value">{{ config.data_retention.dep_map_history_retention_hours }}</td>
-                        <td class="config-note">
-                            <small>Retention period for dependency map history (default: 2160, i.e. 90 days)</small>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Background Jobs Retention (hours)</td>
-                        <td class="config-value">{{ config.data_retention.background_jobs_retention_hours }}</td>
-                        <td class="config-note">
-                            <small>Retention period for completed/failed/cancelled background job history (default: 720, i.e. 30 days)</small>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Cleanup Interval (hours)</td>
-                        <td class="config-value">{{ config.data_retention.cleanup_interval_hours }}</td>
-                        <td class="config-note">
-                            <small>How often the periodic cleanup job runs (default: 1 hour, range: 1-24)</small>
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
-            <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('data-retention')">Edit</button>
-            </div>
-        </div>
-        <!-- Edit Mode -->
-        <form id="edit-form-data-retention" method="post" action="/admin/config/data_retention" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.data_retention %}
-            <div class="validation-error">{{ validation_errors.data_retention }}</div>
-            {% endif %}
-            <div class="form-grid">
-                <label for="operational-logs-retention-hours">
-                    Operational Logs Retention (hours)
-                    <input type="number" id="operational-logs-retention-hours" name="operational_logs_retention_hours" value="{{ config.data_retention.operational_logs_retention_hours }}" min="1" max="8760">
-                    <small>Range: 1-8760 hours (default: 168, i.e. 7 days).</small>
-                </label>
-                <label for="audit-logs-retention-hours">
-                    Audit Logs Retention (hours)
-                    <input type="number" id="audit-logs-retention-hours" name="audit_logs_retention_hours" value="{{ config.data_retention.audit_logs_retention_hours }}" min="1" max="8760">
-                    <small>Range: 1-8760 hours (default: 2160, i.e. 90 days).</small>
-                </label>
-                <label for="sync-jobs-retention-hours">
-                    Sync Jobs Retention (hours)
-                    <input type="number" id="sync-jobs-retention-hours" name="sync_jobs_retention_hours" value="{{ config.data_retention.sync_jobs_retention_hours }}" min="1" max="8760">
-                    <small>Range: 1-8760 hours (default: 720, i.e. 30 days).</small>
-                </label>
-                <label for="dep-map-history-retention-hours">
-                    Dependency Map History Retention (hours)
-                    <input type="number" id="dep-map-history-retention-hours" name="dep_map_history_retention_hours" value="{{ config.data_retention.dep_map_history_retention_hours }}" min="1" max="8760">
-                    <small>Range: 1-8760 hours (default: 2160, i.e. 90 days).</small>
-                </label>
-                <label for="background-jobs-retention-hours">
-                    Background Jobs Retention (hours)
-                    <input type="number" id="background-jobs-retention-hours" name="background_jobs_retention_hours" value="{{ config.data_retention.background_jobs_retention_hours }}" min="1" max="8760">
-                    <small>Range: 1-8760 hours (default: 720, i.e. 30 days). Maximum age for completed/failed/cancelled job history before cleanup.</small>
-                </label>
-                <label for="cleanup-interval-hours">
-                    Cleanup Interval (hours)
-                    <input type="number" id="cleanup-interval-hours" name="cleanup_interval_hours" value="{{ config.data_retention.cleanup_interval_hours }}" min="1" max="24">
-                    <small>Range: 1-24 hours (default: 1). How often the periodic cleanup job runs.</small>
-                </label>
-            </div>
-            <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('data-retention')">Cancel</button>
             </div>
         </form>
     </article>

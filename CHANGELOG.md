@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.7
+
+### Features
+
+- feat: Debug memory snapshot endpoints for runtime memory diagnostics (Story #405). Two new localhost-only endpoints: `GET /debug/memory-snapshot` returns object counts and sizes by type (top 100) with module-qualified names and self-monitoring overhead reporting; `GET /debug/memory-compare?baseline={timestamp}` diffs current memory against a prior snapshot. Secured by network restriction (127.0.0.1/::1 only, no auth required, 403 for external IPs). 57 new unit tests across 4 test files.
+
 ## v9.5.6
 
 ### Security

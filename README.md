@@ -2,7 +2,7 @@
 
 AI-powered semantic code search for your codebase. Find code by meaning, not just keywords.
 
-**Version 9.5.5** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
+**Version 9.5.7** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
 
 ## Quick Navigation
 
@@ -348,6 +348,7 @@ cidx-server start       # Start multi-user server
 - **Automatic Issue Creation**: Detected bugs automatically create GitHub issues with reproduction steps
 - **Actionable Focus**: Filters configuration noise, reports only development-actionable bugs
 - **Manual Trigger**: On-demand scans via admin API endpoint
+- **Debug Memory Snapshot** (v9.5.7+): Localhost-only endpoints for diagnosing memory leaks without restarting the server. `GET /debug/memory-snapshot` returns object counts and sizes by type (top 100), with module-qualified names and self-monitoring overhead. `GET /debug/memory-compare?baseline={timestamp}` diffs against a prior snapshot. Secured by network restriction (127.0.0.1/::1 only, no auth required).
 
 **Authentication & Authorization**:
 - OAuth 2.0 and OIDC (OpenID Connect) support
