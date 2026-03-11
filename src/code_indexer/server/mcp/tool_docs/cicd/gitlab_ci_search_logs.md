@@ -18,6 +18,10 @@ inputSchema:
     base_url:
       type: string
       description: 'Optional GitLab instance base URL (default: https://gitlab.com)'
+    case_sensitive:
+      type: boolean
+      description: 'Case-sensitive pattern matching (default: true)'
+      default: true
   required:
   - project_id
   - pipeline_id

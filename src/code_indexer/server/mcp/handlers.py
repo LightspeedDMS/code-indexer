@@ -9441,9 +9441,10 @@ async def handle_gitlab_ci_list_pipelines(
         ref = args.get("ref")
         status = args.get("status")
         limit = _coerce_int(args.get("limit"), 10)
+        base_url = args.get("base_url", "https://gitlab.com")
 
         # Create client and list pipelines (CRITICAL: keyword)
-        client = GitLabCIClient(token)
+        client = GitLabCIClient(token, base_url=base_url)
         pipelines = await client.list_pipelines(
             project_id=project_id, ref=ref, status=status
         )
@@ -9549,8 +9550,11 @@ async def handle_gitlab_ci_get_pipeline(
                 }
             )
 
+        # Extract optional parameters
+        base_url = args.get("base_url", "https://gitlab.com")
+
         # Create client and get pipeline details (CRITICAL: keyword)
-        client = GitLabCIClient(token)
+        client = GitLabCIClient(token, base_url=base_url)
         pipeline_info = await client.get_pipeline(
             project_id=project_id, pipeline_id=pipeline_id
         )
@@ -9660,9 +9664,10 @@ async def handle_gitlab_ci_search_logs(
 
         # Extract optional parameters
         case_sensitive = args.get("case_sensitive", True)
+        base_url = args.get("base_url", "https://gitlab.com")
 
         # Create client and search logs (CRITICAL: keyword)
-        client = GitLabCIClient(token)
+        client = GitLabCIClient(token, base_url=base_url)
         matches = await client.search_logs(
             project_id=project_id,
             pipeline_id=pipeline_id,
@@ -9774,8 +9779,11 @@ async def handle_gitlab_ci_get_job_logs(
                 }
             )
 
+        # Extract optional parameters
+        base_url = args.get("base_url", "https://gitlab.com")
+
         # Create client and get job logs (CRITICAL: keyword)
-        client = GitLabCIClient(token)
+        client = GitLabCIClient(token, base_url=base_url)
         logs = await client.get_job_logs(project_id=project_id, job_id=job_id)
 
         return _mcp_response(
@@ -9874,8 +9882,11 @@ async def handle_gitlab_ci_retry_pipeline(
                 }
             )
 
+        # Extract optional parameters
+        base_url = args.get("base_url", "https://gitlab.com")
+
         # Create client and retry pipeline (CRITICAL: keyword)
-        client = GitLabCIClient(token)
+        client = GitLabCIClient(token, base_url=base_url)
         result = await client.retry_pipeline(
             project_id=project_id, pipeline_id=pipeline_id
         )
@@ -9977,8 +9988,11 @@ async def handle_gitlab_ci_cancel_pipeline(
                 }
             )
 
+        # Extract optional parameters
+        base_url = args.get("base_url", "https://gitlab.com")
+
         # Create client and cancel pipeline (CRITICAL: keyword)
-        client = GitLabCIClient(token)
+        client = GitLabCIClient(token, base_url=base_url)
         result = await client.cancel_pipeline(
             project_id=project_id, pipeline_id=pipeline_id
         )

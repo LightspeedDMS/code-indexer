@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.5
+
+### Bug Fixes
+
+- fix: MCP parameter audit -- 11 schema/handler mismatches resolved (Story #403). P0: All 6 GitLab CI handlers now read and pass `base_url` to GitLabCIClient, enabling self-hosted GitLab instances. P1: Removed `aggregation_mode` from git_log, git_search_commits, regex_search schemas (only used by search_code). P3: Added `case_sensitive` to gitlab_ci_search_logs schema (handler already reads it). 12 new unit tests.
+
 ## v9.5.4
 
 ### Bug Fixes

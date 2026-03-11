@@ -35,22 +35,13 @@ inputSchema:
       default: 50
       minimum: 1
       maximum: 500
-    aggregation_mode:
-      type: string
-      enum:
-      - global
-      - per_repo
-      description: 'Multi-repo aggregation. ''global'' (default): top N by score across all repos. ''per_repo'': distributes
-        N evenly across repos. IMPORTANT: limit=10 with 3 repos returns 10 TOTAL (not 30). per_repo distributes as 4+3+3=10.'
-      default: global
     response_format:
       type: string
+      description: 'Response format for multi-repo queries: flat (default) or grouped by repository'
       enum:
-      - flat
-      - grouped
+        - flat
+        - grouped
       default: flat
-      description: 'Multi-repo result format. ''flat'' (default): single array with source_repo field per result. ''grouped'':
-        results organized under results_by_repo by repository.'
   required:
   - repository_alias
   - query
