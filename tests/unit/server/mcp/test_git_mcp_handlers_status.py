@@ -423,6 +423,8 @@ class TestGitCommitHandler:
             "Test commit",
             "testuser@example.com",
             "testuser",  # Derived from username
+            committer_email=None,
+            committer_name=None,
         )
 
     def test_git_commit_missing_parameters(self, mock_user):
@@ -458,3 +460,214 @@ class TestGitCommitHandler:
         assert data["success"] is False
         assert data["error_type"] == "GitCommandError"
         assert "nothing to commit" in data["stderr"]
+
+
+class TestGitCommitHandlerCredentialLookup:
+    """Test git_commit MCP handler credential lookup for committer identity (Story #402).
+
+    Verifies that git_commit handler:
+    - Uses PAT credential identity (git_user_email, git_user_name) for both author and committer
+    - Falls back gracefully when no credential is registered
+    - Does NOT block the commit when credential lookup raises an exception
+    - Handles partial credentials (email only, no name)
+    - Treats empty string git_user_email as absent (no override)
+    """
+
+    def test_git_commit_with_credential_uses_credential_identity(
+        self, mock_user, mock_git_service, mock_repo_manager
+    ):
+        """Scenario 1: credential with email+name -> both passed to service as committer."""
+        from code_indexer.server.mcp import handlers
+
+        credential = {
+            "git_user_name": "Alice Smith",
+            "git_user_email": "alice@gitlab.com",
+            "token": "glpat-secret",
+        }
+
+        mock_git_service.git_commit.return_value = {
+            "success": True,
+            "commit_hash": "def456",
+            "message": "Feature work",
+            "author": "alice@gitlab.com",
+            "committer": "alice@gitlab.com",
+        }
+
+        params = {"repository_alias": "test-repo", "message": "Feature work"}
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_pat_credential_for_remote",
+            return_value=(credential, "https://gitlab.com/alice/repo.git", None),
+        ):
+            mcp_response = handlers.git_commit(params, mock_user)
+
+        data = _extract_response_data(mcp_response)
+
+        assert data["success"] is True
+
+        # Verify service was called with credential identity as committer params
+        mock_git_service.git_commit.assert_called_once_with(
+            Path("/tmp/test-repo"),
+            "Feature work",
+            "alice@gitlab.com",  # author_email from credential
+            "Alice Smith",       # author_name from credential
+            committer_email="alice@gitlab.com",
+            committer_name="Alice Smith",
+        )
+
+    def test_git_commit_without_credential_falls_back_to_user_identity(
+        self, mock_user, mock_git_service, mock_repo_manager
+    ):
+        """Scenario 2: no credential registered -> falls back to user.email / username."""
+        from code_indexer.server.mcp import handlers
+
+        mock_git_service.git_commit.return_value = {
+            "success": True,
+            "commit_hash": "abc123",
+            "message": "Test commit",
+            "author": "testuser@example.com",
+            "committer": "testuser@example.com",
+        }
+
+        params = {"repository_alias": "test-repo", "message": "Test commit"}
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_pat_credential_for_remote",
+            return_value=(None, None, "No git credential configured for github.com"),
+        ):
+            mcp_response = handlers.git_commit(params, mock_user)
+
+        data = _extract_response_data(mcp_response)
+
+        assert data["success"] is True
+
+        # Verify service called with fallback identity (committer_email/committer_name as None)
+        mock_git_service.git_commit.assert_called_once_with(
+            Path("/tmp/test-repo"),
+            "Test commit",
+            "testuser@example.com",  # user.email fallback
+            "testuser",              # username fallback
+            committer_email=None,
+            committer_name=None,
+        )
+
+    def test_git_commit_credential_lookup_exception_does_not_block_commit(
+        self, mock_user, mock_git_service, mock_repo_manager
+    ):
+        """Scenario 3: credential lookup raises exception -> commit proceeds with fallback."""
+        from code_indexer.server.mcp import handlers
+
+        mock_git_service.git_commit.return_value = {
+            "success": True,
+            "commit_hash": "abc123",
+            "message": "Test commit",
+            "author": "testuser@example.com",
+            "committer": "testuser@example.com",
+        }
+
+        params = {"repository_alias": "test-repo", "message": "Test commit"}
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_pat_credential_for_remote",
+            side_effect=Exception("Database connection failed"),
+        ):
+            mcp_response = handlers.git_commit(params, mock_user)
+
+        data = _extract_response_data(mcp_response)
+
+        # Commit must succeed despite credential lookup failure
+        assert data["success"] is True
+
+        # Verify service was still called with fallback identity
+        mock_git_service.git_commit.assert_called_once_with(
+            Path("/tmp/test-repo"),
+            "Test commit",
+            "testuser@example.com",
+            "testuser",
+            committer_email=None,
+            committer_name=None,
+        )
+
+    def test_git_commit_partial_credential_email_only_uses_email_name_falls_back(
+        self, mock_user, mock_git_service, mock_repo_manager
+    ):
+        """Scenario 5: credential has email but no name -> email from credential, name fallback."""
+        from code_indexer.server.mcp import handlers
+
+        credential = {
+            "git_user_email": "bob@gitlab.com",
+            # No git_user_name
+            "token": "glpat-secret",
+        }
+
+        mock_git_service.git_commit.return_value = {
+            "success": True,
+            "commit_hash": "abc123",
+            "message": "Test commit",
+            "author": "bob@gitlab.com",
+            "committer": "bob@gitlab.com",
+        }
+
+        params = {"repository_alias": "test-repo", "message": "Test commit"}
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_pat_credential_for_remote",
+            return_value=(credential, "https://gitlab.com/bob/repo.git", None),
+        ):
+            mcp_response = handlers.git_commit(params, mock_user)
+
+        data = _extract_response_data(mcp_response)
+
+        assert data["success"] is True
+
+        # Email from credential, name falls back to username (no git_user_name in credential)
+        mock_git_service.git_commit.assert_called_once_with(
+            Path("/tmp/test-repo"),
+            "Test commit",
+            "bob@gitlab.com",   # author_email from credential
+            "testuser",         # name fallback: no args.author_name, use user.username
+            committer_email="bob@gitlab.com",
+            committer_name=None,  # No name in credential -> None
+        )
+
+    def test_git_commit_empty_string_credential_email_treated_as_absent(
+        self, mock_user, mock_git_service, mock_repo_manager
+    ):
+        """Empty string git_user_email in credential must not override user identity."""
+        from code_indexer.server.mcp import handlers
+
+        credential = {
+            "git_user_email": "",   # Empty -> treat as absent
+            "git_user_name": "Alice",
+            "token": "glpat-secret",
+        }
+
+        mock_git_service.git_commit.return_value = {
+            "success": True,
+            "commit_hash": "abc123",
+            "message": "Test commit",
+            "author": "testuser@example.com",
+            "committer": "testuser@example.com",
+        }
+
+        params = {"repository_alias": "test-repo", "message": "Test commit"}
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_pat_credential_for_remote",
+            return_value=(credential, "https://gitlab.com/alice/repo.git", None),
+        ):
+            mcp_response = handlers.git_commit(params, mock_user)
+
+        data = _extract_response_data(mcp_response)
+
+        assert data["success"] is True
+
+        # Empty email -> treat as no credential email -> fallback to user.email
+        mock_git_service.git_commit.assert_called_once_with(
+            Path("/tmp/test-repo"),
+            "Test commit",
+            "testuser@example.com",  # user.email fallback (credential email was empty)
+            "testuser",              # username fallback
+            committer_email=None,
+            committer_name=None,
+        )

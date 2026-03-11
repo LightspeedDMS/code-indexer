@@ -6964,8 +6964,33 @@ def git_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         user_email = getattr(user, "email", None) or f"{user.username}@cidx.local"
         user_name = args.get("author_name") or user.username
 
+        # Story #402: Look up PAT credential to set committer identity.
+        # Forges like GitLab verify that committer email matches the pusher's verified emails.
+        # Credential lookup failure must NEVER block the commit - wrap in try/except.
+        committer_email: Optional[str] = None
+        committer_name: Optional[str] = None
+        try:
+            credential, _remote_url, _cred_error = _get_pat_credential_for_remote(
+                repo_path, "origin", user.username
+            )
+            if credential and credential.get("git_user_email"):
+                # Use credential identity for both author and committer
+                cred_email = credential["git_user_email"]
+                cred_name = credential.get("git_user_name") or None
+                user_email = cred_email
+                user_name = cred_name or user_name
+                committer_email = cred_email
+                committer_name = cred_name
+        except Exception as e:
+            logger.warning(
+                f"Credential lookup for git_commit committer identity failed (non-blocking): {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
         result = git_operations_service.git_commit(
-            Path(repo_path), message, user_email, user_name
+            Path(repo_path), message, user_email, user_name,
+            committer_email=committer_email,
+            committer_name=committer_name,
         )
         return _mcp_response(result)
 
