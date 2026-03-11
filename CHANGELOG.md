@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.4
+
+### Bug Fixes
+
+- fix: create_pull_request MCP tool no longer requires `token` parameter (Bug #392). The handler already auto-fetches the PAT from stored credentials via `_get_pat_credential_for_remote()`, but the MCP schema listed `token` as required, causing MCP clients to reject requests without it. Removed `token` from the required array and updated the example. Users with registered PAT credentials can now create PRs/MRs without providing a raw token.
+
 ## v9.5.3
 
 ### Bug Fixes

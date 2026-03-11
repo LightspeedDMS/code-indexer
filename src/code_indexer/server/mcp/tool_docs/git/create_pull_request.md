@@ -24,13 +24,12 @@ inputSchema:
       description: Target branch name (the branch to merge into)
     token:
       type: string
-      description: Personal access token for the forge API (GitHub PAT or GitLab PAT)
+      description: 'Personal access token for forge API. Optional: auto-fetched from stored credentials when omitted.'
   required:
   - repository_alias
   - title
   - head
   - base
-  - token
   additionalProperties: false
 outputSchema:
   type: object
@@ -52,4 +51,4 @@ outputSchema:
       description: Error message on failure
 ---
 
-TL;DR: Create a GitHub pull request or GitLab merge request. The forge type is auto-detected from the repository's remote URL. REQUIRES write mode to be active. USE CASES: (1) Open a PR/MR after committing and pushing changes, (2) Create review requests for feature branches. WORKFLOW: enter_write_mode -> create_file/edit_file -> git_stage -> git_commit -> git_push -> create_pull_request -> exit_write_mode. PERMISSIONS: Requires repository:write. EXAMPLE: {"repository_alias": "my-repo", "title": "Add new feature", "body": "Implements...", "head": "feature/my-branch", "base": "main", "token": "ghp_..."} Returns: {"success": true, "pr_url": "https://github.com/org/repo/pull/42", "pr_number": 42, "forge_type": "github"}
+TL;DR: Create a GitHub pull request or GitLab merge request. The forge type is auto-detected from the repository's remote URL. REQUIRES write mode to be active. USE CASES: (1) Open a PR/MR after committing and pushing changes, (2) Create review requests for feature branches. WORKFLOW: enter_write_mode -> create_file/edit_file -> git_stage -> git_commit -> git_push -> create_pull_request -> exit_write_mode. PERMISSIONS: Requires repository:write. EXAMPLE: {"repository_alias": "my-repo", "title": "Add new feature", "body": "Implements...", "head": "feature/my-branch", "base": "main"} Returns: {"success": true, "pr_url": "https://github.com/org/repo/pull/42", "pr_number": 42, "forge_type": "github"}
