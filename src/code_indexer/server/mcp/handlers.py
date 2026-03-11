@@ -7249,7 +7249,7 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     mode = args.get("mode", "mixed")
-    target = args.get("target")
+    target = args.get("commit_hash")
     confirmation_token = args.get("confirmation_token")
 
     try:

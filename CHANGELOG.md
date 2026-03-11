@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.3
+
+### Bug Fixes
+
+- fix: git_reset handler reads MCP parameter `commit_hash` instead of non-existent `target`. Bug #397 (v9.5.1) fixed the handler-to-service call but missed the args extraction: `args.get("target")` should have been `args.get("commit_hash")` to match the MCP tool schema. Result: `commit_hash` parameter was silently ignored, every reset defaulted to HEAD (no-op).
+
 ## v9.5.2
 
 ### Bug Fixes
