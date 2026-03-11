@@ -63,7 +63,11 @@ class TestGitResetHandler:
     def test_git_reset_soft_success(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
-        """Test successful git reset --soft operation."""
+        """Test successful git reset --soft operation.
+
+        Bug #397: MCP schema uses 'commit_hash' (not 'target'). Params must use
+        'commit_hash' to match what the MCP client actually sends.
+        """
         mock_git_service.git_reset.return_value = {
             "success": True,
             "mode": "soft",
@@ -73,7 +77,7 @@ class TestGitResetHandler:
         params = {
             "repository_alias": "test-repo",
             "mode": "soft",
-            "target": "HEAD~1",
+            "commit_hash": "HEAD~1",
         }
 
         mcp_response = handlers.git_reset(params, mock_user)
@@ -102,7 +106,7 @@ class TestGitResetHandler:
         params = {
             "repository_alias": "test-repo",
             "mode": "hard",
-            "target": "HEAD",
+            "commit_hash": "HEAD",
         }
 
         mcp_response = handlers.git_reset(params, mock_user)
@@ -125,7 +129,7 @@ class TestGitResetHandler:
         params = {
             "repository_alias": "test-repo",
             "mode": "hard",
-            "target": "HEAD",
+            "commit_hash": "HEAD",
             "confirmation_token": "ABC123",
         }
 
@@ -141,14 +145,15 @@ class TestGitResetHandler:
             confirmation_token="ABC123",
         )
 
-    def test_git_reset_passes_commit_hash_not_target(
+    def test_git_reset_commit_hash_reaches_service(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
-        """Test that git_reset handler passes commit_hash (not target) to service.
+        """Test that commit_hash sent by MCP client reaches the service layer.
 
-        Bug #397: Handler was calling git_reset(target=target) but service
-        expects commit_hash=commit_hash. This test verifies the correct
-        parameter name is used so the value actually reaches the service.
+        Bug #397: Handler read args.get("target") but MCP schema defines the
+        parameter as "commit_hash". When MCP client sent commit_hash, the handler
+        ignored it (got None) and always reset to HEAD. This test verifies that
+        the value sent as commit_hash in args reaches the service as commit_hash.
         """
         mock_git_service.git_reset.return_value = {
             "success": True,
@@ -159,7 +164,7 @@ class TestGitResetHandler:
         params = {
             "repository_alias": "test-repo",
             "mode": "soft",
-            "target": "abc1234",
+            "commit_hash": "abc1234",
         }
 
         mcp_response = handlers.git_reset(params, mock_user)
