@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.6
+
+### Security
+
+- feat: CI/CD credential security and resilience -- group access control, per-user write tokens, and global PAT fallback (Story #404). All 12 CI/CD MCP handlers (6 GitHub Actions, 6 GitLab CI) now enforce group-based repository access with invisible repo pattern, use per-user PAT exclusively for write operations (retry/cancel), produce INFO-level audit log entries for all write mutations, and fall back from global CI token to personal PAT for read operations. 5 new helper functions, 55 new unit tests, E2E validated against live server.
+
 ## v9.5.5
 
 ### Bug Fixes
