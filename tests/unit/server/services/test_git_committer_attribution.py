@@ -445,7 +445,10 @@ class TestGitCommitCoAuthorValidation:
 
         assert result["success"] is True
         assert result["author"] == "claude-user@anthropic.com"
-        assert result["committer"] == "committer@example.com"
+        # Story #402: When no committer_email is provided, GIT_COMMITTER_EMAIL falls back
+        # to the author email (user_email), overriding the git config committer.
+        # The old Story #641 behavior (committer from git config) is superseded by Story #402.
+        assert result["committer"] == "claude-user@anthropic.com"
         assert "commit_hash" in result
 
 
@@ -505,7 +508,8 @@ class TestActivationWithSSHKeyDiscovery:
 
         # Set up golden repo manager
         golden_repo_manager = GoldenRepoManager(str(data_dir))
-        golden_repo_manager.golden_repos["test-repo"] = GoldenRepo(
+        # Persist to SQLite (get_golden_repo reads from SQLite, not in-memory dict)
+        golden_repo_manager._sqlite_backend.add_repo(
             alias="test-repo",
             repo_url="git@github.com:user/repo.git",
             default_branch="main",

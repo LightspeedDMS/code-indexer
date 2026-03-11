@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.2
+
+### Bug Fixes
+
+- fix: git_commit committer identity now uses user's registered PAT credential (Story #402). Previously, git_commit only set GIT_AUTHOR_* from the credential, leaving GIT_COMMITTER_* to fall back to the repo's local git config (set during activation via SSH key discovery). This caused push rejections on identity-strict forges like GitLab where committer email must match the pusher's verified emails. Now mirrors the git_push pattern: both author and committer are set from the PAT credential when available, with graceful fallback to author identity when no credential exists. Validation reordered to run before I/O.
+
 ## v9.5.1
 
 ### Bug Fixes

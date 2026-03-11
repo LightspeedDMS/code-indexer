@@ -1163,13 +1163,17 @@ class GitOperationsService:
         message: str,
         user_email: str,
         user_name: Optional[str] = None,
+        committer_email: Optional[str] = None,
+        committer_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Create a git commit with dual attribution (Story #641).
+        Create a git commit with dual attribution (Story #641, Story #402).
 
         Uses dual attribution model:
         - Git Author: user_email parameter (co_author_email - actual Claude.ai user)
-        - Git Committer: From repository's git config (set during activation via SSH key discovery)
+        - Git Committer: committer_email/committer_name if provided (from PAT credential,
+          Story #402), otherwise falls back to author identity (user_email/user_name).
+          This ensures forges like GitLab that verify committer email accept the commit.
         - Commit message: Injects AUTHOR prefix for audit trail
 
         Args:
@@ -1177,6 +1181,10 @@ class GitOperationsService:
             message: Commit message (user's actual message)
             user_email: MANDATORY co_author_email (actual Claude.ai user) - becomes Git author
             user_name: Optional user name (derived from email if not provided)
+            committer_email: Optional committer email from PAT credential. Falls back to
+                user_email when None or empty.
+            committer_name: Optional committer name from PAT credential. Falls back to
+                user_name when None.
 
         Returns:
             Dict with success, commit_hash, message, author, and committer
@@ -1186,6 +1194,29 @@ class GitOperationsService:
             ValueError: If user_email is missing, empty, has invalid format, or .code-indexer files are staged
         """
         try:
+            # Story #641 AC #3: Validate co_author_email parameter is MANDATORY
+            # All parameter validation must happen before any I/O operations
+            if user_email is None or user_email == "":
+                raise ValueError(
+                    "co_author_email parameter is required and cannot be None or empty"
+                )
+
+            # Story #641 AC #4: Validate user_email format (RFC 5322 basic format)
+            email_pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+            if not re.match(email_pattern, user_email):
+                raise ValueError(
+                    f"Invalid email format for co_author_email: {user_email}"
+                )
+
+            # Derive author name from email if not provided
+            if not user_name:
+                user_name = user_email.split("@")[0]
+
+            # Validate user_name (alphanumeric + space, hyphen, underscore only)
+            name_pattern = r"^[a-zA-Z0-9 _-]+$"
+            if not re.match(name_pattern, user_name):
+                raise ValueError(f"Invalid user name format: {user_name}")
+
             # Check for staged .code-indexer files before committing
             staged_result = run_git_command(
                 ["git", "diff", "--cached", "--name-only"],
@@ -1211,30 +1242,6 @@ class GitOperationsService:
                     f"These files should never be committed. Blocked files: {forbidden_staged}"
                 )
 
-            # Story #641 AC #3: Validate co_author_email parameter is MANDATORY
-            if user_email is None or user_email == "":
-                raise ValueError(
-                    "co_author_email parameter is required and cannot be None or empty"
-                )
-
-            # Story #641 AC #4: Validate user_email format (RFC 5322 basic format)
-            import re
-
-            email_pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-            if not re.match(email_pattern, user_email):
-                raise ValueError(
-                    f"Invalid email format for co_author_email: {user_email}"
-                )
-
-            # Derive author name from email if not provided
-            if not user_name:
-                user_name = user_email.split("@")[0]
-
-            # Validate user_name (alphanumeric + space, hyphen, underscore only)
-            name_pattern = r"^[a-zA-Z0-9 _-]+$"
-            if not re.match(name_pattern, user_name):
-                raise ValueError(f"Invalid user name format: {user_name}")
-
             # Sanitize user message to prevent trailer injection
             # Remove any lines that look like our trailers to prevent forgery
             sanitized_lines = []
@@ -1252,11 +1259,14 @@ class GitOperationsService:
             attributed_message = f"{sanitized_message}\n\nActual-Author: {user_email}\nCommitted-Via: CIDX API"
 
             # Story #641 AC #5: Set Git Author via environment variables
-            # Git Committer comes from repository's git config (set during activation)
+            # Story #402: Set Git Committer from PAT credential identity (committer_email/
+            # committer_name), falling back to author identity when not provided.
+            # This ensures forges like GitLab that verify committer email accept the commit.
             env = os.environ.copy()
             env["GIT_AUTHOR_NAME"] = user_name
             env["GIT_AUTHOR_EMAIL"] = user_email
-            # DO NOT set GIT_COMMITTER_* - let git use repository config
+            env["GIT_COMMITTER_EMAIL"] = committer_email if committer_email else user_email
+            env["GIT_COMMITTER_NAME"] = committer_name if committer_name else user_name
 
             cmd = ["git", "commit", "-m", attributed_message]
 
