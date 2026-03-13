@@ -14,23 +14,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
 logger = logging.getLogger(__name__)
 
 # Rows deleted per batch to avoid long-running transactions
 _BATCH_SIZE = 1000
-
-
-class _PatchableConnection(sqlite3.Connection):
-    """
-    sqlite3.Connection subclass that re-exposes `execute` as a Python-level
-    instance method. In CPython 3.9, `sqlite3.Connection.execute` is a C
-    slot (read-only descriptor), which prevents monkey-patching in tests.
-    By defining `execute` in a Python subclass, the attribute becomes a
-    regular Python attribute on instances and is freely re-assignable.
-    """
-
-    def execute(self, sql: str, parameters=()) -> sqlite3.Cursor:  # type: ignore[override]
-        return super().execute(sql, parameters)
 
 
 class DataRetentionScheduler:
@@ -263,18 +252,19 @@ class DataRetentionScheduler:
         )
 
         total_deleted = 0
+        manager = DatabaseConnectionManager.get_instance(str(db_path))
         try:
-            conn = sqlite3.connect(str(db_path), factory=_PatchableConnection)
-            try:
-                while True:
+            while True:
+                rows_in_batch: list = [0]
+
+                def _do_batch(conn: sqlite3.Connection) -> None:
                     conn.execute(delete_sql)
-                    rows = conn.execute("SELECT changes()").fetchone()[0]
-                    conn.commit()
-                    if rows == 0:
-                        break
-                    total_deleted += rows
-            finally:
-                conn.close()
+                    rows_in_batch[0] = conn.execute("SELECT changes()").fetchone()[0]
+
+                manager.execute_atomic(_do_batch)
+                if rows_in_batch[0] == 0:
+                    break
+                total_deleted += rows_in_batch[0]
         except sqlite3.OperationalError as e:
             if "no such table" in str(e).lower():
                 logger.debug(

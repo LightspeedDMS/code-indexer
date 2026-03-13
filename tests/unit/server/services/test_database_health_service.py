@@ -1,17 +1,24 @@
 """
 Tests for DatabaseHealthService, specifically:
 - Story #18: Add database size to tooltip
+- Bug #435: _check_not_locked must use an independent sqlite3.connect() call
 
 Tests for _format_file_size() helper function and get_tooltip() with size.
 """
 
 import os
+import sqlite3
 import tempfile
+from pathlib import Path
+from unittest.mock import patch, call as mock_call
+
+import pytest
 
 from code_indexer.server.services.database_health_service import (
     DatabaseHealthResult,
     DatabaseHealthStatus,
     CheckResult,
+    DatabaseHealthService,
     _format_file_size,
 )
 
@@ -213,3 +220,121 @@ class TestGetTooltipWithSize:
         assert "Connect" in lines[2]
         assert "Connection failed" in lines[2]
         assert "Size:" not in tooltip
+
+
+class TestCheckNotLockedUsesIndependentConnection:
+    """
+    Bug #435 fix: _check_not_locked() must use a fresh, independent
+    sqlite3.connect() call rather than the shared thread-local connection
+    from DatabaseConnectionManager.
+
+    Using BEGIN IMMEDIATE on the shared connection can corrupt in-flight
+    transactions from other code on the same thread. The fix restores the
+    original behaviour of using a dedicated, isolated connection that is
+    opened, used, and closed entirely within this method.
+    """
+
+    def test_check_not_locked_calls_sqlite3_connect_directly(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        _check_not_locked() must call sqlite3.connect() directly, NOT via
+        DatabaseConnectionManager, so it gets an independent connection that
+        cannot contaminate the shared thread-local connection state.
+        """
+        db_path = tmp_path / "test_lock.db"
+        # Create a real empty SQLite database so the file exists
+        conn = sqlite3.connect(str(db_path))
+        conn.close()
+
+        connect_calls = []
+        real_connect = sqlite3.connect
+
+        def tracking_connect(path, *args, **kwargs):
+            connect_calls.append(path)
+            return real_connect(path, *args, **kwargs)
+
+        with patch("sqlite3.connect", side_effect=tracking_connect):
+            result = DatabaseHealthService._check_not_locked(str(db_path))
+
+        # The method must have called sqlite3.connect() directly
+        assert len(connect_calls) >= 1, (
+            "_check_not_locked() must call sqlite3.connect() directly "
+            "to get an isolated connection for lock testing"
+        )
+        assert result.passed is True
+
+    def test_check_not_locked_does_not_use_database_connection_manager(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        _check_not_locked() must NOT call DatabaseConnectionManager.get_instance()
+        because using the shared connection would corrupt in-flight transactions.
+        """
+        db_path = tmp_path / "test_lock2.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.close()
+
+        manager_calls = []
+
+        # Patch get_instance to track calls
+        real_get_instance = __import__(
+            "code_indexer.server.storage.database_manager",
+            fromlist=["DatabaseConnectionManager"],
+        ).DatabaseConnectionManager.get_instance
+
+        def tracking_get_instance(path):
+            manager_calls.append(path)
+            return real_get_instance(path)
+
+        with patch(
+            "code_indexer.server.services.database_health_service."
+            "DatabaseConnectionManager.get_instance",
+            side_effect=tracking_get_instance,
+        ):
+            result = DatabaseHealthService._check_not_locked(str(db_path))
+
+        # The method must NOT have called DatabaseConnectionManager.get_instance()
+        assert len(manager_calls) == 0, (
+            "_check_not_locked() must not call DatabaseConnectionManager.get_instance(); "
+            f"it was called {len(manager_calls)} time(s) with args: {manager_calls}"
+        )
+        assert result.passed is True
+
+    def test_check_not_locked_closes_its_own_connection(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        The independent connection opened by _check_not_locked() must be
+        explicitly closed after use to avoid a resource leak.
+        """
+        db_path = tmp_path / "test_lock3.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.close()
+
+        real_connect = sqlite3.connect
+        created_connections = []
+
+        def capturing_connect(path, *args, **kwargs):
+            c = real_connect(path, *args, **kwargs)
+            created_connections.append(c)
+            return c
+
+        with patch("sqlite3.connect", side_effect=capturing_connect):
+            result = DatabaseHealthService._check_not_locked(str(db_path))
+
+        assert result.passed is True
+        assert len(created_connections) >= 1
+
+        # Verify the connection is closed (in Python, sqlite3 Connection.close()
+        # raises ProgrammingError on subsequent use if already closed)
+        for c in created_connections:
+            try:
+                c.execute("SELECT 1")
+                # If this succeeds, the connection was NOT closed - that is a bug
+                pytest.fail(
+                    "_check_not_locked() did not close its independent connection"
+                )
+            except Exception:
+                # Any exception here means the connection is already closed - correct
+                pass
