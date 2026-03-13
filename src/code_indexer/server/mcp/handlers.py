@@ -4829,6 +4829,9 @@ def _resolve_git_repo_path(
         (path, error_message) tuple. If error_message is not None,
         the caller should return the error to the user.
     """
+    # Bug #432: Validate repository_alias is a string (clients may pass a list)
+    if not isinstance(repository_alias, str):
+        return None, "repository_alias must be a string, not a list. Use a single repository alias."
     if repository_alias.endswith("-global"):
         golden_repos_dir = _get_golden_repos_dir()
 
