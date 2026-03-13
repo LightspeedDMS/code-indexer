@@ -926,6 +926,14 @@ class SyncJobManager:
         """
         # SQLite backend - load all jobs from database
         if self._use_sqlite and self._sqlite_backend is not None:
+            # Bug #436: Clean up orphaned jobs from previous server instance before loading
+            try:
+                cleaned = self._sqlite_backend.cleanup_orphaned_jobs_on_startup()
+                if cleaned:
+                    logging.info(f"Cleaned {cleaned} orphaned sync jobs on startup")
+            except Exception as e:
+                logging.warning(f"Failed to cleanup orphaned sync jobs: {e}")
+
             jobs_list = self._sqlite_backend.list_jobs()
             for job_dict in jobs_list:
                 try:
