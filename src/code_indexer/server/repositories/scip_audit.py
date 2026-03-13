@@ -10,6 +10,8 @@ import threading
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
 
 class SCIPAuditRepository:
     """
@@ -39,12 +41,15 @@ class SCIPAuditRepository:
         # Ensure database directory exists
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # Connection manager for thread-safe access
+        self._conn_manager = DatabaseConnectionManager.get_instance(str(self.db_path))
+
         # Initialize database schema
         self._init_database()
 
     def _init_database(self):
         """Initialize SQLite database schema for audit records."""
-        with sqlite3.connect(self.db_path, timeout=30) as conn:
+        def _do_init(conn: sqlite3.Connection) -> None:
             # Create scip_dependency_installations table
             conn.execute(
                 """
@@ -93,7 +98,7 @@ class SCIPAuditRepository:
             """
             )
 
-            conn.commit()
+        self._conn_manager.execute_atomic(_do_init)
 
     def create_audit_record(
         self,
@@ -129,8 +134,9 @@ class SCIPAuditRepository:
         Raises:
             sqlite3.Error: If database operation fails
         """
+        result: dict = {}
         with self._lock:
-            with sqlite3.connect(self.db_path, timeout=30) as conn:
+            def _do_insert(conn: sqlite3.Connection) -> None:
                 cursor = conn.execute(
                     """
                     INSERT INTO scip_dependency_installations
@@ -150,10 +156,13 @@ class SCIPAuditRepository:
                         username,
                     ),
                 )
-                record_id = cursor.lastrowid
-                conn.commit()
-                assert record_id is not None, "Failed to get record ID after INSERT"
-                return record_id
+                result["record_id"] = cursor.lastrowid
+
+            self._conn_manager.execute_atomic(_do_insert)
+        record_id = result["record_id"]
+        if record_id is None:
+            raise RuntimeError("Failed to get record ID after INSERT")
+        return record_id
 
     def query_audit_records(
         self,
@@ -184,53 +193,56 @@ class SCIPAuditRepository:
             Each record is a dictionary with all audit fields
         """
         with self._lock:
-            with sqlite3.connect(self.db_path, timeout=30) as conn:
-                conn.row_factory = sqlite3.Row
+            conn = self._conn_manager.get_connection()
+            # Use cursor-level row_factory to avoid mutating the shared connection
+            # permanently for all subsequent operations on this thread.
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row
 
-                # Build WHERE clause and parameters
-                where_sql, params = self._build_where_clause(
-                    job_id=job_id,
-                    repo_alias=repo_alias,
-                    project_language=project_language,
-                    project_build_system=project_build_system,
-                    since=since,
-                    until=until,
-                )
+            # Build WHERE clause and parameters
+            where_sql, params = self._build_where_clause(
+                job_id=job_id,
+                repo_alias=repo_alias,
+                project_language=project_language,
+                project_build_system=project_build_system,
+                since=since,
+                until=until,
+            )
 
-                # Get total count
-                count_sql = f"""
-                    SELECT COUNT(*) as total
-                    FROM scip_dependency_installations
-                    {where_sql}
-                """
-                cursor = conn.execute(count_sql, params)
-                total = cursor.fetchone()["total"]
+            # Get total count
+            count_sql = f"""
+                SELECT COUNT(*) as total
+                FROM scip_dependency_installations
+                {where_sql}
+            """
+            cursor.execute(count_sql, params)
+            total = cursor.fetchone()["total"]
 
-                # Get records with pagination
-                query_sql = f"""
-                    SELECT
-                        id,
-                        timestamp,
-                        job_id,
-                        repo_alias,
-                        project_path,
-                        project_language,
-                        project_build_system,
-                        package,
-                        command,
-                        reasoning,
-                        username
-                    FROM scip_dependency_installations
-                    {where_sql}
-                    ORDER BY timestamp DESC
-                    LIMIT ? OFFSET ?
-                """
-                cursor = conn.execute(query_sql, params + [limit, offset])
+            # Get records with pagination
+            query_sql = f"""
+                SELECT
+                    id,
+                    timestamp,
+                    job_id,
+                    repo_alias,
+                    project_path,
+                    project_language,
+                    project_build_system,
+                    package,
+                    command,
+                    reasoning,
+                    username
+                FROM scip_dependency_installations
+                {where_sql}
+                ORDER BY timestamp DESC
+                LIMIT ? OFFSET ?
+            """
+            cursor.execute(query_sql, params + [limit, offset])
 
-                # Convert rows to dictionaries
-                records = [self._row_to_dict(row) for row in cursor.fetchall()]
+            # Convert rows to dictionaries
+            records = [self._row_to_dict(row) for row in cursor.fetchall()]
 
-                return records, total
+            return records, total
 
     def _build_where_clause(
         self,

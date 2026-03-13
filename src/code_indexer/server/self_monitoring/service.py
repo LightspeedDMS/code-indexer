@@ -8,10 +8,12 @@ create bug reports, and maintain operational excellence.
 """
 
 import logging
+import sqlite3
 import threading
 from typing import Optional, TYPE_CHECKING
 
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
@@ -162,12 +164,10 @@ class SelfMonitoringService:
             return
 
         try:
-            import sqlite3
+            result: dict = {"orphaned_count": 0}
 
-            with sqlite3.connect(self._db_path) as conn:
+            def _do_cleanup(conn: sqlite3.Connection) -> None:
                 cursor = conn.cursor()
-
-                # Find and mark orphaned scans (>2 hours old, not completed)
                 cursor.execute(
                     """
                     UPDATE self_monitoring_scans
@@ -176,15 +176,15 @@ class SelfMonitoringService:
                         error_message = 'Scan failed to complete (orphaned after 2 hours)'
                     WHERE completed_at IS NULL
                       AND datetime(started_at) < datetime('now', '-2 hours')
-                """
+                    """
                 )
+                result["orphaned_count"] = cursor.rowcount
 
-                orphaned_count = cursor.rowcount
-                conn.commit()
+            DatabaseConnectionManager.get_instance(self._db_path).execute_atomic(_do_cleanup)
 
-            if orphaned_count > 0:
+            if result["orphaned_count"] > 0:
                 logger.info(
-                    f"Cleaned up {orphaned_count} orphaned scans older than 2 hours"
+                    f"Cleaned up {result['orphaned_count']} orphaned scans older than 2 hours"
                 )
 
         except Exception as e:
@@ -219,18 +219,17 @@ class SelfMonitoringService:
             return 0.0
 
         try:
-            import sqlite3
             from datetime import datetime, timezone
 
-            with sqlite3.connect(self._db_path) as conn:
-                cursor = conn.cursor()
+            conn = DatabaseConnectionManager.get_instance(self._db_path).get_connection()
+            cursor = conn.cursor()
 
-                # Query for most recent scan
-                cursor.execute(
-                    "SELECT started_at FROM self_monitoring_scans "
-                    "ORDER BY started_at DESC LIMIT 1"
-                )
-                row = cursor.fetchone()
+            # Query for most recent scan
+            cursor.execute(
+                "SELECT started_at FROM self_monitoring_scans "
+                "ORDER BY started_at DESC LIMIT 1"
+            )
+            row = cursor.fetchone()
 
             if not row:
                 logger.info("No previous scans found, running immediately")

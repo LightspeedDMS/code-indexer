@@ -19,6 +19,7 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import CacheConfig
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,7 @@ class PayloadCache:
         self._cleanup_thread: Optional[threading.Thread] = None
         self._stop_cleanup = threading.Event()
         self._initialized = threading.Event()  # Bug #178: Gate to prevent race
+        self._conn_manager: Optional[DatabaseConnectionManager] = None
 
     def initialize(self) -> None:
         """Initialize database with WAL mode and create schema.
@@ -114,13 +116,15 @@ class PayloadCache:
         # Ensure parent directory exists
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        try:
-            # Enable WAL mode for concurrent access
-            conn.execute("PRAGMA journal_mode=WAL")
+        self._conn_manager = DatabaseConnectionManager.get_instance(str(self.db_path))
+        conn = self._conn_manager.get_connection()
 
+        # Enable WAL mode for concurrent access
+        conn.execute("PRAGMA journal_mode=WAL")
+
+        def _do_schema(c: sqlite3.Connection) -> None:
             # Create table
-            conn.execute(
+            c.execute(
                 """
                 CREATE TABLE IF NOT EXISTS payload_cache (
                     handle TEXT PRIMARY KEY,
@@ -132,16 +136,14 @@ class PayloadCache:
             )
 
             # Create index for TTL cleanup
-            conn.execute(
+            c.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_payload_cache_created_at
                 ON payload_cache(created_at)
                 """
             )
 
-            conn.commit()
-        finally:
-            conn.close()
+        self._conn_manager.execute_atomic(_do_schema)
 
         # Bug #178: Signal that initialization is complete
         self._initialized.set()
@@ -204,12 +206,13 @@ class PayloadCache:
         Returns:
             UUID4 handle for retrieving the content
         """
+        if self._conn_manager is None:
+            raise RuntimeError("PayloadCache not initialized - call initialize() first")
         handle = str(uuid.uuid4())
         created_at = time.time()
         total_size = len(content)
 
-        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        try:
+        def _do_insert(conn: sqlite3.Connection) -> None:
             conn.execute(
                 """
                 INSERT INTO payload_cache (handle, content, created_at, total_size)
@@ -217,9 +220,8 @@ class PayloadCache:
                 """,
                 (handle, content, created_at, total_size),
             )
-            conn.commit()
-        finally:
-            conn.close()
+
+        self._conn_manager.execute_atomic(_do_insert)
 
         return handle
 
@@ -236,11 +238,12 @@ class PayloadCache:
             key: Explicit key for storage (e.g., "delegation:job-uuid")
             content: Content to cache
         """
+        if self._conn_manager is None:
+            raise RuntimeError("PayloadCache not initialized - call initialize() first")
         created_at = time.time()
         total_size = len(content)
 
-        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        try:
+        def _do_insert(conn: sqlite3.Connection) -> None:
             # Use INSERT OR REPLACE to handle updates
             conn.execute(
                 """
@@ -249,9 +252,8 @@ class PayloadCache:
                 """,
                 (key, content, created_at, total_size),
             )
-            conn.commit()
-        finally:
-            conn.close()
+
+        self._conn_manager.execute_atomic(_do_insert)
 
     def has_key(self, key: str) -> bool:
         """Check if a key exists in the cache without retrieving content.
@@ -267,16 +269,15 @@ class PayloadCache:
         Returns:
             True if key exists in cache, False otherwise
         """
-        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        try:
-            cursor = conn.execute(
-                "SELECT COUNT(*) FROM payload_cache WHERE handle = ?",
-                (key,),
-            )
-            row = cursor.fetchone()
-            return row[0] > 0 if row else False
-        finally:
-            conn.close()
+        if self._conn_manager is None:
+            raise RuntimeError("PayloadCache not initialized - call initialize() first")
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM payload_cache WHERE handle = ?",
+            (key,),
+        )
+        row = cursor.fetchone()
+        return row[0] > 0 if row else False
 
     def retrieve(self, handle: str, page: int = 0) -> CacheRetrievalResult:
         """Retrieve cached content by handle with pagination.
@@ -296,15 +297,14 @@ class PayloadCache:
         if page < 0:
             raise CacheNotFoundError(f"Invalid page number: {page}")
 
-        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        try:
-            cursor = conn.execute(
-                "SELECT content, total_size FROM payload_cache WHERE handle = ?",
-                (handle,),
-            )
-            row = cursor.fetchone()
-        finally:
-            conn.close()
+        if self._conn_manager is None:
+            raise RuntimeError("PayloadCache not initialized - call initialize() first")
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            "SELECT content, total_size FROM payload_cache WHERE handle = ?",
+            (handle,),
+        )
+        row = cursor.fetchone()
 
         if row is None:
             raise CacheNotFoundError(f"Cache handle not found: {handle}")
@@ -379,23 +379,24 @@ class PayloadCache:
         Returns:
             Number of entries deleted
         """
+        if self._conn_manager is None:
+            raise RuntimeError("PayloadCache not initialized - call initialize() first")
         cutoff_time = time.time() - self.config.cache_ttl_seconds
 
-        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        try:
-            cursor = conn.execute(
-                "SELECT COUNT(*) FROM payload_cache WHERE created_at < ?",
-                (cutoff_time,),
-            )
-            row = cursor.fetchone()
-            count = row[0] if row else 0
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM payload_cache WHERE created_at < ?",
+            (cutoff_time,),
+        )
+        row = cursor.fetchone()
+        count = row[0] if row else 0
 
-            conn.execute(
+        def _do_delete(c: sqlite3.Connection) -> None:
+            c.execute(
                 "DELETE FROM payload_cache WHERE created_at < ?",
                 (cutoff_time,),
             )
-            conn.commit()
-        finally:
-            conn.close()
+
+        self._conn_manager.execute_atomic(_do_delete)
 
         return count

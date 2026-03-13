@@ -303,10 +303,15 @@ class RefreshScheduler:
         self, alias_name: str, repo_url: str, master_path: str
     ) -> bool:
         """
-        Delete the master clone and re-clone from the remote URL.
+        Re-clone from the remote URL using a safe clone-to-temp-then-swap strategy.
 
-        Only deletes golden-repos/{alias}/ (the master clone).
-        Preserves .versioned/{alias}/ snapshot directories.
+        Clones into a sibling temp directory (.reclone-{name}-tmp) first.
+        Only deletes the old master clone and renames temp to master on success.
+        On any failure the original master clone is preserved and the temp
+        directory is cleaned up.
+
+        Only touches golden-repos/{alias}/ (the master clone) and the sibling
+        temp dir.  Never touches .versioned/{alias}/ snapshot directories.
 
         Args:
             alias_name: Global alias name (for logging)
@@ -318,16 +323,15 @@ class RefreshScheduler:
             Never raises — all exceptions are caught and logged.
         """
         master = Path(master_path)
+        temp_clone = master.parent / f".reclone-{master.name}-tmp"
+
+        # Clean up any leftover temp dir from a previous failed attempt.
+        if temp_clone.exists():
+            shutil.rmtree(str(temp_clone))
 
         try:
-            # Safety: only delete the specific master clone directory, never its
-            # parent (golden_repos_dir) which would destroy all repos.
-            if master.exists():
-                logger.info(f"Deleting master clone for re-clone: {master}")
-                shutil.rmtree(str(master))
-
             clone_result = subprocess.run(
-                ["git", "clone", repo_url, str(master)],
+                ["git", "clone", repo_url, str(temp_clone)],
                 capture_output=True,
                 text=True,
                 timeout=self.CLONE_TIMEOUT_SECONDS,
@@ -336,12 +340,29 @@ class RefreshScheduler:
             logger.critical(
                 f"Auto re-clone FAILED for {alias_name}: {type(e).__name__}: {e}"
             )
+            if temp_clone.exists():
+                shutil.rmtree(str(temp_clone))
             return False
 
         if clone_result.returncode != 0:
             logger.critical(
                 f"Auto re-clone FAILED for {alias_name}: {clone_result.stderr}"
             )
+            if temp_clone.exists():
+                shutil.rmtree(str(temp_clone))
+            return False
+
+        # Clone succeeded — swap temp into place.
+        try:
+            if master.exists():
+                shutil.rmtree(str(master))
+            temp_clone.rename(master)
+        except OSError as e:
+            logger.critical(
+                f"Auto re-clone swap FAILED for {alias_name}: {type(e).__name__}: {e}"
+            )
+            if temp_clone.exists():
+                shutil.rmtree(str(temp_clone))
             return False
 
         logger.info(f"Auto re-clone succeeded for {alias_name} into {master}")

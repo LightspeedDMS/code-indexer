@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.8
+
+### Bug Fixes
+
+- fix: SQLite connection leak -- 75+ direct sqlite3.connect() calls migrated to DatabaseConnectionManager (Bug #434, v9.5.8). All server-side SQLite operations now use thread-local connection pooling via DatabaseConnectionManager.get_instance(db_path), eliminating FD accumulation (38 to 73+ and growing) and native memory growth (2.4GB to 3.2GB over ~2 hours). Write operations use execute_atomic() for consistent transaction handling. Cursor-level row_factory prevents shared connection state mutation. 7 justified exceptions documented (health probes, bootstrap, log handler). Regression test guards against reintroduction. 23 files changed, 5209 tests pass, E2E validated on live server.
+
 ## v9.5.7
 
 ### Features

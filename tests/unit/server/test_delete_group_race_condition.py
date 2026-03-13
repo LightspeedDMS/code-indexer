@@ -53,33 +53,37 @@ class TestDeleteGroupAtomicity:
     within a single database transaction.
     """
 
-    def test_delete_group_uses_single_connection_pattern(
+    def test_delete_group_uses_execute_atomic_pattern(
         self, group_manager, temp_db_path
     ):
         """
-        Test that delete_group() uses a single connection for entire operation.
+        Test that delete_group() uses execute_atomic for the entire operation.
 
-        The fixed implementation should only call _get_connection() once
-        for the entire delete_group() operation.
+        The correct implementation delegates all work (lookup, checks, deletes)
+        to a single execute_atomic() call, which provides the transactional
+        guarantee. _get_connection() should NOT be called during delete_group()
+        since execute_atomic() manages its own connection internally.
         """
         group = group_manager.create_group("test-atomic", "Test atomicity")
 
-        original_get_connection = group_manager._get_connection
-        connection_call_count = 0
+        original_execute_atomic = group_manager._conn_manager.execute_atomic
+        atomic_call_count = 0
 
-        def counting_get_connection():
-            nonlocal connection_call_count
-            connection_call_count += 1
-            return original_get_connection()
+        def counting_execute_atomic(fn):
+            nonlocal atomic_call_count
+            atomic_call_count += 1
+            return original_execute_atomic(fn)
 
         with patch.object(
-            group_manager, "_get_connection", side_effect=counting_get_connection
+            group_manager._conn_manager,
+            "execute_atomic",
+            side_effect=counting_execute_atomic,
         ):
             group_manager.delete_group(group.id)
 
-        assert connection_call_count == 1, (
-            f"delete_group() should use only 1 connection, but used {connection_call_count}. "
-            "This indicates potential TOCTOU vulnerability."
+        assert atomic_call_count == 1, (
+            f"delete_group() should use exactly 1 execute_atomic() call, but used {atomic_call_count}. "
+            "All checks and deletes must be atomic within a single transaction."
         )
 
     def test_delete_group_all_tables_deleted_in_transaction(

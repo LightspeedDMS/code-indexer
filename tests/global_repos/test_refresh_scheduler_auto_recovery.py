@@ -352,8 +352,17 @@ class TestRecloneGuardRails:
         sibling_file = sibling_repo / "sibling.txt"
         sibling_file.write_text("sibling content")
 
+        # The temp path that _attempt_reclone clones into before swapping.
+        temp_clone = golden_repos_dir / ".reclone-test-repo-tmp"
+
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            # Simulate a successful clone: create the temp dir so rename() works.
+            def fake_clone(cmd, **kwargs):
+                if "clone" in cmd:
+                    temp_clone.mkdir(parents=True, exist_ok=True)
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            mock_run.side_effect = fake_clone
 
             scheduler._attempt_reclone(
                 alias_name="test-repo-global",
@@ -365,7 +374,9 @@ class TestRecloneGuardRails:
         assert sibling_repo.exists(), "Sibling repo directory was incorrectly deleted"
         assert sibling_file.exists(), "Sibling repo files were incorrectly deleted"
 
-        # Verify git clone was called with the correct target path
+        # Verify git clone was called exactly once with the correct URL.
+        # The new clone-to-temp-then-swap design clones into a sibling temp dir
+        # (.reclone-{name}-tmp), not directly into master_path.
         clone_calls = [
             c for c in mock_run.call_args_list
             if c[0][0][0] == "git" and c[0][0][1] == "clone"
@@ -373,4 +384,114 @@ class TestRecloneGuardRails:
         assert len(clone_calls) == 1, "git clone should be called exactly once"
         clone_args = clone_calls[0][0][0]
         assert "https://github.com/test/repo" in clone_args
-        assert str(master_path) in clone_args
+        assert str(temp_clone) in clone_args, (
+            "git clone destination must be the temp path, not master directly"
+        )
+
+    def test_reclone_preserves_master_on_clone_failure(self, tmp_path):
+        """
+        When git clone fails (non-zero returncode), the original master clone
+        directory must still exist after _attempt_reclone returns False.
+
+        Bug #406: current impl deletes master before cloning, so a clone failure
+        permanently loses the master.
+        """
+        scheduler, golden_repos_dir, registry = _make_scheduler(tmp_path)
+        _register_repo(golden_repos_dir, registry, "test-repo")
+
+        master_path = golden_repos_dir / "test-repo"
+        # Put a sentinel file inside master so we can verify it survives
+        sentinel = master_path / "important_file.txt"
+        sentinel.write_text("do not delete me")
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=1, stdout="", stderr="fatal: repository not found"
+            )
+
+            result = scheduler._attempt_reclone(
+                alias_name="test-repo-global",
+                repo_url="https://github.com/test/repo",
+                master_path=str(master_path),
+            )
+
+        assert result is False, "_attempt_reclone should return False on clone failure"
+        assert master_path.exists(), (
+            "Master clone directory must survive a failed clone attempt"
+        )
+        assert sentinel.exists(), (
+            "Files inside master clone must survive a failed clone attempt"
+        )
+
+    def test_reclone_cleans_up_temp_on_failure(self, tmp_path):
+        """
+        When git clone fails, any partially-created temp directory
+        (.reclone-{alias}-tmp) must be cleaned up before returning False.
+
+        No leftover temp directories should remain after a failed _attempt_reclone.
+        """
+        scheduler, golden_repos_dir, registry = _make_scheduler(tmp_path)
+        _register_repo(golden_repos_dir, registry, "test-repo")
+
+        master_path = golden_repos_dir / "test-repo"
+        temp_clone = golden_repos_dir / ".reclone-test-repo-tmp"
+
+        with patch("subprocess.run") as mock_run:
+            # Simulate partial clone: temp dir gets created but clone fails
+            def fake_clone(cmd, **kwargs):
+                if "clone" in cmd:
+                    temp_clone.mkdir(parents=True, exist_ok=True)
+                    (temp_clone / "partial.txt").write_text("partial")
+                return MagicMock(
+                    returncode=1, stdout="", stderr="fatal: repository not found"
+                )
+
+            mock_run.side_effect = fake_clone
+
+            result = scheduler._attempt_reclone(
+                alias_name="test-repo-global",
+                repo_url="https://github.com/test/repo",
+                master_path=str(master_path),
+            )
+
+        assert result is False
+        assert not temp_clone.exists(), (
+            "Temp clone directory must be cleaned up after a failed clone attempt"
+        )
+
+    def test_reclone_replaces_master_on_success(self, tmp_path):
+        """
+        When git clone succeeds, master path must exist afterwards and no
+        temp directory (.reclone-{alias}-tmp) should remain.
+
+        The new clone (via temp) replaces the old master atomically.
+        """
+        scheduler, golden_repos_dir, registry = _make_scheduler(tmp_path)
+        _register_repo(golden_repos_dir, registry, "test-repo")
+
+        master_path = golden_repos_dir / "test-repo"
+        temp_clone = golden_repos_dir / ".reclone-test-repo-tmp"
+
+        with patch("subprocess.run") as mock_run:
+            # Simulate successful clone into the temp directory
+            def fake_clone(cmd, **kwargs):
+                if "clone" in cmd:
+                    # The implementation clones into the temp path (last arg)
+                    target = Path(cmd[-1])
+                    target.mkdir(parents=True, exist_ok=True)
+                    (target / "cloned_file.txt").write_text("cloned content")
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            mock_run.side_effect = fake_clone
+
+            result = scheduler._attempt_reclone(
+                alias_name="test-repo-global",
+                repo_url="https://github.com/test/repo",
+                master_path=str(master_path),
+            )
+
+        assert result is True, "_attempt_reclone should return True on success"
+        assert master_path.exists(), "Master path must exist after successful reclone"
+        assert not temp_clone.exists(), (
+            "Temp directory must be removed after successful reclone (renamed to master)"
+        )

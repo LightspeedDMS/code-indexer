@@ -1540,7 +1540,6 @@ class GoldenRepoMetadataSqliteBackend:
                     logger.info(
                         "Migrated golden_repos_metadata: added column %s", col_name
                     )
-            conn.commit()
         self._conn_manager.execute_atomic(operation)
 
     def add_repo(
@@ -2114,18 +2113,19 @@ class DependencyMapTrackingBackend:
         Uses ALTER TABLE for backward-compatible schema migration.
         Probes each column independently to handle half-migration scenarios.
         """
-        conn = self._conn_manager.get_connection()
-        for col, col_type in [
-            ("refinement_cursor", "INTEGER DEFAULT 0"),
-            ("refinement_next_run", "TEXT"),
-        ]:
-            try:
-                conn.execute(f"SELECT {col} FROM dependency_map_tracking LIMIT 1")
-            except sqlite3.OperationalError:
-                conn.execute(
-                    f"ALTER TABLE dependency_map_tracking ADD COLUMN {col} {col_type}"
-                )
-        conn.commit()
+        def _do_migrate(conn: sqlite3.Connection) -> None:
+            for col, col_type in [
+                ("refinement_cursor", "INTEGER DEFAULT 0"),
+                ("refinement_next_run", "TEXT"),
+            ]:
+                try:
+                    conn.execute(f"SELECT {col} FROM dependency_map_tracking LIMIT 1")
+                except sqlite3.OperationalError:
+                    conn.execute(
+                        f"ALTER TABLE dependency_map_tracking ADD COLUMN {col} {col_type}"
+                    )
+
+        self._conn_manager.execute_atomic(_do_migrate)
 
     def record_run_metrics(self, metrics: Dict[str, Any]) -> None:
         """

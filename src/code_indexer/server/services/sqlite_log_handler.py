@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, cast
 
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
 logger = logging.getLogger(__name__)
 
 
@@ -71,40 +73,38 @@ class SQLiteLogHandler(logging.Handler):
         # Ensure parent directory exists
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Use a temporary connection for initialization
-        conn = sqlite3.connect(str(self.db_path))
-        cursor = conn.cursor()
+        def _do_init(conn: sqlite3.Connection) -> None:
+            cursor = conn.cursor()
 
-        # Create logs table with schema from AC5
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                level TEXT NOT NULL,
-                source TEXT NOT NULL,
-                message TEXT NOT NULL,
-                correlation_id TEXT,
-                user_id TEXT,
-                request_path TEXT,
-                extra_data TEXT,
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            # Create logs table with schema from AC5
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    correlation_id TEXT,
+                    user_id TEXT,
+                    request_path TEXT,
+                    extra_data TEXT,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                )
+                """
             )
-        """
-        )
 
-        # Create indexes from AC5
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp)"
-        )
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level)")
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_logs_correlation_id ON logs(correlation_id)"
-        )
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_source ON logs(source)")
+            # Create indexes from AC5
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp)"
+            )
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level)")
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_logs_correlation_id ON logs(correlation_id)"
+            )
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_source ON logs(source)")
 
-        conn.commit()
-        conn.close()
+        DatabaseConnectionManager.get_instance(str(self.db_path)).execute_atomic(_do_init)
 
     def _cleanup_stale_connections(self) -> None:
         """

@@ -97,6 +97,28 @@ class TestClassifyFetchError:
         )
         assert result == "transient"
 
+    def test_classify_transient_ssh_could_not_read_from_remote_full_message(self):
+        """Standard SSH access error 'Could not read from remote repository' classifies as transient.
+
+        Bug #407: This was previously misclassified as corruption because
+        'Could not read' matched CORRUPTION_PATTERNS before TRANSIENT_PATTERNS
+        were checked.
+        """
+        result = classify_fetch_error(
+            "fatal: Could not read from remote repository.\n"
+            "Please make sure you have the correct access rights\n"
+            "and the repository exists."
+        )
+        assert result == "transient"
+
+    def test_classify_transient_ssh_could_not_read_from_remote_bare(self):
+        """Bare 'Could not read from remote repository' classifies as transient.
+
+        Bug #407: Same misclassification as above, simpler variant.
+        """
+        result = classify_fetch_error("Could not read from remote repository")
+        assert result == "transient"
+
     def test_classify_unknown_unrecognized_error(self):
         """Unrecognized error messages classify as unknown."""
         result = classify_fetch_error("something completely unexpected happened")
