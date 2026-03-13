@@ -12,8 +12,6 @@ Implements AC5: SQLite Log Storage Infrastructure
 import json
 import logging
 import sqlite3
-import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, cast
@@ -59,11 +57,6 @@ class SQLiteLogHandler(logging.Handler):
         """
         super().__init__()
         self.db_path = Path(db_path)
-        self._lock = threading.Lock()
-        self._local = threading.local()
-        self._connections: Dict[int, sqlite3.Connection] = {}
-        self._last_cleanup: float = 0.0
-        self.CLEANUP_INTERVAL: float = 60.0
 
         # Create database and schema on initialization
         self._init_database()
@@ -106,56 +99,18 @@ class SQLiteLogHandler(logging.Handler):
 
         DatabaseConnectionManager.get_instance(str(self.db_path)).execute_atomic(_do_init)
 
-    def _cleanup_stale_connections(self) -> None:
-        """
-        Close and remove connections for threads that are no longer alive.
-
-        Called periodically (throttled by CLEANUP_INTERVAL) to prevent
-        unbounded memory and file descriptor growth from thread pool churn.
-        """
-        with self._lock:
-            self._last_cleanup = time.time()
-            alive_thread_ids = {t.ident for t in threading.enumerate()}
-            stale_ids = [
-                tid for tid in self._connections if tid not in alive_thread_ids
-            ]
-            for tid in stale_ids:
-                try:
-                    self._connections[tid].close()
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to close stale log handler connection for thread {tid}: {e}"
-                    )
-                del self._connections[tid]
-
-            if stale_ids:
-                logger.info(
-                    f"Cleaned up {len(stale_ids)} stale SQLite connections"
-                )
-
     def _get_connection(self) -> sqlite3.Connection:
         """
-        Get thread-local database connection.
+        Get thread-local database connection via DatabaseConnectionManager.
 
-        Each thread gets its own connection for thread safety.
-        Connections are cached in thread-local storage and tracked for cleanup.
+        Delegates to the shared DatabaseConnectionManager singleton which
+        handles thread-local caching, stale connection cleanup, and
+        proper connection lifecycle management.
         """
-        thread_id = threading.get_ident()
-        if not hasattr(self._local, "connection"):
-            conn = sqlite3.connect(
-                str(self.db_path),
-                check_same_thread=False,
-                timeout=30.0,  # 30 second timeout for lock conflicts
-            )
-            self._local.connection = conn
-            with self._lock:
-                self._connections[thread_id] = conn
-
-        # Piggyback stale connection cleanup (throttled)
-        if (time.time() - self._last_cleanup) > self.CLEANUP_INTERVAL:
-            self._cleanup_stale_connections()
-
-        return cast(sqlite3.Connection, self._local.connection)
+        return cast(
+            sqlite3.Connection,
+            DatabaseConnectionManager.get_instance(str(self.db_path)).get_connection(),
+        )
 
     def emit(self, record: logging.LogRecord) -> None:
         """
@@ -229,28 +184,28 @@ class SQLiteLogHandler(logging.Handler):
             if extra_data:
                 extra_data_json = json.dumps(extra_data)
 
-            # Insert log record into database (thread-safe)
-            conn = self._get_connection()
-            cursor = conn.cursor()
+            # Insert log record into database (thread-safe, transaction-isolated)
+            def _do_insert(conn: sqlite3.Connection) -> None:
+                conn.execute(
+                    """
+                    INSERT INTO logs (timestamp, level, source, message, correlation_id, user_id, request_path, extra_data)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        timestamp,
+                        level,
+                        source,
+                        message,
+                        correlation_id,
+                        user_id,
+                        request_path,
+                        extra_data_json,
+                    ),
+                )
 
-            cursor.execute(
-                """
-                INSERT INTO logs (timestamp, level, source, message, correlation_id, user_id, request_path, extra_data)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    timestamp,
-                    level,
-                    source,
-                    message,
-                    correlation_id,
-                    user_id,
-                    request_path,
-                    extra_data_json,
-                ),
-            )
-
-            conn.commit()
+            DatabaseConnectionManager.get_instance(
+                str(self.db_path)
+            ).execute_atomic(_do_insert)
 
         except Exception:
             # Don't let logging failures crash the application
@@ -258,17 +213,5 @@ class SQLiteLogHandler(logging.Handler):
             self.handleError(record)
 
     def close(self) -> None:
-        """Close ALL tracked database connections and cleanup resources."""
-        with self._lock:
-            for conn in self._connections.values():
-                try:
-                    conn.close()
-                except Exception as e:
-                    logger.warning(f"Failed to close log handler connection: {e}")
-            self._connections.clear()
-
-        # Clear thread-local reference
-        if hasattr(self._local, "connection"):
-            delattr(self._local, "connection")
-
+        """Close handler. Connections are managed by DatabaseConnectionManager."""
         super().close()

@@ -1995,37 +1995,37 @@ class DiagnosticsService:
 
             # Try to connect and validate
             try:
-                with sqlite3.connect(str(db_path)) as conn:
-                    # Check database integrity
-                    cursor = conn.cursor()
-                    cursor.execute("PRAGMA integrity_check")
-                    integrity_result = cursor.fetchone()[0]
+                conn = DatabaseConnectionManager.get_instance(str(db_path)).get_connection()
+                # Check database integrity
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA integrity_check")
+                integrity_result = cursor.fetchone()[0]
 
-                    if integrity_result != "ok":
-                        return self._create_db_error_result(
-                            f"Database integrity check failed: {integrity_result}"
-                        )
+                if integrity_result != "ok":
+                    return self._create_db_error_result(
+                        f"Database integrity check failed: {integrity_result}"
+                    )
 
-                    # Check schema
-                    schema_valid, missing_tables = self._check_database_schema(conn)
-                    if not schema_valid:
-                        return self._create_db_error_result(
-                            f"Database schema incomplete: missing {len(missing_tables)} table(s)",
-                            {"missing_tables": missing_tables},
-                        )
+                # Check schema
+                schema_valid, missing_tables = self._check_database_schema(conn)
+                if not schema_valid:
+                    return self._create_db_error_result(
+                        f"Database schema incomplete: missing {len(missing_tables)} table(s)",
+                        {"missing_tables": missing_tables},
+                    )
 
-                    # Get file size
-                    file_size = db_path.stat().st_size
+                # Get file size
+                file_size = db_path.stat().st_size
 
-                    return DiagnosticResult(
-                        name="SQLite Database",
-                        status=DiagnosticStatus.WORKING,
-                        message="Database is healthy and accessible",
-                        details={
-                            "path": str(db_path),
-                            "size_bytes": file_size,
-                            "integrity": "ok",
-                            "schema_valid": True,
+                return DiagnosticResult(
+                    name="SQLite Database",
+                    status=DiagnosticStatus.WORKING,
+                    message="Database is healthy and accessible",
+                    details={
+                        "path": str(db_path),
+                        "size_bytes": file_size,
+                        "integrity": "ok",
+                        "schema_valid": True,
                         },
                     )
             except PermissionError:

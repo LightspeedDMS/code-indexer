@@ -736,29 +736,36 @@ class TestConfigReload:
 
 class TestNoVacuum:
     def test_cleanup_table_does_not_call_vacuum(self, scheduler, db_paths):
-        """AC7: No VACUUM is called in cleanup code."""
+        """AC7: No VACUUM is called in cleanup code.
+
+        Uses MagicMock(wraps=real_conn) so real SQL executes but all
+        execute() calls are tracked. Cannot monkey-patch sqlite3.Connection.execute
+        directly in CPython 3.9 because it is a read-only C-level descriptor.
+        """
         log_db, groups_db, main_db = db_paths
         _insert_logs(log_db, 10, age_hours=200)
 
-        # Patch sqlite3.connect to monitor for VACUUM calls
-        vacuum_called = []
-        real_connect = sqlite3.connect
+        # Obtain the real connection that DatabaseConnectionManager would use
+        real_conn = sqlite3.connect(str(log_db), check_same_thread=False)
+        wrapped_conn = MagicMock(wraps=real_conn)
 
-        def mock_connect(path, *args, **kwargs):
-            conn = real_connect(path, *args, **kwargs)
-            original_execute = conn.execute
+        mock_manager = MagicMock()
+        mock_manager.get_connection.return_value = wrapped_conn
 
-            def tracked_execute(sql, *a, **kw):
-                if "VACUUM" in sql.upper():
-                    vacuum_called.append(sql)
-                return original_execute(sql, *a, **kw)
-
-            conn.execute = tracked_execute
-            return conn
-
-        with patch("sqlite3.connect", side_effect=mock_connect):
+        with patch(
+            "code_indexer.server.services.data_retention_scheduler.DatabaseConnectionManager.get_instance",
+            return_value=mock_manager,
+        ):
             scheduler._cleanup_table(log_db, "logs", "timestamp", retention_hours=168)
 
+        real_conn.close()
+
+        # Verify no VACUUM was issued in any execute() call
+        vacuum_called = [
+            call_args
+            for call_args in wrapped_conn.execute.call_args_list
+            if "VACUUM" in str(call_args).upper()
+        ]
         assert len(vacuum_called) == 0, f"VACUUM was called: {vacuum_called}"
 
     def test_execute_cleanup_does_not_call_vacuum(self, scheduler, db_paths):
@@ -857,3 +864,97 @@ class TestMissingTableHandling:
         except Exception as e:
             # Should be caught gracefully at _execute_cleanup level
             pytest.fail(f"_cleanup_table raised unexpected exception: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Bug #435 fix: _cleanup_table must use execute_atomic() per batch
+# ---------------------------------------------------------------------------
+
+
+class TestCleanupTableUsesExecuteAtomic:
+    """
+    Bug #435 fix: _cleanup_table() must delegate each batch DELETE to
+    DatabaseConnectionManager.execute_atomic(), not call conn.execute() +
+    conn.commit() directly on the shared thread-local connection.
+
+    Using raw conn.commit() on the shared connection can commit or roll back
+    transactions belonging to other callers on the same thread. execute_atomic()
+    provides proper transaction isolation for each batch.
+    """
+
+    def test_cleanup_table_calls_execute_atomic_not_raw_commit(
+        self, scheduler, db_paths
+    ) -> None:
+        """
+        _cleanup_table() must call execute_atomic() on the
+        DatabaseConnectionManager instance, not raw conn.commit().
+        """
+        from code_indexer.server.storage.database_manager import (
+            DatabaseConnectionManager,
+        )
+
+        log_db, groups_db, main_db = db_paths
+        _insert_logs(log_db, 5, age_hours=200)
+
+        atomic_calls: list = []
+        real_manager = DatabaseConnectionManager.get_instance(str(log_db))
+        real_execute_atomic = real_manager.execute_atomic
+
+        def tracking_execute_atomic(fn):
+            atomic_calls.append(fn)
+            return real_execute_atomic(fn)
+
+        real_manager.execute_atomic = tracking_execute_atomic
+
+        try:
+            deleted = scheduler._cleanup_table(
+                log_db, "logs", "timestamp", retention_hours=168
+            )
+        finally:
+            # Restore original
+            real_manager.execute_atomic = real_execute_atomic
+
+        assert deleted == 5
+        assert len(atomic_calls) >= 1, (
+            "_cleanup_table() must call execute_atomic() for each batch DELETE; "
+            "raw conn.commit() was used instead"
+        )
+
+    def test_cleanup_table_does_not_call_conn_commit_directly(
+        self, scheduler, db_paths
+    ) -> None:
+        """
+        _cleanup_table() must not call conn.commit() directly on the shared
+        connection returned by get_connection(). All commits must go through
+        execute_atomic() to ensure proper transaction isolation.
+
+        Uses MagicMock(wraps=real_conn) so real SQL executes but all method
+        calls are tracked. Cannot monkey-patch sqlite3.Connection.commit
+        directly in CPython 3.9 because it is a read-only C-level descriptor.
+        """
+        log_db, groups_db, main_db = db_paths
+        _insert_logs(log_db, 3, age_hours=200)
+
+        # Obtain the real connection that DatabaseConnectionManager would use
+        real_conn = sqlite3.connect(str(log_db), check_same_thread=False)
+        wrapped_conn = MagicMock(wraps=real_conn)
+
+        mock_manager = MagicMock()
+        mock_manager.get_connection.return_value = wrapped_conn
+
+        with patch(
+            "code_indexer.server.services.data_retention_scheduler.DatabaseConnectionManager.get_instance",
+            return_value=mock_manager,
+        ):
+            deleted = scheduler._cleanup_table(
+                log_db, "logs", "timestamp", retention_hours=168
+            )
+
+        real_conn.close()
+
+        # Verify no direct commit() was issued via the shared connection
+        commit_called = wrapped_conn.commit.call_count
+        assert commit_called == 0, (
+            f"_cleanup_table() called conn.commit() directly {commit_called} time(s); "
+            "it must use execute_atomic() instead"
+        )

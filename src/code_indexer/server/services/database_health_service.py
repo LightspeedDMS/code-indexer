@@ -24,6 +24,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
 # Story #30 AC2: Cache TTL in seconds
 CACHE_TTL_SECONDS = 60
 
@@ -354,9 +356,9 @@ class DatabaseHealthService:
                     passed=False, error_message="Connection failed: file not found"
                 )
 
-            with sqlite3.connect(db_path, timeout=5) as conn:
-                # Simple test to verify connection works
-                conn.execute("SELECT 1")
+            conn = DatabaseConnectionManager.get_instance(db_path).get_connection()
+            # Simple test to verify connection works
+            conn.execute("SELECT 1")
             return CheckResult(passed=True)
         except Exception as e:
             return CheckResult(passed=False, error_message=f"Connection failed: {e}")
@@ -365,11 +367,11 @@ class DatabaseHealthService:
     def _check_read(db_path: str) -> CheckResult:
         """Check 2: Can we read from the database?"""
         try:
-            with sqlite3.connect(db_path, timeout=5) as conn:
-                # Read sqlite_master to verify read capability
-                conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' LIMIT 1"
-                )
+            conn = DatabaseConnectionManager.get_instance(db_path).get_connection()
+            # Read sqlite_master to verify read capability
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' LIMIT 1"
+            )
             return CheckResult(passed=True)
         except Exception as e:
             return CheckResult(passed=False, error_message=f"Read failed: {e}")
@@ -398,7 +400,9 @@ class DatabaseHealthService:
                coupling to the migration system for purely operational concerns.
         """
         try:
-            with sqlite3.connect(db_path, timeout=5) as conn:
+            now = datetime.now(timezone.utc).isoformat()
+
+            def _do_write(conn: sqlite3.Connection) -> None:
                 # Create _health_check table if not exists (see docstring for rationale)
                 conn.execute(
                     """CREATE TABLE IF NOT EXISTS _health_check (
@@ -406,14 +410,13 @@ class DatabaseHealthService:
                         last_check TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )"""
                 )
-
                 # Update or insert health check record
-                now = datetime.now(timezone.utc).isoformat()
                 conn.execute(
                     "INSERT OR REPLACE INTO _health_check (id, last_check) VALUES (1, ?)",
                     (now,),
                 )
-                conn.commit()
+
+            DatabaseConnectionManager.get_instance(db_path).execute_atomic(_do_write)
             return CheckResult(passed=True)
         except Exception as e:
             return CheckResult(passed=False, error_message=f"Write failed: {e}")
@@ -427,16 +430,16 @@ class DatabaseHealthService:
         85+ seconds to milliseconds for large databases like logs.db.
         """
         try:
-            with sqlite3.connect(db_path, timeout=5) as conn:
-                cursor = conn.execute("PRAGMA integrity_check(1)")
-                result = cursor.fetchone()
-                if result and result[0] == "ok":
-                    return CheckResult(passed=True)
-                else:
-                    return CheckResult(
-                        passed=False,
-                        error_message=f"Integrity check failed: {result[0] if result else 'unknown'}",
-                    )
+            conn = DatabaseConnectionManager.get_instance(db_path).get_connection()
+            cursor = conn.execute("PRAGMA integrity_check(1)")
+            result = cursor.fetchone()
+            if result and result[0] == "ok":
+                return CheckResult(passed=True)
+            else:
+                return CheckResult(
+                    passed=False,
+                    error_message=f"Integrity check failed: {result[0] if result else 'unknown'}",
+                )
         except Exception as e:
             return CheckResult(
                 passed=False, error_message=f"Integrity check failed: {e}"
@@ -444,12 +447,20 @@ class DatabaseHealthService:
 
     @staticmethod
     def _check_not_locked(db_path: str) -> CheckResult:
-        """Check 5: Is the database not exclusively locked?"""
+        """Check 5: Is the database not exclusively locked?
+
+        Uses a fresh, independent sqlite3.connect() call rather than the
+        shared DatabaseConnectionManager connection. BEGIN IMMEDIATE on the
+        shared connection would corrupt any in-flight transaction on that
+        thread-local connection. This isolated connection is opened, used,
+        and closed entirely within this method.
+        """
+        conn = None
         try:
-            with sqlite3.connect(db_path, timeout=1) as conn:
-                # Try to acquire a shared lock
-                conn.execute("BEGIN IMMEDIATE")
-                conn.rollback()
+            conn = sqlite3.connect(db_path, timeout=1.0)
+            # Try to acquire an immediate (write-intent) lock
+            conn.execute("BEGIN IMMEDIATE")
+            conn.rollback()
             return CheckResult(passed=True)
         except sqlite3.OperationalError as e:
             if "locked" in str(e).lower():
@@ -457,6 +468,9 @@ class DatabaseHealthService:
             return CheckResult(passed=False, error_message=f"Lock check failed: {e}")
         except Exception as e:
             return CheckResult(passed=False, error_message=f"Lock check failed: {e}")
+        finally:
+            if conn is not None:
+                conn.close()
 
     @staticmethod
     def _determine_status(checks: Dict[str, CheckResult]) -> DatabaseHealthStatus:

@@ -32,6 +32,7 @@ from .database_health_service import (
 )
 from .config_service import get_config_service
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
 
@@ -201,14 +202,14 @@ class HealthCheckService:
                 from sqlalchemy import create_engine, text
             except ImportError:
                 # SQLAlchemy not available - fall back to basic SQLite check
-                import sqlite3
-
                 # Extract database path from SQLite URL
                 db_path = self.database_url.replace("sqlite:///", "")
-                with sqlite3.connect(db_path) as connection:
-                    cursor = connection.cursor()
-                    cursor.execute("SELECT 1")
-                    cursor.fetchone()
+                connection = DatabaseConnectionManager.get_instance(
+                    db_path
+                ).get_connection()
+                cursor = connection.cursor()
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
             else:
                 # Use SQLAlchemy if available
                 engine = create_engine(self.database_url, pool_pre_ping=True)

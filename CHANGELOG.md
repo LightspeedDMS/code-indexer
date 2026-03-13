@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.9
+
+### Bug Fixes
+
+- fix: SQLite connection leak completion -- remaining 11 direct sqlite3.connect() calls migrated to DatabaseConnectionManager (Bug #435, v9.5.9). Five server-side files still bypassing the singleton after v9.5.8: database_health_service.py (5 calls), sqlite_log_handler.py (1), health_service.py (1), data_retention_scheduler.py (1), diagnostics_service.py (1). All write operations now use execute_atomic() for proper transaction isolation on shared thread-local connections. _check_not_locked() retains isolated connection (BEGIN IMMEDIATE would corrupt shared connection state). Dead _PatchableConnection class removed. Regression test allowlist tightened from 7 to 3 files. 7 new TDD tests, 5209 tests pass.
+
 ## v9.5.8
 
 ### Bug Fixes

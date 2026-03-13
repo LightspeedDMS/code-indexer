@@ -1,17 +1,12 @@
 """
-Regression test for Bug #434: SQLite Connection Leak.
+Regression test for Bug #434 / Bug #435: SQLite Connection Leak.
 
 Scans src/code_indexer/server/ for direct sqlite3.connect() calls and fails
 if any are found outside the explicitly allowed list.
 
 Allowed exceptions (files that legitimately use direct sqlite3.connect()):
-- database_manager.py        : implements the connection manager itself
-- database_health_service.py : health probe that tests real DB connectivity
-- health_service.py          : health probe fallback
-- data_retention_scheduler.py: uses _PatchableConnection factory pattern
-- startup/database_init.py   : one-time initialisation before manager is set up
-- diagnostics_service.py     : _check_sqlite_database() health probe (PRAGMA integrity_check)
-- sqlite_log_handler.py      : manages own thread-local connection pool (not closeable via manager)
+- database_manager.py   : implements the connection manager itself
+- startup/database_init.py : one-time initialisation before manager is set up
 """
 
 import ast
@@ -31,15 +26,11 @@ _SERVER_SRC = (
 # sqlite3.connect() directly.  Paths use forward slashes for cross-platform
 # matching.
 _ALLOWED_FILES = {
-    "storage/database_manager.py",
-    "services/database_health_service.py",
-    "services/health_service.py",
-    "services/data_retention_scheduler.py",
-    "startup/database_init.py",
-    # diagnostics health probe — runs PRAGMA integrity_check on a fresh conn
-    "services/diagnostics_service.py",
-    # thread-local pool managed by the handler itself, not closeable via manager
-    "services/sqlite_log_handler.py",
+    "storage/database_manager.py",       # implements the connection manager itself
+    "startup/database_init.py",          # one-time init before manager is ready
+    "services/database_health_service.py",  # _check_not_locked() needs an isolated
+                                            # connection to avoid corrupting in-flight
+                                            # transactions on the shared thread-local conn
 }
 
 
