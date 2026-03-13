@@ -69,147 +69,139 @@ def _make_fake_job_tracker():
 
 def _create_logs_db(path: Path) -> None:
     """Create logs.db with the logs table schema."""
-    conn = sqlite3.connect(str(path))
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            level TEXT NOT NULL,
-            source TEXT NOT NULL,
-            message TEXT NOT NULL,
-            correlation_id TEXT,
-            user_id TEXT,
-            request_path TEXT,
-            extra_data TEXT,
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    with sqlite3.connect(str(path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                level TEXT NOT NULL,
+                source TEXT NOT NULL,
+                message TEXT NOT NULL,
+                correlation_id TEXT,
+                user_id TEXT,
+                request_path TEXT,
+                extra_data TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            )
+            """
         )
-        """
-    )
-    conn.commit()
-    conn.close()
+        conn.commit()
 
 
 def _create_groups_db(path: Path) -> None:
     """Create groups.db with the audit_logs table schema."""
-    conn = sqlite3.connect(str(path))
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            admin_id TEXT NOT NULL,
-            action_type TEXT NOT NULL,
-            target_type TEXT NOT NULL,
-            target_id TEXT NOT NULL,
-            details TEXT
+    with sqlite3.connect(str(path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                admin_id TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                details TEXT
+            )
+            """
         )
-        """
-    )
-    conn.commit()
-    conn.close()
+        conn.commit()
 
 
 def _create_main_db(path: Path) -> None:
     """Create cidx_server.db with sync_jobs, background_jobs, dependency_map_tracking."""
-    conn = sqlite3.connect(str(path))
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sync_jobs (
-            job_id TEXT PRIMARY KEY,
-            username TEXT,
-            user_alias TEXT,
-            job_type TEXT,
-            status TEXT NOT NULL,
-            created_at TEXT,
-            started_at TEXT,
-            completed_at TEXT
+    with sqlite3.connect(str(path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sync_jobs (
+                job_id TEXT PRIMARY KEY,
+                username TEXT,
+                user_alias TEXT,
+                job_type TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT,
+                started_at TEXT,
+                completed_at TEXT
+            )
+            """
         )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS background_jobs (
-            job_id TEXT PRIMARY KEY,
-            operation_type TEXT,
-            status TEXT NOT NULL,
-            created_at TEXT,
-            started_at TEXT,
-            completed_at TEXT
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS background_jobs (
+                job_id TEXT PRIMARY KEY,
+                operation_type TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT,
+                started_at TEXT,
+                completed_at TEXT
+            )
+            """
         )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS dependency_map_tracking (
-            id INTEGER PRIMARY KEY,
-            last_run TEXT,
-            next_run TEXT,
-            status TEXT DEFAULT 'pending',
-            commit_hashes TEXT,
-            error_message TEXT
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dependency_map_tracking (
+                id INTEGER PRIMARY KEY,
+                last_run TEXT,
+                next_run TEXT,
+                status TEXT DEFAULT 'pending',
+                commit_hashes TEXT,
+                error_message TEXT
+            )
+            """
         )
-        """
-    )
-    conn.commit()
-    conn.close()
+        conn.commit()
 
 
 def _insert_logs(path: Path, count: int, age_hours: float) -> None:
     ts = _iso_ago(age_hours)
-    conn = sqlite3.connect(str(path))
-    conn.executemany(
-        "INSERT INTO logs (timestamp, level, source, message) VALUES (?, 'INFO', 'test', 'msg')",
-        [(ts,)] * count,
-    )
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(str(path)) as conn:
+        conn.executemany(
+            "INSERT INTO logs (timestamp, level, source, message) VALUES (?, 'INFO', 'test', 'msg')",
+            [(ts,)] * count,
+        )
+        conn.commit()
 
 
 def _insert_audit_logs(path: Path, count: int, age_hours: float) -> None:
     ts = _iso_ago(age_hours)
-    conn = sqlite3.connect(str(path))
-    conn.executemany(
-        "INSERT INTO audit_logs (timestamp, admin_id, action_type, target_type, target_id) VALUES (?, 'admin', 'create', 'repo', 'r1')",
-        [(ts,)] * count,
-    )
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(str(path)) as conn:
+        conn.executemany(
+            "INSERT INTO audit_logs (timestamp, admin_id, action_type, target_type, target_id) VALUES (?, 'admin', 'create', 'repo', 'r1')",
+            [(ts,)] * count,
+        )
+        conn.commit()
 
 
 def _insert_sync_jobs(path: Path, count: int, age_hours: float, status: str = "completed") -> None:
     ts = _iso_ago(age_hours)
-    conn = sqlite3.connect(str(path))
-    conn.executemany(
-        "INSERT INTO sync_jobs (job_id, status, completed_at) VALUES (?, ?, ?)",
-        [(str(uuid.uuid4()), status, ts) for _ in range(count)],
-    )
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(str(path)) as conn:
+        conn.executemany(
+            "INSERT INTO sync_jobs (job_id, status, completed_at) VALUES (?, ?, ?)",
+            [(str(uuid.uuid4()), status, ts) for _ in range(count)],
+        )
+        conn.commit()
 
 
 def _insert_background_jobs(
     path: Path, count: int, age_hours: float, status: str = "completed"
 ) -> None:
     ts = _iso_ago(age_hours)
-    conn = sqlite3.connect(str(path))
-    conn.executemany(
-        "INSERT INTO background_jobs (job_id, status, completed_at) VALUES (?, ?, ?)",
-        [(str(uuid.uuid4()), status, ts) for _ in range(count)],
-    )
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(str(path)) as conn:
+        conn.executemany(
+            "INSERT INTO background_jobs (job_id, status, completed_at) VALUES (?, ?, ?)",
+            [(str(uuid.uuid4()), status, ts) for _ in range(count)],
+        )
+        conn.commit()
 
 
 def _insert_dep_map_tracking(path: Path, count: int, age_hours: float) -> None:
     ts = _iso_ago(age_hours)
-    conn = sqlite3.connect(str(path))
-    conn.executemany(
-        "INSERT INTO dependency_map_tracking (last_run, status) VALUES (?, 'completed')",
-        [(ts,)] * count,
-    )
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(str(path)) as conn:
+        conn.executemany(
+            "INSERT INTO dependency_map_tracking (last_run, status) VALUES (?, 'completed')",
+            [(ts,)] * count,
+        )
+        conn.commit()
 
 
 def _count_rows(path: Path, table: str) -> int:

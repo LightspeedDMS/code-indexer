@@ -1998,7 +1998,7 @@ class DiagnosticsService:
                 conn = DatabaseConnectionManager.get_instance(str(db_path)).get_connection()
                 # Check database integrity
                 cursor = conn.cursor()
-                cursor.execute("PRAGMA integrity_check")
+                cursor.execute("PRAGMA integrity_check(1)")
                 integrity_result = cursor.fetchone()[0]
 
                 if integrity_result != "ok":
