@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.12
+
+### Bug Fixes
+
+- fix: git_log handler no longer crashes when repository_alias is passed as a list (Bug #432, v9.5.12). Added type validation at the start of _resolve_git_repo_path() to return a clear error message instead of an AttributeError. 4 new tests.
+
 ## v9.5.11
 
 ### Security
