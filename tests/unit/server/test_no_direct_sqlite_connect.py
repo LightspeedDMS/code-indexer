@@ -5,8 +5,10 @@ Scans src/code_indexer/server/ for direct sqlite3.connect() calls and fails
 if any are found outside the explicitly allowed list.
 
 Allowed exceptions (files that legitimately use direct sqlite3.connect()):
-- database_manager.py   : implements the connection manager itself
-- startup/database_init.py : one-time initialisation before manager is set up
+- database_manager.py        : implements the connection manager itself
+- startup/database_init.py   : one-time initialisation before manager is set up
+- database_health_service.py : _check_not_locked() needs isolated connection
+                                (BEGIN IMMEDIATE would corrupt shared thread-local state)
 """
 
 import ast

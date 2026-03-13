@@ -14,7 +14,7 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, cast
+from typing import Any, Dict, Optional
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
@@ -107,10 +107,7 @@ class SQLiteLogHandler(logging.Handler):
         handles thread-local caching, stale connection cleanup, and
         proper connection lifecycle management.
         """
-        return cast(
-            sqlite3.Connection,
-            DatabaseConnectionManager.get_instance(str(self.db_path)).get_connection(),
-        )
+        return DatabaseConnectionManager.get_instance(str(self.db_path)).get_connection()
 
     def emit(self, record: logging.LogRecord) -> None:
         """

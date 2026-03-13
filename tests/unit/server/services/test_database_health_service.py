@@ -338,3 +338,133 @@ class TestCheckNotLockedUsesIndependentConnection:
             except Exception:
                 # Any exception here means the connection is already closed - correct
                 pass
+
+
+class TestManagerPathChecks:
+    """
+    Regression tests for Bug #435: _check_connect, _check_read, _check_write,
+    and _check_integrity must use DatabaseConnectionManager (not sqlite3.connect
+    directly).
+
+    Strategy: assert that DatabaseConnectionManager.get_instance() IS called by
+    each check method. This is the positive-assertion equivalent of "must use the
+    manager" and avoids the difficulty of distinguishing the health-service's own
+    direct sqlite3 calls from the manager's internal ones (both share the same
+    sqlite3 module object, so module-namespace patching cannot separate them).
+    """
+
+    def _make_real_db(self, tmp_path: Path, name: str) -> str:
+        """Create a real SQLite database file and return its path as string."""
+        db_path = tmp_path / name
+        conn = sqlite3.connect(str(db_path))
+        conn.close()
+        return str(db_path)
+
+    _GET_INSTANCE_PATCH = (
+        "code_indexer.server.services.database_health_service."
+        "DatabaseConnectionManager.get_instance"
+    )
+
+    def test_check_connect_uses_database_connection_manager(
+        self, tmp_path: Path
+    ) -> None:
+        """_check_connect() must call DatabaseConnectionManager.get_instance()."""
+        db_path = self._make_real_db(tmp_path, "connect_test.db")
+
+        real_get_instance = __import__(
+            "code_indexer.server.storage.database_manager",
+            fromlist=["DatabaseConnectionManager"],
+        ).DatabaseConnectionManager.get_instance
+
+        instance_calls = []
+
+        def tracking_get_instance(path):
+            instance_calls.append(path)
+            return real_get_instance(path)
+
+        with patch(self._GET_INSTANCE_PATCH, side_effect=tracking_get_instance):
+            result = DatabaseHealthService._check_connect(db_path)
+
+        assert result.passed is True
+        assert len(instance_calls) >= 1, (
+            "_check_connect() must call DatabaseConnectionManager.get_instance() "
+            "to obtain its connection"
+        )
+
+    def test_check_read_uses_database_connection_manager(
+        self, tmp_path: Path
+    ) -> None:
+        """_check_read() must call DatabaseConnectionManager.get_instance()."""
+        db_path = self._make_real_db(tmp_path, "read_test.db")
+
+        real_get_instance = __import__(
+            "code_indexer.server.storage.database_manager",
+            fromlist=["DatabaseConnectionManager"],
+        ).DatabaseConnectionManager.get_instance
+
+        instance_calls = []
+
+        def tracking_get_instance(path):
+            instance_calls.append(path)
+            return real_get_instance(path)
+
+        with patch(self._GET_INSTANCE_PATCH, side_effect=tracking_get_instance):
+            result = DatabaseHealthService._check_read(db_path)
+
+        assert result.passed is True
+        assert len(instance_calls) >= 1, (
+            "_check_read() must call DatabaseConnectionManager.get_instance() "
+            "to obtain its connection"
+        )
+
+    def test_check_write_uses_database_connection_manager(
+        self, tmp_path: Path
+    ) -> None:
+        """_check_write() must call DatabaseConnectionManager.get_instance()."""
+        db_path = self._make_real_db(tmp_path, "write_test.db")
+
+        real_get_instance = __import__(
+            "code_indexer.server.storage.database_manager",
+            fromlist=["DatabaseConnectionManager"],
+        ).DatabaseConnectionManager.get_instance
+
+        instance_calls = []
+
+        def tracking_get_instance(path):
+            instance_calls.append(path)
+            return real_get_instance(path)
+
+        with patch(self._GET_INSTANCE_PATCH, side_effect=tracking_get_instance):
+            result = DatabaseHealthService._check_write(db_path)
+
+        assert result.passed is True
+        assert len(instance_calls) >= 1, (
+            "_check_write() must call DatabaseConnectionManager.get_instance() "
+            "to obtain its connection"
+        )
+
+    def test_check_integrity_uses_database_connection_manager(
+        self, tmp_path: Path
+    ) -> None:
+        """_check_integrity() must call DatabaseConnectionManager.get_instance()."""
+        db_path = self._make_real_db(tmp_path, "integrity_test.db")
+
+        real_get_instance = __import__(
+            "code_indexer.server.storage.database_manager",
+            fromlist=["DatabaseConnectionManager"],
+        ).DatabaseConnectionManager.get_instance
+
+        instance_calls = []
+
+        def tracking_get_instance(path):
+            instance_calls.append(path)
+            return real_get_instance(path)
+
+        with patch(self._GET_INSTANCE_PATCH, side_effect=tracking_get_instance):
+            result = DatabaseHealthService._check_integrity(db_path)
+
+        assert result.passed is True
+        assert len(instance_calls) >= 1, (
+            "_check_integrity() must call DatabaseConnectionManager.get_instance() "
+            "to obtain its connection"
+        )
