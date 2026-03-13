@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.11
+
+### Security
+
+- fix: Research assistant prompt hardened to prohibit source code modifications on deployed servers (v9.5.11). Added "NO SOURCE CODE MODIFICATIONS" as absolute prohibition in both the template prompt and hardcoded fallback. Removed git operations (pull, checkout, reset) from allowed remediation operations. Research assistant previously edited Python source files directly on staging, blocking the auto-updater from pulling updates.
+
 ## v9.5.10
 
 ### Bug Fixes
