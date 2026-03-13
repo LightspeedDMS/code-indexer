@@ -20,6 +20,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Optional
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ class ApiMetricsService:
     def __init__(self):
         """Initialize the API metrics service (database not yet connected)."""
         self._db_path: Optional[str] = None
+        self._conn_manager: Optional[DatabaseConnectionManager] = None
         self._insert_count = 0
         self._insert_count_lock = threading.Lock()
 
@@ -70,17 +72,19 @@ class ApiMetricsService:
             raise ValueError("db_path must be a non-empty string")
 
         self._db_path = db_path
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
         # Ensure parent directory exists
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-        # Create table and index using context manager for safe resource handling
-        with sqlite3.connect(db_path, timeout=30.0) as conn:
-            cursor = conn.cursor()
+        # Enable WAL mode outside any transaction — PRAGMA journal_mode=WAL
+        # cannot be executed inside a transaction (execute_atomic wraps in BEGIN).
+        conn = self._conn_manager.get_connection()
+        conn.execute("PRAGMA journal_mode=WAL")
 
-            # Enable WAL mode for better concurrent write handling
-            # WAL allows concurrent reads and writes without blocking
-            cursor.execute("PRAGMA journal_mode=WAL")
+        # Create table and index using atomic operation for safe resource handling
+        def _do_schema(conn: sqlite3.Connection) -> None:
+            cursor = conn.cursor()
 
             cursor.execute(
                 """
@@ -99,7 +103,7 @@ class ApiMetricsService:
                 """
             )
 
-            conn.commit()
+        self._conn_manager.execute_atomic(_do_schema)
 
         logger.debug(f"ApiMetricsService initialized with database: {db_path}")
 
@@ -109,20 +113,20 @@ class ApiMetricsService:
         Deletes all records with timestamps older than MAX_TIMESTAMP_AGE_SECONDS.
         Called automatically on each insert to keep the database size bounded.
         """
-        if not self._db_path:
+        if not self._conn_manager:
             return
 
         cutoff = (
             datetime.now(timezone.utc) - timedelta(seconds=MAX_TIMESTAMP_AGE_SECONDS)
         ).isoformat()
 
-        with sqlite3.connect(self._db_path, timeout=30.0) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
+        def _do_delete(conn: sqlite3.Connection) -> None:
+            conn.cursor().execute(
                 "DELETE FROM api_metrics WHERE timestamp < ?",
                 (cutoff,),
             )
-            conn.commit()
+
+        self._conn_manager.execute_atomic(_do_delete)
 
     def _insert_metric(self, metric_type: str) -> None:
         """Insert a metric record into the database.
@@ -135,7 +139,7 @@ class ApiMetricsService:
             Uses retry logic with exponential backoff for database lock errors.
             Gracefully degrades (logs warning, no crash) if all retries fail.
         """
-        if not self._db_path:
+        if not self._conn_manager:
             logger.warning(
                 format_error_log(
                     "APP-GENERAL-047",
@@ -149,13 +153,13 @@ class ApiMetricsService:
         # Retry logic for database lock errors
         for attempt in range(MAX_RETRIES):
             try:
-                with sqlite3.connect(self._db_path, timeout=30.0) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(
+                def _do_insert(conn: sqlite3.Connection) -> None:
+                    conn.cursor().execute(
                         "INSERT INTO api_metrics (metric_type, timestamp) VALUES (?, ?)",
                         (metric_type, now),
                     )
-                    conn.commit()
+
+                self._conn_manager.execute_atomic(_do_insert)
                 break  # Success
             except sqlite3.OperationalError as e:
                 if "database is locked" in str(e).lower() and attempt < MAX_RETRIES - 1:
@@ -206,7 +210,7 @@ class ApiMetricsService:
             Dictionary with counts for each metric category within the window.
         """
         # Return zeros if not initialized
-        if not self._db_path:
+        if not self._conn_manager:
             return {
                 "semantic_searches": 0,
                 "other_index_searches": 0,
@@ -219,18 +223,18 @@ class ApiMetricsService:
         ).isoformat()
 
         # Query counts grouped by metric type within the window
-        with sqlite3.connect(self._db_path, timeout=30.0) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT metric_type, COUNT(*) as count
-                FROM api_metrics
-                WHERE timestamp >= ?
-                GROUP BY metric_type
-                """,
-                (cutoff,),
-            )
-            rows = cursor.fetchall()
+        conn = self._conn_manager.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT metric_type, COUNT(*) as count
+            FROM api_metrics
+            WHERE timestamp >= ?
+            GROUP BY metric_type
+            """,
+            (cutoff,),
+        )
+        rows = cursor.fetchall()
 
         # Build result dict from query results
         counts = {row[0]: row[1] for row in rows}
@@ -248,13 +252,13 @@ class ApiMetricsService:
         Note: With rolling window approach, this method is largely unnecessary
         as timestamps naturally age out. Kept for backward compatibility and testing.
         """
-        if not self._db_path:
+        if not self._conn_manager:
             return
 
-        with sqlite3.connect(self._db_path, timeout=30.0) as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM api_metrics")
-            conn.commit()
+        def _do_reset(conn: sqlite3.Connection) -> None:
+            conn.cursor().execute("DELETE FROM api_metrics")
+
+        self._conn_manager.execute_atomic(_do_reset)
 
 
 # Global service instance

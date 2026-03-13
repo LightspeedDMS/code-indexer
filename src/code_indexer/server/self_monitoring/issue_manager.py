@@ -18,6 +18,8 @@ from typing import Dict, List, Optional
 
 import httpx
 
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
 logger = logging.getLogger(__name__)
 
 
@@ -60,6 +62,7 @@ class IssueManager:
         self.github_repo = github_repo
         self.github_token = github_token
         self.server_name = server_name
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
     def _get_all_server_ips(self) -> str:
         """
@@ -278,13 +281,13 @@ class IssueManager:
             source_log_ids: List of log IDs
             source_files: List of source files
         """
-        conn = sqlite3.connect(self.db_path)
-        try:
-            # Convert lists to CSV strings
-            error_codes_str = ",".join(error_codes) if error_codes else ""
-            source_log_ids_str = ",".join(str(lid) for lid in source_log_ids)
-            source_files_str = ",".join(source_files) if source_files else ""
+        # Convert lists to CSV strings outside the lambda
+        error_codes_str = ",".join(error_codes) if error_codes else ""
+        source_log_ids_str = ",".join(str(lid) for lid in source_log_ids)
+        source_files_str = ",".join(source_files) if source_files else ""
+        created_at = datetime.utcnow().isoformat()
 
+        def _do_insert(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "INSERT INTO self_monitoring_issues "
                 "(scan_id, github_issue_number, github_issue_url, classification, "
@@ -300,12 +303,11 @@ class IssueManager:
                     source_log_ids_str,
                     source_files_str,
                     title,
-                    datetime.utcnow().isoformat(),
+                    created_at,
                 ),
             )
-            conn.commit()
-        finally:
-            conn.close()
+
+        self._conn_manager.execute_atomic(_do_insert)
 
     def compute_fingerprint(
         self, classification: str, source_files: List[str], error_type: str
@@ -399,31 +401,28 @@ class IssueManager:
                 - title
                 - created_at
         """
-        conn = sqlite3.connect(self.db_path)
-        try:
-            cursor = conn.execute(
-                "SELECT github_issue_number, github_issue_url, classification, "
-                "error_codes, fingerprint, title, created_at "
-                "FROM self_monitoring_issues "
-                "WHERE datetime(created_at) >= datetime('now', '-' || ? || ' days') "
-                "ORDER BY created_at DESC",
-                (days,),
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            "SELECT github_issue_number, github_issue_url, classification, "
+            "error_codes, fingerprint, title, created_at "
+            "FROM self_monitoring_issues "
+            "WHERE datetime(created_at) >= datetime('now', '-' || ? || ' days') "
+            "ORDER BY created_at DESC",
+            (days,),
+        )
+
+        results = []
+        for row in cursor.fetchall():
+            results.append(
+                {
+                    "github_issue_number": row[0],
+                    "github_issue_url": row[1],
+                    "classification": row[2],
+                    "error_codes": row[3],  # CSV string
+                    "fingerprint": row[4],
+                    "title": row[5],
+                    "created_at": row[6],
+                }
             )
 
-            results = []
-            for row in cursor.fetchall():
-                results.append(
-                    {
-                        "github_issue_number": row[0],
-                        "github_issue_url": row[1],
-                        "classification": row[2],
-                        "error_codes": row[3],  # CSV string
-                        "fingerprint": row[4],
-                        "title": row[5],
-                        "created_at": row[6],
-                    }
-                )
-
-            return results
-        finally:
-            conn.close()
+        return results

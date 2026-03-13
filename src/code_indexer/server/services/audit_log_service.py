@@ -25,6 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
 logger = logging.getLogger(__name__)
 
 # PR-related action_type values
@@ -49,6 +51,7 @@ class AuditLogService:
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
+        self._conn_manager = DatabaseConnectionManager.get_instance(str(db_path))
         self._ensure_schema()
 
     # ------------------------------------------------------------------
@@ -56,14 +59,11 @@ class AuditLogService:
     # ------------------------------------------------------------------
 
     def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self._db_path))
-        conn.row_factory = sqlite3.Row
-        return conn
+        return self._conn_manager.get_connection()
 
     def _ensure_schema(self) -> None:
         """Create audit_logs table and indexes if they don't exist."""
-        conn = self._get_connection()
-        try:
+        def _do_schema(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -90,9 +90,8 @@ class AuditLogService:
                 ON audit_logs(action_type)
                 """
             )
-            conn.commit()
-        finally:
-            conn.close()
+
+        self._conn_manager.execute_atomic(_do_schema)
 
     # ------------------------------------------------------------------
     # Write
@@ -116,9 +115,9 @@ class AuditLogService:
             target_id:   Identifier of the specific target.
             details:     Optional JSON string with extra event data.
         """
-        conn = self._get_connection()
-        try:
-            now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
+
+        def _do_log(conn: sqlite3.Connection) -> None:
             conn.execute(
                 """
                 INSERT INTO audit_logs
@@ -127,9 +126,8 @@ class AuditLogService:
                 """,
                 (now, admin_id, action_type, target_type, target_id, details),
             )
-            conn.commit()
-        finally:
-            conn.close()
+
+        self._conn_manager.execute_atomic(_do_log)
 
     def log_raw(
         self,
@@ -141,15 +139,13 @@ class AuditLogService:
         details: Optional[str] = None,
     ) -> None:
         """Insert an audit entry with an explicit timestamp (for migration use)."""
-        conn = self._get_connection()
-        try:
+        def _do_log_raw(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "INSERT INTO audit_logs (timestamp, admin_id, action_type, target_type, target_id, details) VALUES (?, ?, ?, ?, ?, ?)",
                 (timestamp, admin_id, action_type, target_type, target_id, details),
             )
-            conn.commit()
-        finally:
-            conn.close()
+
+        self._conn_manager.execute_atomic(_do_log_raw)
 
     # ------------------------------------------------------------------
     # Read
@@ -184,58 +180,56 @@ class AuditLogService:
             (list_of_dicts, total_matching_count)
         """
         conn = self._get_connection()
-        try:
-            conditions: List[str] = []
-            params: List[Any] = []
+        conditions: List[str] = []
+        params: List[Any] = []
 
-            if action_type:
-                conditions.append("action_type = ?")
-                params.append(action_type)
-            if target_type:
-                conditions.append("target_type = ?")
-                params.append(target_type)
-            if admin_id:
-                conditions.append("admin_id = ?")
-                params.append(admin_id)
-            if date_from:
-                conditions.append("timestamp >= ?")
-                params.append(f"{date_from}T00:00:00")
-            if date_to:
-                conditions.append("timestamp <= ?")
-                params.append(f"{date_to}T23:59:59")
-            if exclude_target_type:
-                conditions.append("target_type != ?")
-                params.append(exclude_target_type)
+        if action_type:
+            conditions.append("action_type = ?")
+            params.append(action_type)
+        if target_type:
+            conditions.append("target_type = ?")
+            params.append(target_type)
+        if admin_id:
+            conditions.append("admin_id = ?")
+            params.append(admin_id)
+        if date_from:
+            conditions.append("timestamp >= ?")
+            params.append(f"{date_from}T00:00:00")
+        if date_to:
+            conditions.append("timestamp <= ?")
+            params.append(f"{date_to}T23:59:59")
+        if exclude_target_type:
+            conditions.append("target_type != ?")
+            params.append(exclude_target_type)
 
-            where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
-            cursor = conn.cursor()
-            cursor.execute(
-                f"SELECT COUNT(*) AS cnt FROM audit_logs {where}", params
-            )
-            total = cursor.fetchone()["cnt"]
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        cursor.execute(
+            f"SELECT COUNT(*) AS cnt FROM audit_logs {where}", params
+        )
+        total = cursor.fetchone()["cnt"]
 
-            query_sql = f"""
-                SELECT id, timestamp, admin_id, action_type, target_type,
-                       target_id, details
-                FROM audit_logs
-                {where}
-                ORDER BY timestamp DESC
-            """
-            if limit is not None:
-                query_sql += " LIMIT ? OFFSET ?"
-                params = list(params) + [limit, offset]
-            elif offset > 0:
-                query_sql += " LIMIT -1 OFFSET ?"
-                params = list(params) + [offset]
+        query_sql = f"""
+            SELECT id, timestamp, admin_id, action_type, target_type,
+                   target_id, details
+            FROM audit_logs
+            {where}
+            ORDER BY timestamp DESC
+        """
+        if limit is not None:
+            query_sql += " LIMIT ? OFFSET ?"
+            params = list(params) + [limit, offset]
+        elif offset > 0:
+            query_sql += " LIMIT -1 OFFSET ?"
+            params = list(params) + [offset]
 
-            cursor.execute(query_sql, params)
-            rows = cursor.fetchall()
+        cursor.execute(query_sql, params)
+        rows = cursor.fetchall()
 
-            logs = [dict(row) for row in rows]
-            return logs, total
-        finally:
-            conn.close()
+        logs = [dict(row) for row in rows]
+        return logs, total
 
     def get_pr_logs(
         self,
@@ -257,31 +251,29 @@ class AuditLogService:
             List of audit log dicts (newest first).
         """
         conn = self._get_connection()
-        try:
-            placeholders = ",".join("?" * len(_PR_ACTION_TYPES))
-            conditions = [f"action_type IN ({placeholders})"]
-            params: List[Any] = list(_PR_ACTION_TYPES)
+        placeholders = ",".join("?" * len(_PR_ACTION_TYPES))
+        conditions = [f"action_type IN ({placeholders})"]
+        params: List[Any] = list(_PR_ACTION_TYPES)
 
-            if repo_alias:
-                conditions.append("target_id = ?")
-                params.append(repo_alias)
+        if repo_alias:
+            conditions.append("target_id = ?")
+            params.append(repo_alias)
 
-            where = "WHERE " + " AND ".join(conditions)
-            cursor = conn.cursor()
-            cursor.execute(
-                f"""
-                SELECT id, timestamp, admin_id, action_type, target_type,
-                       target_id, details
-                FROM audit_logs
-                {where}
-                ORDER BY timestamp DESC
-                LIMIT ? OFFSET ?
-                """,
-                params + [limit, offset],
-            )
-            return [dict(row) for row in cursor.fetchall()]
-        finally:
-            conn.close()
+        where = "WHERE " + " AND ".join(conditions)
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        cursor.execute(
+            f"""
+            SELECT id, timestamp, admin_id, action_type, target_type,
+                   target_id, details
+            FROM audit_logs
+            {where}
+            ORDER BY timestamp DESC
+            LIMIT ? OFFSET ?
+            """,
+            params + [limit, offset],
+        )
+        return [dict(row) for row in cursor.fetchall()]
 
     def get_cleanup_logs(
         self,
@@ -303,30 +295,28 @@ class AuditLogService:
             List of audit log dicts (newest first).
         """
         conn = self._get_connection()
-        try:
-            conditions = ["action_type = ?"]
-            params: List[Any] = [_CLEANUP_ACTION_TYPE]
+        conditions = ["action_type = ?"]
+        params: List[Any] = [_CLEANUP_ACTION_TYPE]
 
-            if repo_path:
-                conditions.append("target_id = ?")
-                params.append(repo_path)
+        if repo_path:
+            conditions.append("target_id = ?")
+            params.append(repo_path)
 
-            where = "WHERE " + " AND ".join(conditions)
-            cursor = conn.cursor()
-            cursor.execute(
-                f"""
-                SELECT id, timestamp, admin_id, action_type, target_type,
-                       target_id, details
-                FROM audit_logs
-                {where}
-                ORDER BY timestamp DESC
-                LIMIT ? OFFSET ?
-                """,
-                params + [limit, offset],
-            )
-            return [dict(row) for row in cursor.fetchall()]
-        finally:
-            conn.close()
+        where = "WHERE " + " AND ".join(conditions)
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        cursor.execute(
+            f"""
+            SELECT id, timestamp, admin_id, action_type, target_type,
+                   target_id, details
+            FROM audit_logs
+            {where}
+            ORDER BY timestamp DESC
+            LIMIT ? OFFSET ?
+            """,
+            params + [limit, offset],
+        )
+        return [dict(row) for row in cursor.fetchall()]
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ class LogAggregatorService:
             db_path: Path to SQLite logs database (e.g., ~/.cidx-server/logs.db)
         """
         self.db_path = Path(db_path)
+        self._conn_manager = DatabaseConnectionManager.get_instance(str(self.db_path))
 
     def query(
         self,
@@ -105,9 +107,9 @@ class LogAggregatorService:
             return self._empty_response(page, page_size)
 
         try:
-            conn = sqlite3.connect(str(self.db_path))
-            conn.row_factory = sqlite3.Row  # Enable column access by name
+            conn = self._conn_manager.get_connection()
             cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row  # Enable column access by name
 
             # Build WHERE clause for filtering
             where_sql, params = self._build_where_clause(
@@ -125,8 +127,6 @@ class LogAggregatorService:
             logs = self._query_logs(
                 cursor, where_sql, params, sort_order, page_size, offset
             )
-
-            conn.close()
 
             return {
                 "logs": logs,
@@ -178,9 +178,9 @@ class LogAggregatorService:
             return []
 
         try:
-            conn = sqlite3.connect(str(self.db_path))
-            conn.row_factory = sqlite3.Row  # Enable column access by name
+            conn = self._conn_manager.get_connection()
             cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row  # Enable column access by name
 
             # Build WHERE clause for filtering (reuse existing logic)
             where_sql, params = self._build_where_clause(
@@ -189,8 +189,6 @@ class LogAggregatorService:
 
             # Query all logs with sorting (no LIMIT/OFFSET)
             logs = self._query_logs_all(cursor, where_sql, params, sort_order)
-
-            conn.close()
 
             return logs
 
@@ -217,11 +215,10 @@ class LogAggregatorService:
             return 0
 
         try:
-            conn = sqlite3.connect(str(self.db_path))
+            conn = self._conn_manager.get_connection()
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM logs")
             total = int(cursor.fetchone()[0])
-            conn.close()
             return total
 
         except sqlite3.Error as e:

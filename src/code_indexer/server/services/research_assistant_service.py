@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
 import bleach
 import markdown
 
@@ -114,6 +116,7 @@ class ResearchAssistantService:
         self._github_token = github_token
         # Story #314: JobTracker for dashboard visibility (dual tracking with _jobs dict)
         self._job_tracker = job_tracker
+        self._conn_manager = DatabaseConnectionManager.get_instance(self.db_path)
 
     def _detect_repo_root(self) -> Optional[str]:
         """
@@ -228,10 +231,15 @@ class ResearchAssistantService:
             return SECURITY_GUARDRAILS
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Get database connection with foreign keys enabled."""
-        conn = sqlite3.connect(self.db_path)
+        """Get database connection with foreign keys enabled.
+
+        Note: Do NOT set conn.row_factory here -- that mutates the shared
+        thread-local connection permanently and causes unpredictable behavior
+        for all subsequent operations on that thread. Use cursor-level
+        row_factory instead where dict-like access is needed.
+        """
+        conn = self._conn_manager.get_connection()
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.row_factory = sqlite3.Row  # Enable dict-like access
         return conn
 
     def render_markdown(self, text: str) -> str:
@@ -336,37 +344,46 @@ class ResearchAssistantService:
         Returns:
             A valid UUID string for Claude CLI (--session-id or --resume)
         """
-        conn = self._get_connection()
-        try:
-            # Query the session's claude_session_id
-            cursor = conn.execute(
+        result: dict = {"claude_session_id": None, "not_found": False, "generated": False}
+
+        def _do_get_or_create(conn: sqlite3.Connection) -> None:
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row
+            cursor.execute(
                 "SELECT claude_session_id FROM research_sessions WHERE id = ?",
                 (session_id,),
             )
             row = cursor.fetchone()
 
             if row is None:
-                # Session doesn't exist - should not happen, but return a new UUID
-                logger.warning(f"Session {session_id} not found, generating new Claude session ID")
-                return str(uuid.uuid4())
+                result["not_found"] = True
+                return
 
-            claude_session_id = row["claude_session_id"]
+            existing_id = row["claude_session_id"]
 
-            # If NULL, generate and store a new UUID
-            if claude_session_id is None:
-                claude_session_id = str(uuid.uuid4())
+            if existing_id is None:
+                new_id = str(uuid.uuid4())
                 now = datetime.now(timezone.utc).isoformat()
-                conn.execute(
+                cursor.execute(
                     "UPDATE research_sessions SET claude_session_id = ?, updated_at = ? WHERE id = ?",
-                    (claude_session_id, now, session_id),
+                    (new_id, now, session_id),
                 )
-                conn.commit()
-                logger.info(f"Generated new Claude session ID for session {session_id}: {claude_session_id}")
+                result["claude_session_id"] = new_id
+                result["generated"] = True
+            else:
+                result["claude_session_id"] = existing_id
 
-            return claude_session_id
+        self._conn_manager.execute_atomic(_do_get_or_create)
 
-        finally:
-            conn.close()
+        if result["not_found"]:
+            # Session doesn't exist - should not happen, but return a new UUID
+            logger.warning(f"Session {session_id} not found, generating new Claude session ID")
+            return str(uuid.uuid4())
+
+        if result["generated"]:
+            logger.info(f"Generated new Claude session ID for session {session_id}: {result['claude_session_id']}")
+
+        return result["claude_session_id"]
 
     def get_default_session(self) -> Dict[str, Any]:
         """
@@ -378,45 +395,52 @@ class ResearchAssistantService:
         Returns:
             Dictionary with session data (id, name, folder_path, created_at, updated_at)
         """
-        conn = self._get_connection()
-        try:
-            # Check if default session exists
-            cursor = conn.execute(
+        result: dict = {"session": None, "created": False, "folder_path": None}
+        now = datetime.now(timezone.utc).isoformat()
+        folder_path = str(Path.home() / ".cidx-server" / "research" / "default")
+
+        def _do_get_or_create(conn: sqlite3.Connection) -> None:
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row
+            cursor.execute(
                 "SELECT id, name, folder_path, created_at, updated_at "
                 "FROM research_sessions WHERE id = 'default'"
             )
             row = cursor.fetchone()
 
             if row is not None:
-                session_dict = dict(row)
-                # Ensure folder and softlink exist even if session already in DB
-                self._ensure_session_folder_setup(session_dict["folder_path"])
-                return session_dict
+                result["session"] = dict(row)
+                return
 
             # Create default session
-            now = datetime.now(timezone.utc).isoformat()
-            folder_path = str(Path.home() / ".cidx-server" / "research" / "default")
-
-            conn.execute(
+            cursor.execute(
                 "INSERT INTO research_sessions (id, name, folder_path, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?)",
                 ("default", "Default Session", folder_path, now, now),
             )
-            conn.commit()
+            result["created"] = True
+            result["folder_path"] = folder_path
 
-            # Ensure folder and softlink exist (AC3)
-            self._ensure_session_folder_setup(folder_path)
+        self._conn_manager.execute_atomic(_do_get_or_create)
 
-            # Return the newly created session
-            cursor = conn.execute(
-                "SELECT id, name, folder_path, created_at, updated_at "
-                "FROM research_sessions WHERE id = 'default'"
-            )
-            row = cursor.fetchone()
-            return dict(row)
+        if result["session"] is not None:
+            # Ensure folder and softlink exist even if session already in DB
+            self._ensure_session_folder_setup(result["session"]["folder_path"])
+            return result["session"]
 
-        finally:
-            conn.close()
+        # Ensure folder and softlink exist (AC3)
+        self._ensure_session_folder_setup(folder_path)
+
+        # Return the newly created session
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        cursor.execute(
+            "SELECT id, name, folder_path, created_at, updated_at "
+            "FROM research_sessions WHERE id = 'default'"
+        )
+        row = cursor.fetchone()
+        return dict(row)
 
     def delete_session(self, session_id: str) -> bool:
         """
@@ -433,37 +457,41 @@ class ResearchAssistantService:
         """
         import shutil
 
-        conn = self._get_connection()
-        try:
-            # Check if session exists and get folder path
-            cursor = conn.execute(
+        result: dict = {"found": False, "folder_path": None}
+
+        def _do_delete(conn: sqlite3.Connection) -> None:
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row
+            cursor.execute(
                 "SELECT folder_path FROM research_sessions WHERE id = ?", (session_id,)
             )
             row = cursor.fetchone()
             if row is None:
-                return False
-
-            folder_path = row["folder_path"]
-
+                return
+            result["found"] = True
+            result["folder_path"] = row["folder_path"]
             # Delete from database (CASCADE will delete messages)
-            conn.execute("DELETE FROM research_sessions WHERE id = ?", (session_id,))
-            conn.commit()
+            cursor.execute("DELETE FROM research_sessions WHERE id = ?", (session_id,))
 
-            # Delete session folder from filesystem
-            folder = Path(folder_path)
-            if folder.exists():
-                shutil.rmtree(folder)
-                logger.info(f"Deleted session folder: {folder}")
+        self._conn_manager.execute_atomic(_do_delete)
 
-            # Bug #154: Also delete Claude CLI project folder to keep storage clean
-            # Claude CLI stores sessions in ~/.claude/projects/{path-with-dashes}/
-            # where the folder name is the working directory path with / replaced by -
-            self._cleanup_claude_cli_project(folder_path)
+        if not result["found"]:
+            return False
 
-            return True
+        folder_path = result["folder_path"]
 
-        finally:
-            conn.close()
+        # Delete session folder from filesystem
+        folder = Path(folder_path)
+        if folder.exists():
+            shutil.rmtree(folder)
+            logger.info(f"Deleted session folder: {folder}")
+
+        # Bug #154: Also delete Claude CLI project folder to keep storage clean
+        # Claude CLI stores sessions in ~/.claude/projects/{path-with-dashes}/
+        # where the folder name is the working directory path with / replaced by -
+        self._cleanup_claude_cli_project(folder_path)
+
+        return True
 
     def _cleanup_claude_cli_project(self, folder_path: str) -> None:
         """
@@ -556,26 +584,24 @@ class ResearchAssistantService:
             return False
 
         # Update in database
-        conn = self._get_connection()
-        try:
-            # Check if session exists first
-            cursor = conn.execute(
+        now = datetime.now(timezone.utc).isoformat()
+        result: dict = {"found": False}
+
+        def _do_rename(conn: sqlite3.Connection) -> None:
+            cursor = conn.cursor()
+            cursor.execute(
                 "SELECT id FROM research_sessions WHERE id = ?", (session_id,)
             )
             if cursor.fetchone() is None:
-                return False
-
-            # Update name and updated_at
-            now = datetime.now(timezone.utc).isoformat()
-            conn.execute(
+                return
+            result["found"] = True
+            cursor.execute(
                 "UPDATE research_sessions SET name = ?, updated_at = ? WHERE id = ?",
                 (new_name, now, session_id),
             )
-            conn.commit()
-            return True
 
-        finally:
-            conn.close()
+        self._conn_manager.execute_atomic(_do_rename)
+        return result["found"]
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -588,18 +614,16 @@ class ResearchAssistantService:
             Session dictionary or None if not found
         """
         conn = self._get_connection()
-        try:
-            cursor = conn.execute(
-                "SELECT id, name, folder_path, created_at, updated_at "
-                "FROM research_sessions "
-                "WHERE id = ?",
-                (session_id,),
-            )
-            row = cursor.fetchone()
-            return dict(row) if row else None
-
-        finally:
-            conn.close()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        cursor.execute(
+            "SELECT id, name, folder_path, created_at, updated_at "
+            "FROM research_sessions "
+            "WHERE id = ?",
+            (session_id,),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
 
     def get_all_sessions(self) -> List[Dict[str, Any]]:
         """
@@ -609,17 +633,15 @@ class ResearchAssistantService:
             List of session dictionaries, most recently updated first
         """
         conn = self._get_connection()
-        try:
-            cursor = conn.execute(
-                "SELECT id, name, folder_path, created_at, updated_at "
-                "FROM research_sessions "
-                "ORDER BY updated_at DESC"
-            )
-            rows = cursor.fetchall()
-            return [dict(row) for row in rows]
-
-        finally:
-            conn.close()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        cursor.execute(
+            "SELECT id, name, folder_path, created_at, updated_at "
+            "FROM research_sessions "
+            "ORDER BY updated_at DESC"
+        )
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
 
     def _get_unique_session_name(
         self, conn: sqlite3.Connection, base_name: str = "New Session"
@@ -635,11 +657,13 @@ class ResearchAssistantService:
             Unique session name (e.g., "New Session", "New Session 2", "New Session 3")
         """
         # Get all existing session names that start with base_name
-        cursor = conn.execute(
+        cur = conn.cursor()
+        cur.row_factory = sqlite3.Row
+        cur.execute(
             "SELECT name FROM research_sessions WHERE name = ? OR name LIKE ?",
             (base_name, f"{base_name} %"),
         )
-        existing_names = {row["name"] for row in cursor.fetchall()}
+        existing_names = {row["name"] for row in cur.fetchall()}
 
         # If base name is available, use it
         if base_name not in existing_names:
@@ -678,38 +702,35 @@ class ResearchAssistantService:
         # Create timestamps
         now = datetime.now(timezone.utc).isoformat()
 
-        # Insert into database
-        conn = self._get_connection()
-        try:
-            # BEGIN IMMEDIATE acquires a write lock before reading,
-            # preventing race conditions where concurrent creates both see
-            # the same state and create duplicate "New Session" names
-            conn.execute("BEGIN IMMEDIATE")
-
+        # Insert into database atomically.
+        # execute_atomic() acquires an exclusive transaction, preventing race
+        # conditions where concurrent creates both see the same state and
+        # create duplicate "New Session" names.
+        def _do_create(conn: sqlite3.Connection) -> None:
             # Generate unique session name within same transaction
             session_name = self._get_unique_session_name(conn)
-
             conn.execute(
                 "INSERT INTO research_sessions (id, name, folder_path, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?)",
                 (session_id, session_name, folder_path, now, now),
             )
-            conn.commit()
 
-            # Ensure folder and softlink exist
-            self._ensure_session_folder_setup(folder_path)
+        self._conn_manager.execute_atomic(_do_create)
 
-            # Return the created session
-            cursor = conn.execute(
-                "SELECT id, name, folder_path, created_at, updated_at "
-                "FROM research_sessions WHERE id = ?",
-                (session_id,),
-            )
-            row = cursor.fetchone()
-            return dict(row)
+        # Ensure folder and softlink exist
+        self._ensure_session_folder_setup(folder_path)
 
-        finally:
-            conn.close()
+        # Return the created session
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        cursor.execute(
+            "SELECT id, name, folder_path, created_at, updated_at "
+            "FROM research_sessions WHERE id = ?",
+            (session_id,),
+        )
+        row = cursor.fetchone()
+        return dict(row)
 
     def _ensure_session_folder_setup(self, folder_path: str) -> None:
         """
@@ -808,29 +829,31 @@ class ResearchAssistantService:
         Raises:
             sqlite3.IntegrityError: If session doesn't exist or role is invalid
         """
-        conn = self._get_connection()
-        try:
-            now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
+        result: dict = {"message_id": None}
 
-            cursor = conn.execute(
+        def _do_insert(conn: sqlite3.Connection) -> None:
+            cursor = conn.cursor()
+            cursor.execute(
                 "INSERT INTO research_messages (session_id, role, content, created_at) "
                 "VALUES (?, ?, ?, ?)",
                 (session_id, role, content, now),
             )
-            conn.commit()
+            result["message_id"] = cursor.lastrowid
 
-            # Get the inserted message
-            message_id = cursor.lastrowid
-            cursor = conn.execute(
-                "SELECT id, session_id, role, content, created_at "
-                "FROM research_messages WHERE id = ?",
-                (message_id,),
-            )
-            row = cursor.fetchone()
-            return dict(row)
+        self._conn_manager.execute_atomic(_do_insert)
 
-        finally:
-            conn.close()
+        # Get the inserted message
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        cursor.execute(
+            "SELECT id, session_id, role, content, created_at "
+            "FROM research_messages WHERE id = ?",
+            (result["message_id"],),
+        )
+        row = cursor.fetchone()
+        return dict(row)
 
     def get_messages(self, session_id: str) -> List[Dict[str, Any]]:
         """
@@ -843,19 +866,17 @@ class ResearchAssistantService:
             List of message dictionaries ordered by created_at (oldest first)
         """
         conn = self._get_connection()
-        try:
-            cursor = conn.execute(
-                "SELECT id, session_id, role, content, created_at "
-                "FROM research_messages "
-                "WHERE session_id = ? "
-                "ORDER BY id ASC",  # Using id for ordering (auto-increment)
-                (session_id,),
-            )
-            rows = cursor.fetchall()
-            return [dict(row) for row in rows]
-
-        finally:
-            conn.close()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        cursor.execute(
+            "SELECT id, session_id, role, content, created_at "
+            "FROM research_messages "
+            "WHERE session_id = ? "
+            "ORDER BY id ASC",  # Using id for ordering (auto-increment)
+            (session_id,),
+        )
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
 
     def execute_prompt(self, session_id: str, user_prompt: str) -> str:
         """

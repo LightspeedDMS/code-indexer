@@ -39,9 +39,12 @@ CORRUPTION_PATTERNS: List[str] = [
     "bad object",
 ]
 
-# Patterns indicating transient failures (network, auth, DNS).
+# Patterns indicating transient failures (network, auth, DNS, SSH access).
 # These may resolve on their own; re-clone only after repeated failures.
+# NOTE: "Could not read from remote repository" is an SSH access error (transient),
+# distinct from the corruption pattern "Could not read <object-hash>".
 TRANSIENT_PATTERNS: List[str] = [
+    "Could not read from remote",
     "Could not resolve host",
     "Connection refused",
     "Connection timed out",
@@ -56,7 +59,9 @@ def classify_fetch_error(stderr: str) -> str:
     """
     Classify a git fetch failure from its stderr output.
 
-    Checks corruption patterns first (more actionable), then transient.
+    Checks transient patterns first to prevent SSH access errors of the form
+    "Could not read from remote repository" from being misclassified as
+    corruption by the broader "Could not read" corruption pattern.
     Returns "unknown" when no known pattern matches.
 
     Args:
@@ -67,12 +72,12 @@ def classify_fetch_error(stderr: str) -> str:
         "transient"  if the error indicates a network or authentication issue.
         "unknown"    if the error does not match any known pattern.
     """
-    for pattern in CORRUPTION_PATTERNS:
-        if pattern in stderr:
-            return "corruption"
-
     for pattern in TRANSIENT_PATTERNS:
         if pattern in stderr:
             return "transient"
+
+    for pattern in CORRUPTION_PATTERNS:
+        if pattern in stderr:
+            return "corruption"
 
     return "unknown"

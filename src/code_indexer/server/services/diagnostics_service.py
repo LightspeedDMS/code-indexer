@@ -31,6 +31,7 @@ from code_indexer.server.services.ci_token_manager import (
     GITLAB_TOKEN_PATTERN,
 )
 from code_indexer.server.config.delegation_config import ClaudeDelegationManager
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 
 # Timeout for individual diagnostic checks (seconds)
@@ -164,6 +165,9 @@ class DiagnosticsService:
                 "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
             )
             self._db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")
+
+        # Connection manager for the diagnostics database
+        self._conn_manager = DatabaseConnectionManager.get_instance(self._db_path)
 
         # Load persisted results from database on initialization
         self._load_results_from_db()
@@ -631,15 +635,13 @@ class DiagnosticsService:
             run_at = datetime.now().isoformat()
 
             # Save to database
-            conn = sqlite3.connect(self._db_path)
-            try:
+            def _do_save(conn: sqlite3.Connection) -> None:
                 conn.execute(
                     "INSERT OR REPLACE INTO diagnostic_results (category, results_json, run_at) VALUES (?, ?, ?)",
                     (category.value, results_json, run_at),
                 )
-                conn.commit()
-            finally:
-                conn.close()
+
+            self._conn_manager.execute_atomic(_do_save)
 
         except Exception as e:
             # Log error but don't fail diagnostic execution
@@ -660,43 +662,39 @@ class DiagnosticsService:
             if not Path(self._db_path).exists():
                 return
 
-            conn = sqlite3.connect(self._db_path)
-            try:
-                cursor = conn.execute(
-                    "SELECT category, results_json, run_at FROM diagnostic_results"
-                )
-                rows = cursor.fetchall()
+            conn = self._conn_manager.get_connection()
+            cursor = conn.execute(
+                "SELECT category, results_json, run_at FROM diagnostic_results"
+            )
+            rows = cursor.fetchall()
 
-                for row in rows:
-                    category_str, results_json, run_at = row
+            for row in rows:
+                category_str, results_json, run_at = row
 
-                    # Parse category
-                    try:
-                        category = DiagnosticCategory(category_str)
-                    except ValueError:
-                        continue  # Skip unknown categories
+                # Parse category
+                try:
+                    category = DiagnosticCategory(category_str)
+                except ValueError:
+                    continue  # Skip unknown categories
 
-                    # Deserialize results
-                    results_data = json.loads(results_json)
-                    results = []
+                # Deserialize results
+                results_data = json.loads(results_json)
+                results = []
 
-                    for result_dict in results_data:
-                        # Reconstruct DiagnosticResult from dict
-                        result = DiagnosticResult(
-                            name=result_dict["name"],
-                            status=DiagnosticStatus(result_dict["status"]),
-                            message=result_dict["message"],
-                            details=result_dict.get("details", {}),
-                            timestamp=datetime.fromisoformat(result_dict["timestamp"]),
-                        )
-                        results.append(result)
+                for result_dict in results_data:
+                    # Reconstruct DiagnosticResult from dict
+                    result = DiagnosticResult(
+                        name=result_dict["name"],
+                        status=DiagnosticStatus(result_dict["status"]),
+                        message=result_dict["message"],
+                        details=result_dict.get("details", {}),
+                        timestamp=datetime.fromisoformat(result_dict["timestamp"]),
+                    )
+                    results.append(result)
 
-                    # Populate cache
-                    self._cache[category] = results
-                    self._cache_timestamps[category] = datetime.fromisoformat(run_at)
-
-            finally:
-                conn.close()
+                # Populate cache
+                self._cache[category] = results
+                self._cache_timestamps[category] = datetime.fromisoformat(run_at)
 
         except Exception as e:
             # Log error but don't fail service initialization
@@ -722,42 +720,38 @@ class DiagnosticsService:
             if not Path(self._db_path).exists():
                 return False
 
-            conn = sqlite3.connect(self._db_path)
-            try:
-                cursor = conn.execute(
-                    "SELECT results_json, run_at FROM diagnostic_results WHERE category = ?",
-                    (category.value,)
+            conn = self._conn_manager.get_connection()
+            cursor = conn.execute(
+                "SELECT results_json, run_at FROM diagnostic_results WHERE category = ?",
+                (category.value,)
+            )
+            row = cursor.fetchone()
+
+            if row is None:
+                return False
+
+            results_json, run_at = row
+
+            # Deserialize results
+            results_data = json.loads(results_json)
+            results = []
+
+            for result_dict in results_data:
+                # Reconstruct DiagnosticResult from dict
+                result = DiagnosticResult(
+                    name=result_dict["name"],
+                    status=DiagnosticStatus(result_dict["status"]),
+                    message=result_dict["message"],
+                    details=result_dict.get("details", {}),
+                    timestamp=datetime.fromisoformat(result_dict["timestamp"]),
                 )
-                row = cursor.fetchone()
+                results.append(result)
 
-                if row is None:
-                    return False
+            # Populate cache
+            self._cache[category] = results
+            self._cache_timestamps[category] = datetime.fromisoformat(run_at)
 
-                results_json, run_at = row
-
-                # Deserialize results
-                results_data = json.loads(results_json)
-                results = []
-
-                for result_dict in results_data:
-                    # Reconstruct DiagnosticResult from dict
-                    result = DiagnosticResult(
-                        name=result_dict["name"],
-                        status=DiagnosticStatus(result_dict["status"]),
-                        message=result_dict["message"],
-                        details=result_dict.get("details", {}),
-                        timestamp=datetime.fromisoformat(result_dict["timestamp"]),
-                    )
-                    results.append(result)
-
-                # Populate cache
-                self._cache[category] = results
-                self._cache_timestamps[category] = datetime.fromisoformat(run_at)
-
-                return True
-
-            finally:
-                conn.close()
+            return True
 
         except Exception as e:
             # Log error but return False to indicate no results loaded
@@ -897,14 +891,11 @@ class DiagnosticsService:
 
         # Bug #149 Fix: Query database for registered golden repos instead of scanning filesystem
         try:
-            conn = sqlite3.connect(self._db_path)
-            try:
-                cursor = conn.execute(
-                    "SELECT alias, clone_path FROM golden_repos_metadata"
-                )
-                registered_repos = cursor.fetchall()
-            finally:
-                conn.close()
+            conn = self._conn_manager.get_connection()
+            cursor = conn.execute(
+                "SELECT alias, clone_path FROM golden_repos_metadata"
+            )
+            registered_repos = cursor.fetchall()
         except Exception as e:
             import logging
             logger = logging.getLogger(__name__)

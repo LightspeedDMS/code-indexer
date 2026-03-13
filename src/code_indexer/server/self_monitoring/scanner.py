@@ -13,6 +13,8 @@ import sqlite3
 import subprocess
 from typing import Dict, List, Optional
 
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -112,6 +114,7 @@ class LogScanner:
         self.repo_root = repo_root
         self.github_token = github_token
         self.server_name = server_name
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
     def assemble_prompt(
         self, last_scan_log_id: int, existing_issues: List[Dict]
@@ -239,36 +242,32 @@ class LogScanner:
         """
         lines = []
 
-        conn = sqlite3.connect(self.db_path)
-        try:
-            cursor = conn.execute(
-                "SELECT fingerprint, classification, error_codes, title, created_at "
-                "FROM self_monitoring_issues "
-                "WHERE datetime(created_at) >= datetime('now', '-' || ? || ' days') "
-                "ORDER BY created_at DESC",
-                (FINGERPRINT_RETENTION_DAYS,),
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            "SELECT fingerprint, classification, error_codes, title, created_at "
+            "FROM self_monitoring_issues "
+            "WHERE datetime(created_at) >= datetime('now', '-' || ? || ' days') "
+            "ORDER BY created_at DESC",
+            (FINGERPRINT_RETENTION_DAYS,),
+        )
+
+        fingerprints = cursor.fetchall()
+
+        if fingerprints:
+            lines.append(
+                f"# Stored Fingerprints (Last {FINGERPRINT_RETENTION_DAYS} Days)"
             )
+            lines.append("")
 
-            fingerprints = cursor.fetchall()
-
-            if fingerprints:
-                lines.append(
-                    f"# Stored Fingerprints (Last {FINGERPRINT_RETENTION_DAYS} Days)"
-                )
+            for fp_row in fingerprints:
+                fingerprint, classification, error_codes, title, created_at = fp_row
+                lines.append(f"Fingerprint: {fingerprint}")
+                lines.append(f"  Classification: {classification}")
+                if error_codes:
+                    lines.append(f"  Error Codes: {error_codes}")
+                lines.append(f"  Title: {title}")
+                lines.append(f"  Created: {created_at}")
                 lines.append("")
-
-                for fp_row in fingerprints:
-                    fingerprint, classification, error_codes, title, created_at = fp_row
-                    lines.append(f"Fingerprint: {fingerprint}")
-                    lines.append(f"  Classification: {classification}")
-                    if error_codes:
-                        lines.append(f"  Error Codes: {error_codes}")
-                    lines.append(f"  Title: {title}")
-                    lines.append(f"  Created: {created_at}")
-                    lines.append("")
-
-        finally:
-            conn.close()
 
         return lines
 
@@ -282,8 +281,9 @@ class LogScanner:
         logger.debug(
             f"[SELF-MON-DEBUG] create_scan_record: Entry - scan_id={self.scan_id}, log_id_start={log_id_start}, db_path={self.db_path}"
         )
-        conn = sqlite3.connect(self.db_path)
-        try:
+        started_at = datetime.datetime.utcnow().isoformat()
+
+        def _do_create(conn: sqlite3.Connection) -> None:
             logger.debug(
                 "[SELF-MON-DEBUG] create_scan_record: Executing INSERT into self_monitoring_scans"
             )
@@ -295,19 +295,18 @@ class LogScanner:
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     self.scan_id,
-                    datetime.datetime.utcnow().isoformat(),
+                    started_at,
                     "RUNNING",
                     log_id_start,
                     log_id_start,
                     0,
                 ),
             )
-            conn.commit()
-            logger.debug(
-                "[SELF-MON-DEBUG] create_scan_record: INSERT committed successfully"
-            )
-        finally:
-            conn.close()
+
+        self._conn_manager.execute_atomic(_do_create)
+        logger.debug(
+            "[SELF-MON-DEBUG] create_scan_record: INSERT committed successfully"
+        )
 
     def get_last_scan_log_id(self) -> int:
         """
@@ -323,25 +322,22 @@ class LogScanner:
         logger.debug(
             f"[SELF-MON-DEBUG] get_last_scan_log_id: Entry - db_path={self.db_path}"
         )
-        conn = sqlite3.connect(self.db_path)
-        try:
-            logger.debug(
-                "[SELF-MON-DEBUG] get_last_scan_log_id: Executing SELECT query for last successful scan"
-            )
-            cursor = conn.execute(
-                "SELECT log_id_end FROM self_monitoring_scans "
-                "WHERE status = 'SUCCESS' AND log_id_end IS NOT NULL "
-                "ORDER BY started_at DESC "
-                "LIMIT 1"
-            )
-            row = cursor.fetchone()
-            result = row[0] if row else 0
-            logger.debug(
-                f"[SELF-MON-DEBUG] get_last_scan_log_id: Query complete - result={result}, has_row={row is not None}"
-            )
-            return result
-        finally:
-            conn.close()
+        conn = self._conn_manager.get_connection()
+        logger.debug(
+            "[SELF-MON-DEBUG] get_last_scan_log_id: Executing SELECT query for last successful scan"
+        )
+        cursor = conn.execute(
+            "SELECT log_id_end FROM self_monitoring_scans "
+            "WHERE status = 'SUCCESS' AND log_id_end IS NOT NULL "
+            "ORDER BY started_at DESC "
+            "LIMIT 1"
+        )
+        row = cursor.fetchone()
+        result = row[0] if row else 0
+        logger.debug(
+            f"[SELF-MON-DEBUG] get_last_scan_log_id: Query complete - result={result}, has_row={row is not None}"
+        )
+        return result
 
     def update_scan_record(
         self,
@@ -365,36 +361,34 @@ class LogScanner:
         """
         completed_at = datetime.datetime.utcnow().isoformat()
 
-        conn = sqlite3.connect(self.db_path)
-        try:
-            # Build dynamic UPDATE based on provided fields
-            update_fields = ["status = ?", "completed_at = ?"]
-            update_values = [status, completed_at]
+        # Build dynamic UPDATE based on provided fields
+        update_fields = ["status = ?", "completed_at = ?"]
+        update_values: list = [status, completed_at]
 
-            if log_id_end is not None:
-                update_fields.append("log_id_end = ?")
-                update_values.append(log_id_end)
+        if log_id_end is not None:
+            update_fields.append("log_id_end = ?")
+            update_values.append(log_id_end)
 
-            if issues_created is not None:
-                update_fields.append("issues_created = ?")
-                update_values.append(issues_created)
+        if issues_created is not None:
+            update_fields.append("issues_created = ?")
+            update_values.append(issues_created)
 
-            if error_message is not None:
-                update_fields.append("error_message = ?")
-                update_values.append(error_message)
+        if error_message is not None:
+            update_fields.append("error_message = ?")
+            update_values.append(error_message)
 
-            update_values.append(self.scan_id)
+        update_values.append(self.scan_id)
 
-            query = (
-                f"UPDATE self_monitoring_scans "
-                f"SET {', '.join(update_fields)} "
-                f"WHERE scan_id = ?"
-            )
+        query = (
+            f"UPDATE self_monitoring_scans "
+            f"SET {', '.join(update_fields)} "
+            f"WHERE scan_id = ?"
+        )
 
+        def _do_update(conn: sqlite3.Connection) -> None:
             conn.execute(query, update_values)
-            conn.commit()
-        finally:
-            conn.close()
+
+        self._conn_manager.execute_atomic(_do_update)
 
     def parse_claude_response(self, response_str: str) -> Dict:
         """

@@ -26,6 +26,7 @@ from pathlib import Path
 
 from .jwt_manager import JWTManager
 from .audit_logger import password_audit_logger
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 
 @dataclass
@@ -115,12 +116,14 @@ class RefreshTokenManager:
         # Ensure database directory exists
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
+        self._conn_manager = DatabaseConnectionManager.get_instance(str(self.db_path))
+
         # Initialize database
         self._init_database()
 
     def _init_database(self):
         """Initialize SQLite database for secure token storage."""
-        with sqlite3.connect(self.db_path, timeout=30) as conn:
+        def _do_init(conn: sqlite3.Connection) -> None:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS token_families (
@@ -187,7 +190,7 @@ class RefreshTokenManager:
             """
             )
 
-            conn.commit()
+        self._conn_manager.execute_atomic(_do_init)
 
     def create_token_family(self, username: str) -> str:
         """
@@ -202,16 +205,17 @@ class RefreshTokenManager:
         family_id = self._generate_secure_id()
         now = datetime.now(timezone.utc).isoformat()
 
-        with sqlite3.connect(self.db_path, timeout=30) as conn:
+        def _do_insert(conn: sqlite3.Connection) -> None:
             conn.execute(
                 """
-                INSERT INTO token_families 
+                INSERT INTO token_families
                 (family_id, username, created_at, last_used_at)
                 VALUES (?, ?, ?, ?)
             """,
                 (family_id, username, now, now),
             )
-            conn.commit()
+
+        self._conn_manager.execute_atomic(_do_insert)
 
         return family_id
 
@@ -240,10 +244,10 @@ class RefreshTokenManager:
             expires_at = now + timedelta(days=self.refresh_token_lifetime_days)
 
             # Store refresh token
-            with sqlite3.connect(self.db_path, timeout=30) as conn:
+            def _do_insert(conn: sqlite3.Connection) -> None:
                 conn.execute(
                     """
-                    INSERT INTO refresh_tokens 
+                    INSERT INTO refresh_tokens
                     (token_id, family_id, username, token_hash, created_at, expires_at)
                     VALUES (?, ?, ?, ?, ?, ?)
                 """,
@@ -256,7 +260,8 @@ class RefreshTokenManager:
                         expires_at.isoformat(),
                     ),
                 )
-                conn.commit()
+
+            self._conn_manager.execute_atomic(_do_insert)
 
             # Create access token
             access_token = self.jwt_manager.create_token(user_data)
@@ -323,7 +328,9 @@ class RefreshTokenManager:
             # - INSERT (store new token)
             # A crash between UPDATE and INSERT would leave the family with a
             # consumed token and no replacement, breaking the rotation chain.
-            with sqlite3.connect(self.db_path, timeout=30) as conn:
+            result_holder: Dict[str, Any] = {}
+
+            def _do_rotate(conn: sqlite3.Connection) -> None:
                 cursor = conn.execute(
                     """
                     SELECT token_id, family_id, username, created_at, expires_at,
@@ -337,16 +344,15 @@ class RefreshTokenManager:
                 token_record = cursor.fetchone()
 
                 if not token_record:
-                    return {
-                        "valid": False,
-                        "error": "Invalid refresh token",
-                        "security_incident": True,
-                    }
+                    result_holder["valid"] = False
+                    result_holder["error"] = "Invalid refresh token"
+                    result_holder["security_incident"] = True
+                    return
 
                 (
-                    token_id,
-                    family_id,
-                    username,
+                    t_id,
+                    f_id,
+                    uname,
                     created_at_str,
                     expires_at_str,
                     is_used,
@@ -354,20 +360,23 @@ class RefreshTokenManager:
                     parent_token_id,
                 ) = token_record
 
+                result_holder["token_id"] = t_id
+                result_holder["family_id"] = f_id
+                result_holder["username"] = uname
+
                 # Check if token is already used (replay attack detection)
                 if is_used:
-                    self._handle_replay_attack(family_id, username, client_ip)
-                    return {
-                        "valid": False,
-                        "error": "Token replay attack detected",
-                        "security_incident": True,
-                        "family_revoked": True,
-                    }
+                    result_holder["replay_attack"] = True
+                    result_holder["family_id_for_revoke"] = f_id
+                    result_holder["username_for_revoke"] = uname
+                    return
 
                 # Check expiration
-                expires_at = datetime.fromisoformat(expires_at_str)
-                if datetime.now(timezone.utc) > expires_at:
-                    return {"valid": False, "error": "Refresh token has expired"}
+                expires_at_dt = datetime.fromisoformat(expires_at_str)
+                if datetime.now(timezone.utc) > expires_at_dt:
+                    result_holder["valid"] = False
+                    result_holder["error"] = "Refresh token has expired"
+                    return
 
                 # Check if family is revoked
                 cursor = conn.execute(
@@ -376,28 +385,27 @@ class RefreshTokenManager:
                     FROM token_families
                     WHERE family_id = ?
                 """,
-                    (family_id,),
+                    (f_id,),
                 )
 
                 family_record = cursor.fetchone()
                 if not family_record or family_record[0]:
-                    return {
-                        "valid": False,
-                        "error": f'Refresh token revoked due to {family_record[1] if family_record else "unknown reason"}',
-                        "revocation_reason": (
-                            family_record[1] if family_record else None
-                        ),
-                    }
+                    result_holder["valid"] = False
+                    result_holder["error"] = f'Refresh token revoked due to {family_record[1] if family_record else "unknown reason"}'
+                    result_holder["revocation_reason"] = (
+                        family_record[1] if family_record else None
+                    )
+                    return
 
                 # Mark current token as used (critical write - must be under lock)
-                now = datetime.now(timezone.utc)
+                rotate_now = datetime.now(timezone.utc)
                 conn.execute(
                     """
                     UPDATE refresh_tokens
                     SET is_used = 1, used_at = ?
                     WHERE token_id = ?
                 """,
-                    (now.isoformat(), token_id),
+                    (rotate_now.isoformat(), t_id),
                 )
 
                 # Update family last used
@@ -407,13 +415,13 @@ class RefreshTokenManager:
                     SET last_used_at = ?
                     WHERE family_id = ?
                 """,
-                    (now.isoformat(), family_id),
+                    (rotate_now.isoformat(), f_id),
                 )
 
                 # INSERT new token inside the same lock + transaction as the UPDATE
                 # above.  This keeps UPDATE and INSERT atomic: either both succeed
                 # or neither is committed, preventing a TOCTOU gap.
-                new_expires_at = now + timedelta(days=self.refresh_token_lifetime_days)
+                new_expires_at = rotate_now + timedelta(days=self.refresh_token_lifetime_days)
                 conn.execute(
                     """
                     INSERT INTO refresh_tokens
@@ -422,16 +430,45 @@ class RefreshTokenManager:
                 """,
                     (
                         new_token_id,
-                        family_id,
-                        username,
+                        f_id,
+                        uname,
                         new_token_hash,
-                        now.isoformat(),
+                        rotate_now.isoformat(),
                         new_expires_at.isoformat(),
-                        token_id,
+                        t_id,
                     ),
                 )
 
-                conn.commit()
+                result_holder["success"] = True
+                result_holder["token_id"] = t_id
+                result_holder["family_id"] = f_id
+                result_holder["username"] = uname
+
+            self._conn_manager.execute_atomic(_do_rotate)
+
+            if result_holder.get("replay_attack"):
+                self._handle_replay_attack(
+                    result_holder["family_id_for_revoke"],
+                    result_holder["username_for_revoke"],
+                    client_ip,
+                )
+                return {
+                    "valid": False,
+                    "error": "Token replay attack detected",
+                    "security_incident": True,
+                    "family_revoked": True,
+                }
+
+            if not result_holder.get("success"):
+                # Pass through error/revocation responses
+                response = {k: v for k, v in result_holder.items() if k not in ("token_id", "family_id", "username")}
+                if "valid" not in response:
+                    response["valid"] = False
+                return response
+
+            token_id = result_holder["token_id"]
+            family_id = result_holder["family_id"]
+            username = result_holder["username"]
 
         # User lookup and JWT creation happen OUTSIDE the lock - no shared state.
         if user_manager:
@@ -487,17 +524,17 @@ class RefreshTokenManager:
             username: Username for audit logging
             client_ip: Client IP for audit logging
         """
-        with sqlite3.connect(self.db_path, timeout=30) as conn:
-            # Revoke token family
+        def _do_revoke(conn: sqlite3.Connection) -> None:
             conn.execute(
                 """
-                UPDATE token_families 
+                UPDATE token_families
                 SET is_revoked = 1, revocation_reason = 'replay_attack'
                 WHERE family_id = ?
             """,
                 (family_id,),
             )
-            conn.commit()
+
+        self._conn_manager.execute_atomic(_do_revoke)
 
         # Log security incident
         password_audit_logger.log_security_incident(
@@ -520,31 +557,31 @@ class RefreshTokenManager:
         Returns:
             Number of tokens revoked
         """
-        with sqlite3.connect(self.db_path, timeout=30) as conn:
-            # Count tokens in family
+        result: dict = {"token_count": 0}
+
+        def _do_revoke(conn: sqlite3.Connection) -> None:
+            # SELECT and UPDATE are atomic within this transaction
             cursor = conn.execute(
                 """
-                SELECT COUNT(*) FROM refresh_tokens 
+                SELECT COUNT(*) FROM refresh_tokens
                 WHERE family_id = ? AND is_used = 0
             """,
                 (family_id,),
             )
+            result["token_count"] = cursor.fetchone()[0]
 
-            token_count: int = cursor.fetchone()[0]
-
-            # Revoke family
             conn.execute(
                 """
-                UPDATE token_families 
+                UPDATE token_families
                 SET is_revoked = 1, revocation_reason = ?
                 WHERE family_id = ?
             """,
                 (reason, family_id),
             )
 
-            conn.commit()
+        self._conn_manager.execute_atomic(_do_revoke)
 
-        return token_count
+        return result["token_count"]
 
     def revoke_user_tokens(self, username: str, reason: str = "password_change") -> int:
         """
@@ -557,31 +594,31 @@ class RefreshTokenManager:
         Returns:
             Number of token families revoked
         """
-        with sqlite3.connect(self.db_path, timeout=30) as conn:
-            # Count families
+        result: dict = {"family_count": 0}
+
+        def _do_revoke(conn: sqlite3.Connection) -> None:
+            # SELECT and UPDATE are atomic within this transaction
             cursor = conn.execute(
                 """
-                SELECT COUNT(*) FROM token_families 
+                SELECT COUNT(*) FROM token_families
                 WHERE username = ? AND is_revoked = 0
             """,
                 (username,),
             )
+            result["family_count"] = cursor.fetchone()[0]
 
-            family_count: int = cursor.fetchone()[0]
-
-            # Revoke all user families
             conn.execute(
                 """
-                UPDATE token_families 
+                UPDATE token_families
                 SET is_revoked = 1, revocation_reason = ?
                 WHERE username = ? AND is_revoked = 0
             """,
                 (reason, username),
             )
 
-            conn.commit()
+        self._conn_manager.execute_atomic(_do_revoke)
 
-        return family_count
+        return result["family_count"]
 
     def cleanup_expired_tokens(self) -> int:
         """
@@ -591,41 +628,39 @@ class RefreshTokenManager:
             Number of tokens cleaned up
         """
         now = datetime.now(timezone.utc).isoformat()
+        result: dict = {"token_count": 0}
 
-        with sqlite3.connect(self.db_path, timeout=30) as conn:
-            # Count expired tokens
+        def _do_cleanup(conn: sqlite3.Connection) -> None:
+            # SELECT and DELETE are atomic within this transaction
             cursor = conn.execute(
                 """
-                SELECT COUNT(*) FROM refresh_tokens 
+                SELECT COUNT(*) FROM refresh_tokens
                 WHERE expires_at < ?
             """,
                 (now,),
             )
+            result["token_count"] = cursor.fetchone()[0]
 
-            token_count: int = cursor.fetchone()[0]
-
-            # Delete expired tokens
             conn.execute(
                 """
-                DELETE FROM refresh_tokens 
+                DELETE FROM refresh_tokens
                 WHERE expires_at < ?
             """,
                 (now,),
             )
-
             # Clean up families with no tokens
             conn.execute(
                 """
-                DELETE FROM token_families 
+                DELETE FROM token_families
                 WHERE family_id NOT IN (
                     SELECT DISTINCT family_id FROM refresh_tokens
                 )
             """
             )
 
-            conn.commit()
+        self._conn_manager.execute_atomic(_do_cleanup)
 
-        return token_count
+        return result["token_count"]
 
     def track_token_relationship(
         self, parent_token_id: str, child_token_id: str, family_id: str
@@ -653,9 +688,8 @@ class RefreshTokenManager:
         """
         # Verify database exists and is readable
         try:
-            with sqlite3.connect(self.db_path, timeout=30) as conn:
-                cursor = conn.execute("SELECT COUNT(*) FROM refresh_tokens")
-                cursor.fetchone()
+            conn = self._conn_manager.get_connection()
+            conn.execute("SELECT COUNT(*) FROM refresh_tokens")
             return True
         except Exception:
             return False

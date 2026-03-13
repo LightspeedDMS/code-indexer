@@ -36,6 +36,7 @@ from ..services.config_service import get_config_service
 from code_indexer import __version__ as cidx_version
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
 
@@ -8483,58 +8484,58 @@ def _load_self_monitoring_data(
     issues = []
 
     try:
-        with sqlite3.connect(str(db_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
+        conn = DatabaseConnectionManager.get_instance(str(db_path)).get_connection()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row
 
-            # Load scans (most recent first)
-            cursor.execute(
-                """
-                SELECT scan_id, started_at, completed_at, status,
-                       log_id_start, log_id_end, issues_created, error_message
-                FROM self_monitoring_scans
-                ORDER BY started_at DESC
-                LIMIT ?
-                """,
-                (SCAN_HISTORY_LIMIT,),
-            )
-            scans = [dict(row) for row in cursor.fetchall()]
+        # Load scans (most recent first)
+        cursor.execute(
+            """
+            SELECT scan_id, started_at, completed_at, status,
+                   log_id_start, log_id_end, issues_created, error_message
+            FROM self_monitoring_scans
+            ORDER BY started_at DESC
+            LIMIT ?
+            """,
+            (SCAN_HISTORY_LIMIT,),
+        )
+        scans = [dict(row) for row in cursor.fetchall()]
 
-            # Add duration calculation for each scan
-            from datetime import datetime
+        # Add duration calculation for each scan
+        from datetime import datetime
 
-            for scan in scans:
-                if scan["completed_at"] and scan["started_at"]:
-                    # Parse timestamps and calculate duration
-                    try:
-                        started = datetime.fromisoformat(scan["started_at"])
-                        completed = datetime.fromisoformat(scan["completed_at"])
-                        duration_seconds = (completed - started).total_seconds()
+        for scan in scans:
+            if scan["completed_at"] and scan["started_at"]:
+                # Parse timestamps and calculate duration
+                try:
+                    started = datetime.fromisoformat(scan["started_at"])
+                    completed = datetime.fromisoformat(scan["completed_at"])
+                    duration_seconds = (completed - started).total_seconds()
 
-                        # Format as "Xm Ys"
-                        minutes = int(duration_seconds // 60)
-                        seconds = int(duration_seconds % 60)
-                        scan["duration"] = f"{minutes}m {seconds}s"
-                    except (ValueError, TypeError):
-                        scan["duration"] = "N/A"
-                elif scan["status"] == "RUNNING":
-                    scan["duration"] = "In progress"
-                else:
+                    # Format as "Xm Ys"
+                    minutes = int(duration_seconds // 60)
+                    seconds = int(duration_seconds % 60)
+                    scan["duration"] = f"{minutes}m {seconds}s"
+                except (ValueError, TypeError):
                     scan["duration"] = "N/A"
+            elif scan["status"] == "RUNNING":
+                scan["duration"] = "In progress"
+            else:
+                scan["duration"] = "N/A"
 
-            # Load issues (most recent first)
-            cursor.execute(
-                """
-                SELECT id, scan_id, github_issue_number, github_issue_url,
-                       classification, title, fingerprint,
-                       source_log_ids, source_files, created_at
-                FROM self_monitoring_issues
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (ISSUES_HISTORY_LIMIT,),
-            )
-            issues = [dict(row) for row in cursor.fetchall()]
+        # Load issues (most recent first)
+        cursor.execute(
+            """
+            SELECT id, scan_id, github_issue_number, github_issue_url,
+                   classification, title, fingerprint,
+                   source_log_ids, source_files, created_at
+            FROM self_monitoring_issues
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (ISSUES_HISTORY_LIMIT,),
+        )
+        issues = [dict(row) for row in cursor.fetchall()]
     except Exception as e:
         logger.error(
             format_error_log(
@@ -8576,21 +8577,19 @@ def _get_last_scan_time(db_path: Path) -> Optional[str]:
         started_at timestamp of most recent scan, or None if no scans exist
     """
     try:
-        import sqlite3
-
-        with sqlite3.connect(str(db_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT started_at
-                FROM self_monitoring_scans
-                ORDER BY started_at DESC
-                LIMIT 1
-                """
-            )
-            row = cursor.fetchone()
-            return row["started_at"] if row else None
+        conn = DatabaseConnectionManager.get_instance(str(db_path)).get_connection()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        cursor.execute(
+            """
+            SELECT started_at
+            FROM self_monitoring_scans
+            ORDER BY started_at DESC
+            LIMIT 1
+            """
+        )
+        row = cursor.fetchone()
+        return row["started_at"] if row else None
     except Exception as e:
         logger.error(
             format_error_log(
@@ -8646,19 +8645,17 @@ def _get_scan_status(db_path: Path) -> str:
         "Running..." if self_monitoring job is running, "Idle" otherwise
     """
     try:
-        import sqlite3
-
-        with sqlite3.connect(str(db_path)) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT COUNT(*)
-                FROM self_monitoring_scans
-                WHERE completed_at IS NULL
-                """
-            )
-            count = cursor.fetchone()[0]
-            return "Running..." if count > 0 else "Idle"
+        conn = DatabaseConnectionManager.get_instance(str(db_path)).get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM self_monitoring_scans
+            WHERE completed_at IS NULL
+            """
+        )
+        count = cursor.fetchone()[0]
+        return "Running..." if count > 0 else "Idle"
     except Exception as e:
         logger.error(
             format_error_log(

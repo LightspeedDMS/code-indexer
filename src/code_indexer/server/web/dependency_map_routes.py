@@ -673,27 +673,23 @@ def _get_known_repo_names() -> Optional[Set[str]]:
     Used to detect repos not covered by any domain in _domains.json.
     Returns None on any error so the caller can skip Check 6 gracefully.
     """
-    import sqlite3
-
     try:
         from ..services.config_service import get_config_service
+        from ..storage.database_manager import DatabaseConnectionManager
 
         config_service = get_config_service()
         config_manager = config_service.config_manager
         server_dir = config_manager.server_dir
         db_path = str(server_dir / "data" / "cidx_server.db")
 
-        conn = sqlite3.connect(db_path)
-        try:
-            # INNER JOIN excludes orphaned global_repos entries (repos removed from
-            # golden_repos_metadata but whose global_repos row was never cleaned up).
-            rows = conn.execute(
-                "SELECT g.repo_name FROM global_repos g"
-                " INNER JOIN golden_repos_metadata m ON g.repo_name = m.alias"
-            ).fetchall()
-            return {row[0] for row in rows}
-        finally:
-            conn.close()
+        conn = DatabaseConnectionManager.get_instance(db_path).get_connection()
+        # INNER JOIN excludes orphaned global_repos entries (repos removed from
+        # golden_repos_metadata but whose global_repos row was never cleaned up).
+        rows = conn.execute(
+            "SELECT g.repo_name FROM global_repos g"
+            " INNER JOIN golden_repos_metadata m ON g.repo_name = m.alias"
+        ).fetchall()
+        return {row[0] for row in rows}
     except Exception as e:
         logger.warning("Failed to get known repo names for Check 6: %s", e)
         return None

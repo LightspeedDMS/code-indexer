@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, TYPE_CHECKING
 import json
 
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
 if TYPE_CHECKING:
     from ..user_manager import UserManager
     from ..audit_logger import PasswordChangeAuditLogger
@@ -44,10 +46,11 @@ class OAuthManager:
             server_dir.mkdir(parents=True, exist_ok=True)
             self.db_path = server_dir / "oauth.db"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn_manager = DatabaseConnectionManager.get_instance(str(self.db_path))
         self._init_database()
 
     def _init_database(self):
-        with sqlite3.connect(self.db_path, timeout=30) as conn:
+        def _do_init(conn: sqlite3.Connection) -> None:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS oauth_clients (
@@ -92,7 +95,27 @@ class OAuthManager:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tokens_access ON oauth_tokens (access_token)"
             )
-            conn.commit()
+
+            # Seed synthetic client_credentials row to satisfy FK constraint.
+            # DatabaseConnectionManager enables PRAGMA foreign_keys = ON, so
+            # oauth_tokens.client_id = "client_credentials" requires a matching
+            # row in oauth_clients. This row is never used for authorization flows.
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO oauth_clients
+                    (client_id, client_name, redirect_uris, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "client_credentials",
+                    "System: Client Credentials Grant",
+                    "[]",
+                    "2000-01-01T00:00:00+00:00",
+                    "{}",
+                ),
+            )
+
+        self._conn_manager.execute_atomic(_do_init)
 
     def get_discovery_metadata(self) -> Dict[str, Any]:
         return {
@@ -127,7 +150,8 @@ class OAuthManager:
             "response_types": response_types or ["code"],
             "scope": scope,
         }
-        with sqlite3.connect(self.db_path, timeout=30) as conn:
+
+        def _do_insert(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "INSERT INTO oauth_clients (client_id, client_name, redirect_uris, created_at, metadata) VALUES (?, ?, ?, ?, ?)",
                 (
@@ -138,7 +162,8 @@ class OAuthManager:
                     json.dumps(metadata),
                 ),
             )
-            conn.commit()
+
+        self._conn_manager.execute_atomic(_do_insert)
         return {
             "client_id": client_id,
             "client_name": client_name,
@@ -150,20 +175,21 @@ class OAuthManager:
         }
 
     def get_client(self, client_id: str) -> Optional[Dict[str, Any]]:
-        with sqlite3.connect(self.db_path, timeout=30) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT * FROM oauth_clients WHERE client_id = ?", (client_id,)
-            )
-            row = cursor.fetchone()
-            if row:
-                return {
-                    "client_id": row["client_id"],
-                    "client_name": row["client_name"],
-                    "redirect_uris": json.loads(row["redirect_uris"]),
-                    "created_at": row["created_at"],
-                }
-            return None
+        conn = self._conn_manager.get_connection()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        cursor.execute(
+            "SELECT * FROM oauth_clients WHERE client_id = ?", (client_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return {
+                "client_id": row["client_id"],
+                "client_name": row["client_name"],
+                "redirect_uris": json.loads(row["redirect_uris"]),
+                "created_at": row["created_at"],
+            }
+        return None
 
     def generate_authorization_code(
         self,
@@ -184,7 +210,8 @@ class OAuthManager:
             raise OAuthError(f"Invalid redirect_uri: {redirect_uri}")
         code = secrets.token_urlsafe(32)
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
-        with sqlite3.connect(self.db_path, timeout=30) as conn:
+
+        def _do_insert(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "INSERT INTO oauth_codes (code, client_id, user_id, code_challenge, redirect_uri, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (
@@ -196,15 +223,26 @@ class OAuthManager:
                     expires_at.isoformat(),
                 ),
             )
-            conn.commit()
+
+        self._conn_manager.execute_atomic(_do_insert)
         return code
 
     def exchange_code_for_token(
         self, code: str, code_verifier: str, client_id: str
     ) -> Dict[str, Any]:
-        with sqlite3.connect(self.db_path, timeout=30) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
+        # Prepare new token values before entering the atomic block
+        token_id = secrets.token_urlsafe(32)
+        access_token = secrets.token_urlsafe(48)
+        refresh_token = secrets.token_urlsafe(48)
+        now = datetime.now(timezone.utc)
+        hard_expires_at = now + timedelta(days=self.HARD_EXPIRATION_DAYS)
+
+        result: Dict[str, Any] = {}
+
+        def _do_exchange(conn: sqlite3.Connection) -> None:
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row
+            cursor.execute(
                 "SELECT * FROM oauth_codes WHERE code = ? AND client_id = ?",
                 (code, client_id),
             )
@@ -213,8 +251,8 @@ class OAuthManager:
                 raise OAuthError("Invalid authorization code")
             if code_row["used"]:
                 raise OAuthError("Authorization code already used")
-            expires_at = datetime.fromisoformat(code_row["expires_at"])
-            if datetime.now(timezone.utc) > expires_at:
+            expires_at_dt = datetime.fromisoformat(code_row["expires_at"])
+            if datetime.now(timezone.utc) > expires_at_dt:
                 raise OAuthError("Authorization code expired")
 
             # PKCE verification
@@ -231,12 +269,7 @@ class OAuthManager:
 
             conn.execute("UPDATE oauth_codes SET used = 1 WHERE code = ?", (code,))
 
-            token_id = secrets.token_urlsafe(32)
-            access_token = secrets.token_urlsafe(48)
-            refresh_token = secrets.token_urlsafe(48)
-            now = datetime.now(timezone.utc)
-            expires_at = now + timedelta(hours=self.ACCESS_TOKEN_LIFETIME_HOURS)
-            hard_expires_at = now + timedelta(days=self.HARD_EXPIRATION_DAYS)
+            token_expires_at = now + timedelta(hours=self.ACCESS_TOKEN_LIFETIME_HOURS)
 
             conn.execute(
                 """INSERT INTO oauth_tokens (token_id, client_id, user_id, access_token, refresh_token,
@@ -247,87 +280,93 @@ class OAuthManager:
                     code_row["user_id"],
                     access_token,
                     refresh_token,
-                    expires_at.isoformat(),
+                    token_expires_at.isoformat(),
                     now.isoformat(),
                     now.isoformat(),
                     hard_expires_at.isoformat(),
                 ),
             )
-            conn.commit()
+            result["access_token"] = access_token
+            result["refresh_token"] = refresh_token
 
-            return {
-                "access_token": access_token,
-                "token_type": "Bearer",
-                "expires_in": int(self.ACCESS_TOKEN_LIFETIME_HOURS * 3600),
-                "refresh_token": refresh_token,
-            }
+        self._conn_manager.execute_atomic(_do_exchange)
+
+        return {
+            "access_token": result["access_token"],
+            "token_type": "Bearer",
+            "expires_in": int(self.ACCESS_TOKEN_LIFETIME_HOURS * 3600),
+            "refresh_token": result["refresh_token"],
+        }
 
     def validate_token(self, access_token: str) -> Optional[Dict[str, Any]]:
-        with sqlite3.connect(self.db_path, timeout=30) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT * FROM oauth_tokens WHERE access_token = ?", (access_token,)
-            )
-            row = cursor.fetchone()
-            if not row:
-                return None
-            expires_at = datetime.fromisoformat(row["expires_at"])
-            if datetime.now(timezone.utc) > expires_at:
-                return None
-            return {
-                "token_id": row["token_id"],
-                "client_id": row["client_id"],
-                "user_id": row["user_id"],
-                "expires_at": row["expires_at"],
-                "created_at": row["created_at"],
-            }
+        conn = self._conn_manager.get_connection()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        cursor.execute(
+            "SELECT * FROM oauth_tokens WHERE access_token = ?", (access_token,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        expires_at = datetime.fromisoformat(row["expires_at"])
+        if datetime.now(timezone.utc) > expires_at:
+            return None
+        return {
+            "token_id": row["token_id"],
+            "client_id": row["client_id"],
+            "user_id": row["user_id"],
+            "expires_at": row["expires_at"],
+            "created_at": row["created_at"],
+        }
 
     def extend_token_on_activity(self, access_token: str) -> bool:
-        with sqlite3.connect(self.db_path, timeout=30) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT * FROM oauth_tokens WHERE access_token = ?", (access_token,)
-            )
-            row = cursor.fetchone()
-            if not row:
-                return False
-            now = datetime.now(timezone.utc)
-            expires_at = datetime.fromisoformat(row["expires_at"])
-            hard_expires_at = datetime.fromisoformat(row["hard_expires_at"])
-            remaining = (expires_at - now).total_seconds() / 3600
-            if remaining >= self.EXTENSION_THRESHOLD_HOURS:
-                return False
-            new_expires_at = now + timedelta(hours=self.ACCESS_TOKEN_LIFETIME_HOURS)
-            if new_expires_at > hard_expires_at:
-                new_expires_at = hard_expires_at
-            conn.execute(
+        conn = self._conn_manager.get_connection()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        cursor.execute(
+            "SELECT * FROM oauth_tokens WHERE access_token = ?", (access_token,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return False
+        now = datetime.now(timezone.utc)
+        expires_at = datetime.fromisoformat(row["expires_at"])
+        hard_expires_at = datetime.fromisoformat(row["hard_expires_at"])
+        remaining = (expires_at - now).total_seconds() / 3600
+        if remaining >= self.EXTENSION_THRESHOLD_HOURS:
+            return False
+        new_expires_at = now + timedelta(hours=self.ACCESS_TOKEN_LIFETIME_HOURS)
+        if new_expires_at > hard_expires_at:
+            new_expires_at = hard_expires_at
+
+        def _do_extend(c: sqlite3.Connection) -> None:
+            c.execute(
                 "UPDATE oauth_tokens SET expires_at = ?, last_activity = ? WHERE access_token = ?",
                 (new_expires_at.isoformat(), now.isoformat(), access_token),
             )
-            conn.commit()
-            return True
+
+        self._conn_manager.execute_atomic(_do_extend)
+        return True
 
     def refresh_access_token(
         self, refresh_token: str, client_id: str
     ) -> Dict[str, Any]:
         """Exchange refresh token for new access and refresh tokens."""
-        with sqlite3.connect(self.db_path, timeout=30) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
+        new_access_token = secrets.token_urlsafe(48)
+        new_refresh_token = secrets.token_urlsafe(48)
+        now = datetime.now(timezone.utc)
+        new_expires_at = now + timedelta(hours=self.ACCESS_TOKEN_LIFETIME_HOURS)
+
+        def _do_refresh(conn: sqlite3.Connection) -> None:
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row
+            cursor.execute(
                 "SELECT * FROM oauth_tokens WHERE refresh_token = ?", (refresh_token,)
             )
             row = cursor.fetchone()
-
             if not row:
                 raise OAuthError("Invalid refresh token")
 
-            # Generate new tokens
-            new_access_token = secrets.token_urlsafe(48)
-            new_refresh_token = secrets.token_urlsafe(48)
-            now = datetime.now(timezone.utc)
-            new_expires_at = now + timedelta(hours=self.ACCESS_TOKEN_LIFETIME_HOURS)
-
-            # Update tokens
             conn.execute(
                 """UPDATE oauth_tokens
                    SET access_token = ?, refresh_token = ?, expires_at = ?, last_activity = ?
@@ -340,14 +379,15 @@ class OAuthManager:
                     refresh_token,
                 ),
             )
-            conn.commit()
 
-            return {
-                "access_token": new_access_token,
-                "token_type": "Bearer",
-                "expires_in": int(self.ACCESS_TOKEN_LIFETIME_HOURS * 3600),
-                "refresh_token": new_refresh_token,
-            }
+        self._conn_manager.execute_atomic(_do_refresh)
+
+        return {
+            "access_token": new_access_token,
+            "token_type": "Bearer",
+            "expires_in": int(self.ACCESS_TOKEN_LIFETIME_HOURS * 3600),
+            "refresh_token": new_refresh_token,
+        }
 
     def revoke_token(
         self, token: str, token_type_hint: Optional[str] = None
@@ -363,42 +403,50 @@ class OAuthManager:
             Dictionary with username and token_type if found, None values if not found.
             Per OAuth 2.1 spec, endpoint should return 200 either way.
         """
-        with sqlite3.connect(self.db_path, timeout=30) as conn:
-            conn.row_factory = sqlite3.Row
+        result: Dict[str, Optional[str]] = {"username": None, "token_type": None}
 
-            # Find token
+        def _do_revoke(conn: sqlite3.Connection) -> None:
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row
+
+            # Find token - SELECT and DELETE are atomic within this transaction
             if token_type_hint == "access_token":
-                cursor = conn.execute(
+                cursor.execute(
                     "SELECT * FROM oauth_tokens WHERE access_token = ?", (token,)
                 )
             elif token_type_hint == "refresh_token":
-                cursor = conn.execute(
+                cursor.execute(
                     "SELECT * FROM oauth_tokens WHERE refresh_token = ?", (token,)
                 )
             else:
                 # Try both
-                cursor = conn.execute(
+                cursor.execute(
                     "SELECT * FROM oauth_tokens WHERE access_token = ? OR refresh_token = ?",
                     (token, token),
                 )
 
             row = cursor.fetchone()
-
             if not row:
-                return {"username": None, "token_type": None}
+                return
 
-            # Delete token
-            conn.execute(
-                "DELETE FROM oauth_tokens WHERE token_id = ?", (row["token_id"],)
+            token_id = row["token_id"]
+            user_id = row["user_id"]
+            access_token_val = row["access_token"]
+
+            cursor.execute(
+                "DELETE FROM oauth_tokens WHERE token_id = ?", (token_id,)
             )
-            conn.commit()
 
             # Determine which token type was revoked
             determined_type = (
-                "access_token" if row["access_token"] == token else "refresh_token"
+                "access_token" if access_token_val == token else "refresh_token"
             )
+            result["username"] = user_id
+            result["token_type"] = determined_type
 
-            return {"username": row["user_id"], "token_type": determined_type}
+        self._conn_manager.execute_atomic(_do_revoke)
+
+        return result
 
     def handle_client_credentials_grant(
         self,
@@ -441,8 +489,7 @@ class OAuthManager:
         expires_at = now + timedelta(hours=self.ACCESS_TOKEN_LIFETIME_HOURS)
         hard_expires_at = now + timedelta(days=self.HARD_EXPIRATION_DAYS)
 
-        # Store token in database (use "client_credentials" as client_id for tracking)
-        with sqlite3.connect(self.db_path, timeout=30) as conn:
+        def _do_insert(conn: sqlite3.Connection) -> None:
             conn.execute(
                 """INSERT INTO oauth_tokens (token_id, client_id, user_id, access_token, refresh_token,
                    expires_at, created_at, last_activity, hard_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -458,7 +505,8 @@ class OAuthManager:
                     hard_expires_at.isoformat(),
                 ),
             )
-            conn.commit()
+
+        self._conn_manager.execute_atomic(_do_insert)
 
         return {
             "access_token": access_token,
