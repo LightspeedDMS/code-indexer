@@ -93,6 +93,7 @@ class LangfuseTraceSyncService:
         self._sync_lock = threading.Lock()  # Concurrent sync guard (C1/H4)
         self._refresh_scheduler = refresh_scheduler  # Story #227: write-lock coordination
         self._job_tracker = job_tracker  # Story #314: dashboard visibility
+        self._current_tracked_job_id: Optional[str] = None  # Bug #436: track for stop() cleanup
 
     def start(self) -> None:
         """Start background sync thread."""
@@ -113,7 +114,28 @@ class LangfuseTraceSyncService:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=10.0)
-        logger.info("Langfuse trace sync service stopped")
+            # Bug #436: If thread didn't finish, fail the tracked job so dashboard
+            # reflects the true state rather than leaving it stuck as "running".
+            # Read _current_tracked_job_id under _sync_lock for thread-safe access.
+            with self._sync_lock:
+                job_id_to_fail = self._current_tracked_job_id
+            if self._thread.is_alive() and job_id_to_fail and self._job_tracker:
+                try:
+                    self._job_tracker.fail_job(
+                        job_id_to_fail,
+                        error="Langfuse sync interrupted by server shutdown (join timeout)",
+                    )
+                    logger.warning(
+                        "LangfuseTraceSyncService: thread did not stop within timeout, "
+                        "marked tracked job %s as failed",
+                        job_id_to_fail,
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to fail tracked job on stop: {e}")
+        if self._thread is not None and self._thread.is_alive():
+            logger.warning("Langfuse trace sync service stopped (thread still alive after timeout)")
+        else:
+            logger.info("Langfuse trace sync service stopped")
 
     def get_metrics(self) -> Dict[str, dict]:
         """Return per-project sync metrics for dashboard."""
@@ -170,11 +192,15 @@ class LangfuseTraceSyncService:
         tracked_job_id = None
         if self._job_tracker is not None:
             try:
-                tracked_job_id = f"langfuse-sync-{uuid.uuid4().hex[:8]}"
+                candidate_id = f"langfuse-sync-{uuid.uuid4().hex[:8]}"
                 self._job_tracker.register_job(
-                    tracked_job_id, "langfuse_sync", username="system", repo_alias="server"
+                    candidate_id, "langfuse_sync", username="system", repo_alias="server"
                 )
-                self._job_tracker.update_status(tracked_job_id, status="running")
+                self._job_tracker.update_status(candidate_id, status="running")
+                # Bug #436: Only set after successful registration so stop() won't
+                # reference a job ID that was never actually registered.
+                tracked_job_id = candidate_id
+                self._current_tracked_job_id = tracked_job_id
             except Exception as e:
                 logger.debug(f"Failed to register langfuse_sync job: {e}")
                 tracked_job_id = None
@@ -184,6 +210,11 @@ class LangfuseTraceSyncService:
             host = langfuse.pull_host
             max_concurrent = langfuse.pull_max_concurrent_observations
             for project_creds in langfuse.pull_projects:
+                # Bug #436: Cooperative shutdown check between projects
+                if self._stop_event.is_set():
+                    logger.info("Langfuse sync interrupted by stop signal")
+                    sync_errors.append("Sync interrupted by server shutdown")
+                    break
                 try:
                     self.sync_project(host, project_creds, langfuse.pull_trace_age_days, max_concurrent)
                 except Exception as e:
@@ -191,7 +222,8 @@ class LangfuseTraceSyncService:
                     sync_errors.append(str(e))
 
             # After syncing all projects, notify callback for auto-registration
-            if self._on_sync_complete:
+            # Bug #436: Skip callback if stop was requested
+            if self._on_sync_complete and not self._stop_event.is_set():
                 try:
                     self._on_sync_complete()
                 except Exception as e:
@@ -212,6 +244,8 @@ class LangfuseTraceSyncService:
                         self._job_tracker.complete_job(tracked_job_id)
                 except Exception as e:
                     logger.debug(f"Failed to update langfuse_sync job status: {e}")
+                finally:
+                    self._current_tracked_job_id = None  # Bug #436: clear after completion
 
     def sync_all_projects(self) -> None:
         """Sync all configured projects. Called by background loop and manual trigger."""

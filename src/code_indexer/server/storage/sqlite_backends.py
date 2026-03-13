@@ -963,6 +963,42 @@ class SyncJobsSqliteBackend:
             logger.info(f"Deleted sync job: {job_id}")
         return deleted
 
+    def cleanup_orphaned_jobs_on_startup(self) -> int:
+        """
+        Clean up orphaned sync jobs on server startup.
+
+        On server restart, any sync jobs with status 'running' or 'pending' are
+        orphaned because the threads executing them no longer exist. This method
+        marks them as 'failed' with an appropriate error message and timestamp
+        for audit trail.
+
+        Bug #436: Orphaned jobs persist as "running" after server restart.
+
+        Returns:
+            Number of orphaned jobs that were cleaned up.
+        """
+        interrupted_at = datetime.now(timezone.utc).isoformat()
+        error_message = "Job interrupted by server restart"
+
+        def operation(conn):
+            cursor = conn.execute(
+                """UPDATE sync_jobs
+                   SET status = 'failed',
+                       error_message = ?,
+                       completed_at = ?
+                   WHERE status IN ('running', 'pending')""",
+                (error_message, interrupted_at),
+            )
+            return cursor.rowcount
+
+        count: int = self._conn_manager.execute_atomic(operation)
+        if count > 0:
+            logger.info(
+                f"SyncJobsSqliteBackend.cleanup_orphaned_jobs_on_startup: "
+                f"marked {count} orphaned sync job(s) as failed"
+            )
+        return count
+
     def close(self) -> None:
         """Close database connections."""
         self._conn_manager.close_all()

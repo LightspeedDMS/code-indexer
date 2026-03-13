@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.10
+
+### Bug Fixes
+
+- fix: Orphaned jobs persist as "running" after server restart (Bug #436, v9.5.10). Three gaps fixed: (1) SyncJobsSqliteBackend now has cleanup_orphaned_jobs_on_startup() mirroring BackgroundJobsSqliteBackend pattern -- marks running/pending sync_jobs as failed on startup. (2) LangfuseTraceSyncService.stop() now fails tracked job via JobTracker when thread doesn't finish within join timeout, with thread-safe _sync_lock access to _current_tracked_job_id. (3) Cooperative shutdown checks added in _do_sync_all_projects() between project iterations and before post-sync callback. Code review fixes: deferred _current_tracked_job_id assignment until after successful registration, differentiated clean vs timed-out shutdown log messages. 22 new tests, fast-automation passes.
+
 ## v9.5.9
 
 ### Bug Fixes
