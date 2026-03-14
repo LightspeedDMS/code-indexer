@@ -206,7 +206,9 @@ class DependencyMapService:
 
             # Update tracking to running
             self._tracking_backend.update_tracking(
-                status="running", last_run=datetime.now(timezone.utc).isoformat()
+                status="running",
+                last_run=datetime.now(timezone.utc).isoformat(),
+                error_message=None,  # Bug #437: clear stale error from orphan recovery
             )
 
             # Story #312 AC5: Progress update during analysis passes
@@ -2042,13 +2044,19 @@ class DependencyMapService:
                     datetime.now(timezone.utc)
                     + timedelta(hours=config.dependency_map_interval_hours)
                 ).isoformat()
-                self._tracking_backend.update_tracking(next_run=next_run)
+                self._tracking_backend.update_tracking(
+                    status="completed",
+                    next_run=next_run,
+                    error_message=None,  # Bug #437: clear stale error from orphan recovery
+                )
                 _delta_succeeded = True
                 return {"status": "skipped", "message": "No changes detected"}
 
             # Update tracking to running
             self._tracking_backend.update_tracking(
-                status="running", last_run=datetime.now(timezone.utc).isoformat()
+                status="running",
+                last_run=datetime.now(timezone.utc).isoformat(),
+                error_message=None,  # Bug #437: clear stale error from orphan recovery
             )
 
             # Get paths
