@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
 from .api_models import TemporalIndexOptions
+from .jobs import SyncProgress, SyncJobOptions
 
 
 class AddGoldenRepoRequest(BaseModel):
@@ -356,23 +357,6 @@ class RepositorySyncRequest(BaseModel):
     progress_webhook: Optional[str] = Field(
         default=None, description="Webhook URL for progress updates"
     )
-
-
-class SyncProgress(BaseModel):
-    """Model for sync progress information."""
-
-    percentage: int = Field(ge=0, le=100, description="Progress percentage")
-    files_processed: int = Field(ge=0, description="Number of files processed")
-    files_total: int = Field(ge=0, description="Total number of files to process")
-    current_file: Optional[str] = Field(description="Currently processing file")
-
-
-class SyncJobOptions(BaseModel):
-    """Model for sync job options."""
-
-    force: bool
-    full_reindex: bool
-    incremental: bool
 
 
 class RepositorySyncJobResponse(BaseModel):
