@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.13
+
+### Bug Fixes
+
+- fix: Stale error_message in dependency_map_tracking after orphan recovery (Bug #437, v9.5.13). Three update_tracking() call sites in dependency_map_service.py were not clearing error_message when transitioning to running or completing with no changes. After server restart orphaned a running job, the stale 'orphaned - server restarted' message persisted indefinitely. Fixed by passing error_message=None in all status transition paths: run_full_analysis() running transition, run_delta_analysis() no-changes completion, and run_delta_analysis() running transition. 9 new tests.
+
 ## v9.5.12
 
 ### Bug Fixes
