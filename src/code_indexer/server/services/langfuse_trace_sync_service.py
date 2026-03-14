@@ -91,9 +91,13 @@ class LangfuseTraceSyncService:
         self._metrics: Dict[str, SyncMetrics] = {}  # Per-project metrics
         self._lock = threading.Lock()  # Metrics lock
         self._sync_lock = threading.Lock()  # Concurrent sync guard (C1/H4)
-        self._refresh_scheduler = refresh_scheduler  # Story #227: write-lock coordination
+        self._refresh_scheduler = (
+            refresh_scheduler  # Story #227: write-lock coordination
+        )
         self._job_tracker = job_tracker  # Story #314: dashboard visibility
-        self._current_tracked_job_id: Optional[str] = None  # Bug #436: track for stop() cleanup
+        self._current_tracked_job_id: Optional[str] = (
+            None  # Bug #436: track for stop() cleanup
+        )
 
     def start(self) -> None:
         """Start background sync thread."""
@@ -133,7 +137,9 @@ class LangfuseTraceSyncService:
                 except Exception as e:
                     logger.debug(f"Failed to fail tracked job on stop: {e}")
         if self._thread is not None and self._thread.is_alive():
-            logger.warning("Langfuse trace sync service stopped (thread still alive after timeout)")
+            logger.warning(
+                "Langfuse trace sync service stopped (thread still alive after timeout)"
+            )
         else:
             logger.info("Langfuse trace sync service stopped")
 
@@ -170,7 +176,9 @@ class LangfuseTraceSyncService:
             finally:
                 self._sync_lock.release()
 
-        threading.Thread(target=_do_sync, name="LangfuseManualSync", daemon=True).start()
+        threading.Thread(
+            target=_do_sync, name="LangfuseManualSync", daemon=True
+        ).start()
         logger.info("Manual Langfuse sync triggered")
         return True
 
@@ -194,7 +202,10 @@ class LangfuseTraceSyncService:
             try:
                 candidate_id = f"langfuse-sync-{uuid.uuid4().hex[:8]}"
                 self._job_tracker.register_job(
-                    candidate_id, "langfuse_sync", username="system", repo_alias="server"
+                    candidate_id,
+                    "langfuse_sync",
+                    username="system",
+                    repo_alias="server",
                 )
                 self._job_tracker.update_status(candidate_id, status="running")
                 # Bug #436: Only set after successful registration so stop() won't
@@ -216,7 +227,12 @@ class LangfuseTraceSyncService:
                     sync_errors.append("Sync interrupted by server shutdown")
                     break
                 try:
-                    self.sync_project(host, project_creds, langfuse.pull_trace_age_days, max_concurrent)
+                    self.sync_project(
+                        host,
+                        project_creds,
+                        langfuse.pull_trace_age_days,
+                        max_concurrent,
+                    )
                 except Exception as e:
                     logger.error(f"Error syncing project: {e}", exc_info=True)
                     sync_errors.append(str(e))
@@ -238,14 +254,16 @@ class LangfuseTraceSyncService:
                     if sync_errors:
                         self._job_tracker.fail_job(
                             tracked_job_id,
-                            error=f"{len(sync_errors)} project(s) failed: {'; '.join(sync_errors[:3])}"
+                            error=f"{len(sync_errors)} project(s) failed: {'; '.join(sync_errors[:3])}",
                         )
                     else:
                         self._job_tracker.complete_job(tracked_job_id)
                 except Exception as e:
                     logger.debug(f"Failed to update langfuse_sync job status: {e}")
                 finally:
-                    self._current_tracked_job_id = None  # Bug #436: clear after completion
+                    self._current_tracked_job_id = (
+                        None  # Bug #436: clear after completion
+                    )
 
     def sync_all_projects(self) -> None:
         """Sync all configured projects. Called by background loop and manual trigger."""
@@ -260,7 +278,11 @@ class LangfuseTraceSyncService:
             self._sync_lock.release()
 
     def sync_project(
-        self, host: str, creds: LangfusePullProject, trace_age_days: int, max_concurrent_observations: int = 5
+        self,
+        host: str,
+        creds: LangfusePullProject,
+        trace_age_days: int,
+        max_concurrent_observations: int = 5,
     ) -> None:
         """Sync a single project (Story #174: parallel observation fetches)."""
         # 1. Create API client
@@ -271,32 +293,64 @@ class LangfuseTraceSyncService:
         project_name = project_info.get("name", "unknown")
 
         # 3. Run sync and collect per-user repos that received writes.
-        #    Note: We do NOT acquire a project-level write lock here.
-        #    The project-level alias (e.g. "langfuse_Claude_Code") does not exist
-        #    in RefreshScheduler's registry - only per-user repos do
-        #    (e.g. "langfuse_Claude_Code_seba_battig_lightspeeddms_com").
-        #    Acquiring a non-existent alias raises ValueError every 60 seconds.
-        #    The overlap window + content hash strategy makes partial snapshots
-        #    self-healing, so per-page locking is not required for correctness.
         modified_repos = self._sync_project_inner(
             api_client, project_name, trace_age_days, max_concurrent_observations
         )
 
         # 4. Trigger refresh for each per-user repo that received writes (Story #227).
         #    Each per-user repo has its own entry in RefreshScheduler's registry.
+        #    Story #441: Briefly hold write lock around the enqueue call to prevent
+        #    the periodic scheduler from starting a new refresh cycle in the window
+        #    between trace writes completing and the explicit refresh being enqueued.
+        #    The lock serializes the enqueue, not the refresh execution itself --
+        #    trigger_refresh_for_repo() is non-blocking. Combined with Story #439
+        #    (removal of rglob count-mismatch fallback), any residual count delta
+        #    between HNSW metadata and disk is harmless.
+        #    Note: we use manual acquire/release (not the write_lock() context
+        #    manager) because acquire failure is non-fatal -- we proceed anyway.
         if self._refresh_scheduler is not None:
-            from code_indexer.server.repositories.background_jobs import DuplicateJobError
+            from code_indexer.server.repositories.background_jobs import (
+                DuplicateJobError,
+            )
+
             for repo_folder_name in modified_repos:
                 trigger_alias = f"{repo_folder_name}-global"
+                lock_acquired = False
                 try:
+                    lock_acquired = self._refresh_scheduler.acquire_write_lock(
+                        repo_folder_name, owner_name="langfuse_sync"
+                    )
+                    if lock_acquired:
+                        logger.debug(
+                            f"Write lock acquired for '{repo_folder_name}' before refresh trigger"
+                        )
+                    else:
+                        logger.debug(
+                            f"Write lock for '{repo_folder_name}' already held, "
+                            f"proceeding with refresh trigger anyway"
+                        )
                     self._refresh_scheduler.trigger_refresh_for_repo(trigger_alias)
                 except DuplicateJobError:
-                    logger.debug(f"Refresh already in progress for '{trigger_alias}', skipping")
+                    logger.debug(
+                        f"Refresh already in progress for '{trigger_alias}', skipping"
+                    )
                 except Exception as e:
-                    logger.warning(f"Failed to trigger refresh for '{trigger_alias}': {e}")
+                    logger.warning(
+                        f"Failed to trigger refresh for '{trigger_alias}': {e}"
+                    )
+                finally:
+                    if lock_acquired:
+                        self._refresh_scheduler.release_write_lock(
+                            repo_folder_name, owner_name="langfuse_sync"
+                        )
+                        logger.debug(f"Write lock released for '{repo_folder_name}'")
 
     def _sync_project_inner(
-        self, api_client: "LangfuseApiClient", project_name: str, trace_age_days: int, max_concurrent_observations: int
+        self,
+        api_client: "LangfuseApiClient",
+        project_name: str,
+        trace_age_days: int,
+        max_concurrent_observations: int,
     ) -> set:
         """Internal sync logic for a single project.
 
@@ -348,7 +402,9 @@ class LangfuseTraceSyncService:
             # Main thread writes to trace_hashes only in the as_completed loop after the
             # corresponding future completes. No cross-thread contention on the same key.
             # Safe under CPython GIL for dict operations.
-            with ThreadPoolExecutor(max_workers=max_concurrent_observations) as executor:
+            with ThreadPoolExecutor(
+                max_workers=max_concurrent_observations
+            ) as executor:
                 futures = {}
                 for trace in traces:
                     trace_id = trace.get("id")
@@ -440,7 +496,6 @@ class LangfuseTraceSyncService:
         )
 
         return modified_repos
-
 
     def _process_trace(
         self,
@@ -555,7 +610,14 @@ class LangfuseTraceSyncService:
             timestamp = trace.get("timestamp")
             trace_type = self._extract_trace_type(trace)
             short_id = self._extract_short_id(trace_id)
-            result.rename_info = (timestamp, trace_id, str(staging_folder), str(dest_folder), trace_type, short_id)
+            result.rename_info = (
+                str(timestamp) if timestamp is not None else "",
+                trace_id,
+                str(staging_folder),
+                str(dest_folder),
+                trace_type,
+                short_id,
+            )
 
             result.repo_folder_name = repo_folder_name
             return result
@@ -591,18 +653,24 @@ class LangfuseTraceSyncService:
 
             for timestamp, trace_id, staging_folder, trace_type, short_id in entries:
                 staging_file = Path(staging_folder) / f"{trace_id}.json"
-                new_filename = LangfuseTraceSyncService._build_trace_filename(seq, trace_type, short_id)
+                new_filename = LangfuseTraceSyncService._build_trace_filename(
+                    seq, trace_type, short_id
+                )
                 dest_file = dest_folder / new_filename
 
                 if staging_file.exists():
                     if dest_file.exists():
-                        logger.warning(f"Destination already exists, overwriting: {dest_file}")
+                        logger.warning(
+                            f"Destination already exists, overwriting: {dest_file}"
+                        )
                         dest_file.unlink()  # Remove existing file before move
                     shutil.move(str(staging_file), str(dest_file))
                     if trace_id in trace_hashes:
                         trace_hashes[trace_id]["filename"] = new_filename
                 else:
-                    logger.warning(f"Staged file missing for trace {trace_id}: {staging_file}")
+                    logger.warning(
+                        f"Staged file missing for trace {trace_id}: {staging_file}"
+                    )
                     # Don't update trace_hashes - next sync will re-process
 
                 seq += 1
@@ -630,7 +698,7 @@ class LangfuseTraceSyncService:
         """
         name = trace.get("name", "") or ""
         if name.startswith("subagent:"):
-            subagent_name = name[len("subagent:"):]
+            subagent_name = name[len("subagent:") :]
             safe_name = LangfuseTraceSyncService._sanitize_folder_name(subagent_name)
             return f"subagent-{safe_name}"
         return "turn"
@@ -695,7 +763,13 @@ class LangfuseTraceSyncService:
         safe_user = self._sanitize_folder_name(user_id)
         safe_session = self._sanitize_folder_name(session_id)
 
-        return Path(self._data_dir) / ".langfuse_staging" / safe_project / safe_user / safe_session
+        return (
+            Path(self._data_dir)
+            / ".langfuse_staging"
+            / safe_project
+            / safe_user
+            / safe_session
+        )
 
     def _cleanup_staging(self, project_name: str) -> None:
         """Remove empty staging directories after sync.
@@ -707,7 +781,9 @@ class LangfuseTraceSyncService:
         staging_dir = Path(self._data_dir) / ".langfuse_staging" / safe_project
         if staging_dir.exists():
             # Walk bottom-up removing empty dirs
-            for dirpath, dirnames, filenames in os.walk(str(staging_dir), topdown=False):
+            for dirpath, dirnames, filenames in os.walk(
+                str(staging_dir), topdown=False
+            ):
                 if not os.listdir(dirpath):
                     os.rmdir(dirpath)
 
@@ -738,12 +814,15 @@ class LangfuseTraceSyncService:
         tmp_path.write_text(content, encoding="utf-8")
         tmp_path.rename(file_path)
 
-    def _load_sync_state(self, project_name: str) -> dict:
+    def _load_sync_state(self, project_name: str) -> Dict[str, Any]:
         """Load sync state from file."""
         state_file = self._get_state_file_path(project_name)
         if state_file.exists():
             try:
-                return json.loads(state_file.read_text(encoding="utf-8"))
+                result: Dict[str, Any] = json.loads(
+                    state_file.read_text(encoding="utf-8")
+                )
+                return result
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning(f"Failed to load sync state for {project_name}: {e}")
         return {}
@@ -777,7 +856,9 @@ class LangfuseTraceSyncService:
                 config = self._config_getter()
                 if config.langfuse_config and config.langfuse_config.pull_enabled:
                     interval = config.langfuse_config.pull_sync_interval_seconds
-                    logger.info(f"Langfuse sync iteration starting (pull_enabled=True, interval={interval}s)")
+                    logger.info(
+                        f"Langfuse sync iteration starting (pull_enabled=True, interval={interval}s)"
+                    )
                     # H4: Acquire lock before sync (skip if manual sync in progress)
                     if self._sync_lock.acquire(blocking=False):
                         try:
@@ -785,7 +866,9 @@ class LangfuseTraceSyncService:
                         finally:
                             self._sync_lock.release()
                     else:
-                        logger.debug("Skipping background sync - manual sync in progress")
+                        logger.debug(
+                            "Skipping background sync - manual sync in progress"
+                        )
             except Exception as e:
                 logger.error(f"Error in sync loop: {e}", exc_info=True)
 

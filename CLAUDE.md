@@ -1,5 +1,25 @@
 # Code-Indexer (CIDX) Project Instructions
 
+## ABSOLUTE PROHIBITION: SANDBOX TO THIS PROJECT DIRECTORY ONLY
+
+**COMPLETE, TOTAL, AND ABSOLUTE PROHIBITION**: NEVER copy, edit, checkout, reset, restore, read-then-write, or modify ANY file outside this project's working directory. Other directories may contain sibling clones of the same repo where other agents are actively working.
+
+This includes but is not limited to:
+- `cp` or file copy operations to/from other directories containing code-indexer source
+- `git checkout`, `git restore`, `git reset` in any other repo clone
+- Using Write/Edit tools on files outside this project directory
+- Using `sed`, `cat >`, `echo >` or any Bash file modification outside this project directory
+- Instructing subagents to "sync" or "update" an "editable install" in another folder
+- ANY operation whatsoever that modifies files outside the current project working directory
+
+**WHY**: Sibling clones are separate working copies where other agents work. Modifying files there destroys their uncommitted work. Attempting to "restore" with git checkout makes it worse by reverting legitimate changes.
+
+**For running tests**: Use `PYTHONPATH=<this-project-root>/src pytest ...` to force pytest to use this project's source code. NEVER copy files to any editable install in another directory.
+
+**VIOLATION = CATASTROPHIC FAILURE**: This has caused data loss. There are ZERO exceptions.
+
+---
+
 ## 0. DOCUMENTATION STANDARDS
 
 **NO EMOJI/ICONOGRAPHY** in documentation (README.md, CLAUDE.md, CHANGELOG.md, docs/*.md).

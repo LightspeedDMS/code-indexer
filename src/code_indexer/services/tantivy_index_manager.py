@@ -376,6 +376,24 @@ class TantivyIndexManager:
             logger.error(f"Failed to add document: {e}")
             raise
 
+    def _commit_inner(self) -> None:
+        """Core commit logic: commit, wait for merges, re-create writer.
+
+        MUST be called while holding self._lock. Does not acquire the lock
+        itself.  Separating this from commit() allows update_document() and
+        delete_document() to reuse the same logic inside their own lock blocks
+        without a nested lock acquisition (which would deadlock on a
+        non-reentrant threading.Lock).
+        """
+        assert self._writer is not None  # Callers guarantee writer exists
+        writer = self._writer
+        writer.commit()
+        writer.wait_merging_threads()
+        # wait_merging_threads() consumes the writer; re-create it so
+        # subsequent add_document() calls remain valid.
+        assert self._index is not None
+        self._writer = self._index.writer(self._heap_size)
+
     def commit(self) -> None:
         """
         Commit pending documents to the index (atomic operation).
@@ -388,7 +406,7 @@ class TantivyIndexManager:
 
         try:
             with self._lock:
-                self._writer.commit()
+                self._commit_inner()
             logger.info("Committed documents to Tantivy index")
         except Exception as e:
             logger.error(f"Failed to commit documents: {e}")
@@ -528,7 +546,9 @@ class TantivyIndexManager:
             # FUZZY MATCHING: Apply fuzzy matching to each term independently
             if has_boolean_ops:
                 # Boolean + fuzzy incompatible: strip operators, fuzzy-match remaining terms
-                logger.warning("Boolean operators ignored in fuzzy mode: %s", query_text)
+                logger.warning(
+                    "Boolean operators ignored in fuzzy mode: %s", query_text
+                )
                 non_op_terms = [t for t in query_terms if t not in _BOOL_OPS]
                 fuzzy_queries = [
                     TantivyQuery.fuzzy_term_query(
@@ -573,7 +593,9 @@ class TantivyIndexManager:
             if has_boolean_ops:
                 # Boolean query: pass entire query to Tantivy's parse_query() which natively
                 # supports OR, AND, NOT operators. sanitize_fts_query() already ensured validity.
-                return self._index.parse_query(query_text, [search_field, "identifiers"])
+                return self._index.parse_query(
+                    query_text, [search_field, "identifiers"]
+                )
             elif is_multi_word:
                 # Multi-word exact query: Require ALL terms to exist (AND semantics)
                 # Example: "gloc pattern" returns 0 results if "gloc" doesn't exist
@@ -1201,9 +1223,11 @@ class TantivyIndexManager:
             # Add updated version (has its own lock)
             self.add_document(doc)
 
-            # Commit atomically (5-50ms target)
+            # Commit atomically (5-50ms target): use _commit_inner() so that
+            # wait_merging_threads() is called and the writer is re-created,
+            # keeping segment count bounded (same guarantee as commit()).
             with self._lock:
-                self._writer.commit()
+                self._commit_inner()
             logger.debug(f"Updated document: {file_path}")
 
         except Exception as e:
@@ -1237,8 +1261,10 @@ class TantivyIndexManager:
                 delete_query = self._index.parse_query(file_path, ["path"])
                 self._writer.delete_documents_by_query(delete_query)
 
-                # Commit atomically (5-50ms target)
-                self._writer.commit()
+                # Commit atomically (5-50ms target): use _commit_inner() so that
+                # wait_merging_threads() is called and the writer is re-created,
+                # keeping segment count bounded (same guarantee as commit()).
+                self._commit_inner()
             logger.debug(f"Deleted document: {file_path}")
 
         except Exception as e:
@@ -1382,7 +1408,12 @@ class TantivyIndexManager:
         """Close the index and writer."""
         if self._writer is not None:
             try:
-                self._writer.commit()
+                with self._lock:
+                    self._writer.commit()
+                    # Await pending background merge threads before releasing the
+                    # writer so that all segment merges complete cleanly on close.
+                    # No writer re-creation needed because we are shutting down.
+                    self._writer.wait_merging_threads()
             except Exception as e:
                 logger.error(f"Failed to commit on close: {e}")
             self._writer = None

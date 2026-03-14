@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.14
+
+### Performance
+
+- feat: Scalable index maintenance for high-frequency incremental repos (Epic #438, v9.5.14). Four surgical fixes addressing critical performance problems on repos with >10K vectors:
+  - Story #439: Removed O(N) rglob count-mismatch fallback from HNSW is_stale(), eliminating 25-98 second query-time rebuilds after every refresh cycle. Staleness now relies solely on the explicit is_stale flag in metadata (O(1) JSON read).
+  - Story #440: HNSW search now uses distances directly (similarity = 1.0 - distance) instead of re-reading each candidate's 22KB JSON file to recalculate cosine similarity. JSON files read only for top-limit results (not all candidates), cutting query I/O by ~50%.
+  - Story #441: Langfuse trace sync now acquires per-user write lock before triggering refresh, preventing periodic RefreshScheduler from racing with explicitly triggered refreshes. Lock released in finally block for exception safety.
+  - Story #442: Added wait_merging_threads() after Tantivy commit() to ensure FTS segment merges complete before writer is released. Extracted _commit_inner() so update_document(), delete_document(), and close() also benefit. Handles Tantivy binding behavior where wait_merging_threads() consumes the writer (re-creates it automatically).
+  24 new tests across 4 test files. fast-automation.sh passes.
+
 ## v9.5.13
 
 ### Bug Fixes

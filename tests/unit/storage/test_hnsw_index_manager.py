@@ -462,8 +462,12 @@ class TestHNSWIndexManagerStalenessFunctionality:
         # Should detect staleness
         assert manager.is_stale(tmp_path) is True
 
-    def test_is_stale_detects_count_mismatch(self, tmp_path: Path):
-        """Test that is_stale detects vector count mismatch (fallback detection)."""
+    def test_is_stale_flag_false_overrides_count_mismatch(self, tmp_path: Path):
+        """Test that is_stale respects explicit is_stale=False flag even when disk count differs.
+
+        Story #439: The rglob count-mismatch fallback was removed.  The explicit
+        is_stale flag is the sole source of truth for non-filtered indexes.
+        """
         manager = HNSWIndexManager(vector_dim=128)
 
         # Build initial index
@@ -492,8 +496,8 @@ class TestHNSWIndexManagerStalenessFunctionality:
                     {"id": f"vec_new_{i}", "vector": np.random.randn(128).tolist()}, f
                 )
 
-        # Should detect staleness via count mismatch
-        assert manager.is_stale(tmp_path) is True
+        # is_stale=False means fresh - disk count mismatch is no longer checked
+        assert manager.is_stale(tmp_path) is False
 
     def test_is_stale_returns_true_for_missing_index(self, tmp_path: Path):
         """Test that is_stale returns True when metadata doesn't exist."""

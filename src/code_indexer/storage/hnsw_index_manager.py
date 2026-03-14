@@ -371,7 +371,9 @@ class HNSWIndexManager:
                     M=16,
                     ef_construction=200,
                     ids=[],
-                    index_file_size=index_file.stat().st_size if index_file.exists() else 0,
+                    index_file_size=index_file.stat().st_size
+                    if index_file.exists()
+                    else 0,
                     filtered=True,
                     visible_count=0,
                     total_on_disk=total_files_on_disk,
@@ -484,8 +486,9 @@ class HNSWIndexManager:
 
         Returns True if any of the following conditions are met:
         - is_stale flag is set to True in metadata
-        - Vector count mismatch (fallback detection for incremental indexing)
         - No metadata exists (no index built yet)
+        - hnsw_index key is missing from metadata
+        - For filtered rebuilds: stored count != visible_count
 
         Args:
             collection_path: Path to collection directory
@@ -496,6 +499,8 @@ class HNSWIndexManager:
         Note:
             No locking needed - atomic boolean read. Defaults to True if
             is_stale flag missing (backward compatibility with old metadata).
+            No filesystem scan (rglob) is performed - the explicit is_stale
+            flag is the sole source of truth for non-filtered indexes.
         """
         meta_file = collection_path / "collection_meta.json"
 
@@ -530,15 +535,6 @@ class HNSWIndexManager:
                 if stored_count != visible_count:
                     return True  # HNSW count doesn't match what was rebuilt
                 return False  # Filtered rebuild is fresh
-
-            # Non-filtered rebuild: use disk-count comparison (existing behavior)
-            vector_files = list(collection_path.rglob("vector_*.json"))
-            actual_count = len(vector_files)
-
-            # Only check count mismatch if vector files exist
-            # (avoids false positives when only HNSW index exists)
-            if actual_count > 0 and stored_count != actual_count:
-                return True  # Count mismatch = needs rebuild
 
             return False  # Fresh index
 

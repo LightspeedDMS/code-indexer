@@ -2018,7 +2018,11 @@ class FilesystemVectorStore:
             # so the rebuild doesn't overwrite a filtered HNSW with all vectors.
             stale_meta = hnsw_manager.get_index_stats(collection_path)
             query_time_branch = None
-            if stale_meta and stale_meta.get("filtered") and stale_meta.get("current_branch"):
+            if (
+                stale_meta
+                and stale_meta.get("filtered")
+                and stale_meta.get("current_branch")
+            ):
                 query_time_branch = stale_meta["current_branch"]
                 self.logger.info(
                     f"Query-time rebuild for '{collection_name}' will filter by branch "
@@ -2167,57 +2171,93 @@ class FilesystemVectorStore:
         with self._id_index_lock:
             existing_id_index = id_index
 
-        # Load candidate vectors and apply filters
+        # Convert HNSW distances to similarities: hnswlib cosine space returns
+        # distance = 1.0 - cosine_similarity, so similarity = 1.0 - distance
+        # distances is a plain Python list of floats returned by hnsw_manager.query()
+        candidate_similarities = [1.0 - d for d in distances]
+
         t0 = time.time()
         results = []
-        for point_id in candidate_ids:
-            if point_id not in existing_id_index:
-                continue
 
-            vector_file = existing_id_index[point_id]
-            if not vector_file.exists():
-                continue
+        if not filter_conditions:
+            # Case A: No filter_conditions - maximum optimization path.
+            # Apply score_threshold on HNSW similarities before any JSON reads,
+            # then read JSON only for the top `limit` results.
 
-            try:
-                with open(vector_file) as f:
-                    data = json.load(f)
+            # Pair candidate IDs with their HNSW-derived similarities
+            candidates = [
+                (point_id, float(sim))
+                for point_id, sim in zip(candidate_ids, candidate_similarities)
+                if point_id in existing_id_index
+                and existing_id_index[point_id].exists()
+                and (score_threshold is None or sim >= score_threshold)
+            ]
 
-                # Apply filter conditions
-                if filter_conditions:
-                    payload = data.get("payload", {})
-                    filter_func = self._parse_filter(filter_conditions)
-                    if not filter_func(payload):
-                        continue
+            # HNSW already returns candidates sorted by distance (closest first),
+            # so candidates are already in descending similarity order.
+            # Take top `limit` candidates before reading any JSON.
+            top_candidates = candidates[:limit]
 
-                # Calculate exact cosine similarity
-                stored_vec = np.array(data["vector"])
-                stored_norm = np.linalg.norm(stored_vec)
+            # Read JSON only for the top results to get payload/content
+            for point_id, similarity in top_candidates:
+                vector_file = existing_id_index[point_id]
+                try:
+                    with open(vector_file) as f:
+                        data = json.load(f)
 
-                if stored_norm == 0:
+                    results.append(
+                        {
+                            "id": data["id"],
+                            "score": similarity,
+                            "payload": data.get("payload", {}),
+                            "_vector_data": data,
+                        }
+                    )
+                except (json.JSONDecodeError, KeyError, ValueError):
                     continue
 
-                similarity = np.dot(query_vec, stored_vec) / (query_norm * stored_norm)
+        else:
+            # Case B: filter_conditions present - must read JSON for filter evaluation.
+            # Use HNSW-derived similarities (not recalculated) but read JSON to apply
+            # filter conditions. Stop when we have `limit` results (early exit).
+            filter_func = self._parse_filter(filter_conditions)
 
-                # Apply score threshold
+            for point_id, similarity in zip(candidate_ids, candidate_similarities):
+                if point_id not in existing_id_index:
+                    continue
+
+                vector_file = existing_id_index[point_id]
+                if not vector_file.exists():
+                    continue
+
+                # Apply score threshold before reading JSON when possible
                 if score_threshold is not None and similarity < score_threshold:
                     continue
 
-                # Payload should always exist in new format
-                results.append(
-                    {
-                        "id": data["id"],
-                        "score": float(similarity),
-                        "payload": data.get("payload", {}),
-                        "_vector_data": data,
-                    }
-                )
+                try:
+                    with open(vector_file) as f:
+                        data = json.load(f)
 
-                # EARLY EXIT: If lazy loading enabled, stop when we have enough results
-                if lazy_load and len(results) >= limit:
-                    break
+                    # Apply filter conditions on payload
+                    payload = data.get("payload", {})
+                    if not filter_func(payload):
+                        continue
 
-            except (json.JSONDecodeError, KeyError, ValueError):
-                continue
+                    results.append(
+                        {
+                            "id": data["id"],
+                            "score": float(similarity),
+                            "payload": payload,
+                            "_vector_data": data,
+                        }
+                    )
+
+                    # EARLY EXIT: If lazy loading enabled, stop when we have enough results
+                    if lazy_load and len(results) >= limit:
+                        break
+
+                except (json.JSONDecodeError, KeyError, ValueError):
+                    continue
 
         timing["candidate_load_ms"] = (time.time() - t0) * 1000
 
@@ -2746,7 +2786,9 @@ class FilesystemVectorStore:
             # Ensure id_index is loaded for O(1) file resolution
             with self._id_index_lock:
                 if collection_name not in self._id_index:
-                    self._id_index[collection_name] = self._load_id_index(collection_name)
+                    self._id_index[collection_name] = self._load_id_index(
+                        collection_name
+                    )
                 index = self._id_index[collection_name]
 
             for point in points:
@@ -2779,7 +2821,7 @@ class FilesystemVectorStore:
             return True
 
         except Exception as e:
-            logger.warning(
+            self.logger.warning(
                 "Failed to batch update payload for collection %s: %s",
                 collection_name,
                 e,
