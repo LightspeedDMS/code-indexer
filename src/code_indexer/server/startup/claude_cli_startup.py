@@ -75,7 +75,7 @@ def initialize_claude_manager_on_startup(
             )
 
         # Initialize the global singleton
-        manager = initialize_claude_cli_manager(
+        initialize_claude_cli_manager(
             api_key=api_key,
             meta_dir=cidx_meta_dir,
             max_workers=max_workers,

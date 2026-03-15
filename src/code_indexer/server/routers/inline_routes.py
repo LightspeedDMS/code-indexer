@@ -17,47 +17,118 @@ Usage in create_app():
     )
 """
 
-from typing import Dict, Any, Optional, List
-from fastapi import FastAPI, HTTPException, status, Depends, Response, Request, Query, Body
+# Standard library imports (missing after extraction from app.py)
+import logging
+import os
+import requests
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, Dict, Any, Optional
+
+# Exception classes missing after extraction from app.py closures
+from ..repositories.activated_repo_manager import ActivatedRepoError  # noqa: E402
+from ..repositories.repository_listing_manager import RepositoryListingError  # noqa: E402
+from ..services.repository_discovery_service import RepositoryDiscoveryError  # noqa: E402
+from ..query.semantic_query_manager import SemanticQueryError  # noqa: E402
+from ..validators.composite_repo_validator import CompositeRepoValidator  # noqa: E402
+from ..services.branch_service import BranchService  # noqa: E402
+from ...services.git_topology_service import GitTopologyService  # noqa: E402
+
+# Service singletons missing after extraction from app.py closures
+from ..services.stats_service import stats_service  # noqa: E402
+from ..services.file_service import file_service  # noqa: E402
+from ..services.search_service import search_service  # noqa: E402
+from ..services.health_service import health_service  # noqa: E402
+
+# Helper function missing after extraction from app.py closures
+from ..managers.composite_file_listing import _list_composite_files  # noqa: E402
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    status,
+    Depends,
+    Response,
+    Request,
+    Query,
+    Body,
+)
 from fastapi.responses import JSONResponse
 
 # Import all model classes used by route handlers
 from ..models.auth import (
-    LoginRequest, LoginResponse, RefreshTokenRequest, RefreshTokenResponse,
-    UserInfo, CreateUserRequest, UpdateUserRequest, ChangePasswordRequest,
-    UserResponse, MessageResponse, RegistrationRequest, PasswordResetRequest,
-    CreateApiKeyRequest, CreateApiKeyResponse, ApiKeyListResponse,
-    CreateMCPCredentialRequest, CreateMCPCredentialResponse, MCPCredentialListResponse,
+    LoginRequest,
+    LoginResponse,
+    RefreshTokenRequest,
+    RefreshTokenResponse,
+    UserInfo,
+    CreateUserRequest,
+    UpdateUserRequest,
+    ChangePasswordRequest,
+    UserResponse,
+    MessageResponse,
+    RegistrationRequest,
+    PasswordResetRequest,
+    CreateApiKeyRequest,
+    CreateApiKeyResponse,
+    ApiKeyListResponse,
+    CreateMCPCredentialRequest,
+    CreateMCPCredentialResponse,
+    MCPCredentialListResponse,
 )
 from ..models.repos import (
-    AddGoldenRepoRequest, GoldenRepoInfo, ActivateRepositoryRequest, ActivatedRepositoryInfo,
-    SwitchBranchRequest, RepositoryInfo, RepositoryDetailsResponse, RepositoryListResponse,
-    AvailableRepositoryListResponse, RepositorySyncResponse, BranchInfo,
-    RepositoryBranchesResponse, RepositoryStatistics, GitInfo, RepositoryConfiguration,
-    RepositoryDetailsV2Response, ComponentRepoInfo, CompositeRepositoryDetails,
-    RepositorySyncRequest, SyncProgress, SyncJobOptions, RepositorySyncJobResponse,
+    AddGoldenRepoRequest,
+    ActivateRepositoryRequest,
+    ActivatedRepositoryInfo,
+    SwitchBranchRequest,
+    RepositoryInfo,
+    RepositoryDetailsResponse,
+    RepositoryListResponse,
+    AvailableRepositoryListResponse,
+    RepositorySyncResponse,
+    BranchInfo,
+    RepositoryBranchesResponse,
+    RepositoryStatistics,
+    GitInfo,
+    RepositoryConfiguration,
+    RepositoryDetailsV2Response,
+    RepositorySyncRequest,
+    SyncProgress,
+    SyncJobOptions,
+    RepositorySyncJobResponse,
     GeneralRepositorySyncRequest,
 )
 from ..models.jobs import (
-    AddIndexRequest, AddIndexResponse, IndexInfo, IndexStatusResponse,
-    JobResponse, JobStatusResponse, JobListResponse, JobCancellationResponse, JobCleanupResponse,
+    AddIndexRequest,
+    AddIndexResponse,
+    IndexInfo,
+    IndexStatusResponse,
+    JobResponse,
+    JobStatusResponse,
+    JobListResponse,
+    JobCancellationResponse,
+    JobCleanupResponse,
 )
 from ..models.query import (
-    SemanticQueryRequest, QueryMetadata, SemanticQueryResponse,
-    FTSResultItem, UnifiedSearchMetadata, UnifiedSearchResponse,
+    SemanticQueryRequest,
+    FTSResultItem,
 )
 from ..models.api_models import (
-    QueryResultItem, RepositoryStatsResponse, FileListQueryParams,
-    SemanticSearchRequest, SemanticSearchResponse, HealthCheckResponse,
-    RepositoryStatusSummary, ActivatedRepositorySummary, AvailableRepositorySummary,
-    RecentActivity, TemporalIndexOptions,
+    QueryResultItem,
+    RepositoryStatsResponse,
+    FileListQueryParams,
+    SemanticSearchRequest,
+    SemanticSearchResponse,
+    HealthCheckResponse,
+    RepositoryStatusSummary,
+    ActivatedRepositorySummary,
+    AvailableRepositorySummary,
+    RecentActivity,
 )
 from ..models.repository_discovery import RepositoryDiscoveryResponse
 from ..models.branch_models import BranchListResponse
 from ..models.activated_repository import ActivatedRepository
 
 # Import auth dependencies and utilities
-from .. import auth as auth_pkg
 from ..auth import dependencies
 from ..auth.user_manager import UserRole, SSOPasswordChangeError
 from ..auth.rate_limiter import password_change_rate_limiter, refresh_token_rate_limiter
@@ -65,7 +136,8 @@ from ..auth.audit_logger import password_audit_logger
 from ..auth.session_manager import session_manager
 from ..auth.timing_attack_prevention import timing_attack_prevention
 from ..auth.concurrency_protection import (
-    password_change_concurrency_protection, ConcurrencyConflictError,
+    password_change_concurrency_protection,
+    ConcurrencyConflictError,
 )
 from ..auth.auth_error_handler import auth_error_handler, AuthErrorType
 
@@ -105,7 +177,13 @@ from ..routers.groups import (
 from ..routers.repo_categories import router as repo_categories_router
 from ..routes.multi_query_routes import router as multi_query_router
 from ..routes.scip_multi_routes import router as scip_multi_router
-from ..web import web_router, user_router, login_router, api_router, init_session_manager
+from ..web import (
+    web_router,
+    user_router,
+    login_router,
+    api_router,
+    init_session_manager,
+)
 from ..web.repo_category_routes import repo_category_web_router
 from ..web.dependency_map_routes import dependency_map_router
 
@@ -120,7 +198,6 @@ from ..app_helpers import (
     _apply_rest_fts_truncation,
     _execute_repository_sync,
     _get_composite_details,
-    _analyze_component_repo,
 )
 
 # Constants used by route handlers
@@ -128,6 +205,9 @@ GOLDEN_REPO_ADD_OPERATION = "add_golden_repo"
 GOLDEN_REPO_REFRESH_OPERATION = "refresh_golden_repo"
 JOB_STATUS_PENDING = "pending"
 JOB_STATUS_RUNNING = "running"
+
+# Module-level logger (was available as a closure variable in app.py)
+logger = logging.getLogger(__name__)
 
 
 def register_inline_routes(
@@ -178,6 +258,7 @@ def register_inline_routes(
         db_path_str: Database path string
         job_tracker: JobTracker instance
     """
+
     # Health endpoint (requires authentication for security)
     @app.get("/health")
     def health_check(
@@ -341,7 +422,7 @@ def register_inline_routes(
         """
         try:
             # Import cache singleton
-            from .cache import get_global_cache
+            from code_indexer.server.cache import get_global_cache
 
             # Get cache instance
             cache = get_global_cache()
@@ -1757,7 +1838,6 @@ def register_inline_routes(
             HTTPException 409: If index already exists
             HTTPException 500: If job submission fails
         """
-        from fastapi.responses import JSONResponse
 
         # Get list of index types to process
         index_types = request.get_index_types()
@@ -2009,6 +2089,7 @@ def register_inline_routes(
         # Story #400 - AC5: Use DataRetentionConfig.background_jobs_retention_hours
         if max_age_hours is None:
             from code_indexer.server.services.config_service import get_config_service
+
             _config_service = get_config_service()
             max_age_hours = _config_service.get_config().data_retention_config.background_jobs_retention_hours
         if max_age_hours < 1:
@@ -3475,28 +3556,30 @@ def register_inline_routes(
                 # Execute semantic search for hybrid or degraded mode
                 if search_mode_actual in ["semantic", "hybrid"]:
                     try:
-                        semantic_results_raw = semantic_query_manager.query_user_repositories(
-                            username=current_user.username,
-                            query_text=request.query_text,
-                            repository_alias=request.repository_alias,
-                            limit=request.limit,
-                            min_score=request.min_score,
-                            file_extensions=request.file_extensions,
-                            # Phase 1 parameters (Story #503)
-                            exclude_language=request.exclude_language,
-                            exclude_path=request.exclude_path,
-                            accuracy=request.accuracy,
-                            # Temporal parameters (Story #446)
-                            time_range=request.time_range,
-                            time_range_all=request.time_range_all,
-                            at_commit=request.at_commit,
-                            include_removed=request.include_removed,
-                            show_evolution=request.show_evolution,
-                            evolution_limit=request.evolution_limit,
-                            # Phase 3 temporal filtering parameters (Story #503)
-                            diff_type=request.diff_type,
-                            author=request.author,
-                            chunk_type=request.chunk_type,
+                        semantic_results_raw = (
+                            semantic_query_manager.query_user_repositories(
+                                username=current_user.username,
+                                query_text=request.query_text,
+                                repository_alias=request.repository_alias,
+                                limit=request.limit,
+                                min_score=request.min_score,
+                                file_extensions=request.file_extensions,
+                                # Phase 1 parameters (Story #503)
+                                exclude_language=request.exclude_language,
+                                exclude_path=request.exclude_path,
+                                accuracy=request.accuracy,
+                                # Temporal parameters (Story #446)
+                                time_range=request.time_range,
+                                time_range_all=request.time_range_all,
+                                at_commit=request.at_commit,
+                                include_removed=request.include_removed,
+                                show_evolution=request.show_evolution,
+                                evolution_limit=request.evolution_limit,
+                                # Phase 3 temporal filtering parameters (Story #503)
+                                diff_type=request.diff_type,
+                                author=request.author,
+                                chunk_type=request.chunk_type,
+                            )
                         )
                         semantic_results_list = [
                             QueryResultItem(**result)
@@ -3553,8 +3636,12 @@ def register_inline_routes(
 
                 # Apply payload truncation for consistency with MCP handlers
                 _payload_cache = getattr(app.state, "payload_cache", None)
-                truncated_fts = _apply_rest_fts_truncation(fts_dicts, payload_cache=_payload_cache)
-                truncated_semantic = _apply_rest_semantic_truncation(semantic_dicts, payload_cache=_payload_cache)
+                truncated_fts = _apply_rest_fts_truncation(
+                    fts_dicts, payload_cache=_payload_cache
+                )
+                truncated_semantic = _apply_rest_semantic_truncation(
+                    semantic_dicts, payload_cache=_payload_cache
+                )
 
                 # Return as JSONResponse to support truncated fields
                 from fastapi.responses import JSONResponse
@@ -5114,6 +5201,7 @@ def register_inline_routes(
 
     # Include wiki router (Stories #280-#283)
     from ..wiki.routes import wiki_router
+
     # NOTE: __file__ is in routers/, so use .parent.parent to reach server/ root
     wiki_static_dir = PathLib(__file__).parent.parent / "wiki" / "static"
     if wiki_static_dir.exists():
@@ -5138,7 +5226,7 @@ def register_inline_routes(
     def root_oauth_discovery():
         """OAuth 2.1 discovery endpoint at root path (RFC 8414 compliance)."""
         from pathlib import Path
-        from .auth.oauth.oauth_manager import OAuthManager
+        from code_indexer.server.auth.oauth.oauth_manager import OAuthManager
 
         # Use same configuration as /oauth/ routes for consistency
         oauth_db = Path.home() / ".cidx-server" / "oauth.db"
@@ -5149,6 +5237,8 @@ def register_inline_routes(
     @app.get("/.well-known/oauth-protected-resource")
     def oauth_protected_resource_metadata():
         """OAuth 2.0 Protected Resource Metadata endpoint (RFC 9728 compliance)."""
+        import os
+
         issuer_url = os.getenv("CIDX_ISSUER_URL", "http://localhost:8000")
 
         return {
@@ -5166,4 +5256,3 @@ def register_inline_routes(
         from fastapi.responses import RedirectResponse
 
         return RedirectResponse(url="/admin/static/favicon.svg", status_code=302)
-
