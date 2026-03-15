@@ -12,7 +12,6 @@ import logging
 import os
 import secrets
 import sqlite3
-import subprocess
 import sys
 import threading
 import time
@@ -30,7 +29,6 @@ from ..auth import dependencies
 from .auth import (
     get_session_manager,
     SessionData,
-    require_admin_session,
 )
 from ..services.ci_token_manager import CITokenManager, TokenValidationError
 from ..services.config_service import get_config_service
@@ -1660,8 +1658,7 @@ def _repo_access_error_response(
     """Return appropriate error response based on request type."""
     if is_ajax:
         return JSONResponse(
-            {"success": False, "error": error_msg},
-            status_code=status_code
+            {"success": False, "error": error_msg}, status_code=status_code
         )
     return _create_groups_page_response(
         request, session, active_tab="repos", error_message=error_msg
@@ -1702,7 +1699,7 @@ async def grant_repo_access(
     # Validate CSRF
     is_valid, error_msg = _validate_repo_access_csrf(request, is_ajax, csrf_token)
     if not is_valid:
-        return _repo_access_error_response(is_ajax, request, session, error_msg, 403)
+        return _repo_access_error_response(is_ajax, request, session, error_msg, 403)  # type: ignore[arg-type]
 
     # Parse request
     repo_name, group_id, error_msg = await _parse_repo_access_request(
@@ -1713,7 +1710,11 @@ async def grant_repo_access(
 
     if not repo_name or group_id is None:
         return _repo_access_error_response(
-            is_ajax, request, session, "Missing required parameters: repo_name and group_id", 400
+            is_ajax,
+            request,
+            session,
+            "Missing required parameters: repo_name and group_id",
+            400,
         )
 
     group_manager = _get_group_manager()
@@ -1721,7 +1722,9 @@ async def grant_repo_access(
     try:
         group = group_manager.get_group(group_id)
         if not group:
-            return _repo_access_error_response(is_ajax, request, session, "Group not found", 404)
+            return _repo_access_error_response(
+                is_ajax, request, session, "Group not found", 404
+            )
 
         success = group_manager.grant_repo_access(
             repo_name=repo_name,
@@ -1739,7 +1742,8 @@ async def grant_repo_access(
             )
 
         message = (
-            f"Granted '{repo_name}' access to '{group.name}'" if success
+            f"Granted '{repo_name}' access to '{group.name}'"
+            if success
             else f"'{group.name}' already has access to '{repo_name}'"
         )
         return _repo_access_success_response(is_ajax, request, session, message)
@@ -1776,7 +1780,7 @@ async def revoke_repo_access(
     # Validate CSRF
     is_valid, error_msg = _validate_repo_access_csrf(request, is_ajax, csrf_token)
     if not is_valid:
-        return _repo_access_error_response(is_ajax, request, session, error_msg, 403)
+        return _repo_access_error_response(is_ajax, request, session, error_msg, 403)  # type: ignore[arg-type]
 
     # Parse request
     repo_name, group_id, error_msg = await _parse_repo_access_request(
@@ -1787,7 +1791,11 @@ async def revoke_repo_access(
 
     if not repo_name or group_id is None:
         return _repo_access_error_response(
-            is_ajax, request, session, "Missing required parameters: repo_name and group_id", 400
+            is_ajax,
+            request,
+            session,
+            "Missing required parameters: repo_name and group_id",
+            400,
         )
 
     group_manager = _get_group_manager()
@@ -1795,7 +1803,9 @@ async def revoke_repo_access(
     try:
         group = group_manager.get_group(group_id)
         if not group:
-            return _repo_access_error_response(is_ajax, request, session, "Group not found", 404)
+            return _repo_access_error_response(
+                is_ajax, request, session, "Group not found", 404
+            )
 
         success = group_manager.revoke_repo_access(
             repo_name=repo_name,
@@ -1812,7 +1822,8 @@ async def revoke_repo_access(
             )
 
         message = (
-            f"Revoked '{repo_name}' access from '{group.name}'" if success
+            f"Revoked '{repo_name}' access from '{group.name}'"
+            if success
             else f"'{group.name}' did not have access to '{repo_name}'"
         )
         return _repo_access_success_response(is_ajax, request, session, message)
@@ -1846,13 +1857,14 @@ def _golden_repo_not_found_error():
     from code_indexer.server.repositories.golden_repo_manager import (
         GoldenRepoNotFoundError,
     )
+
     return GoldenRepoNotFoundError
 
 
 # Module-level lazy sentinel for exception matching
 _GoldenRepoNotFoundError = type("_LazyError", (Exception,), {})
 try:
-    from code_indexer.server.repositories.golden_repo_manager import (
+    from code_indexer.server.repositories.golden_repo_manager import (  # type: ignore[no-redef]
         GoldenRepoNotFoundError as _GoldenRepoNotFoundError,
     )
 except ImportError:
@@ -1868,6 +1880,7 @@ def _get_golden_repo_branch_service():
         from code_indexer.server.services.golden_repo_branch_service import (
             GoldenRepoBranchService,
         )
+
         return GoldenRepoBranchService(manager)
     except ImportError:
         return None
@@ -2006,7 +2019,9 @@ def _get_golden_repos_list():
             global_repos = {r["repo_name"]: r for r in registry.list_global_repos()}
         except Exception as e:
             logger.warning(
-                format_error_log("SCIP-GENERAL-044", f"Could not load global registry: {e}"),
+                format_error_log(
+                    "SCIP-GENERAL-044", f"Could not load global registry: {e}"
+                ),
                 extra={"correlation_id": get_correlation_id()},
             )
             global_repos = {}
@@ -2024,11 +2039,13 @@ def _get_golden_repos_list():
                     category_lookup[alias] = {
                         "category_id": info["category_id"],
                         "category_name": info["category_name"],
-                        "category_priority": info["priority"]
+                        "category_priority": info["priority"],
                     }
         except Exception as e:
             logger.warning(
-                format_error_log("SCIP-GENERAL-048", f"Could not load category information: {e}"),
+                format_error_log(
+                    "SCIP-GENERAL-048", f"Could not load category information: {e}"
+                ),
                 extra={"correlation_id": get_correlation_id()},
             )
 
@@ -2071,7 +2088,10 @@ def _get_golden_repos_list():
                         )
                     except Exception as e:
                         logger.warning(
-                            format_error_log("SCIP-GENERAL-045", f"Could not read alias file {alias_file}: {e}"),
+                            format_error_log(
+                                "SCIP-GENERAL-045",
+                                f"Could not read alias file {alias_file}: {e}",
+                            ),
                             extra={"correlation_id": get_correlation_id()},
                         )
                         repo["version"] = None
@@ -2101,7 +2121,10 @@ def _get_golden_repos_list():
                     repo["temporal_status"] = temporal_status
                 except Exception as e:
                     logger.warning(
-                        format_error_log("SCIP-GENERAL-046", f"Failed to get temporal status for {repo.get('alias')}: {e}"),
+                        format_error_log(
+                            "SCIP-GENERAL-046",
+                            f"Failed to get temporal status for {repo.get('alias')}: {e}",
+                        ),
                         extra={"correlation_id": get_correlation_id()},
                     )
                     repo["temporal_status"] = {"format": "error", "message": str(e)}
@@ -2170,7 +2193,9 @@ def _get_golden_repos_list():
         return sorted(repos, key=lambda r: r.get("alias", "").lower())
     except Exception as e:
         logger.error(
-            format_error_log("SCIP-GENERAL-047", f"Failed to get golden repos list: {e}"),
+            format_error_log(
+                "SCIP-GENERAL-047", f"Failed to get golden repos list: {e}"
+            ),
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
         )
@@ -2194,7 +2219,9 @@ def _create_golden_repos_page_response(
         categories = category_service.list_categories()
     except Exception as e:
         logger.warning(
-            format_error_log("SCIP-GENERAL-049", f"Could not load categories for template: {e}"),
+            format_error_log(
+                "SCIP-GENERAL-049", f"Could not load categories for template: {e}"
+            ),
             extra={"correlation_id": get_correlation_id()},
         )
         categories = []
@@ -2502,6 +2529,7 @@ def toggle_wiki_enabled(
             from ..wiki.wiki_cache import WikiCache
             from ..wiki.wiki_service import WikiService
             from ...global_repos.alias_manager import AliasManager
+
             cache = WikiCache(manager.db_path)
             cache.ensure_tables()
             aliases_dir = str(Path(manager.golden_repos_dir) / "aliases")
@@ -2553,6 +2581,7 @@ def refresh_wiki_cache(
             status_code=400,
         )
     from ..wiki.wiki_cache import WikiCache
+
     manager = _get_golden_repo_manager()
     cache = WikiCache(manager.db_path)
     cache.invalidate_repo(alias)
@@ -2599,10 +2628,11 @@ async def change_golden_repo_branch(
 
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
-    except (FileNotFoundError, _GoldenRepoNotFoundError) as e:
+    except (FileNotFoundError, _GoldenRepoNotFoundError) as e:  # type: ignore[misc]
         return JSONResponse(status_code=404, content={"error": str(e)})
     except Exception as e:
         from code_indexer.server.repositories.background_jobs import DuplicateJobError
+
         if isinstance(e, DuplicateJobError):
             return JSONResponse(
                 status_code=409,
@@ -2654,7 +2684,7 @@ def get_golden_repo_branches(
                 ]
             }
         )
-    except (FileNotFoundError, _GoldenRepoNotFoundError) as e:
+    except (FileNotFoundError, _GoldenRepoNotFoundError) as e:  # type: ignore[misc]
         return JSONResponse(status_code=404, content={"error": str(e)})
     except Exception as e:
         logger.error(f"Failed to get branches for {alias}: {e}")
@@ -2758,7 +2788,10 @@ def golden_repo_details(
         raise
     except Exception as e:
         logger.error(
-            format_error_log("STORE-GENERAL-026", f"Failed to get golden repo details for '{alias}': {e}"),
+            format_error_log(
+                "STORE-GENERAL-026",
+                f"Failed to get golden repo details for '{alias}': {e}",
+            ),
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
         )
@@ -2789,7 +2822,10 @@ def golden_repos_list_partial(request: Request):
         categories = category_service.list_categories()
     except Exception as e:
         logger.warning(
-            format_error_log("SCIP-GENERAL-050", f"Could not load categories for partial template: {e}"),
+            format_error_log(
+                "SCIP-GENERAL-050",
+                f"Could not load categories for partial template: {e}",
+            ),
             extra={"correlation_id": get_correlation_id()},
         )
         categories = []
@@ -2857,7 +2893,10 @@ def _get_all_activated_repos() -> list:
                 }
         except Exception as e:
             logger.warning(
-                format_error_log("SCIP-GENERAL-051", f"Could not load category information for activated repos: {e}"),
+                format_error_log(
+                    "SCIP-GENERAL-051",
+                    f"Could not load category information for activated repos: {e}",
+                ),
                 extra={"correlation_id": get_correlation_id()},
             )
 
@@ -2878,7 +2917,9 @@ def _get_all_activated_repos() -> list:
                     golden_alias = repo.get("golden_repo_alias", "")
                     cat_info = category_lookup.get(golden_alias, {})
                     if isinstance(cat_info, dict):
-                        repo["category_name"] = cat_info.get("category_name", "Unassigned")
+                        repo["category_name"] = cat_info.get(
+                            "category_name", "Unassigned"
+                        )
                         repo["category_id"] = cat_info.get("category_id")
                         repo["category_priority"] = cat_info.get("category_priority")
                     else:
@@ -2896,7 +2937,10 @@ def _get_all_activated_repos() -> list:
                     except Exception as e:
                         # Honest error handling - indicate failure clearly
                         logger.error(
-                            format_error_log("STORE-GENERAL-027", f"Failed to get temporal status for repo {username}/{repo.get('user_alias', 'unknown')}: {e}"),
+                            format_error_log(
+                                "STORE-GENERAL-027",
+                                f"Failed to get temporal status for repo {username}/{repo.get('user_alias', 'unknown')}: {e}",
+                            ),
                             exc_info=True,
                             extra={"correlation_id": get_correlation_id()},
                         )
@@ -2917,7 +2961,9 @@ def _get_all_activated_repos() -> list:
 
     except Exception as e:
         logger.error(
-            format_error_log("STORE-GENERAL-028", f"Failed to get activated repos: {e}"),
+            format_error_log(
+                "STORE-GENERAL-028", f"Failed to get activated repos: {e}"
+            ),
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
         )
@@ -3257,9 +3303,7 @@ def toggle_user_wiki_enabled(
                 )
         return JSONResponse({"success": True})
     except Exception as exc:
-        logger.warning(
-            "Failed to toggle wiki for %s/%s: %s", username, alias, exc
-        )
+        logger.warning("Failed to toggle wiki for %s/%s: %s", username, alias, exc)
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 
@@ -3271,7 +3315,9 @@ def _get_background_job_manager():
         return background_job_manager
     except Exception as e:
         logger.error(
-            format_error_log("STORE-GENERAL-029", f"Failed to get background job manager: {e}"),
+            format_error_log(
+                "STORE-GENERAL-029", f"Failed to get background job manager: {e}"
+            ),
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
         )
@@ -3608,7 +3654,9 @@ def _get_all_activated_repos_for_query() -> list:
             )
     except Exception as e:
         logger.warning(
-            format_error_log("STORE-GENERAL-030", f"Could not load global repos for query: {e}"),
+            format_error_log(
+                "STORE-GENERAL-030", f"Could not load global repos for query: {e}"
+            ),
             extra={"correlation_id": get_correlation_id()},
         )
 
@@ -4011,14 +4059,20 @@ def query_submit(
                                 )
                         except FileNotFoundError as e:
                             logger.error(
-                                format_error_log("STORE-GENERAL-032", f"SCIP query failed - file not found: {e}"),
+                                format_error_log(
+                                    "STORE-GENERAL-032",
+                                    f"SCIP query failed - file not found: {e}",
+                                ),
                                 exc_info=True,
                                 extra={"correlation_id": get_correlation_id()},
                             )
                             error_message = f"SCIP index not found or corrupted for repository '{user_alias}'. Generate an index with: `cidx scip generate`"
                         except Exception as e:
                             logger.error(
-                                format_error_log("STORE-GENERAL-033", f"SCIP query execution failed: {e}"),
+                                format_error_log(
+                                    "STORE-GENERAL-033",
+                                    f"SCIP query execution failed: {e}",
+                                ),
                                 exc_info=True,
                                 extra={"correlation_id": get_correlation_id()},
                             )
@@ -4098,7 +4152,9 @@ def query_submit(
                             )
                     except Exception as e:
                         logger.error(
-                            format_error_log("STORE-GENERAL-034", f"Global repo query failed: {e}"),
+                            format_error_log(
+                                "STORE-GENERAL-034", f"Global repo query failed: {e}"
+                            ),
                             exc_info=True,
                             extra={"correlation_id": get_correlation_id()},
                         )
@@ -4211,7 +4267,9 @@ def _get_semantic_query_manager():
         return semantic_query_manager
     except Exception as e:
         logger.error(
-            format_error_log("STORE-GENERAL-036", f"Failed to get semantic query manager: {e}"),
+            format_error_log(
+                "STORE-GENERAL-036", f"Failed to get semantic query manager: {e}"
+            ),
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
         )
@@ -4377,7 +4435,9 @@ def _execute_scip_query(
             )
     except FileNotFoundError as e:
         logger.error(
-            format_error_log("STORE-GENERAL-038", f"SCIP query failed - file not found: {e}"),
+            format_error_log(
+                "STORE-GENERAL-038", f"SCIP query failed - file not found: {e}"
+            ),
             exc_info=True,
             extra={"correlation_id": get_correlation_id()},
         )
@@ -4571,7 +4631,9 @@ def query_results_partial_post(
                             )
                     except Exception as e:
                         logger.error(
-                            format_error_log("STORE-GENERAL-040", f"Global repo query failed: {e}"),
+                            format_error_log(
+                                "STORE-GENERAL-040", f"Global repo query failed: {e}"
+                            ),
                             exc_info=True,
                             extra={"correlation_id": get_correlation_id()},
                         )
@@ -5959,6 +6021,18 @@ def _create_config_page_response(
     github_token_data = token_manager.get_token("github")
     gitlab_token_data = token_manager.get_token("gitlab")
 
+    # Get golden repos for delegation config dropdown (Story #459)
+    golden_repos_list = []
+    try:
+        grm = _get_golden_repo_manager()
+        if grm:
+            repos = grm.list_golden_repos()
+            golden_repos_list = sorted(
+                [r.get("alias", "") for r in repos if r.get("alias")]
+            )
+    except Exception as e:
+        logger.warning("Failed to fetch golden repos for config dropdown: %s", e)
+
     response = templates.TemplateResponse(
         "config.html",
         {
@@ -5975,6 +6049,7 @@ def _create_config_page_response(
             "github_token_data": github_token_data,
             "gitlab_token_data": gitlab_token_data,
             "restart_required_fields": RESTART_REQUIRED_FIELDS,
+            "golden_repos_list": golden_repos_list,
         },
     )
 
@@ -6298,7 +6373,7 @@ async def fetch_discovery_branches(request: Request):
         token_manager = _get_token_manager()
 
         # Build requests and fetch branches
-        results = {}
+        results = {}  # type: ignore[var-annotated]
         for repo in repos:
             clone_url = repo.get("clone_url")
             platform = repo.get("platform", "github")
@@ -6395,8 +6470,8 @@ async def update_claude_delegation_config(
         existing = delegation_manager.load_config()
         credential = existing.claude_server_credential if existing else ""
 
-    url = form_data.get("claude_server_url", "").strip()
-    username = form_data.get("claude_server_username", "").strip()
+    url = form_data.get("claude_server_url", "").strip()  # type: ignore[union-attr]
+    username = form_data.get("claude_server_username", "").strip()  # type: ignore[union-attr]
 
     if not url or not username or not credential:
         return _create_config_page_response(
@@ -6409,7 +6484,10 @@ async def update_claude_delegation_config(
     # Validate connectivity before saving
     cred_type = form_data.get("claude_server_credential_type", "password")
     result = delegation_manager.validate_connectivity(
-        url, username, credential, cred_type
+        url,
+        username,
+        credential,
+        cred_type,  # type: ignore[arg-type]
     )
 
     if not result.success:
@@ -6423,17 +6501,74 @@ async def update_claude_delegation_config(
     # Save configuration with encrypted credential
     from ..config.delegation_config import DEFAULT_FUNCTION_REPO_ALIAS
 
-    cidx_callback_url = form_data.get("cidx_callback_url", "").strip()  # Story #720
-    skip_ssl_verify = form_data.get("skip_ssl_verify", "false").lower() == "true"
+    cidx_callback_url = form_data.get("cidx_callback_url", "").strip()  # type: ignore[union-attr]  # Story #720
+    skip_ssl_verify = form_data.get("skip_ssl_verify", "false").lower() == "true"  # type: ignore[union-attr]
+    guardrails_enabled = (
+        form_data.get("guardrails_enabled", "true").lower() == "true"  # type: ignore[union-attr]
+    )  # Story #457
+    delegation_guardrails_repo = form_data.get(  # type: ignore[union-attr]
+        "delegation_guardrails_repo", ""
+    ).strip()  # Story #457
+    delegation_default_engine = form_data.get(  # type: ignore[union-attr]
+        "delegation_default_engine", "claude-code"
+    ).strip()  # Story #459
+    delegation_default_mode = form_data.get(  # type: ignore[union-attr]
+        "delegation_default_mode", "single"
+    ).strip()  # Story #459
+
+    # Validate guardrails repo exists in golden repos (Story #459)
+    if delegation_guardrails_repo:
+        try:
+            grm = _get_golden_repo_manager()
+            if grm:
+                grm.get_actual_repo_path(delegation_guardrails_repo)
+        except Exception:
+            return _create_config_page_response(
+                request,
+                session,
+                error_message=f"Guardrails repository '{delegation_guardrails_repo}' not found in golden repos. Please select a valid repository or leave empty.",
+                validation_errors={
+                    "claude_delegation": f"Invalid guardrails repo: {delegation_guardrails_repo}"
+                },
+            )
+
+    # Validate engine and mode values (Story #459)
+    VALID_ENGINES = {"claude-code", "codex", "gemini", "opencode", "q"}
+    VALID_MODES = {"single", "collaborative", "competitive"}
+
+    if delegation_default_engine not in VALID_ENGINES:
+        return _create_config_page_response(
+            request,
+            session,
+            error_message=f"Invalid engine '{delegation_default_engine}'. Must be one of: {', '.join(sorted(VALID_ENGINES))}",
+            validation_errors={
+                "claude_delegation": f"Invalid engine: {delegation_default_engine}"
+            },
+        )
+
+    if delegation_default_mode not in VALID_MODES:
+        return _create_config_page_response(
+            request,
+            session,
+            error_message=f"Invalid mode '{delegation_default_mode}'. Must be one of: {', '.join(sorted(VALID_MODES))}",
+            validation_errors={
+                "claude_delegation": f"Invalid mode: {delegation_default_mode}"
+            },
+        )
+
     config = ClaudeDelegationConfig(
-        function_repo_alias=form_data.get("function_repo_alias", "").strip()
+        function_repo_alias=form_data.get("function_repo_alias", "").strip()  # type: ignore[union-attr]
         or DEFAULT_FUNCTION_REPO_ALIAS,
         claude_server_url=url,
         claude_server_username=username,
-        claude_server_credential_type=cred_type,
-        claude_server_credential=credential,
+        claude_server_credential_type=cred_type,  # type: ignore[arg-type]
+        claude_server_credential=credential,  # type: ignore[arg-type]
         cidx_callback_url=cidx_callback_url,
         skip_ssl_verify=skip_ssl_verify,
+        guardrails_enabled=guardrails_enabled,
+        delegation_guardrails_repo=delegation_guardrails_repo,
+        delegation_default_engine=delegation_default_engine,
+        delegation_default_mode=delegation_default_mode,
     )
     delegation_manager.save_config(config)
 
@@ -6549,7 +6684,9 @@ async def update_langfuse_pull_config(
         )
     except Exception as e:
         logger.error(
-            format_error_log("STORE-GENERAL-046", f"Failed to update Langfuse pull config: {e}"),
+            format_error_log(
+                "STORE-GENERAL-046", f"Failed to update Langfuse pull config: {e}"
+            ),
             extra={"correlation_id": get_correlation_id()},
         )
         return _create_config_page_response(
@@ -6721,56 +6858,15 @@ async def update_config_section(
         )
     except Exception as e:
         logger.error(
-            format_error_log("STORE-GENERAL-048", f"Failed to save config section {section}: {e}"),
+            format_error_log(
+                "STORE-GENERAL-048", f"Failed to save config section {section}: {e}"
+            ),
             extra={"correlation_id": get_correlation_id()},
         )
         return _create_config_page_response(
             request,
             session,
             error_message=f"Failed to save configuration: {str(e)}",
-        )
-
-
-@web_router.post("/config/reset", response_class=HTMLResponse)
-def reset_config(
-    request: Request,
-    csrf_token: Optional[str] = Form(None),
-):
-    """Reset configuration to defaults."""
-    from ..services.config_service import get_config_service
-
-    session = _require_admin_session(request)
-    if not session:
-        return HTMLResponse(content="", status_code=401)
-
-    # Validate CSRF token
-    if not validate_login_csrf_token(request, csrf_token):
-        return _create_config_page_response(
-            request, session, error_message="Invalid CSRF token"
-        )
-
-    # Reset to defaults using ConfigService
-    try:
-        config_service = get_config_service()
-        # Create a fresh default config and save it
-        default_config = config_service.config_manager.create_default_config()
-        config_service.config_manager.save_config(default_config)
-        config_service._config = default_config  # Update cached config
-
-        return _create_config_page_response(
-            request,
-            session,
-            success_message="Configuration reset to defaults successfully",
-        )
-    except Exception as e:
-        logger.error(
-            format_error_log("STORE-GENERAL-049", f"Failed to reset config: {e}"),
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _create_config_page_response(
-            request,
-            session,
-            error_message=f"Failed to reset configuration: {str(e)}",
         )
 
 
@@ -6873,7 +6969,9 @@ def save_api_key(
         )
     except Exception as e:
         logger.error(
-            format_error_log("STORE-GENERAL-050", f"Failed to save {platform} API key: {e}"),
+            format_error_log(
+                "STORE-GENERAL-050", f"Failed to save {platform} API key: {e}"
+            ),
             extra={"correlation_id": get_correlation_id()},
         )
         return _create_config_page_response(
@@ -6928,7 +7026,9 @@ def delete_api_key(
         )
     except Exception as e:
         logger.error(
-            format_error_log("SVC-GENERAL-015", f"Failed to delete {platform} API key: {e}"),
+            format_error_log(
+                "SVC-GENERAL-015", f"Failed to delete {platform} API key: {e}"
+            ),
             extra={"correlation_id": get_correlation_id()},
         )
         raise HTTPException(
@@ -7007,7 +7107,7 @@ def file_content_limits_page(request: Request):
     csrf_token = generate_csrf_token()
 
     # Calculate derived values
-    max_chars = config.max_chars_per_request
+    max_chars = config.max_chars_per_request  # type: ignore[union-attr]
     estimated_lines = max_chars // 80  # Typical code line length
 
     response = templates.TemplateResponse(
@@ -7088,7 +7188,9 @@ def update_file_content_limits(
         )
     except Exception as e:
         logger.error(
-            format_error_log("SVC-GENERAL-016", f"Failed to update file content limits: {e}"),
+            format_error_log(
+                "SVC-GENERAL-016", f"Failed to update file content limits: {e}"
+            ),
             extra={"correlation_id": get_correlation_id()},
         )
         return _create_file_content_limits_response(
@@ -7114,7 +7216,7 @@ def _create_file_content_limits_response(
     csrf_token = generate_csrf_token()
 
     # Calculate derived values
-    max_chars = config.max_chars_per_request
+    max_chars = config.max_chars_per_request  # type: ignore[union-attr]
     estimated_lines = max_chars // 80
 
     response = templates.TemplateResponse(
@@ -7356,7 +7458,9 @@ async def admin_git_credentials_add(request: Request):
     """Add a new git credential via admin form submission."""
     session = _require_admin_session(request)
     if not session:
-        return JSONResponse({"success": False, "error": "Session expired"}, status_code=401)
+        return JSONResponse(
+            {"success": False, "error": "Session expired"}, status_code=401
+        )
 
     from ..services.config_service import get_config_service
     from ..services.git_credential_manager import GitCredentialManager
@@ -7370,10 +7474,14 @@ async def admin_git_credentials_add(request: Request):
         name = body.get("name")
 
         if not forge_type or not forge_host or not token:
-            return JSONResponse({"success": False, "error": "Missing required fields"}, status_code=400)
+            return JSONResponse(
+                {"success": False, "error": "Missing required fields"}, status_code=400
+            )
 
         config_service = get_config_service()
-        db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+        db_path = str(
+            config_service.config_manager.server_dir / "data" / "cidx_server.db"
+        )
         manager = GitCredentialManager(db_path)
 
         result = await manager.configure_credential(
@@ -7396,14 +7504,18 @@ def admin_git_credentials_delete(request: Request, credential_id: str):
     """Delete a git credential from admin interface."""
     session = _require_admin_session(request)
     if not session:
-        return JSONResponse({"success": False, "error": "Session expired"}, status_code=401)
+        return JSONResponse(
+            {"success": False, "error": "Session expired"}, status_code=401
+        )
 
     from ..services.config_service import get_config_service
     from ..services.git_credential_manager import GitCredentialManager
 
     try:
         config_service = get_config_service()
-        db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+        db_path = str(
+            config_service.config_manager.server_dir / "data" / "cidx_server.db"
+        )
         manager = GitCredentialManager(db_path)
         manager.delete_credential(session.username, credential_id)
 
@@ -7627,7 +7739,9 @@ async def user_git_credentials_add(request: Request):
     """Add a new git credential via form submission."""
     session = _require_authenticated_session(request)
     if not session:
-        return JSONResponse({"success": False, "error": "Session expired"}, status_code=401)
+        return JSONResponse(
+            {"success": False, "error": "Session expired"}, status_code=401
+        )
 
     from ..services.config_service import get_config_service
     from ..services.git_credential_manager import GitCredentialManager
@@ -7641,10 +7755,14 @@ async def user_git_credentials_add(request: Request):
         name = body.get("name")
 
         if not forge_type or not forge_host or not token:
-            return JSONResponse({"success": False, "error": "Missing required fields"}, status_code=400)
+            return JSONResponse(
+                {"success": False, "error": "Missing required fields"}, status_code=400
+            )
 
         config_service = get_config_service()
-        db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+        db_path = str(
+            config_service.config_manager.server_dir / "data" / "cidx_server.db"
+        )
         manager = GitCredentialManager(db_path)
 
         result = await manager.configure_credential(
@@ -7667,14 +7785,18 @@ def user_git_credentials_delete(request: Request, credential_id: str):
     """Delete a git credential."""
     session = _require_authenticated_session(request)
     if not session:
-        return JSONResponse({"success": False, "error": "Session expired"}, status_code=401)
+        return JSONResponse(
+            {"success": False, "error": "Session expired"}, status_code=401
+        )
 
     from ..services.config_service import get_config_service
     from ..services.git_credential_manager import GitCredentialManager
 
     try:
         config_service = get_config_service()
-        db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+        db_path = str(
+            config_service.config_manager.server_dir / "data" / "cidx_server.db"
+        )
         manager = GitCredentialManager(db_path)
         manager.delete_credential(session.username, credential_id)
 
@@ -8763,7 +8885,7 @@ def self_monitoring_page(request: Request):
     default_prompt = _load_default_prompt()
 
     # Get current prompt (use default if empty)
-    current_prompt = self_monitoring_config.prompt_template or default_prompt
+    current_prompt = self_monitoring_config.prompt_template or default_prompt  # type: ignore[union-attr]
 
     # Load scan history and issues from database
     server_dir = config_service.config_manager.server_dir
@@ -8809,7 +8931,7 @@ async def save_self_monitoring_config(
         server_dir = config_service.config_manager.server_dir
         db_path = server_dir / "data" / "cidx_server.db"
         scans, issues = _load_self_monitoring_data(db_path, session)
-        current_prompt = config.self_monitoring_config.prompt_template or default_prompt
+        current_prompt = config.self_monitoring_config.prompt_template or default_prompt  # type: ignore[union-attr]
         return _create_self_monitoring_page_response(
             request,
             session,
@@ -8828,25 +8950,25 @@ async def save_self_monitoring_config(
     enabled = form_data.get("enabled") == "on"
 
     try:
-        cadence_minutes = int(form_data.get("cadence_minutes", "60"))
+        cadence_minutes = int(form_data.get("cadence_minutes", "60"))  # type: ignore[arg-type]
     except ValueError:
         logger.debug("Invalid cadence_minutes value in form, defaulting to 60")
         cadence_minutes = 60
 
-    model = form_data.get("model", "opus").strip()
-    prompt_template = form_data.get("prompt_template", "").strip()
+    model = form_data.get("model", "opus").strip()  # type: ignore[union-attr]
+    prompt_template = form_data.get("prompt_template", "").strip()  # type: ignore[union-attr]
 
     # Determine if prompt was user-modified
-    prompt_user_modified = config.self_monitoring_config.prompt_user_modified
+    prompt_user_modified = config.self_monitoring_config.prompt_user_modified  # type: ignore[union-attr]
     if prompt_template and prompt_template != default_prompt:
         prompt_user_modified = True
 
     # Update configuration
-    config.self_monitoring_config.enabled = enabled
-    config.self_monitoring_config.cadence_minutes = cadence_minutes
-    config.self_monitoring_config.model = model
-    config.self_monitoring_config.prompt_template = prompt_template
-    config.self_monitoring_config.prompt_user_modified = prompt_user_modified
+    config.self_monitoring_config.enabled = enabled  # type: ignore[union-attr]
+    config.self_monitoring_config.cadence_minutes = cadence_minutes  # type: ignore[union-attr]
+    config.self_monitoring_config.model = model  # type: ignore[union-attr]
+    config.self_monitoring_config.prompt_template = prompt_template  # type: ignore[union-attr]
+    config.self_monitoring_config.prompt_user_modified = prompt_user_modified  # type: ignore[union-attr]
 
     # Save configuration
     config_service.config_manager.save_config(config)
@@ -8931,7 +9053,7 @@ async def trigger_manual_scan(
     config = config_service.get_config()
 
     logger.debug(
-        f"[SELF-MON-DEBUG] trigger_manual_scan: Config loaded - enabled={config.self_monitoring_config.enabled}, cadence_minutes={config.self_monitoring_config.cadence_minutes}, model={config.self_monitoring_config.model}"
+        f"[SELF-MON-DEBUG] trigger_manual_scan: Config loaded - enabled={config.self_monitoring_config.enabled}, cadence_minutes={config.self_monitoring_config.cadence_minutes}, model={config.self_monitoring_config.model}"  # type: ignore[union-attr]
     )
 
     # Get background job manager from app state
@@ -9001,14 +9123,14 @@ async def trigger_manual_scan(
         "[SELF-MON-DEBUG] trigger_manual_scan: Creating SelfMonitoringService instance"
     )
     service = SelfMonitoringService(
-        enabled=config.self_monitoring_config.enabled,
-        cadence_minutes=config.self_monitoring_config.cadence_minutes,
+        enabled=config.self_monitoring_config.enabled,  # type: ignore[union-attr]
+        cadence_minutes=config.self_monitoring_config.cadence_minutes,  # type: ignore[union-attr]
         job_manager=job_manager,
         db_path=db_path,
         log_db_path=log_db_path,
         github_repo=github_repo,
-        prompt_template=config.self_monitoring_config.prompt_template,
-        model=config.self_monitoring_config.model,
+        prompt_template=config.self_monitoring_config.prompt_template,  # type: ignore[union-attr]
+        model=config.self_monitoring_config.model,  # type: ignore[union-attr]
         repo_root=str(repo_root) if repo_root else None,
         github_token=github_token,
         server_name=server_name,
@@ -9111,6 +9233,7 @@ def _delayed_restart(delay: int = 2) -> None:
         # Story #355: Systemd mode - write signal file for auto-updater to pick up.
         # This avoids needing sudo/privilege escalation (NoNewPrivileges=true compatible).
         from datetime import datetime as _datetime
+
         signal_data = {
             "timestamp": _datetime.now().isoformat(),
             "reason": "diagnostics_restart",
@@ -9152,9 +9275,7 @@ def _schedule_delayed_restart(delay: int = 2) -> None:
         delay: Seconds to wait before restarting (default: 2)
     """
     restart_thread = threading.Thread(
-        target=_delayed_restart,
-        args=(delay,),
-        daemon=True
+        target=_delayed_restart, args=(delay,), daemon=True
     )
     restart_thread.start()
 
@@ -9192,26 +9313,21 @@ def restart_server(request: Request) -> JSONResponse:
     session = _require_admin_session(request)
     if not session:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required"
+            status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required"
         )
 
     # Validate CSRF token (Code Review Issues #1 and #2)
     csrf_from_header = request.headers.get("X-CSRF-Token")
     if not validate_login_csrf_token(request, csrf_from_header):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid CSRF token"
+            status_code=status.HTTP_403_FORBIDDEN, detail="Invalid CSRF token"
         )
 
     # Rate limiting: Check if restart already in progress (Code Review Issue #6)
     with _restart_lock:
         if _restart_in_progress:
             return JSONResponse(
-                status_code=409,
-                content={
-                    "message": "Restart already in progress"
-                }
+                status_code=409, content={"message": "Restart already in progress"}
             )
         _restart_in_progress = True
 
@@ -9224,10 +9340,7 @@ def restart_server(request: Request) -> JSONResponse:
 
     # Return 202 Accepted immediately
     return JSONResponse(
-        status_code=202,
-        content={
-            "message": "Server is restarting in 2 seconds..."
-        }
+        status_code=202, content={"message": "Server is restarting in 2 seconds..."}
     )
 
 

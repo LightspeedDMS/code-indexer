@@ -189,7 +189,8 @@ class ConfigService:
                 "claude_auth_mode": config.claude_integration_config.claude_auth_mode,
                 "llm_creds_provider_url": config.claude_integration_config.llm_creds_provider_url,
                 "llm_creds_provider_api_key": (
-                    config.claude_integration_config.llm_creds_provider_api_key[:6] + "***"
+                    config.claude_integration_config.llm_creds_provider_api_key[:6]
+                    + "***"
                     if config.claude_integration_config.llm_creds_provider_api_key
                     else None
                 ),
@@ -231,18 +232,42 @@ class ConfigService:
             },
             # Langfuse configuration (Story #136, Story #164)
             "langfuse": {
-                "enabled": config.langfuse_config.enabled if config.langfuse_config else False,
-                "public_key": config.langfuse_config.public_key if config.langfuse_config else "",
-                "secret_key": config.langfuse_config.secret_key if config.langfuse_config else "",
-                "host": config.langfuse_config.host if config.langfuse_config else "https://cloud.langfuse.com",
-                "auto_trace_enabled": config.langfuse_config.auto_trace_enabled if config.langfuse_config else False,
+                "enabled": config.langfuse_config.enabled
+                if config.langfuse_config
+                else False,
+                "public_key": config.langfuse_config.public_key
+                if config.langfuse_config
+                else "",
+                "secret_key": config.langfuse_config.secret_key
+                if config.langfuse_config
+                else "",
+                "host": config.langfuse_config.host
+                if config.langfuse_config
+                else "https://cloud.langfuse.com",
+                "auto_trace_enabled": config.langfuse_config.auto_trace_enabled
+                if config.langfuse_config
+                else False,
                 # Story #164: Langfuse Trace Pull Configuration
-                "pull_enabled": config.langfuse_config.pull_enabled if config.langfuse_config else False,
-                "pull_host": config.langfuse_config.pull_host if config.langfuse_config else "https://cloud.langfuse.com",
-                "pull_projects": [asdict(p) for p in config.langfuse_config.pull_projects] if config.langfuse_config else [],
-                "pull_sync_interval_seconds": config.langfuse_config.pull_sync_interval_seconds if config.langfuse_config else 300,
-                "pull_trace_age_days": config.langfuse_config.pull_trace_age_days if config.langfuse_config else 30,
-                "pull_max_concurrent_observations": config.langfuse_config.pull_max_concurrent_observations if config.langfuse_config else 5,
+                "pull_enabled": config.langfuse_config.pull_enabled
+                if config.langfuse_config
+                else False,
+                "pull_host": config.langfuse_config.pull_host
+                if config.langfuse_config
+                else "https://cloud.langfuse.com",
+                "pull_projects": [
+                    asdict(p) for p in config.langfuse_config.pull_projects
+                ]
+                if config.langfuse_config
+                else [],
+                "pull_sync_interval_seconds": config.langfuse_config.pull_sync_interval_seconds
+                if config.langfuse_config
+                else 300,
+                "pull_trace_age_days": config.langfuse_config.pull_trace_age_days
+                if config.langfuse_config
+                else 30,
+                "pull_max_concurrent_observations": config.langfuse_config.pull_max_concurrent_observations
+                if config.langfuse_config
+                else 5,
             },
             # Claude Delegation configuration (Story #721)
             "claude_delegation": self._get_delegation_settings(),
@@ -341,12 +366,12 @@ class ConfigService:
             },
             # Story #400 - Unified data retention configuration
             "data_retention": {
-                "operational_logs_retention_hours": config.data_retention_config.operational_logs_retention_hours,
-                "audit_logs_retention_hours": config.data_retention_config.audit_logs_retention_hours,
-                "sync_jobs_retention_hours": config.data_retention_config.sync_jobs_retention_hours,
-                "dep_map_history_retention_hours": config.data_retention_config.dep_map_history_retention_hours,
-                "background_jobs_retention_hours": config.data_retention_config.background_jobs_retention_hours,
-                "cleanup_interval_hours": config.data_retention_config.cleanup_interval_hours,
+                "operational_logs_retention_hours": config.data_retention_config.operational_logs_retention_hours,  # type: ignore[union-attr]
+                "audit_logs_retention_hours": config.data_retention_config.audit_logs_retention_hours,  # type: ignore[union-attr]
+                "sync_jobs_retention_hours": config.data_retention_config.sync_jobs_retention_hours,  # type: ignore[union-attr]
+                "dep_map_history_retention_hours": config.data_retention_config.dep_map_history_retention_hours,  # type: ignore[union-attr]
+                "background_jobs_retention_hours": config.data_retention_config.background_jobs_retention_hours,  # type: ignore[union-attr]
+                "cleanup_interval_hours": config.data_retention_config.cleanup_interval_hours,  # type: ignore[union-attr]
             },
             # Story #223 - AC4: Indexing configuration
             "indexing": {
@@ -403,6 +428,10 @@ class ConfigService:
             "is_configured": delegation_config.is_configured,
             "cidx_callback_url": delegation_config.cidx_callback_url,  # Story #720
             "skip_ssl_verify": delegation_config.skip_ssl_verify,  # Allow self-signed certs for E2E
+            "guardrails_enabled": delegation_config.guardrails_enabled,  # Story #457
+            "delegation_guardrails_repo": delegation_config.delegation_guardrails_repo,  # Story #457
+            "delegation_default_engine": delegation_config.delegation_default_engine,  # Story #459
+            "delegation_default_mode": delegation_config.delegation_default_mode,  # Story #459
         }
 
     def update_setting(
@@ -766,7 +795,9 @@ class ConfigService:
         elif key == "pull_enabled":
             langfuse.pull_enabled = value in ["true", True, "True", "1"]
         elif key == "pull_host":
-            langfuse.pull_host = value.strip() if value else "https://cloud.langfuse.com"
+            langfuse.pull_host = (
+                value.strip() if value else "https://cloud.langfuse.com"
+            )
         elif key == "pull_sync_interval_seconds":
             val = max(60, min(3600, int(value)))
             langfuse.pull_sync_interval_seconds = val
@@ -778,6 +809,7 @@ class ConfigService:
             langfuse.pull_max_concurrent_observations = val
         elif key == "pull_projects":
             import json as _json
+
             projects_data = _json.loads(value) if isinstance(value, str) else value
             langfuse.pull_projects = [
                 LangfusePullProject(**p) if isinstance(p, dict) else p
@@ -786,9 +818,7 @@ class ConfigService:
         else:
             raise ValueError(f"Unknown langfuse setting: {key}")
 
-    def _update_wiki_setting(
-        self, config: ServerConfig, key: str, value: Any
-    ) -> None:
+    def _update_wiki_setting(self, config: ServerConfig, key: str, value: Any) -> None:
         """Update a wiki metadata configuration setting (Story #323)."""
         from ..utils.config_manager import WikiConfig
 
@@ -1123,6 +1153,7 @@ class ConfigService:
         indexing = config.indexing_config
         if indexing is None:
             from ..utils.config_manager import IndexingConfig
+
             indexing = IndexingConfig()
             config.indexing_config = indexing
 
@@ -1164,6 +1195,7 @@ class ConfigService:
         cli_exts = [ext.lstrip(".") for ext in server_exts]
 
         from ..repositories.golden_repo_manager import get_golden_repo_manager
+
         manager = get_golden_repo_manager()
         if manager is None:
             return

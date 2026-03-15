@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.17
+
+### Features
+
+- feat: open-ended delegation for Claude Server integration (Epic #455, v9.5.17)
+  - New MCP tool `execute_open_delegation` -- submit any free-form coding objective with engine/mode selection
+  - New `delegate_open` permission for power_user and admin roles
+  - Safety guardrails system with configurable golden repo for authorized packages and safety prompts
+  - Convention: `guardrails/system-prompt.md` + `packages/<language>/approved.txt`
+  - Default guardrails template covering 6 safety categories (filesystem, process, git, system, package, secrets)
+  - Audit trail for every delegation call (action_type=open_delegation_executed)
+  - Web UI config: guardrails repo dropdown, guardrails toggle, default engine/mode dropdowns
+  - Server-side validation for engine, mode, and guardrails repo alias
+  - Claude Server proxy tools: `cs_register_repository`, `cs_list_repositories`, `cs_check_health`
+  - Repo readiness polling with configurable timeout (accepts both cloneStatus "completed" and "success")
+  - Forward-compatible config loading (unknown JSON keys silently ignored)
+  - Documentation: `docs/guardrails-repo-convention.md`
+
 ## v9.5.16
 
 ### Refactoring

@@ -3,7 +3,7 @@
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="config-group">
     <h3 class="config-group-header">Core Server</h3>
-    
+
 <!-- Server Settings Section -->
 <details open class="config-section" id="section-server">
     <summary>
@@ -634,7 +634,7 @@ function saveLlmCredsConfig() {
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="config-group">
     <h3 class="config-group-header">Search & Content</h3>
-    
+
 <!-- Search Limits Settings Section -->
 <details class="config-section" id="section-search_limits">
     <summary>
@@ -1287,7 +1287,7 @@ function saveLlmCredsConfig() {
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="config-group">
     <h3 class="config-group-header">Performance & Reliability</h3>
-    
+
 <!-- Cache Settings Section -->
 <details class="config-section" id="section-cache">
     <summary>
@@ -1592,7 +1592,7 @@ function saveLlmCredsConfig() {
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="config-group">
     <h3 class="config-group-header">Authentication & Security</h3>
-    
+
 <!-- SSO Authentication Settings Section -->
 <details class="config-section" id="section-oidc">
     <summary>
@@ -1866,7 +1866,7 @@ function saveLlmCredsConfig() {
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="config-group">
     <h3 class="config-group-header">AI & Integrations</h3>
-    
+
 <!-- Claude Integration Settings Section -->
 <details class="config-section" id="section-claude-integration">
     <summary>
@@ -2123,6 +2123,26 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ 'Yes' if config.claude_delegation.skip_ssl_verify else 'No' }}</td>
                         <td class="config-note"><small>Allow self-signed certificates (E2E testing only)</small></td>
                     </tr>
+                    <tr>
+                        <td class="config-label">Guardrails Enabled</td>
+                        <td class="config-value">{{ 'Yes' if config.claude_delegation.guardrails_enabled else 'No' }}</td>
+                        <td class="config-note"><small>Prepend safety guardrails to delegated prompts</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Guardrails Repository</td>
+                        <td class="config-value">{{ config.claude_delegation.delegation_guardrails_repo or 'Default (built-in)' }}</td>
+                        <td class="config-note"><small>Golden repo alias for custom system-prompt.md</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Default Engine</td>
+                        <td class="config-value">{{ config.claude_delegation.delegation_default_engine }}</td>
+                        <td class="config-note"><small>Default agent engine when not specified by caller</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Default Mode</td>
+                        <td class="config-value">{{ config.claude_delegation.delegation_default_mode }}</td>
+                        <td class="config-note"><small>Default execution mode when not specified by caller</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -2186,6 +2206,47 @@ function saveLlmCredsConfig() {
                         <option value="true" {% if config.claude_delegation.skip_ssl_verify %}selected{% endif %}>Yes</option>
                     </select>
                     <small>WARNING: Only enable for testing with self-signed certificates</small>
+                </label>
+                <label for="delegation-guardrails-enabled">
+                    Guardrails Enabled
+                    <select id="delegation-guardrails-enabled" name="guardrails_enabled">
+                        <option value="true" {% if config.claude_delegation.guardrails_enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.claude_delegation.guardrails_enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Prepend safety guardrails to delegated prompts</small>
+                </label>
+                <label for="delegation-guardrails-repo">
+                    Guardrails Repository
+                    <select id="delegation-guardrails-repo" name="delegation_guardrails_repo">
+                        <option value="">-- None (use default guardrails) --</option>
+                        {% for repo_alias in golden_repos_list %}
+                        <option value="{{ repo_alias }}"
+                                {% if config.claude_delegation.delegation_guardrails_repo == repo_alias %}selected{% endif %}>
+                            {{ repo_alias }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                    <small>Golden repo alias containing a custom system-prompt.md (optional)</small>
+                </label>
+                <label for="delegation-default-engine">
+                    Default Engine
+                    <select id="delegation-default-engine" name="delegation_default_engine">
+                        <option value="claude-code" {% if config.claude_delegation.delegation_default_engine == 'claude-code' %}selected{% endif %}>claude-code</option>
+                        <option value="codex" {% if config.claude_delegation.delegation_default_engine == 'codex' %}selected{% endif %}>codex</option>
+                        <option value="gemini" {% if config.claude_delegation.delegation_default_engine == 'gemini' %}selected{% endif %}>gemini</option>
+                        <option value="opencode" {% if config.claude_delegation.delegation_default_engine == 'opencode' %}selected{% endif %}>opencode</option>
+                        <option value="q" {% if config.claude_delegation.delegation_default_engine == 'q' %}selected{% endif %}>q</option>
+                    </select>
+                    <small>Default agent engine when caller does not specify one</small>
+                </label>
+                <label for="delegation-default-mode">
+                    Default Mode
+                    <select id="delegation-default-mode" name="delegation_default_mode">
+                        <option value="single" {% if config.claude_delegation.delegation_default_mode == 'single' %}selected{% endif %}>single</option>
+                        <option value="collaborative" {% if config.claude_delegation.delegation_default_mode == 'collaborative' %}selected{% endif %}>collaborative</option>
+                        <option value="competitive" {% if config.claude_delegation.delegation_default_mode == 'competitive' %}selected{% endif %}>competitive</option>
+                    </select>
+                    <small>Default execution mode when caller does not specify one</small>
                 </label>
             </div>
             <p><small><strong>Note:</strong> Connectivity will be validated before saving. Configuration will only be saved if connection to Claude Server is successful.</small></p>
@@ -2348,7 +2409,7 @@ function saveLlmCredsConfig() {
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <div class="config-group">
     <h3 class="config-group-header">Observability</h3>
-    
+
 <details class="config-section" id="section-telemetry">
     <summary>
         <h2>OpenTelemetry Export</h2>

@@ -29,6 +29,44 @@ AES_BLOCK_SIZE = 16  # 128 bits
 # Default function repository alias
 DEFAULT_FUNCTION_REPO_ALIAS = "claude-delegation-functions-global"
 
+# Default guardrails template used when no guardrails repo is configured or
+# system-prompt.md is not found in the configured repo.
+DEFAULT_GUARDRAILS_TEMPLATE = """\
+SAFETY GUARDRAILS - MANDATORY RULES
+
+You MUST follow these rules for every action you take. Violations are unacceptable.
+
+1. FILESYSTEM SAFETY
+   - Only modify files within the designated repository workspace
+   - Never modify system files, configs outside the workspace, or files in other repositories
+   - Never delete files outside the project directory
+
+2. PROCESS SAFETY
+   - Do not start background daemons or persistent services
+   - Do not open network listeners or bind to ports
+   - Do not execute commands that persist beyond the job lifetime
+
+3. GIT SAFETY
+   - Do not force-push to any branch
+   - Do not rewrite history on protected branches
+   - Do not delete remote branches unless explicitly instructed
+
+4. SYSTEM SAFETY
+   - Do not modify system packages, system configs, or environment variables outside the workspace
+   - Do not create or modify cron jobs, systemd services, or startup scripts
+   - Do not change user permissions, create users, or modify authentication
+
+5. PACKAGE SAFETY
+   {packages_context}
+
+6. SECRETS SAFETY
+   - Never output, log, or commit secrets, credentials, API keys, or tokens
+   - Never include passwords or sensitive data in code, comments, or documentation
+   - If you encounter secrets, report their presence but never display their values
+
+USER OBJECTIVE
+"""
+
 
 @dataclass
 class ConnectivityResult:
@@ -55,6 +93,18 @@ class ClaudeDelegationConfig:
     skip_ssl_verify: bool = False  # Allow self-signed certificates for E2E testing
     cidx_callback_url: str = (
         ""  # Story #720: URL that Claude Server uses to POST callbacks
+    )
+    guardrails_enabled: bool = (
+        True  # Story #457: prepend safety guardrails to delegated prompts
+    )
+    delegation_guardrails_repo: str = (
+        ""  # Story #457: golden repo alias for custom system-prompt.md
+    )
+    delegation_default_engine: str = (
+        "claude-code"  # Story #459: default engine for open delegation
+    )
+    delegation_default_mode: str = (
+        "single"  # Story #459: default mode for open delegation
     )
 
     @property
@@ -156,7 +206,7 @@ class ClaudeDelegationManager:
 
             unpadder = padding.PKCS7(AES_BLOCK_SIZE * 8).unpadder()
             data = unpadder.update(padded_data) + unpadder.finalize()
-            return data.decode("utf-8")
+            return data.decode("utf-8")  # type: ignore[no-any-return]
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -204,7 +254,11 @@ class ClaudeDelegationManager:
             encrypted_credential
         )
 
-        return ClaudeDelegationConfig(**config_dict)
+        import dataclasses
+
+        known_fields = {f.name for f in dataclasses.fields(ClaudeDelegationConfig)}
+        filtered = {k: v for k, v in config_dict.items() if k in known_fields}
+        return ClaudeDelegationConfig(**filtered)
 
     def validate_connectivity(
         self,

@@ -84,6 +84,7 @@ class User(BaseModel):
             UserRole.POWER_USER: {
                 "activate_repos",
                 "repository:write",  # Can modify files, commit, push, etc.
+                "delegate_open",  # Story #456: Open-ended delegation with engine/mode selection
             },
             UserRole.ADMIN: {
                 "manage_users",

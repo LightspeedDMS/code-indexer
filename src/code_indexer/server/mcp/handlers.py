@@ -1006,11 +1006,13 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     request = MultiSearchRequest(
         repositories=repo_aliases,
         query=params.get("query_text", ""),
-        search_type=search_type,
+        search_type=search_type,  # type: ignore[arg-type]
         limit=effective_limit,
-        min_score=_coerce_float(params.get("min_score"), 0.0)
-        if params.get("min_score") is not None
-        else None,
+        min_score=(
+            _coerce_float(params.get("min_score"), 0.0)
+            if params.get("min_score") is not None
+            else None
+        ),
         language=params.get("language"),
         path_filter=params.get("path_filter"),
         exclude_language=params.get("exclude_language"),
@@ -1315,9 +1317,11 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     at_commit=params.get("at_commit"),
                     include_removed=params.get("include_removed", False),
                     show_evolution=params.get("show_evolution", False),
-                    evolution_limit=_coerce_int(_evolution_limit_raw, 0)
-                    if _evolution_limit_raw is not None
-                    else None,
+                    evolution_limit=(
+                        _coerce_int(_evolution_limit_raw, 0)
+                        if _evolution_limit_raw is not None
+                        else None
+                    ),
                     # FTS-specific parameters (Story #503 Phase 2)
                     case_sensitive=params.get("case_sensitive", False),
                     fuzzy=params.get("fuzzy", False),
@@ -1475,9 +1479,11 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             at_commit=params.get("at_commit"),
             include_removed=params.get("include_removed", False),
             show_evolution=params.get("show_evolution", False),
-            evolution_limit=_coerce_int(_evolution_limit_activated, 0)
-            if _evolution_limit_activated is not None
-            else None,
+            evolution_limit=(
+                _coerce_int(_evolution_limit_activated, 0)
+                if _evolution_limit_activated is not None
+                else None
+            ),
             # FTS-specific parameters (Story #503 Phase 2)
             case_sensitive=params.get("case_sensitive", False),
             fuzzy=params.get("fuzzy", False),
@@ -13309,6 +13315,701 @@ HANDLER_REGISTRY["poll_delegation_job"] = handle_poll_delegation_job
 
 
 # =============================================================================
+# Story #456: Open-ended delegation with engine and mode selection
+# =============================================================================
+
+# Valid engine and mode values per Claude Server API contract
+_VALID_DELEGATION_ENGINES = {"claude-code", "codex", "gemini", "opencode", "q"}
+_VALID_DELEGATION_MODES = {"single", "collaborative", "competitive"}
+_DEFAULT_DELEGATION_ENGINE = "claude-code"
+_DEFAULT_DELEGATION_MODE = "single"
+
+# Repo readiness poll interval (seconds)
+_REPO_READY_POLL_INTERVAL = 2.0
+
+# Languages recognised for approved-package lists (Story #457)
+_GUARDRAILS_SUPPORTED_LANGUAGES = {
+    "python",
+    "nodejs",
+    "java",
+    "go",
+    "ruby",
+    "rust",
+    "dotnet",
+    "system",
+}
+
+
+def _load_packages_context(repo_path: str) -> str:
+    """
+    Load approved package lists from <repo_path>/packages/<language>/approved.txt.
+
+    Only languages listed in _GUARDRAILS_SUPPORTED_LANGUAGES are included.
+    Non-standard language directories are silently ignored.
+
+    Returns:
+        Formatted string of approved packages per language, or a
+        'No pre-approved packages' message when none are found.
+    """
+    packages_dir = Path(repo_path) / "packages"
+    if not packages_dir.is_dir():
+        return "No pre-approved packages configured for this workspace."
+
+    sections: List[str] = []
+    for lang_dir in sorted(packages_dir.iterdir()):
+        if not lang_dir.is_dir():
+            continue
+        if lang_dir.name not in _GUARDRAILS_SUPPORTED_LANGUAGES:
+            continue
+        approved_file = lang_dir / "approved.txt"
+        if not approved_file.is_file():
+            continue
+        packages = [
+            line.strip()
+            for line in approved_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        if packages:
+            sections.append(
+                f"   Approved {lang_dir.name} packages: {', '.join(packages)}"
+            )
+
+    if not sections:
+        return "No pre-approved packages configured for this workspace."
+
+    return "\n".join(sections)
+
+
+def _resolve_guardrails(
+    config: Any,
+    golden_repo_manager: Any,
+) -> tuple:
+    """
+    Resolve the guardrails system-prompt for an open delegation job.
+
+    Story #457: Safety guardrails prepended to delegated prompts.
+
+    Resolution order:
+      1. guardrails_enabled=False  -> return ("", None)  — disabled
+      2. delegation_guardrails_repo is set AND get_actual_repo_path succeeds
+         AND guardrails/system-prompt.md exists  -> return (resolved_text, alias)
+      3. Anything else (no repo, repo missing, file missing) ->
+         return (DEFAULT_GUARDRAILS_TEMPLATE resolved with packages_context, None)
+         and log a warning when a repo was configured but the file was not found.
+
+    Args:
+        config: ClaudeDelegationConfig instance.
+        golden_repo_manager: GoldenRepoManager (or None) from app_module.
+
+    Returns:
+        Tuple of (guardrails_text, guardrails_repo_alias).
+        guardrails_text is "" when disabled.
+        guardrails_repo_alias is the golden repo alias when loaded from repo, else None.
+    """
+    from code_indexer.server.config.delegation_config import DEFAULT_GUARDRAILS_TEMPLATE
+
+    if not getattr(config, "guardrails_enabled", True):
+        return ("", None)
+
+    repo_alias = getattr(config, "delegation_guardrails_repo", "")
+
+    if repo_alias and golden_repo_manager is not None:
+        try:
+            repo_path = golden_repo_manager.get_actual_repo_path(repo_alias)
+            prompt_file = Path(repo_path) / "guardrails" / "system-prompt.md"
+            if prompt_file.is_file():
+                template = prompt_file.read_text(encoding="utf-8")
+                packages_context = _load_packages_context(repo_path)
+                resolved = template.replace("{packages_context}", packages_context)
+                return (resolved, repo_alias)
+            else:
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-132",
+                        f"Guardrails repo '{repo_alias}' configured but "
+                        f"guardrails/system-prompt.md not found at {repo_path}; "
+                        "falling back to default guardrails template.",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-133",
+                    f"Failed to load guardrails from repo '{repo_alias}': {e}; "
+                    "falling back to default guardrails template.",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+    # Default: use built-in template.
+    # Best-effort: load packages from the repo if a path was already resolved
+    # (operator has packages/ but forgot system-prompt.md).
+    packages_context = "No pre-approved packages configured for this workspace."
+    resolved_repo_alias = None
+    if repo_alias and golden_repo_manager is not None:
+        try:
+            repo_path = golden_repo_manager.get_actual_repo_path(repo_alias)
+            packages_context = _load_packages_context(repo_path)
+            resolved_repo_alias = repo_alias
+        except Exception:
+            pass  # Best-effort; keep default packages_context
+    resolved_default = DEFAULT_GUARDRAILS_TEMPLATE.replace(
+        "{packages_context}", packages_context
+    )
+    return (resolved_default, resolved_repo_alias)
+
+
+def _get_repo_ready_timeout() -> float:
+    """
+    Get the timeout for repository readiness polling from server config.
+
+    Returns the golden repo registration timeout from server config if available,
+    otherwise falls back to 300s (5 minutes).
+
+    Returns:
+        Timeout in seconds as float
+    """
+    try:
+        from ..services.config_service import get_config_service
+
+        config_service = get_config_service()
+        server_config = config_service.get_server_config()  # type: ignore[attr-defined]
+        if hasattr(server_config, "golden_repo_registration_timeout"):
+            return float(server_config.golden_repo_registration_timeout)
+    except Exception as e:
+        logger.debug(
+            f"Could not retrieve repo ready timeout from config, using default 300s: {e}"
+        )
+    return 300.0
+
+
+def _validate_open_delegation_params(
+    args: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """
+    Validate parameters for execute_open_delegation.
+
+    Returns:
+        Error MCP response dict if validation fails, None if all params are valid.
+    """
+    prompt = args.get("prompt", "")
+    if not prompt:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: prompt"}
+        )
+
+    repositories = args.get("repositories")
+    if not repositories:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "Missing required parameter: repositories (must be a non-empty list)",
+            }
+        )
+
+    engine = args.get("engine", _DEFAULT_DELEGATION_ENGINE)
+    if engine not in _VALID_DELEGATION_ENGINES:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": (
+                    f"Invalid engine '{engine}'. "
+                    f"Supported: {', '.join(sorted(_VALID_DELEGATION_ENGINES))}"
+                ),
+            }
+        )
+
+    mode = args.get("mode", _DEFAULT_DELEGATION_MODE)
+    if mode not in _VALID_DELEGATION_MODES:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": (
+                    f"Invalid mode '{mode}'. "
+                    f"Supported: {', '.join(sorted(_VALID_DELEGATION_MODES))}"
+                ),
+            }
+        )
+
+    # Mode routing: only single is currently supported
+    if mode in ("collaborative", "competitive"):
+        return _mcp_response(
+            {
+                "success": False,
+                "error": f"Mode '{mode}' not yet supported by Claude Server",
+            }
+        )
+
+    return None  # All params valid
+
+
+async def _register_open_delegation_callback(client: Any, job_id: str) -> None:
+    """
+    Register callback URL with Claude Server for open delegation job completion.
+
+    Best-effort: logs warning on failure but does not raise.
+    """
+    callback_base_url = _get_cidx_callback_base_url()
+    if not callback_base_url:
+        return
+
+    callback_url = f"{callback_base_url.rstrip('/')}/api/delegation/callback/{job_id}"
+    try:
+        await client.register_callback(job_id, callback_url)
+        logger.debug(f"Registered callback for open delegation job {job_id}")
+    except Exception as callback_err:
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-130",
+                f"Failed to register callback for job {job_id}: {callback_err}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+
+
+async def _submit_open_delegation_job(
+    client: Any,
+    prompt: str,
+    repositories: List[str],
+    engine: str,
+    model: Optional[str],
+    job_timeout: Optional[int],
+    repo_ready_timeout: float,
+) -> Dict[str, Any]:
+    """
+    Check repository readiness, create, register callback, and start the delegation job.
+
+    Returns:
+        MCP response dict (success with job_id, or error)
+    """
+    golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+    for alias in repositories:
+        git_url: Optional[str] = None
+        branch = "main"
+        if golden_repo_manager:
+            try:
+                golden_repo = golden_repo_manager.get_golden_repo(alias)
+                if golden_repo:
+                    git_url = golden_repo.repo_url or None
+                    branch = golden_repo.default_branch or "main"
+            except Exception:
+                pass  # Best-effort: proceed without git_url if lookup fails
+        ready = await client.wait_for_repo_ready(
+            alias=alias,
+            timeout=repo_ready_timeout,
+            git_url=git_url,
+            branch=branch,
+            poll_interval=_REPO_READY_POLL_INTERVAL,
+        )
+        if not ready:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"Repository '{alias}' failed to become ready "
+                        f"within timeout ({int(repo_ready_timeout)}s)"
+                    ),
+                }
+            )
+
+    job_result = await client.create_job_with_options(
+        prompt=prompt,
+        repositories=repositories,
+        engine=engine,
+        model=model,
+        timeout=job_timeout,
+    )
+    job_id = job_result.get("jobId") or job_result.get("job_id")
+    if not job_id:
+        return _mcp_response(
+            {"success": False, "error": "Job created but no job_id returned"}
+        )
+
+    await _register_open_delegation_callback(client, job_id)
+
+    from ..services.delegation_job_tracker import DelegationJobTracker
+
+    tracker = DelegationJobTracker.get_instance()
+    await tracker.register_job(job_id)
+    await client.start_job(job_id)
+
+    return _mcp_response({"success": True, "job_id": job_id})
+
+
+async def handle_execute_open_delegation(
+    args: Dict[str, Any], user: User, *, session_state=None
+) -> Dict[str, Any]:
+    """
+    Execute open-ended delegation: submit any free-form prompt to Claude Server.
+
+    Story #456: Open-ended delegation with engine and mode selection
+
+    Args:
+        args: Tool arguments with prompt, repositories, engine, mode, model, timeout
+        user: The authenticated user making the request
+        session_state: Optional MCPSessionState for impersonation
+
+    Returns:
+        MCP response with job_id on success or error details
+    """
+    from ..clients.claude_server_client import ClaudeServerClient, ClaudeServerError
+
+    try:
+        delegation_config = _get_delegation_config()
+        if delegation_config is None or not delegation_config.is_configured:
+            return _mcp_response(
+                {"success": False, "error": "Claude Delegation not configured"}
+            )
+
+        effective_user = (
+            session_state.effective_user
+            if session_state and session_state.is_impersonating
+            else user
+        )
+        if not effective_user.has_permission("delegate_open"):
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Access denied: open delegation requires power_user or admin role",
+                }
+            )
+
+        validation_error = _validate_open_delegation_params(args)
+        if validation_error is not None:
+            return validation_error
+
+        # Story #457: resolve safety guardrails and prepend to user prompt
+        golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+        guardrails_text, guardrails_repo_alias = _resolve_guardrails(
+            delegation_config, golden_repo_manager
+        )
+
+        user_prompt = args.get("prompt", "")
+        if guardrails_text:
+            effective_prompt = guardrails_text + user_prompt
+        else:
+            effective_prompt = user_prompt
+
+        repositories = list(args.get("repositories", []))
+        if guardrails_repo_alias and guardrails_repo_alias not in repositories:
+            repositories.append(guardrails_repo_alias)
+
+        engine = str(
+            args.get("engine")
+            or getattr(
+                delegation_config,
+                "delegation_default_engine",
+                _DEFAULT_DELEGATION_ENGINE,
+            )
+        )
+        mode = args.get("mode") or getattr(
+            delegation_config, "delegation_default_mode", _DEFAULT_DELEGATION_MODE
+        )
+        guardrails_enabled = getattr(delegation_config, "guardrails_enabled", True)
+
+        async with ClaudeServerClient(
+            base_url=delegation_config.claude_server_url,
+            username=delegation_config.claude_server_username,
+            password=delegation_config.claude_server_credential,
+            skip_ssl_verify=delegation_config.skip_ssl_verify,
+        ) as client:
+            result = await _submit_open_delegation_job(
+                client=client,
+                prompt=effective_prompt,
+                repositories=repositories,
+                engine=engine,
+                model=args.get("model"),
+                job_timeout=args.get("timeout"),
+                repo_ready_timeout=_get_repo_ready_timeout(),
+            )
+
+        # Story #458: Audit trail — log after successful job creation
+        try:
+            result_data = json.loads(result["content"][0]["text"])
+            if result_data.get("success"):
+                job_id = result_data.get("job_id", "")
+                audit_service = getattr(app_module.app.state, "audit_service", None)
+                if audit_service is not None:
+                    audit_service.log(
+                        admin_id=effective_user.username,
+                        action_type="open_delegation_executed",
+                        target_type="delegation",
+                        target_id=str(job_id),
+                        details=json.dumps(
+                            {
+                                "prompt": user_prompt[:500],
+                                "engine": engine,
+                                "mode": mode,
+                                "repositories": list(args.get("repositories", [])),
+                                "guardrails_enabled": guardrails_enabled,
+                            }
+                        ),
+                    )
+        except Exception as audit_err:
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-134",
+                    f"Failed to write open delegation audit log: {audit_err}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        return result
+
+    except ClaudeServerError as e:
+        logger.error(
+            format_error_log(
+                "MCP-GENERAL-131",
+                f"Claude Server error in open delegation: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return _mcp_response({"success": False, "error": f"Claude Server error: {e}"})
+    except Exception as e:
+        logger.exception(
+            f"Error in execute_open_delegation: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+HANDLER_REGISTRY["execute_open_delegation"] = handle_execute_open_delegation
+
+
+# =============================================================================
+# Story #460: Claude Server proxy tools
+# =============================================================================
+
+
+def _lookup_golden_repo_for_cs(alias: str) -> tuple:
+    """
+    Look up git URL and branch for a CIDX golden repo alias.
+
+    Returns (git_url, branch, error_message).
+    error_message is None on success; non-None string on failure.
+    """
+    golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+    if not golden_repo_manager:
+        return None, "main", f"Alias '{alias}' not found in CIDX golden repos"
+    try:
+        golden_repo = golden_repo_manager.get_golden_repo(alias)
+        if golden_repo is None:
+            return None, "main", f"Alias '{alias}' not found in CIDX golden repos"
+        git_url = golden_repo.repo_url or None
+        branch = golden_repo.default_branch or "main"
+        return git_url, branch, None
+    except Exception as e:
+        return None, "main", f"Failed to look up golden repo '{alias}': {e}"
+
+
+async def handle_cs_register_repository(
+    args: Dict[str, Any], user: User, *, session_state=None, **kwargs
+) -> Dict[str, Any]:
+    """
+    Register a CIDX golden repo alias on Claude Server.
+
+    Story #460: Claude Server proxy tools
+    Looks up git URL and branch from CIDX, checks if already registered,
+    registers if not found (404).
+    """
+    from ..clients.claude_server_client import (
+        ClaudeServerClient,
+        ClaudeServerError,
+        ClaudeServerNotFoundError,
+    )
+
+    delegation_config = _get_delegation_config()
+    if delegation_config is None or not delegation_config.is_configured:
+        return _mcp_response(
+            {"success": False, "error": "Claude Delegation not configured"}
+        )
+
+    effective_user = (
+        session_state.effective_user
+        if session_state and session_state.is_impersonating
+        else user
+    )
+    if not effective_user.has_permission("delegate_open"):
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "Access denied: requires power_user or admin role",
+            }
+        )
+
+    alias = args.get("alias")
+    if not alias:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: alias"}
+        )
+
+    git_url, branch, lookup_error = _lookup_golden_repo_for_cs(alias)
+    if lookup_error is not None:
+        return _mcp_response({"success": False, "error": lookup_error})
+
+    if not git_url:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": f"Golden repo '{alias}' has no git URL configured",
+            }
+        )
+
+    try:
+        async with ClaudeServerClient(
+            base_url=delegation_config.claude_server_url,
+            username=delegation_config.claude_server_username,
+            password=delegation_config.claude_server_credential,
+            skip_ssl_verify=delegation_config.skip_ssl_verify,
+        ) as client:
+            try:
+                status_data = await client.get_repo_status(alias)
+                clone_status = status_data.get("cloneStatus", "unknown")
+                return _mcp_response(
+                    {
+                        "success": True,
+                        "clone_status": clone_status,
+                        "message": f"Repository '{alias}' is already registered (cloneStatus={clone_status})",
+                        "repository": status_data,
+                    }
+                )
+            except ClaudeServerNotFoundError:
+                pass
+            result = await client.register_repository(alias, git_url or "", branch)
+            clone_status = result.get("cloneStatus", "cloning")
+            return _mcp_response(
+                {
+                    "success": True,
+                    "clone_status": clone_status,
+                    "message": f"Repository '{alias}' registered successfully (cloneStatus={clone_status})",
+                    "repository": result,
+                }
+            )
+    except ClaudeServerError as e:
+        return _mcp_response(
+            {"success": False, "error": f"Failed to register repository: {e}"}
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error in cs_register_repository: {e}")
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_cs_list_repositories(
+    args: Dict[str, Any], user: User, *, session_state=None, **kwargs
+) -> Dict[str, Any]:
+    """
+    List all repositories registered on Claude Server.
+
+    Story #460: Claude Server proxy tools
+    Calls GET /repositories and returns a normalized list.
+    """
+    from ..clients.claude_server_client import ClaudeServerClient, ClaudeServerError
+
+    delegation_config = _get_delegation_config()
+    if delegation_config is None or not delegation_config.is_configured:
+        return _mcp_response(
+            {"success": False, "error": "Claude Delegation not configured"}
+        )
+
+    effective_user = (
+        session_state.effective_user
+        if session_state and session_state.is_impersonating
+        else user
+    )
+    if not effective_user.has_permission("delegate_open"):
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "Access denied: requires power_user or admin role",
+            }
+        )
+
+    try:
+        async with ClaudeServerClient(
+            base_url=delegation_config.claude_server_url,
+            username=delegation_config.claude_server_username,
+            password=delegation_config.claude_server_credential,
+            skip_ssl_verify=delegation_config.skip_ssl_verify,
+        ) as client:
+            raw_list = await client.list_repositories()
+
+        repositories = [
+            {
+                "name": repo.get("name", ""),
+                "clone_status": repo.get("cloneStatus", "unknown"),
+                "cidx_aware": repo.get("cidxAware", False),
+                "git_url": repo.get("gitUrl", ""),
+                "branch": repo.get("branch", ""),
+                "current_branch": repo.get("currentBranch", ""),
+                "registered_at": repo.get("registeredAt", ""),
+            }
+            for repo in raw_list
+        ]
+        return _mcp_response({"success": True, "repositories": repositories})
+    except ClaudeServerError as e:
+        return _mcp_response(
+            {"success": False, "error": f"Failed to list repositories: {e}"}
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error in cs_list_repositories: {e}")
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_cs_check_health(
+    args: Dict[str, Any], user: User, *, session_state=None, **kwargs
+) -> Dict[str, Any]:
+    """
+    Check Claude Server health status.
+
+    Story #460: Claude Server proxy tools
+    Calls GET /health (anonymous on Claude Server, gated at CIDX level).
+    """
+    from ..clients.claude_server_client import ClaudeServerClient, ClaudeServerError
+
+    delegation_config = _get_delegation_config()
+    if delegation_config is None or not delegation_config.is_configured:
+        return _mcp_response(
+            {"success": False, "error": "Claude Delegation not configured"}
+        )
+
+    effective_user = (
+        session_state.effective_user
+        if session_state and session_state.is_impersonating
+        else user
+    )
+    if not effective_user.has_permission("delegate_open"):
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "Access denied: requires power_user or admin role",
+            }
+        )
+
+    try:
+        async with ClaudeServerClient(
+            base_url=delegation_config.claude_server_url,
+            username=delegation_config.claude_server_username,
+            password=delegation_config.claude_server_credential,
+            skip_ssl_verify=delegation_config.skip_ssl_verify,
+        ) as client:
+            health = await client.get_health()
+        return _mcp_response({"success": True, "health": health})
+    except ClaudeServerError as e:
+        return _mcp_response(
+            {"success": False, "error": f"Failed to check health: {e}"}
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error in cs_check_health: {e}")
+        return _mcp_response({"success": False, "error": str(e)})
+
+
+HANDLER_REGISTRY["cs_register_repository"] = handle_cs_register_repository
+HANDLER_REGISTRY["cs_list_repositories"] = handle_cs_list_repositories
+HANDLER_REGISTRY["cs_check_health"] = handle_cs_check_health
+
+
+# =============================================================================
 # GROUP & ACCESS MANAGEMENT HANDLERS (Story #742)
 # =============================================================================
 
@@ -14305,6 +15006,9 @@ def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
+        # Support both "action" and "action_type" as filter parameter names
+        action_filter = args.get("action") or args.get("action_type")
+
         limit = _coerce_int(args.get("limit"), DEFAULT_AUDIT_LOG_LIMIT)
         pr_logs = _get_pr_logs_from_service(limit=limit)
         cleanup_logs = _get_cleanup_logs_from_service(limit=limit)
@@ -14314,6 +15018,7 @@ def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "timestamp": log.get("timestamp", ""),
                 "user": log.get("repo_alias", ""),
                 "action": log.get("event_type") or log.get("action_type", ""),
+                "action_type": log.get("event_type") or log.get("action_type", ""),
                 "resource": log.get("pr_url", ""),
                 "details": log,
             }
@@ -14323,16 +15028,55 @@ def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "timestamp": log.get("timestamp", ""),
                 "user": "system",
                 "action": log.get("event_type") or log.get("action_type", ""),
+                "action_type": log.get("event_type") or log.get("action_type", ""),
                 "resource": log.get("repo_path", ""),
                 "details": log,
             }
             for log in cleanup_logs
         ]
 
+        # Story #458: Also query the main audit_logs table for general admin actions
+        # (e.g., open_delegation_executed, group/user management events)
+        import code_indexer.server.app as _app_module
+
+        _svc = getattr(getattr(_app_module, "app", None), "state", None)
+        _audit_svc = getattr(_svc, "audit_service", None) if _svc else None
+        if _audit_svc is not None:
+            audit_rows, _ = _audit_svc.query(
+                action_type=action_filter if action_filter else None,
+                admin_id=args.get("user"),
+                date_from=args.get("from_date"),
+                date_to=args.get("to_date"),
+                limit=limit,
+            )
+            for row in audit_rows:
+                details_str = row.get("details") or "{}"
+                try:
+                    details_obj = (
+                        json.loads(details_str)
+                        if isinstance(details_str, str)
+                        else details_str
+                    )
+                except (ValueError, TypeError):
+                    details_obj = {}
+                all_entries.append(
+                    {
+                        "timestamp": row.get("timestamp", ""),
+                        "user": row.get("admin_id", ""),
+                        "action": row.get("action_type", ""),
+                        "action_type": row.get("action_type", ""),
+                        "target_type": row.get("target_type", ""),
+                        "target_id": row.get("target_id", ""),
+                        "admin_id": row.get("admin_id", ""),
+                        "resource": row.get("target_id", ""),
+                        "details": details_obj,
+                    }
+                )
+
         filtered = _filter_audit_entries(
             all_entries,
             args.get("user"),
-            args.get("action"),
+            action_filter,
             args.get("from_date"),
             args.get("to_date"),
             limit,

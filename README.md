@@ -2,7 +2,7 @@
 
 AI-powered semantic code search for your codebase. Find code by meaning, not just keywords.
 
-**Version 9.5.16** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
+**Version 9.5.17** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
 
 ## Quick Navigation
 
@@ -454,6 +454,7 @@ For complete configuration reference including environment variables, daemon set
 ### AI Integration
 - [AI Integration Guide](docs/ai-integration.md) - Connect AI assistants to CIDX
 - [MCP Bridge Guide](docs/mcpb/README.md) - Claude Desktop integration via MCP
+- [Guardrails Repository Convention](docs/guardrails-repo-convention.md) - Custom safety guardrails for open delegation jobs
 
 ### Server Administration
 - [Auto-Update Guide](docs/auto-update.md) - Job-aware auto-update with graceful drain mode
