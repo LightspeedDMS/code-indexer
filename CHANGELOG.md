@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.16
+
+### Refactoring
+
+- refact: app.py modularization -- 8,800 lines decomposed to 196-line composition root (Story #409, Epic #408, v9.5.16). Extracted into 6 focused modules:
+  - `startup/service_init.py` -- `initialize_services()` returns all managers/services as typed dict
+  - `startup/lifespan.py` -- `make_lifespan()` factory for FastAPI lifespan async context manager (15+ subsystem init)
+  - `startup/app_wiring.py` -- `create_fastapi_app()` wires middleware, app.state, and route registration
+  - `startup/bootstrap.py` -- `_detect_repo_root()`, `migrate_legacy_cidx_meta()`, `bootstrap_cidx_meta()`, `register_langfuse_golden_repos()`
+  - `routers/inline_routes.py` -- `register_inline_routes()` with all 63+ route handlers
+  - `models/` subpackage -- `auth.py`, `repos.py`, `jobs.py`, `query.py` with re-exports from `__init__.py`
+  - `app_state.py` -- Typed `AppState` class replacing ad-hoc `app.state` attributes
+  - Fixed 3 silent NameErrors (missing imports masked by try/except), 1 duplicate model class pair
+  - 100% backward compatible -- all `from code_indexer.server.app import X` imports preserved via re-exports
+  - 570 new tests (test_app_state.py, test_models_package.py). 5,209 tests pass, zero modifications to existing tests. fast-automation.sh passes.
+
 ## v9.5.15
 
 ### Features
