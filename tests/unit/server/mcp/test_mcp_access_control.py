@@ -64,7 +64,9 @@ def mock_access_filtering_service():
     # Default: is_admin_user returns False
     service.is_admin_user = Mock(return_value=False)
     # Default: get_accessible_repos returns limited set
-    service.get_accessible_repos = Mock(return_value={"allowed-repo-global", "cidx-meta"})
+    service.get_accessible_repos = Mock(
+        return_value={"allowed-repo-global", "cidx-meta"}
+    )
     # Default: calculate_over_fetch_limit doubles the limit
     service.calculate_over_fetch_limit = Mock(side_effect=lambda limit: limit * 2)
     return service
@@ -130,9 +132,7 @@ class TestSearchCodeFiltersResultsByGroup:
             patch(
                 "code_indexer.server.mcp.handlers.get_server_global_registry"
             ) as mock_registry_factory,
-            patch(
-                "code_indexer.server.mcp.handlers.app_module"
-            ) as mock_app_module,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
             patch(
                 "code_indexer.global_repos.alias_manager.AliasManager",
             ) as mock_alias_cls,
@@ -155,7 +155,7 @@ class TestSearchCodeFiltersResultsByGroup:
                 "repository_alias": "allowed-repo-global",
                 "query_text": "some query",
             }
-            result = search_code(params, mock_regular_user)
+            search_code(params, mock_regular_user)
 
         # Verify filter_query_results was called with username
         mock_access_filtering_service.filter_query_results.assert_called_once()
@@ -210,9 +210,7 @@ class TestSearchCodeAdminSeesAll:
             patch(
                 "code_indexer.server.mcp.handlers.get_server_global_registry"
             ) as mock_registry_factory,
-            patch(
-                "code_indexer.server.mcp.handlers.app_module"
-            ) as mock_app_module,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
             patch(
                 "code_indexer.global_repos.alias_manager.AliasManager",
             ) as mock_alias_cls,
@@ -283,9 +281,7 @@ class TestListRepositoriesFiltersByGroup:
         mock_app_state.access_filtering_service = mock_access_filtering_service
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers.app_module"
-            ) as mock_app_module,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
             patch(
                 "code_indexer.server.mcp.handlers._get_golden_repos_dir",
                 return_value="/mock/golden-repos",
@@ -351,9 +347,7 @@ class TestDiscoverRepositoriesFiltersByGroup:
         mock_app_state.access_filtering_service = mock_access_filtering_service
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers.app_module"
-            ) as mock_app_module,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
         ):
             mock_app_module.app.state = mock_app_state
             mock_app_module.golden_repo_manager.list_golden_repos = Mock(
@@ -448,9 +442,7 @@ class TestOmniSearchFiltersResultsByGroup:
         mock_config_service.get_config.return_value = mock_server_config
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers.app_module"
-            ) as mock_app_module,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service",
                 return_value=mock_config_service,
@@ -472,7 +464,7 @@ class TestOmniSearchFiltersResultsByGroup:
                 "query_text": "some query",
                 "limit": 10,
             }
-            result = _omni_search_code(params, mock_regular_user)
+            _omni_search_code(params, mock_regular_user)
 
         # filter_query_results MUST have been called
         mock_access_filtering_service.filter_query_results.assert_called_once()
@@ -508,9 +500,7 @@ class TestActivateRepositoryGroupCheck:
         mock_app_state.access_filtering_service = mock_access_filtering_service
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers.app_module"
-            ) as mock_app_module,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
         ):
             mock_app_module.app.state = mock_app_state
 
@@ -548,9 +538,7 @@ class TestActivateRepositoryGroupCheck:
         mock_app_state.access_filtering_service = mock_access_filtering_service
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers.app_module"
-            ) as mock_app_module,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
         ):
             mock_app_module.app.state = mock_app_state
             # Mock the actual activation to succeed
@@ -580,9 +568,7 @@ class TestActivateRepositoryGroupCheck:
         mock_app_state.access_filtering_service = mock_access_filtering_service
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers.app_module"
-            ) as mock_app_module,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
         ):
             mock_app_module.app.state = mock_app_state
             mock_app_module.activated_repo_manager.activate_repository = Mock(
@@ -635,9 +621,21 @@ class TestFilterQueryResultsSuffixHandling:
 
         # Results have -global suffix (as MCP handlers produce)
         results = [
-            {"file_path": "file1.py", "score": 0.9, "repository_alias": "my-repo-global"},
-            {"file_path": "file2.py", "score": 0.8, "repository_alias": "restricted-repo-global"},
-            {"file_path": "file3.py", "score": 0.7, "repository_alias": "cidx-meta-global"},
+            {
+                "file_path": "file1.py",
+                "score": 0.9,
+                "repository_alias": "my-repo-global",
+            },
+            {
+                "file_path": "file2.py",
+                "score": 0.8,
+                "repository_alias": "restricted-repo-global",
+            },
+            {
+                "file_path": "file3.py",
+                "score": 0.7,
+                "repository_alias": "cidx-meta-global",
+            },
         ]
 
         filtered = service.filter_query_results(results, "test_user")
@@ -685,9 +683,7 @@ class TestActivateCompositeRepoGroupCheck:
         mock_app_state.access_filtering_service = mock_access_filtering_service
 
         with (
-            patch(
-                "code_indexer.server.mcp.handlers.app_module"
-            ) as mock_app_module,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
         ):
             mock_app_module.app.state = mock_app_state
 
@@ -761,9 +757,7 @@ class TestCidxMetaAlwaysAccessible:
             patch(
                 "code_indexer.server.mcp.handlers.get_server_global_registry"
             ) as mock_registry_factory,
-            patch(
-                "code_indexer.server.mcp.handlers.app_module"
-            ) as mock_app_module,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
             patch(
                 "code_indexer.global_repos.alias_manager.AliasManager",
             ) as mock_alias_cls,

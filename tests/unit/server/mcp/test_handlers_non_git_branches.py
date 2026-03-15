@@ -5,12 +5,11 @@ Tests that get_branches MCP handler checks is_git_available() before calling
 BranchService and returns empty branches array for non-git repos.
 """
 
-import pytest
 import tempfile
 import shutil
 import json
 from pathlib import Path
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock
 from git import Repo
 
 from code_indexer.server.mcp.handlers import get_branches

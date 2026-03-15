@@ -210,9 +210,9 @@ class TestConcurrentExecutionNoRaceConditions:
             # Parse query_id from repo name like "repo5-global" -> 5
             repo_name = repos[0] if repos else "repo0-global"
             try:
-                query_id = int(repo_name.replace("repo", "").replace("-global", ""))
+                int(repo_name.replace("repo", "").replace("-global", ""))
             except (ValueError, AttributeError):
-                query_id = 0
+                pass
 
             return MultiSearchResponse(
                 results={repo_name: []},

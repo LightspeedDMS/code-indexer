@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.15
+
+### Features
+
+- feat: MR/PR lifecycle and git workflow completion for remote development (Epic #444, v9.5.15). 10 new MCP tools completing the remote dev review loop:
+  - Story #445: Fixed git_push for new branches -- auto-detects current branch, uses explicit refspec HEAD:refs/heads/<branch>, sets upstream tracking after push, guards against detached HEAD state.
+  - Story #446: list_pull_requests -- List open/closed/merged PRs/MRs with state, author, and limit filters. GitHub merged state filters closed PRs with non-null merged_at.
+  - Story #447: get_pull_request -- Full PR/MR details including description, labels, reviewers, CI status, mergeable state, and diff stats.
+  - Story #448: list_pull_request_comments -- Read review comments and conversation threads. Merges GitHub's two comment endpoints (review + issue) into unified format. Filters GitLab system notes.
+  - Story #449: comment_on_pull_request -- Add general or inline file comments. Fetches commit SHA (GitHub) or diff_refs (GitLab) for inline positioning.
+  - Story #450: update_pull_request -- Update title, description, labels, assignees, reviewers. GitHub reviewers use separate endpoint.
+  - Story #451: merge_pull_request -- Merge with method selection (merge/squash/rebase). Fetches head SHA for safety. Optional source branch deletion.
+  - Story #452: close_pull_request -- Close PR/MR without merging.
+  - Story #453: git_stash -- Push/pop/apply/list/drop stash operations via single tool with action dispatch.
+  - Story #454: git_amend -- Amend last commit with PAT credential identity attribution.
+  Both GitHub and GitLab supported across all forge-related tools. 225+ new tests. fast-automation.sh passes.
+
 ## v9.5.14
 
 ### Performance

@@ -16,6 +16,10 @@ inputSchema:
     branch:
       type: string
       description: 'Branch name (default: current branch)'
+    set_upstream:
+      type: boolean
+      description: 'Set upstream tracking after push (default: true). Set to false to skip tracking setup.'
+      default: true
   required:
   - repository_alias
   additionalProperties: false

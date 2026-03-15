@@ -7,13 +7,14 @@ Fix D: _fetch_all_content_points - paginated fetch helper with no silent truncat
 These tests are written FIRST (TDD red phase). Implementation follows.
 """
 
-import pytest
 from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock, call
+from unittest.mock import Mock
 from typing import List, Dict, Any
 
 
-def _make_content_point(point_id: str, file_path: str, hidden_branches: List[str] = None) -> Dict[str, Any]:
+def _make_content_point(
+    point_id: str, file_path: str, hidden_branches: List[str] = None
+) -> Dict[str, Any]:
     """Create a minimal content point dict matching what scroll_points returns."""
     return {
         "id": point_id,
@@ -50,7 +51,9 @@ def _make_processor(tmp_path: Path) -> Any:
     mock_config.collection_base_name = "test_collection"
 
     mock_vector_store = Mock()
-    mock_vector_store.ensure_provider_aware_collection = Mock(return_value="test_collection")
+    mock_vector_store.ensure_provider_aware_collection = Mock(
+        return_value="test_collection"
+    )
     mock_vector_store.resolve_collection_name = Mock(return_value="test_collection")
     mock_vector_store.scroll_points = Mock(return_value=([], None))
     mock_vector_store._batch_update_payload_only = Mock(return_value=True)
@@ -62,6 +65,7 @@ def _make_processor(tmp_path: Path) -> Any:
     processor = HighThroughputProcessor.__new__(HighThroughputProcessor)
 
     import threading
+
     processor.cancelled = False
     processor.progress_log = None
     processor._visibility_lock = threading.Lock()
@@ -283,9 +287,9 @@ class TestBatchEnsureFilesVisibleInBranch:
         processor = _make_processor(tmp_path)
 
         import threading
+
         lock_acquire_count = []
-        original_lock = threading.Lock()
-        real_acquire = original_lock.acquire
+        threading.Lock()
 
         class CountingLock:
             def __enter__(self_inner):
@@ -372,8 +376,12 @@ class TestFetchAllContentPoints:
         """
         processor = _make_processor(tmp_path)
 
-        page1_points = [_make_content_point(f"id_{i}", f"file{i}.py") for i in range(5000)]
-        page2_points = [_make_content_point(f"id_{i}", f"file{i}.py") for i in range(5000, 8000)]
+        page1_points = [
+            _make_content_point(f"id_{i}", f"file{i}.py") for i in range(5000)
+        ]
+        page2_points = [
+            _make_content_point(f"id_{i}", f"file{i}.py") for i in range(5000, 8000)
+        ]
 
         scroll_responses = [
             (page1_points, "page2_offset"),
@@ -443,7 +451,9 @@ class TestFetchAllContentPoints:
             call_count[0] += 1
             if call_count[0] > 10:
                 # Safety: test should not call more than 10 times in stuck state
-                raise RuntimeError("Pagination stuck protection in test: too many calls")
+                raise RuntimeError(
+                    "Pagination stuck protection in test: too many calls"
+                )
             offset = kwargs.get("offset")
             if offset == "stuck_offset":
                 # Stuck: same offset returned again
@@ -475,9 +485,9 @@ class TestFetchAllContentPoints:
         processor._fetch_all_content_points("test_collection")
 
         call_kwargs = processor.vector_store_client.scroll_points.call_args[1]
-        assert call_kwargs.get("with_vectors") is False, (
-            "with_vectors must be False to avoid loading large vector arrays into memory"
-        )
+        assert (
+            call_kwargs.get("with_vectors") is False
+        ), "with_vectors must be False to avoid loading large vector arrays into memory"
 
     def test_calls_scroll_points_with_content_type_filter(self, tmp_path):
         """
@@ -498,12 +508,11 @@ class TestFetchAllContentPoints:
         assert "must" in filter_cond
         must_clauses = filter_cond["must"]
         found_type_filter = any(
-            clause.get("key") == "type" and clause.get("match", {}).get("value") == "content"
+            clause.get("key") == "type"
+            and clause.get("match", {}).get("value") == "content"
             for clause in must_clauses
         )
-        assert found_type_filter, (
-            "filter_conditions must include type=content filter to exclude metadata points"
-        )
+        assert found_type_filter, "filter_conditions must include type=content filter to exclude metadata points"
 
     def test_calls_scroll_points_with_limit_5000(self, tmp_path):
         """
@@ -535,15 +544,21 @@ class TestFetchAllContentPoints:
 
         page1 = [_make_content_point(f"id_{i}", f"f{i}.py") for i in range(5000)]
         page2 = [_make_content_point(f"id_{i}", f"f{i}.py") for i in range(5000, 10000)]
-        page3 = [_make_content_point(f"id_{i}", f"f{i}.py") for i in range(10000, 12000)]
+        page3 = [
+            _make_content_point(f"id_{i}", f"f{i}.py") for i in range(10000, 12000)
+        ]
 
-        responses = iter([
-            (page1, "offset_page2"),
-            (page2, "offset_page3"),
-            (page3, None),
-        ])
+        responses = iter(
+            [
+                (page1, "offset_page2"),
+                (page2, "offset_page3"),
+                (page3, None),
+            ]
+        )
 
-        processor.vector_store_client.scroll_points = Mock(side_effect=lambda **kw: next(responses))
+        processor.vector_store_client.scroll_points = Mock(
+            side_effect=lambda **kw: next(responses)
+        )
 
         result = processor._fetch_all_content_points("test_collection")
 

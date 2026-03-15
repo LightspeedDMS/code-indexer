@@ -10,13 +10,9 @@ Tests cover:
 - extract_host_from_remote_url: SSH, HTTPS, ssh:// format, invalid URL
 """
 
-import os
 import stat
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 
 class TestCreateAskpassScript:
@@ -24,7 +20,9 @@ class TestCreateAskpassScript:
 
     def test_creates_file_at_tmp_dir(self, tmp_path):
         """create_askpass_script creates a file in the configured tmp_dir."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         helper = GitCredentialHelper(tmp_dir=tmp_path)
         script_path = helper.create_askpass_script("mytoken")
@@ -36,7 +34,9 @@ class TestCreateAskpassScript:
 
     def test_script_filename_is_unique(self, tmp_path):
         """create_askpass_script generates unique filenames across calls."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         helper = GitCredentialHelper(tmp_dir=tmp_path)
         path1 = helper.create_askpass_script("token1")
@@ -49,7 +49,9 @@ class TestCreateAskpassScript:
 
     def test_script_content_echoes_token(self, tmp_path):
         """Script contains the token and uses printf to output it."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         helper = GitCredentialHelper(tmp_dir=tmp_path)
         token = "ghp_secrettoken123"
@@ -64,7 +66,9 @@ class TestCreateAskpassScript:
 
     def test_script_has_0700_permissions(self, tmp_path):
         """Script is created with 0700 permissions (owner-only rwx)."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         helper = GitCredentialHelper(tmp_dir=tmp_path)
         script_path = helper.create_askpass_script("token123")
@@ -78,7 +82,9 @@ class TestCreateAskpassScript:
 
     def test_script_not_readable_by_group_or_others(self, tmp_path):
         """Script has no group or other read permissions."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         helper = GitCredentialHelper(tmp_dir=tmp_path)
         script_path = helper.create_askpass_script("secret")
@@ -91,14 +97,18 @@ class TestCreateAskpassScript:
 
     def test_default_tmp_dir_is_home_tmp(self):
         """Default tmp_dir is ~/.tmp."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         helper = GitCredentialHelper()
         assert helper.tmp_dir == Path.home() / ".tmp"
 
     def test_creates_tmp_dir_if_missing(self, tmp_path):
         """Creates tmp_dir if it does not exist."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         new_dir = tmp_path / "nested" / "subdir"
         assert not new_dir.exists()
@@ -112,7 +122,9 @@ class TestCreateAskpassScript:
         """Token with single quotes, backticks, and $(cmd) is echoed literally."""
         import subprocess
 
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         helper = GitCredentialHelper(tmp_dir=tmp_path)
         dangerous_token = "abc'$(rm -rf ~)'`whoami`"
@@ -132,7 +144,9 @@ class TestCreateAskpassScript:
         """Token containing heredoc delimiter strings is echoed literally."""
         import subprocess
 
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         helper = GitCredentialHelper(tmp_dir=tmp_path)
         # Token that would break a heredoc-based approach
@@ -154,7 +168,9 @@ class TestCleanupAskpassScript:
 
     def test_removes_existing_file(self, tmp_path):
         """cleanup_askpass_script removes an existing script file."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         helper = GitCredentialHelper(tmp_dir=tmp_path)
         script_path = helper.create_askpass_script("token")
@@ -165,7 +181,9 @@ class TestCleanupAskpassScript:
 
     def test_safe_on_nonexistent_file(self, tmp_path):
         """cleanup_askpass_script does not raise if file does not exist."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         helper = GitCredentialHelper(tmp_dir=tmp_path)
         nonexistent = tmp_path / "no_such_file.sh"
@@ -175,7 +193,9 @@ class TestCleanupAskpassScript:
 
     def test_logs_warning_on_os_error(self, tmp_path):
         """cleanup_askpass_script logs a warning if unlink raises OSError."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         helper = GitCredentialHelper(tmp_dir=tmp_path)
         script_path = helper.create_askpass_script("token")
@@ -197,21 +217,31 @@ class TestConvertSshToHttps:
 
     def test_standard_github_ssh_url(self):
         """Converts git@github.com:owner/repo.git to https://github.com/owner/repo.git."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
-        result = GitCredentialHelper.convert_ssh_to_https("git@github.com:owner/repo.git")
+        result = GitCredentialHelper.convert_ssh_to_https(
+            "git@github.com:owner/repo.git"
+        )
         assert result == "https://github.com/owner/repo.git"
 
     def test_standard_gitlab_ssh_url(self):
         """Converts git@gitlab.com:owner/repo.git to https://gitlab.com/owner/repo.git."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
-        result = GitCredentialHelper.convert_ssh_to_https("git@gitlab.com:owner/repo.git")
+        result = GitCredentialHelper.convert_ssh_to_https(
+            "git@gitlab.com:owner/repo.git"
+        )
         assert result == "https://gitlab.com/owner/repo.git"
 
     def test_gitlab_subgroup_ssh_url(self):
         """Handles GitLab subgroups in SSH URL path."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         result = GitCredentialHelper.convert_ssh_to_https(
             "git@gitlab.com:group/subgroup/repo.git"
@@ -220,14 +250,18 @@ class TestConvertSshToHttps:
 
     def test_ssh_url_without_git_extension(self):
         """Handles SSH URLs without .git extension."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         result = GitCredentialHelper.convert_ssh_to_https("git@github.com:owner/repo")
         assert result == "https://github.com/owner/repo"
 
     def test_https_url_passes_through(self):
         """HTTPS URLs are returned unchanged."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         url = "https://github.com/owner/repo.git"
         result = GitCredentialHelper.convert_ssh_to_https(url)
@@ -235,7 +269,9 @@ class TestConvertSshToHttps:
 
     def test_https_with_credentials_passes_through(self):
         """HTTPS URLs with embedded credentials are returned unchanged."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         url = "https://user:token@github.com/owner/repo.git"
         result = GitCredentialHelper.convert_ssh_to_https(url)
@@ -243,7 +279,9 @@ class TestConvertSshToHttps:
 
     def test_ssh_protocol_url(self):
         """Converts ssh://git@host/path format."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         result = GitCredentialHelper.convert_ssh_to_https(
             "ssh://git@github.com/owner/repo.git"
@@ -252,7 +290,9 @@ class TestConvertSshToHttps:
 
     def test_ssh_protocol_url_with_port(self):
         """Converts ssh://git@host:port/path format."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         result = GitCredentialHelper.convert_ssh_to_https(
             "ssh://git@github.com:22/owner/repo.git"
@@ -261,7 +301,9 @@ class TestConvertSshToHttps:
 
     def test_custom_self_hosted_host(self):
         """Handles custom self-hosted git hosts."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         result = GitCredentialHelper.convert_ssh_to_https(
             "git@git.mycompany.com:team/project.git"
@@ -270,7 +312,9 @@ class TestConvertSshToHttps:
 
     def test_leading_whitespace_stripped(self):
         """Strips leading/trailing whitespace from URL before processing."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         result = GitCredentialHelper.convert_ssh_to_https(
             "  git@github.com:owner/repo.git  "
@@ -283,14 +327,20 @@ class TestExtractHostFromRemoteUrl:
 
     def test_ssh_format_extracts_host(self):
         """Extracts host from git@host:path SSH URL."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
-        host = GitCredentialHelper.extract_host_from_remote_url("git@github.com:owner/repo.git")
+        host = GitCredentialHelper.extract_host_from_remote_url(
+            "git@github.com:owner/repo.git"
+        )
         assert host == "github.com"
 
     def test_https_format_extracts_host(self):
         """Extracts host from https://host/path URL."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         host = GitCredentialHelper.extract_host_from_remote_url(
             "https://github.com/owner/repo.git"
@@ -299,7 +349,9 @@ class TestExtractHostFromRemoteUrl:
 
     def test_http_format_extracts_host(self):
         """Extracts host from http://host/path URL."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         host = GitCredentialHelper.extract_host_from_remote_url(
             "http://gitlab.com/owner/repo.git"
@@ -308,7 +360,9 @@ class TestExtractHostFromRemoteUrl:
 
     def test_ssh_protocol_format_extracts_host(self):
         """Extracts host from ssh://git@host/path URL."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         host = GitCredentialHelper.extract_host_from_remote_url(
             "ssh://git@github.com/owner/repo.git"
@@ -317,7 +371,9 @@ class TestExtractHostFromRemoteUrl:
 
     def test_ssh_protocol_with_port_extracts_host(self):
         """Extracts host from ssh://git@host:port/path URL (no port in result)."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         host = GitCredentialHelper.extract_host_from_remote_url(
             "ssh://git@github.com:22/owner/repo.git"
@@ -326,7 +382,9 @@ class TestExtractHostFromRemoteUrl:
 
     def test_self_hosted_host(self):
         """Extracts host from custom domain."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         host = GitCredentialHelper.extract_host_from_remote_url(
             "git@git.mycompany.com:team/repo.git"
@@ -335,21 +393,27 @@ class TestExtractHostFromRemoteUrl:
 
     def test_invalid_url_returns_none(self):
         """Returns None for URLs that cannot be parsed."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         host = GitCredentialHelper.extract_host_from_remote_url("not-a-url")
         assert host is None
 
     def test_empty_string_returns_none(self):
         """Returns None for empty string."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         host = GitCredentialHelper.extract_host_from_remote_url("")
         assert host is None
 
     def test_gitlab_subgroup_https(self):
         """Extracts host from GitLab HTTPS URL with subgroups."""
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         host = GitCredentialHelper.extract_host_from_remote_url(
             "https://gitlab.com/group/subgroup/repo.git"

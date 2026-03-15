@@ -15,12 +15,11 @@ import json
 from datetime import datetime
 from unittest.mock import patch, MagicMock
 
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _extract_mcp_data(mcp_response: dict) -> dict:
     """Extract the JSON data from MCP-compliant content array response."""
@@ -33,12 +32,14 @@ def _extract_mcp_data(mcp_response: dict) -> dict:
 def _count_tokens(text: str) -> int:
     """Count tokens using tiktoken cl100k_base (same as code review measurement)."""
     import tiktoken
+
     enc = tiktoken.get_encoding("cl100k_base")
     return len(enc.encode(text))
 
 
 def _make_user(role):
     from code_indexer.server.auth.user_manager import User
+
     return User(
         username="test",
         password_hash="hashed",
@@ -56,8 +57,10 @@ def _call_quick_reference(params, user, mock_config=None):
         mock_config.service_display_name = "Neo"
         mock_config.langfuse_config = None
 
-    with patch("code_indexer.server.mcp.handlers.get_config_service") as mock_svc, \
-         patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+    with (
+        patch("code_indexer.server.mcp.handlers.get_config_service") as mock_svc,
+        patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+    ):
         mock_service = MagicMock()
         mock_service.get_config.return_value = mock_config
         mock_svc.return_value = mock_service
@@ -68,6 +71,7 @@ def _call_quick_reference(params, user, mock_config=None):
 # ---------------------------------------------------------------------------
 # Finding 1: ToolDocLoader singleton
 # ---------------------------------------------------------------------------
+
 
 class TestToolDocLoaderSingleton:
     """Finding 1: _get_tool_doc_loader() must return cached singleton."""
@@ -86,15 +90,18 @@ class TestToolDocLoaderSingleton:
 
     def test_get_tool_doc_loader_returns_loaded_loader(self):
         """The singleton must already have docs loaded (not require explicit load_all_docs())."""
-        from code_indexer.server.mcp.tool_doc_loader import _get_tool_doc_loader, ToolDocLoader
+        from code_indexer.server.mcp.tool_doc_loader import (
+            _get_tool_doc_loader,
+            ToolDocLoader,
+        )
 
         loader = _get_tool_doc_loader()
 
         assert isinstance(loader, ToolDocLoader)
         # _loaded flag indicates docs were loaded during singleton init
-        assert loader._loaded is True, (
-            "Singleton loader must have _loaded=True after _get_tool_doc_loader() call"
-        )
+        assert (
+            loader._loaded is True
+        ), "Singleton loader must have _loaded=True after _get_tool_doc_loader() call"
 
     def test_get_tool_doc_loader_has_docs_in_cache(self):
         """Singleton must have tool docs populated in its cache."""
@@ -103,9 +110,9 @@ class TestToolDocLoaderSingleton:
         loader = _get_tool_doc_loader()
         cache = loader._cache
 
-        assert len(cache) > 0, (
-            "Singleton loader must have tool docs in cache after initialization"
-        )
+        assert (
+            len(cache) > 0
+        ), "Singleton loader must have tool docs in cache after initialization"
 
     def test_get_tool_doc_loader_docs_dir_is_correct(self):
         """Singleton must point to the real tool_docs directory."""
@@ -113,7 +120,9 @@ class TestToolDocLoaderSingleton:
         from code_indexer.server.mcp.tool_doc_loader import _get_tool_doc_loader
 
         loader = _get_tool_doc_loader()
-        expected_dir = Path(__file__).parent.parent.parent.parent.parent / "src" / "code_indexer" / "server" / "mcp" / "tool_docs"
+        Path(
+            __file__
+        ).parent.parent.parent.parent.parent / "src" / "code_indexer" / "server" / "mcp" / "tool_docs"
 
         assert loader.docs_dir.exists(), f"tool_docs dir must exist: {loader.docs_dir}"
         assert loader.docs_dir.name == "tool_docs"
@@ -122,6 +131,7 @@ class TestToolDocLoaderSingleton:
 # ---------------------------------------------------------------------------
 # Finding 2: Token budget
 # ---------------------------------------------------------------------------
+
 
 class TestTokenBudget:
     """Finding 2: Token budgets must be met for all roles."""
@@ -175,9 +185,9 @@ class TestTokenBudget:
         resp = _call_quick_reference({"category": "search"}, user)
         data = _extract_mcp_data(resp)
 
-        assert "category_filter" in data, (
-            "category_filter must be included in response when a filter is applied"
-        )
+        assert (
+            "category_filter" in data
+        ), "category_filter must be included in response when a filter is applied"
         assert data["category_filter"] == "search"
 
     def test_tl_dr_values_truncated_to_30_chars(self):
@@ -215,6 +225,6 @@ class TestTokenBudget:
         text = resp["content"][0]["text"]
         tokens = _count_tokens(text)
 
-        assert tokens < 4000, (
-            f"POWER_USER response must be <4000 tokens, got {tokens} tokens"
-        )
+        assert (
+            tokens < 4000
+        ), f"POWER_USER response must be <4000 tokens, got {tokens} tokens"

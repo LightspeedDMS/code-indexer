@@ -11,7 +11,6 @@ Tests:
 """
 
 from unittest.mock import MagicMock, patch
-import pytest
 
 
 class TestResolveGitRepoPathUserActivated:
@@ -116,7 +115,9 @@ class TestResolveGitRepoPathGroupAccess:
                         "code_indexer.server.mcp.handlers._get_access_filtering_service",
                         return_value=mock_afs,
                     ):
-                        path, error_msg = _resolve_git_repo_path("my-repo-global", "testuser")
+                        path, error_msg = _resolve_git_repo_path(
+                            "my-repo-global", "testuser"
+                        )
 
         assert path is None
         assert error_msg is not None
@@ -159,7 +160,9 @@ class TestResolveGitRepoPathGroupAccess:
                         "code_indexer.server.mcp.handlers._get_access_filtering_service",
                         return_value=mock_afs,
                     ):
-                        path, error_msg = _resolve_git_repo_path("my-repo-global", "testuser")
+                        path, error_msg = _resolve_git_repo_path(
+                            "my-repo-global", "testuser"
+                        )
 
         assert error_msg is None
         assert path == str(repo_dir)
@@ -195,7 +198,9 @@ class TestResolveGitRepoPathGroupAccess:
                         "code_indexer.server.mcp.handlers._get_access_filtering_service",
                         return_value=None,
                     ):
-                        path, error_msg = _resolve_git_repo_path("my-repo-global", "testuser")
+                        path, error_msg = _resolve_git_repo_path(
+                            "my-repo-global", "testuser"
+                        )
 
         assert error_msg is None
         assert path == str(repo_dir)
@@ -211,7 +216,10 @@ class TestResolveGitRepoPathGroupAccess:
 
         # Accessible set stores base name without -global
         mock_afs = MagicMock()
-        mock_afs.get_accessible_repos.return_value = {"code-indexer-python", "cidx-meta"}
+        mock_afs.get_accessible_repos.return_value = {
+            "code-indexer-python",
+            "cidx-meta",
+        }
 
         with patch(
             "code_indexer.server.mcp.handlers._get_golden_repos_dir",

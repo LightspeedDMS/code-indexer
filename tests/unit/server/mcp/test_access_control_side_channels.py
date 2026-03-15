@@ -22,7 +22,7 @@ Test coverage:
 
 import pytest
 from datetime import datetime
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
 from code_indexer.server.mcp.protocol import _check_repository_access
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -198,7 +198,7 @@ class TestAC9FailClosedGuard:
         # and a repo param is present, access should be DENIED.
         from code_indexer.server.mcp import protocol
 
-        user = _make_user("some_user")
+        _make_user("some_user")
 
         # Simulate: access_filtering_service not available (AttributeError)
         # but tool has a repository_alias argument
@@ -208,7 +208,7 @@ class TestAC9FailClosedGuard:
         del mock_app.state.access_filtering_service
         mock_handlers_module.app_module.app = mock_app
 
-        with patch.object(protocol, "_check_repository_access") as mock_guard:
+        with patch.object(protocol, "_check_repository_access"):
             # We need to test the actual except AttributeError path in handle_tools_call
             # So we test the behavior: when service is unavailable AND repo param present,
             # handle_tools_call should raise ValueError
@@ -239,7 +239,9 @@ class TestAC9FailClosedGuard:
         # We test via a more realistic simulation below.
 
     @pytest.mark.asyncio
-    async def test_handle_tools_call_denies_when_service_unavailable_with_repo_param(self):
+    async def test_handle_tools_call_denies_when_service_unavailable_with_repo_param(
+        self,
+    ):
         """handle_tools_call must raise ValueError when access service is missing
         and tool arguments contain a repository parameter.
 
@@ -261,6 +263,7 @@ class TestAC9FailClosedGuard:
         # Create an app.state that does NOT have access_filtering_service
         class _BareState:
             """State object missing access_filtering_service attribute."""
+
             payload_cache = None
 
         mock_app = Mock()
@@ -334,9 +337,15 @@ class TestAC1ErrorSuggestionsFiltered:
             {"alias_name": "another-secret-global"},
         ]
 
-        with patch.object(handlers, "_get_golden_repos_dir", return_value="/fake"), \
-             patch.object(handlers, "get_server_global_registry", return_value=mock_registry), \
-             patch.object(handlers, "_get_access_filtering_service", return_value=access_service):
+        with (
+            patch.object(handlers, "_get_golden_repos_dir", return_value="/fake"),
+            patch.object(
+                handlers, "get_server_global_registry", return_value=mock_registry
+            ),
+            patch.object(
+                handlers, "_get_access_filtering_service", return_value=access_service
+            ),
+        ):
             result = handlers._get_available_repos(user)
 
         # Should only contain repos the user can access
@@ -357,9 +366,15 @@ class TestAC1ErrorSuggestionsFiltered:
             {"alias_name": "repo-b-global"},
         ]
 
-        with patch.object(handlers, "_get_golden_repos_dir", return_value="/fake"), \
-             patch.object(handlers, "get_server_global_registry", return_value=mock_registry), \
-             patch.object(handlers, "_get_access_filtering_service", return_value=access_service):
+        with (
+            patch.object(handlers, "_get_golden_repos_dir", return_value="/fake"),
+            patch.object(
+                handlers, "get_server_global_registry", return_value=mock_registry
+            ),
+            patch.object(
+                handlers, "_get_access_filtering_service", return_value=access_service
+            ),
+        ):
             result = handlers._get_available_repos(user)
 
         assert "repo-a-global" in result
@@ -408,9 +423,15 @@ class TestAC2WildcardExpansionFiltered:
             {"alias_name": "cidx-meta-global"},
         ]
 
-        with patch.object(handlers, "_get_golden_repos_dir", return_value="/fake"), \
-             patch.object(handlers, "get_server_global_registry", return_value=mock_registry), \
-             patch.object(handlers, "_get_access_filtering_service", return_value=access_service):
+        with (
+            patch.object(handlers, "_get_golden_repos_dir", return_value="/fake"),
+            patch.object(
+                handlers, "get_server_global_registry", return_value=mock_registry
+            ),
+            patch.object(
+                handlers, "_get_access_filtering_service", return_value=access_service
+            ),
+        ):
             result = handlers._expand_wildcard_patterns(["*-global"], user)
 
         assert "allowed-repo-global" in result
@@ -432,9 +453,15 @@ class TestAC2WildcardExpansionFiltered:
             {"alias_name": "allowed-repo-global"},
         ]
 
-        with patch.object(handlers, "_get_golden_repos_dir", return_value="/fake"), \
-             patch.object(handlers, "get_server_global_registry", return_value=mock_registry), \
-             patch.object(handlers, "_get_access_filtering_service", return_value=access_service):
+        with (
+            patch.object(handlers, "_get_golden_repos_dir", return_value="/fake"),
+            patch.object(
+                handlers, "get_server_global_registry", return_value=mock_registry
+            ),
+            patch.object(
+                handlers, "_get_access_filtering_service", return_value=access_service
+            ),
+        ):
             # Literal pattern should be preserved (centralized guard will catch unauthorized)
             result = handlers._expand_wildcard_patterns(["specific-repo-global"], user)
 
@@ -465,19 +492,25 @@ class TestAC4OmniHandlersAccessControl:
 
         # We verify that _expand_wildcard_patterns is called with user
         # and that the result is filtered before iteration
-        with patch.object(handlers, "_expand_wildcard_patterns") as mock_expand, \
-             patch.object(handlers, "_get_access_filtering_service", return_value=access_service), \
-             patch.object(handlers, "handle_regex_search") as mock_single:
-
+        with (
+            patch.object(handlers, "_expand_wildcard_patterns") as mock_expand,
+            patch.object(
+                handlers, "_get_access_filtering_service", return_value=access_service
+            ),
+            patch.object(handlers, "handle_regex_search") as mock_single,
+        ):
             mock_expand.return_value = ["allowed-repo-global", "secret-repo-global"]
 
             # Mock single repo search to return empty
             mock_single.return_value = {
-                "content": [{"type": "text", "text": '{"success": true, "matches": []}'}]
+                "content": [
+                    {"type": "text", "text": '{"success": true, "matches": []}'}
+                ]
             }
 
             import asyncio
-            result = asyncio.get_event_loop().run_until_complete(
+
+            asyncio.get_event_loop().run_until_complete(
                 handlers._omni_regex_search(
                     {"repository_alias": ["*-global"], "pattern": "test"},
                     user,
@@ -489,9 +522,9 @@ class TestAC4OmniHandlersAccessControl:
             call_args = mock_expand.call_args
             # Check that user was passed (either positional or keyword)
             all_args = list(call_args.args) + list(call_args.kwargs.values())
-            assert user in all_args, (
-                "_expand_wildcard_patterns must be called with user parameter"
-            )
+            assert (
+                user in all_args
+            ), "_expand_wildcard_patterns must be called with user parameter"
 
     def test_omni_search_code_filters_repo_aliases(self):
         """_omni_search_code must pass user to _expand_wildcard_patterns."""
@@ -503,10 +536,13 @@ class TestAC4OmniHandlersAccessControl:
             accessible_repos={"cidx-meta", "allowed-repo"},
         )
 
-        with patch.object(handlers, "_expand_wildcard_patterns") as mock_expand, \
-             patch.object(handlers, "_get_access_filtering_service", return_value=access_service), \
-             patch.object(handlers, "get_config_service") as mock_config:
-
+        with (
+            patch.object(handlers, "_expand_wildcard_patterns") as mock_expand,
+            patch.object(
+                handlers, "_get_access_filtering_service", return_value=access_service
+            ),
+            patch.object(handlers, "get_config_service") as mock_config,
+        ):
             mock_expand.return_value = []  # Empty to short-circuit
 
             mock_config_instance = Mock()
@@ -521,9 +557,9 @@ class TestAC4OmniHandlersAccessControl:
         if mock_expand.called:
             call_args = mock_expand.call_args
             all_args = list(call_args.args) + list(call_args.kwargs.values())
-            assert user in all_args, (
-                "_expand_wildcard_patterns must be called with user parameter"
-            )
+            assert (
+                user in all_args
+            ), "_expand_wildcard_patterns must be called with user parameter"
 
 
 # ===========================================================================
@@ -547,9 +583,12 @@ class TestAC5CompositeRepoValidation:
             accessible_repos={"cidx-meta", "allowed-repo"},
         )
 
-        with patch.object(handlers, "_get_access_filtering_service", return_value=access_service), \
-             patch.object(handlers, "app_module") as mock_app:
-
+        with (
+            patch.object(
+                handlers, "_get_access_filtering_service", return_value=access_service
+            ),
+            patch.object(handlers, "app_module"),
+        ):
             result = handlers.manage_composite_repository(
                 {
                     "operation": "create",
@@ -561,6 +600,7 @@ class TestAC5CompositeRepoValidation:
 
         # Parse the response
         import json
+
         content = result.get("content", [])
         if content and content[0].get("type") == "text":
             data = json.loads(content[0]["text"])
@@ -586,9 +626,12 @@ class TestAC5CompositeRepoValidation:
             accessible_repos={"cidx-meta", "repo-a", "repo-b"},
         )
 
-        with patch.object(handlers, "_get_access_filtering_service", return_value=access_service), \
-             patch.object(handlers, "app_module") as mock_app:
-
+        with (
+            patch.object(
+                handlers, "_get_access_filtering_service", return_value=access_service
+            ),
+            patch.object(handlers, "app_module") as mock_app,
+        ):
             mock_app.activated_repo_manager.activate_repository.return_value = "job-123"
 
             result = handlers.manage_composite_repository(
@@ -601,6 +644,7 @@ class TestAC5CompositeRepoValidation:
             )
 
         import json
+
         content = result.get("content", [])
         if content and content[0].get("type") == "text":
             data = json.loads(content[0]["text"])
@@ -619,9 +663,12 @@ class TestAC5CompositeRepoValidation:
         user = _make_user("admin_user", role=UserRole.ADMIN)
         access_service = _make_access_service(is_admin=True)
 
-        with patch.object(handlers, "_get_access_filtering_service", return_value=access_service), \
-             patch.object(handlers, "app_module") as mock_app:
-
+        with (
+            patch.object(
+                handlers, "_get_access_filtering_service", return_value=access_service
+            ),
+            patch.object(handlers, "app_module") as mock_app,
+        ):
             mock_app.activated_repo_manager.activate_repository.return_value = "job-456"
 
             result = handlers.manage_composite_repository(
@@ -634,6 +681,7 @@ class TestAC5CompositeRepoValidation:
             )
 
         import json
+
         content = result.get("content", [])
         if content and content[0].get("type") == "text":
             data = json.loads(content[0]["text"])
@@ -664,10 +712,13 @@ class TestAC7OmniSearchErrorsFiltered:
         )
 
         # Simulate omni-regex that encounters errors for multiple repos
-        with patch.object(handlers, "_expand_wildcard_patterns") as mock_expand, \
-             patch.object(handlers, "_get_access_filtering_service", return_value=access_service), \
-             patch.object(handlers, "handle_regex_search") as mock_single:
-
+        with (
+            patch.object(handlers, "_expand_wildcard_patterns") as mock_expand,
+            patch.object(
+                handlers, "_get_access_filtering_service", return_value=access_service
+            ),
+            patch.object(handlers, "handle_regex_search") as mock_single,
+        ):
             # Return all repos (including secret ones - simulating a gap in AC2/AC4)
             mock_expand.return_value = [
                 "allowed-repo-global",
@@ -689,6 +740,7 @@ class TestAC7OmniSearchErrorsFiltered:
             mock_single.side_effect = _make_error_response
 
             import asyncio
+
             result = asyncio.get_event_loop().run_until_complete(
                 handlers._omni_regex_search(
                     {"repository_alias": ["*-global"], "pattern": "test"},
@@ -697,6 +749,7 @@ class TestAC7OmniSearchErrorsFiltered:
             )
 
         import json
+
         content = result.get("content", [])
         if content and content[0].get("type") == "text":
             data = json.loads(content[0]["text"])
@@ -727,14 +780,17 @@ class TestAC6CidxMetaFiltering:
         import inspect
 
         # Verify that filter_cidx_meta_results exists on AccessFilteringService
-        from code_indexer.server.services.access_filtering_service import AccessFilteringService
+        from code_indexer.server.services.access_filtering_service import (
+            AccessFilteringService,
+        )
+
         assert hasattr(AccessFilteringService, "filter_cidx_meta_results")
 
         # Verify via source inspection that search_code calls filter_cidx_meta_results
         source = inspect.getsource(handlers.search_code)
-        assert "filter_cidx_meta_results" in source, (
-            "search_code must call filter_cidx_meta_results for cidx-meta queries"
-        )
+        assert (
+            "filter_cidx_meta_results" in source
+        ), "search_code must call filter_cidx_meta_results for cidx-meta queries"
 
 
 # ===========================================================================
@@ -761,9 +817,7 @@ class TestAC8CacheUserScoping:
 
         # Check for either user-scoping implementation OR documented accepted risk
         has_user_check = (
-            "user.username" in source
-            or "user_id" in source
-            or "owner" in source
+            "user.username" in source or "user_id" in source or "owner" in source
         )
         has_accepted_risk_doc = (
             "accepted risk" in source.lower()

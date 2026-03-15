@@ -14,7 +14,7 @@ AC5: Works across search_code, regex_search, and get_file_content handlers
 
 import json
 import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
 from code_indexer.server.auth.user_manager import User, UserRole
 
@@ -40,10 +40,26 @@ def mock_sqlite_backend_with_wiki():
     """Mock sqlite backend that returns repos with wiki_enabled flags."""
     backend = Mock()
     backend.list_repos.return_value = [
-        {"alias": "sf-kb-wiki", "wiki_enabled": True, "repo_url": "git@github.com:org/sf-kb-wiki.git"},
-        {"alias": "docs-repo", "wiki_enabled": True, "repo_url": "git@github.com:org/docs-repo.git"},
-        {"alias": "code-indexer", "wiki_enabled": False, "repo_url": "git@github.com:org/ci.git"},
-        {"alias": "another-repo", "wiki_enabled": False, "repo_url": "git@github.com:org/another.git"},
+        {
+            "alias": "sf-kb-wiki",
+            "wiki_enabled": True,
+            "repo_url": "git@github.com:org/sf-kb-wiki.git",
+        },
+        {
+            "alias": "docs-repo",
+            "wiki_enabled": True,
+            "repo_url": "git@github.com:org/docs-repo.git",
+        },
+        {
+            "alias": "code-indexer",
+            "wiki_enabled": False,
+            "repo_url": "git@github.com:org/ci.git",
+        },
+        {
+            "alias": "another-repo",
+            "wiki_enabled": False,
+            "repo_url": "git@github.com:org/another.git",
+        },
     ]
     return backend
 
@@ -53,8 +69,16 @@ def mock_sqlite_backend_no_wiki():
     """Mock sqlite backend where no repos have wiki enabled."""
     backend = Mock()
     backend.list_repos.return_value = [
-        {"alias": "code-indexer", "wiki_enabled": False, "repo_url": "git@github.com:org/ci.git"},
-        {"alias": "another-repo", "wiki_enabled": False, "repo_url": "git@github.com:org/another.git"},
+        {
+            "alias": "code-indexer",
+            "wiki_enabled": False,
+            "repo_url": "git@github.com:org/ci.git",
+        },
+        {
+            "alias": "another-repo",
+            "wiki_enabled": False,
+            "repo_url": "git@github.com:org/another.git",
+        },
     ]
     return backend
 
@@ -62,6 +86,7 @@ def mock_sqlite_backend_no_wiki():
 # ============================================================================
 # Tests for _enrich_with_wiki_url helper function
 # ============================================================================
+
 
 class TestEnrichWithWikiUrl:
     """Tests for the _enrich_with_wiki_url helper function (AC1, AC4)."""
@@ -72,8 +97,12 @@ class TestEnrichWithWikiUrl:
 
         result_dict = {}
         wiki_enabled_repos = {"sf-kb-wiki"}
-        _enrich_with_wiki_url(result_dict, "Customer/getting-started.md",
-                              "sf-kb-wiki-global", wiki_enabled_repos)
+        _enrich_with_wiki_url(
+            result_dict,
+            "Customer/getting-started.md",
+            "sf-kb-wiki-global",
+            wiki_enabled_repos,
+        )
 
         assert "wiki_url" in result_dict
         assert result_dict["wiki_url"] == "/wiki/sf-kb-wiki/Customer/getting-started"
@@ -84,8 +113,9 @@ class TestEnrichWithWikiUrl:
 
         result_dict = {}
         wiki_enabled_repos = {"sf-kb-wiki"}
-        _enrich_with_wiki_url(result_dict, "src/auth.py",
-                              "sf-kb-wiki-global", wiki_enabled_repos)
+        _enrich_with_wiki_url(
+            result_dict, "src/auth.py", "sf-kb-wiki-global", wiki_enabled_repos
+        )
 
         assert "wiki_url" not in result_dict
 
@@ -95,8 +125,9 @@ class TestEnrichWithWikiUrl:
 
         result_dict = {}
         wiki_enabled_repos = {"sf-kb-wiki"}  # code-indexer is NOT in this set
-        _enrich_with_wiki_url(result_dict, "docs/overview.md",
-                              "code-indexer-global", wiki_enabled_repos)
+        _enrich_with_wiki_url(
+            result_dict, "docs/overview.md", "code-indexer-global", wiki_enabled_repos
+        )
 
         assert "wiki_url" not in result_dict
 
@@ -106,7 +137,9 @@ class TestEnrichWithWikiUrl:
 
         # Case 1: non-.md file
         result1 = {}
-        _enrich_with_wiki_url(result1, "README.txt", "sf-kb-wiki-global", {"sf-kb-wiki"})
+        _enrich_with_wiki_url(
+            result1, "README.txt", "sf-kb-wiki-global", {"sf-kb-wiki"}
+        )
         assert "wiki_url" not in result1  # Key must not exist at all
 
         # Case 2: non-wiki repo
@@ -124,8 +157,9 @@ class TestEnrichWithWikiUrl:
         from code_indexer.server.mcp.handlers import _enrich_with_wiki_url
 
         result_dict = {}
-        _enrich_with_wiki_url(result_dict, "index.md",
-                              "docs-repo-global", {"docs-repo"})
+        _enrich_with_wiki_url(
+            result_dict, "index.md", "docs-repo-global", {"docs-repo"}
+        )
 
         assert result_dict["wiki_url"] == "/wiki/docs-repo/index"
         assert not result_dict["wiki_url"].endswith(".md")
@@ -135,8 +169,9 @@ class TestEnrichWithWikiUrl:
         from code_indexer.server.mcp.handlers import _enrich_with_wiki_url
 
         result_dict = {}
-        _enrich_with_wiki_url(result_dict, "article.md",
-                              "sf-kb-wiki-global", {"sf-kb-wiki"})
+        _enrich_with_wiki_url(
+            result_dict, "article.md", "sf-kb-wiki-global", {"sf-kb-wiki"}
+        )
 
         # URL should use 'sf-kb-wiki' not 'sf-kb-wiki-global'
         assert "/wiki/sf-kb-wiki/" in result_dict["wiki_url"]
@@ -147,10 +182,17 @@ class TestEnrichWithWikiUrl:
         from code_indexer.server.mcp.handlers import _enrich_with_wiki_url
 
         result_dict = {}
-        _enrich_with_wiki_url(result_dict, "Customer/Support/ticket-management.md",
-                              "docs-repo-global", {"docs-repo"})
+        _enrich_with_wiki_url(
+            result_dict,
+            "Customer/Support/ticket-management.md",
+            "docs-repo-global",
+            {"docs-repo"},
+        )
 
-        assert result_dict["wiki_url"] == "/wiki/docs-repo/Customer/Support/ticket-management"
+        assert (
+            result_dict["wiki_url"]
+            == "/wiki/docs-repo/Customer/Support/ticket-management"
+        )
 
     def test_enrich_handles_empty_inputs(self):
         """_enrich_with_wiki_url handles None/empty inputs without error."""
@@ -176,10 +218,13 @@ class TestEnrichWithWikiUrl:
 # Tests for _get_wiki_enabled_repos helper function
 # ============================================================================
 
+
 class TestGetWikiEnabledRepos:
     """Tests for the _get_wiki_enabled_repos helper function (AC2)."""
 
-    def test_get_wiki_enabled_repos_returns_correct_set(self, mock_sqlite_backend_with_wiki):
+    def test_get_wiki_enabled_repos_returns_correct_set(
+        self, mock_sqlite_backend_with_wiki
+    ):
         """AC2: Returns set of wiki-enabled aliases (without -global suffix)."""
         from code_indexer.server.mcp.handlers import _get_wiki_enabled_repos
 
@@ -193,7 +238,9 @@ class TestGetWikiEnabledRepos:
         assert "code-indexer" not in result
         assert "another-repo" not in result
 
-    def test_get_wiki_enabled_repos_returns_empty_when_no_wiki_repos(self, mock_sqlite_backend_no_wiki):
+    def test_get_wiki_enabled_repos_returns_empty_when_no_wiki_repos(
+        self, mock_sqlite_backend_no_wiki
+    ):
         """Returns empty set when no repos have wiki enabled."""
         from code_indexer.server.mcp.handlers import _get_wiki_enabled_repos
 
@@ -230,6 +277,7 @@ class TestGetWikiEnabledRepos:
 # Integration tests: search_code handler wiki URL enrichment
 # ============================================================================
 
+
 class TestSearchCodeWikiUrlEnrichment:
     """Integration tests for wiki URL enrichment in search_code handler (AC5).
 
@@ -239,7 +287,9 @@ class TestSearchCodeWikiUrlEnrichment:
     needing to mock the entire complex search_code handler stack.
     """
 
-    def _build_search_result_dict(self, file_path, repository_alias="sf-kb-wiki-global", score=0.9):
+    def _build_search_result_dict(
+        self, file_path, repository_alias="sf-kb-wiki-global", score=0.9
+    ):
         """Build a result dict matching the structure search_code produces."""
         return {
             "file_path": file_path,
@@ -248,7 +298,9 @@ class TestSearchCodeWikiUrlEnrichment:
             "repository_alias": repository_alias,
         }
 
-    def test_search_code_result_includes_wiki_url_for_md(self, mock_sqlite_backend_with_wiki):
+    def test_search_code_result_includes_wiki_url_for_md(
+        self, mock_sqlite_backend_with_wiki
+    ):
         """AC1/AC5: search_code result includes wiki_url for .md files from wiki-enabled repos.
 
         Verifies that _enrich_with_wiki_url (called by search_code) adds wiki_url
@@ -271,7 +323,9 @@ class TestSearchCodeWikiUrlEnrichment:
         assert "getting-started" in result_dict["wiki_url"]
         assert not result_dict["wiki_url"].endswith(".md")
 
-    def test_search_code_result_excludes_wiki_url_for_non_md(self, mock_sqlite_backend_with_wiki):
+    def test_search_code_result_excludes_wiki_url_for_non_md(
+        self, mock_sqlite_backend_with_wiki
+    ):
         """AC4: search_code result does NOT include wiki_url for non-.md files.
 
         Verifies that _enrich_with_wiki_url (called by search_code) omits wiki_url
@@ -295,6 +349,7 @@ class TestSearchCodeWikiUrlEnrichment:
 # ============================================================================
 # Integration tests: handle_regex_search handler wiki URL enrichment
 # ============================================================================
+
 
 class TestRegexSearchWikiUrlEnrichment:
     """Integration tests for wiki URL enrichment in handle_regex_search (AC5).
@@ -343,10 +398,13 @@ class TestRegexSearchWikiUrlEnrichment:
 # Integration tests: get_file_content handler wiki URL enrichment
 # ============================================================================
 
+
 class TestGetFileContentWikiUrlEnrichment:
     """Integration tests for wiki URL enrichment in get_file_content handler (AC5)."""
 
-    def test_get_file_content_metadata_includes_wiki_url(self, mock_user, mock_sqlite_backend_with_wiki):
+    def test_get_file_content_metadata_includes_wiki_url(
+        self, mock_user, mock_sqlite_backend_with_wiki
+    ):
         """AC1/AC5: get_file_content metadata includes wiki_url for .md files."""
         from code_indexer.server.mcp.handlers import get_file_content
 
@@ -357,26 +415,37 @@ class TestGetFileContentWikiUrlEnrichment:
                 "repository_alias": "sf-kb-wiki-global",
                 "language": "markdown",
                 "size_bytes": 42,
-            }
+            },
         }
 
         with (
             patch("code_indexer.server.app.golden_repo_manager") as mock_grm,
             patch("code_indexer.server.app.file_service") as mock_fs,
-            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir", return_value="/mock/golden-repos"),
-            patch("code_indexer.server.mcp.handlers.get_server_global_registry") as mock_registry_factory,
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value="/mock/golden-repos",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.get_server_global_registry"
+            ) as mock_registry_factory,
             patch("code_indexer.server.app.app") as mock_app,
         ):
             mock_grm._sqlite_backend = mock_sqlite_backend_with_wiki
             mock_fs.get_file_content_by_path.return_value = mock_file_result
             mock_registry = Mock()
             mock_registry.list_global_repos.return_value = [
-                {"alias_name": "sf-kb-wiki-global", "repo_name": "sf-kb-wiki", "index_path": "/mock/path"}
+                {
+                    "alias_name": "sf-kb-wiki-global",
+                    "repo_name": "sf-kb-wiki",
+                    "index_path": "/mock/path",
+                }
             ]
             mock_registry_factory.return_value = mock_registry
 
             # Mock alias manager
-            with patch("code_indexer.global_repos.alias_manager.AliasManager") as mock_am_class:
+            with patch(
+                "code_indexer.global_repos.alias_manager.AliasManager"
+            ) as mock_am_class:
                 mock_am = Mock()
                 mock_am.read_alias.return_value = "/mock/golden-repos/sf-kb-wiki"
                 mock_am_class.return_value = mock_am
@@ -398,7 +467,9 @@ class TestGetFileContentWikiUrlEnrichment:
         assert "Customer/getting-started" in data["metadata"]["wiki_url"]
         assert not data["metadata"]["wiki_url"].endswith(".md")
 
-    def test_get_file_content_metadata_excludes_wiki_url_for_non_md(self, mock_user, mock_sqlite_backend_with_wiki):
+    def test_get_file_content_metadata_excludes_wiki_url_for_non_md(
+        self, mock_user, mock_sqlite_backend_with_wiki
+    ):
         """AC4: get_file_content metadata does NOT include wiki_url for non-.md files."""
         from code_indexer.server.mcp.handlers import get_file_content
 
@@ -409,25 +480,36 @@ class TestGetFileContentWikiUrlEnrichment:
                 "repository_alias": "sf-kb-wiki-global",
                 "language": "python",
                 "size_bytes": 18,
-            }
+            },
         }
 
         with (
             patch("code_indexer.server.app.golden_repo_manager") as mock_grm,
             patch("code_indexer.server.app.file_service") as mock_fs,
-            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir", return_value="/mock/golden-repos"),
-            patch("code_indexer.server.mcp.handlers.get_server_global_registry") as mock_registry_factory,
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value="/mock/golden-repos",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.get_server_global_registry"
+            ) as mock_registry_factory,
             patch("code_indexer.server.app.app") as mock_app,
         ):
             mock_grm._sqlite_backend = mock_sqlite_backend_with_wiki
             mock_fs.get_file_content_by_path.return_value = mock_file_result
             mock_registry = Mock()
             mock_registry.list_global_repos.return_value = [
-                {"alias_name": "sf-kb-wiki-global", "repo_name": "sf-kb-wiki", "index_path": "/mock/path"}
+                {
+                    "alias_name": "sf-kb-wiki-global",
+                    "repo_name": "sf-kb-wiki",
+                    "index_path": "/mock/path",
+                }
             ]
             mock_registry_factory.return_value = mock_registry
 
-            with patch("code_indexer.global_repos.alias_manager.AliasManager") as mock_am_class:
+            with patch(
+                "code_indexer.global_repos.alias_manager.AliasManager"
+            ) as mock_am_class:
                 mock_am = Mock()
                 mock_am.read_alias.return_value = "/mock/golden-repos/sf-kb-wiki"
                 mock_am_class.return_value = mock_am
@@ -450,6 +532,7 @@ class TestGetFileContentWikiUrlEnrichment:
 # AC3: Only golden repos get wiki_url (not user-activated repos)
 # ============================================================================
 
+
 class TestOnlyGoldenReposGetWikiUrl:
     """AC3: Verify wiki URL enrichment only applies to golden repos, not activated repos."""
 
@@ -464,14 +547,16 @@ class TestOnlyGoldenReposGetWikiUrl:
         # Simulate a user-activated repo (not in wiki_enabled_repos)
         activated_alias = "my-personal-docs"  # Not a golden repo
         result_dict = {}
-        _enrich_with_wiki_url(result_dict, "README.md",
-                              activated_alias, wiki_enabled_repos_set)
+        _enrich_with_wiki_url(
+            result_dict, "README.md", activated_alias, wiki_enabled_repos_set
+        )
 
         # No wiki_url for user-activated repos
         assert "wiki_url" not in result_dict
 
         # Golden repo with wiki enabled gets wiki_url
         golden_result = {}
-        _enrich_with_wiki_url(golden_result, "README.md",
-                              "sf-kb-wiki-global", wiki_enabled_repos_set)
+        _enrich_with_wiki_url(
+            golden_result, "README.md", "sf-kb-wiki-global", wiki_enabled_repos_set
+        )
         assert "wiki_url" in golden_result

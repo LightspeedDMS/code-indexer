@@ -5,11 +5,10 @@ Verifies that auto-watch starts on the correct path (canonical golden repo path)
 when editing write exception repos like cidx-meta-global.
 """
 
-import pytest
 import tempfile
 from pathlib import Path
 from datetime import datetime
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 from code_indexer.server.auth.user_manager import User, UserRole
 
 
@@ -26,10 +25,14 @@ class TestAutoWatchWithExceptions:
             canonical_path.mkdir(parents=True, exist_ok=True)
 
             # Register exception
-            file_crud_service.register_write_exception("cidx-meta-global", canonical_path)
+            file_crud_service.register_write_exception(
+                "cidx-meta-global", canonical_path
+            )
 
             # Mock auto_watch_manager (imported inside handler)
-            with patch("code_indexer.server.services.auto_watch_manager.auto_watch_manager") as mock_watch:
+            with patch(
+                "code_indexer.server.services.auto_watch_manager.auto_watch_manager"
+            ) as mock_watch:
                 mock_watch.start_watch = Mock()
 
                 # Create power user
@@ -48,7 +51,7 @@ class TestAutoWatchWithExceptions:
                     "content": "test content",
                 }
 
-                result = handle_create_file(params, user)
+                handle_create_file(params, user)
 
                 # Verify auto-watch was called with canonical path
                 mock_watch.start_watch.assert_called_once()
@@ -69,10 +72,14 @@ class TestAutoWatchWithExceptions:
             test_file.write_text(original_content)
 
             # Register exception
-            file_crud_service.register_write_exception("cidx-meta-global", canonical_path)
+            file_crud_service.register_write_exception(
+                "cidx-meta-global", canonical_path
+            )
 
             # Mock auto_watch_manager (imported inside handler)
-            with patch("code_indexer.server.services.auto_watch_manager.auto_watch_manager") as mock_watch:
+            with patch(
+                "code_indexer.server.services.auto_watch_manager.auto_watch_manager"
+            ) as mock_watch:
                 mock_watch.start_watch = Mock()
 
                 # Create power user
@@ -97,7 +104,7 @@ class TestAutoWatchWithExceptions:
                     "replace_all": False,
                 }
 
-                result = handle_edit_file(params, user)
+                handle_edit_file(params, user)
 
                 # Verify auto-watch was called with canonical path
                 mock_watch.start_watch.assert_called_once()
@@ -116,10 +123,14 @@ class TestAutoWatchWithExceptions:
             test_file.write_text("to delete")
 
             # Register exception
-            file_crud_service.register_write_exception("cidx-meta-global", canonical_path)
+            file_crud_service.register_write_exception(
+                "cidx-meta-global", canonical_path
+            )
 
             # Mock auto_watch_manager (imported inside handler)
-            with patch("code_indexer.server.services.auto_watch_manager.auto_watch_manager") as mock_watch:
+            with patch(
+                "code_indexer.server.services.auto_watch_manager.auto_watch_manager"
+            ) as mock_watch:
                 mock_watch.start_watch = Mock()
 
                 # Create power user
@@ -137,7 +148,7 @@ class TestAutoWatchWithExceptions:
                     "file_path": "test.md",
                 }
 
-                result = handle_delete_file(params, user)
+                handle_delete_file(params, user)
 
                 # Verify auto-watch was called with canonical path
                 mock_watch.start_watch.assert_called_once()

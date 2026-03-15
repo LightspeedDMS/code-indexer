@@ -13,8 +13,7 @@ import os
 import tempfile
 import time
 from datetime import datetime, timezone
-from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -120,7 +119,7 @@ class TestHNSWHealthServiceInit:
         service = HNSWHealthService()
 
         # Default TTL should be 300 seconds (5 minutes)
-        assert hasattr(service, '_cache_ttl')
+        assert hasattr(service, "_cache_ttl")
         assert service._cache_ttl == 300
 
     def test_service_creation_with_custom_ttl(self):
@@ -145,7 +144,7 @@ class TestHNSWHealthServiceInit:
 
         service = HNSWHealthService()
 
-        assert hasattr(service, '_cache')
+        assert hasattr(service, "_cache")
         assert len(service._cache) == 0
 
 
@@ -173,7 +172,10 @@ class TestHealthCheckMissingFile:
 
         # Should have error message
         assert len(result.errors) > 0
-        assert "not found" in result.errors[0].lower() or "does not exist" in result.errors[0].lower()
+        assert (
+            "not found" in result.errors[0].lower()
+            or "does not exist" in result.errors[0].lower()
+        )
 
         # Other metrics should be None
         assert result.element_count is None
@@ -189,7 +191,9 @@ class TestHealthCheckMissingFile:
 class TestHealthCheckUnreadableFile:
     """Test health check behavior when index file exists but is not readable."""
 
-    @pytest.mark.skipif(os.name == 'nt', reason="Permission tests unreliable on Windows")
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Permission tests unreliable on Windows"
+    )
     def test_unreadable_file_returns_appropriate_result(self):
         """
         AC #4: Health check on unreadable index file returns readable=False, valid=False, permission error.
@@ -220,7 +224,10 @@ class TestHealthCheckUnreadableFile:
 
             # Should have permission error
             assert len(result.errors) > 0
-            assert "permission" in result.errors[0].lower() or "not readable" in result.errors[0].lower()
+            assert (
+                "permission" in result.errors[0].lower()
+                or "not readable" in result.errors[0].lower()
+            )
 
             # Should have file size (can stat without reading)
             assert result.file_size_bytes is not None
@@ -256,7 +263,7 @@ class TestHealthCheckValidIndex:
 
         try:
             # Mock hnswlib.Index to simulate valid index
-            with patch('hnswlib.Index') as mock_index_class:
+            with patch("hnswlib.Index") as mock_index_class:
                 mock_index = Mock()
                 # check_integrity() returns a dictionary
                 mock_index.check_integrity.return_value = {
@@ -320,7 +327,7 @@ class TestHealthCheckCorruptedIndex:
 
         try:
             # Mock hnswlib.Index to simulate corrupted index
-            with patch('hnswlib.Index') as mock_index_class:
+            with patch("hnswlib.Index") as mock_index_class:
                 mock_index = Mock()
                 # check_integrity() returns a dictionary
                 mock_index.check_integrity.return_value = {
@@ -383,7 +390,7 @@ class TestHealthCheckCaching:
 
         try:
             # Mock hnswlib.Index
-            with patch('hnswlib.Index') as mock_index_class:
+            with patch("hnswlib.Index") as mock_index_class:
                 mock_index = Mock()
                 # check_integrity() returns a dictionary
                 mock_index.check_integrity.return_value = {
@@ -430,7 +437,7 @@ class TestHealthCheckCaching:
 
         try:
             # Mock hnswlib.Index
-            with patch('hnswlib.Index') as mock_index_class:
+            with patch("hnswlib.Index") as mock_index_class:
                 mock_index = Mock()
                 # check_integrity() returns a dictionary
                 mock_index.check_integrity.return_value = {
@@ -450,7 +457,7 @@ class TestHealthCheckCaching:
 
                 # Modify the file (change mtime)
                 time.sleep(0.01)  # Ensure different mtime
-                with open(index_path, 'ab') as f:
+                with open(index_path, "ab") as f:
                     f.write(b"more data")
 
                 # Second call - should detect mtime change and refresh
@@ -479,7 +486,7 @@ class TestHealthCheckCaching:
 
         try:
             # Mock hnswlib.Index
-            with patch('hnswlib.Index') as mock_index_class:
+            with patch("hnswlib.Index") as mock_index_class:
                 mock_index = Mock()
                 # check_integrity() returns a dictionary
                 mock_index.check_integrity.return_value = {
@@ -523,7 +530,7 @@ class TestHealthCheckCaching:
 
         try:
             # Mock hnswlib.Index
-            with patch('hnswlib.Index') as mock_index_class:
+            with patch("hnswlib.Index") as mock_index_class:
                 mock_index = Mock()
                 # check_integrity() returns a dictionary
                 mock_index.check_integrity.return_value = {
@@ -574,7 +581,7 @@ class TestHealthCheckAsync:
 
         try:
             # Mock hnswlib.Index
-            with patch('hnswlib.Index') as mock_index_class:
+            with patch("hnswlib.Index") as mock_index_class:
                 mock_index = Mock()
                 # check_integrity() returns a dictionary
                 mock_index.check_integrity.return_value = {

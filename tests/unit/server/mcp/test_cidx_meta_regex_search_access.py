@@ -14,7 +14,6 @@ import asyncio
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 from code_indexer.server.mcp.handlers import handle_regex_search
 
@@ -26,7 +25,9 @@ from .conftest import extract_mcp_data
 # ---------------------------------------------------------------------------
 
 
-def make_regex_match(file_path: str, line_content: str = "description content") -> MagicMock:
+def make_regex_match(
+    file_path: str, line_content: str = "description content"
+) -> MagicMock:
     """Return a simulated RegexMatch dataclass-like object."""
     m = MagicMock()
     m.file_path = file_path
@@ -55,7 +56,9 @@ def _run(coro):
 
 
 @contextmanager
-def _patch_regex_search_infrastructure(repo_alias: str, search_result, access_filtering_service=None):
+def _patch_regex_search_infrastructure(
+    repo_alias: str, search_result, access_filtering_service=None
+):
     """
     Context manager that patches all required infrastructure for handle_regex_search
     unit tests, isolating from the real server state.
@@ -130,7 +133,9 @@ class TestRegexSearchCidxMetaAccessFilteringNonAdmin:
         ]
         search_result = make_search_result(all_matches)
 
-        with _patch_regex_search_infrastructure("cidx-meta", search_result, access_filtering_service):
+        with _patch_regex_search_infrastructure(
+            "cidx-meta", search_result, access_filtering_service
+        ):
             result = _run(
                 handle_regex_search(
                     {"repository_alias": "cidx-meta", "pattern": "description"},
@@ -161,7 +166,9 @@ class TestRegexSearchCidxMetaAccessFilteringNonAdmin:
         ]
         search_result = make_search_result(all_matches)
 
-        with _patch_regex_search_infrastructure("cidx-meta", search_result, access_filtering_service):
+        with _patch_regex_search_infrastructure(
+            "cidx-meta", search_result, access_filtering_service
+        ):
             result = _run(
                 handle_regex_search(
                     {"repository_alias": "cidx-meta", "pattern": "description"},
@@ -190,7 +197,9 @@ class TestRegexSearchCidxMetaAccessFilteringNonAdmin:
         ]
         search_result = make_search_result(all_matches)
 
-        with _patch_regex_search_infrastructure("cidx-meta-global", search_result, access_filtering_service):
+        with _patch_regex_search_infrastructure(
+            "cidx-meta-global", search_result, access_filtering_service
+        ):
             result = _run(
                 handle_regex_search(
                     {"repository_alias": "cidx-meta-global", "pattern": "description"},
@@ -213,9 +222,7 @@ class TestRegexSearchCidxMetaAccessFilteringNonAdmin:
 class TestRegexSearchCidxMetaAccessFilteringAdmin:
     """AC2: Admin users retain full regex_search access to all cidx-meta files."""
 
-    def test_admin_user_sees_all_matches(
-        self, admin_user, access_filtering_service
-    ):
+    def test_admin_user_sees_all_matches(self, admin_user, access_filtering_service):
         """
         admin_user belongs to 'admins' group.
         All matches are returned without filtering.
@@ -228,7 +235,9 @@ class TestRegexSearchCidxMetaAccessFilteringAdmin:
         ]
         search_result = make_search_result(all_matches)
 
-        with _patch_regex_search_infrastructure("cidx-meta", search_result, access_filtering_service):
+        with _patch_regex_search_infrastructure(
+            "cidx-meta", search_result, access_filtering_service
+        ):
             result = _run(
                 handle_regex_search(
                     {"repository_alias": "cidx-meta", "pattern": "description"},
@@ -258,7 +267,9 @@ class TestRegexSearchCidxMetaAccessFilteringAdmin:
         ]
         search_result = make_search_result(all_matches)
 
-        with _patch_regex_search_infrastructure("some-repo", search_result, access_filtering_service):
+        with _patch_regex_search_infrastructure(
+            "some-repo", search_result, access_filtering_service
+        ):
             result = _run(
                 handle_regex_search(
                     {"repository_alias": "some-repo", "pattern": "auth"},
@@ -280,7 +291,9 @@ class TestRegexSearchCidxMetaAccessFilteringAdmin:
         ]
         search_result = make_search_result(all_matches)
 
-        with _patch_regex_search_infrastructure("cidx-meta", search_result, access_filtering_service=None):
+        with _patch_regex_search_infrastructure(
+            "cidx-meta", search_result, access_filtering_service=None
+        ):
             result = _run(
                 handle_regex_search(
                     {"repository_alias": "cidx-meta", "pattern": "description"},
@@ -320,7 +333,9 @@ class TestRegexSearchTotalMatchesReflectsFilteredCount:
         search_result = make_search_result(all_matches)
         assert search_result.total_matches == 4
 
-        with _patch_regex_search_infrastructure("cidx-meta", search_result, access_filtering_service):
+        with _patch_regex_search_infrastructure(
+            "cidx-meta", search_result, access_filtering_service
+        ):
             result = _run(
                 handle_regex_search(
                     {"repository_alias": "cidx-meta", "pattern": "description"},
@@ -348,7 +363,9 @@ class TestRegexSearchTotalMatchesReflectsFilteredCount:
         ]
         search_result = make_search_result(all_matches)
 
-        with _patch_regex_search_infrastructure("cidx-meta", search_result, access_filtering_service):
+        with _patch_regex_search_infrastructure(
+            "cidx-meta", search_result, access_filtering_service
+        ):
             result = _run(
                 handle_regex_search(
                     {"repository_alias": "cidx-meta", "pattern": "description"},

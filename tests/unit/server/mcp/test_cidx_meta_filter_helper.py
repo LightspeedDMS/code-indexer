@@ -9,9 +9,8 @@ TDD: Tests written FIRST before implementation (red phase).
 """
 
 from datetime import datetime
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
-import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
 
@@ -30,9 +29,7 @@ class TestFilterCidxMetaFilesHelper:
     def test_regular_user_only_sees_non_repo_md_files(self, access_filtering_service):
         """regular_user (cidx-meta only) sees README.md but no repo .md files."""
         files = ["repo-a.md", "repo-b.md", "repo-c.md", "README.md"]
-        result = access_filtering_service.filter_cidx_meta_files(
-            files, "regular_user"
-        )
+        result = access_filtering_service.filter_cidx_meta_files(files, "regular_user")
         assert "repo-a.md" not in result
         assert "repo-b.md" not in result
         assert "repo-c.md" not in result
@@ -55,9 +52,7 @@ class TestFilterCidxMetaFilesHelper:
     def test_non_md_files_always_pass_through(self, access_filtering_service):
         """Files without .md extension (e.g. .gitignore) are always accessible."""
         files = [".gitignore", "repo-c.md", "README.txt"]
-        result = access_filtering_service.filter_cidx_meta_files(
-            files, "regular_user"
-        )
+        result = access_filtering_service.filter_cidx_meta_files(files, "regular_user")
         assert ".gitignore" in result
         assert "README.txt" in result
         assert "repo-c.md" not in result

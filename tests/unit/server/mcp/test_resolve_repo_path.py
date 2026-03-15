@@ -20,18 +20,13 @@ Tests:
 
 import asyncio
 import json
-from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 
 class TestResolveRepoPathAliasJson:
     """Tests for alias JSON resolution in _resolve_repo_path (AC1, AC2, AC3, AC4)."""
 
-    def test_returns_alias_json_path_when_alias_exists_and_dir_exists(
-        self, tmp_path
-    ):
+    def test_returns_alias_json_path_when_alias_exists_and_dir_exists(self, tmp_path):
         """AC1: alias JSON target_path is returned as highest-priority resolution."""
         from code_indexer.server.mcp.handlers import _resolve_repo_path
 
@@ -209,12 +204,15 @@ class TestRegexSearchErrorMessage:
             "pattern": "some_pattern",
         }
 
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value="/nonexistent/dir",
-        ), patch(
-            "code_indexer.server.mcp.handlers._resolve_repo_path",
-            return_value=None,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value="/nonexistent/dir",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value=None,
+            ),
         ):
             response = asyncio.get_event_loop().run_until_complete(
                 handle_regex_search(args, fake_user)
@@ -273,15 +271,19 @@ class TestHandleDirectoryTreeAliasResolution:
         mock_alias_manager = MagicMock()
         mock_alias_manager.read_alias.return_value = str(repo_content_dir)
 
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value=str(tmp_path / "golden-repos"),
-        ), patch(
-            "code_indexer.server.mcp.handlers.get_server_global_registry",
-            return_value=mock_registry,
-        ), patch(
-            "code_indexer.server.mcp.handlers.AliasManager",
-            return_value=mock_alias_manager,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value=str(tmp_path / "golden-repos"),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                return_value=mock_registry,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.AliasManager",
+                return_value=mock_alias_manager,
+            ),
         ):
             response = handle_directory_tree(args, fake_user)
 
@@ -313,12 +315,15 @@ class TestHandleDirectoryTreeAliasResolution:
 
         args = {"repository_alias": "my-local-repo"}
 
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value=str(tmp_path / "golden-repos"),
-        ), patch(
-            "code_indexer.server.mcp.handlers._resolve_repo_path",
-            return_value=str(repo_dir),
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value=str(tmp_path / "golden-repos"),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value=str(repo_dir),
+            ),
         ):
             response = handle_directory_tree(args, fake_user)
 

@@ -7,10 +7,9 @@ documents for files that should be hidden from the current branch.
 """
 
 from pathlib import Path
-from typing import List, Dict, Any, Optional
-from unittest.mock import MagicMock, Mock, call, patch
+from typing import List, Dict, Any
+from unittest.mock import MagicMock, Mock
 
-import pytest
 
 from code_indexer.services.high_throughput_processor import HighThroughputProcessor
 
@@ -66,7 +65,10 @@ class TestFTSBranchIsolationDeletesDocuments:
         # files_to_hide = file_c.py, file_d.py
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (content_points, None)
+        processor.vector_store_client.scroll_points.return_value = (
+            content_points,
+            None,
+        )
         processor.vector_store_client._batch_update_points.return_value = None
 
         mock_fts_manager = MagicMock()
@@ -81,9 +83,9 @@ class TestFTSBranchIsolationDeletesDocuments:
         )
 
         # delete_document should be called for file_c.py and file_d.py
-        assert mock_fts_manager.delete_document.call_count == 2, (
-            f"Expected 2 delete_document calls, got {mock_fts_manager.delete_document.call_count}"
-        )
+        assert (
+            mock_fts_manager.delete_document.call_count == 2
+        ), f"Expected 2 delete_document calls, got {mock_fts_manager.delete_document.call_count}"
         deleted_paths = {
             call_args[0][0]
             for call_args in mock_fts_manager.delete_document.call_args_list
@@ -99,7 +101,10 @@ class TestFTSBranchIsolationDeletesDocuments:
         current_files = ["file_a.py"]
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (content_points, None)
+        processor.vector_store_client.scroll_points.return_value = (
+            content_points,
+            None,
+        )
         processor.vector_store_client._batch_update_points.return_value = None
 
         mock_fts_manager = MagicMock()
@@ -112,20 +117,16 @@ class TestFTSBranchIsolationDeletesDocuments:
         )
 
         # commit should be called exactly once
-        assert mock_fts_manager.commit.call_count == 1, (
-            f"Expected commit() called once, got {mock_fts_manager.commit.call_count}"
-        )
+        assert (
+            mock_fts_manager.commit.call_count == 1
+        ), f"Expected commit() called once, got {mock_fts_manager.commit.call_count}"
 
         # And commit should be called AFTER the delete_document calls
         manager_calls = mock_fts_manager.mock_calls
         delete_indices = [
-            i for i, c in enumerate(manager_calls)
-            if c[0] == "delete_document"
+            i for i, c in enumerate(manager_calls) if c[0] == "delete_document"
         ]
-        commit_indices = [
-            i for i, c in enumerate(manager_calls)
-            if c[0] == "commit"
-        ]
+        commit_indices = [i for i, c in enumerate(manager_calls) if c[0] == "commit"]
         assert len(commit_indices) == 1, "Exactly one commit call expected"
         assert all(
             di < commit_indices[0] for di in delete_indices
@@ -143,7 +144,10 @@ class TestFTSBranchIsolationNoOpsWhenManagerNone:
         current_files = ["file_a.py"]
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (content_points, None)
+        processor.vector_store_client.scroll_points.return_value = (
+            content_points,
+            None,
+        )
         processor.vector_store_client._batch_update_points.return_value = None
 
         # Should not raise when fts_manager=None
@@ -155,9 +159,7 @@ class TestFTSBranchIsolationNoOpsWhenManagerNone:
         )
 
         # Function should complete successfully
-        assert result is True or result is None, (
-            f"Expected success, got {result}"
-        )
+        assert result is True or result is None, f"Expected success, got {result}"
 
     def test_hide_files_still_hides_semantic_vectors_when_fts_none(
         self, tmp_path: Path
@@ -169,7 +171,10 @@ class TestFTSBranchIsolationNoOpsWhenManagerNone:
         current_files = ["file_a.py"]
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (content_points, None)
+        processor.vector_store_client.scroll_points.return_value = (
+            content_points,
+            None,
+        )
         processor.vector_store_client._batch_update_points.return_value = None
 
         processor.hide_files_not_in_branch_thread_safe(
@@ -194,7 +199,10 @@ class TestFTSBranchIsolationNoOpsWhenNoFilesToHide:
         current_files = ["file_a.py", "file_b.py"]  # All files visible
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (content_points, None)
+        processor.vector_store_client.scroll_points.return_value = (
+            content_points,
+            None,
+        )
         processor.vector_store_client._batch_update_points.return_value = None
 
         mock_fts_manager = MagicMock()
@@ -214,9 +222,7 @@ class TestFTSBranchIsolationNoOpsWhenNoFilesToHide:
 class TestFTSBranchIsolationErrorHandling:
     """Tests that FTS delete failure doesn't stop processing other files."""
 
-    def test_delete_failure_for_one_file_does_not_stop_processing(
-        self, tmp_path: Path
-    ):
+    def test_delete_failure_for_one_file_does_not_stop_processing(self, tmp_path: Path):
         """When delete_document() raises for one file, other files are still processed."""
         processor = _make_processor(tmp_path)
 
@@ -224,7 +230,10 @@ class TestFTSBranchIsolationErrorHandling:
         current_files = ["file_a.py"]  # 3 files to hide
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (content_points, None)
+        processor.vector_store_client.scroll_points.return_value = (
+            content_points,
+            None,
+        )
         processor.vector_store_client._batch_update_points.return_value = None
 
         mock_fts_manager = MagicMock()
@@ -250,9 +259,9 @@ class TestFTSBranchIsolationErrorHandling:
             call_args[0][0]
             for call_args in mock_fts_manager.delete_document.call_args_list
         }
-        assert len(delete_call_paths) >= 2, (
-            f"Expected at least 2 delete attempts, got {delete_call_paths}"
-        )
+        assert (
+            len(delete_call_paths) >= 2
+        ), f"Expected at least 2 delete attempts, got {delete_call_paths}"
 
     def test_commit_called_even_if_some_deletes_fail(self, tmp_path: Path):
         """commit() is still called even when some delete_document() calls fail."""
@@ -262,7 +271,10 @@ class TestFTSBranchIsolationErrorHandling:
         current_files = ["file_a.py"]
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (content_points, None)
+        processor.vector_store_client.scroll_points.return_value = (
+            content_points,
+            None,
+        )
         processor.vector_store_client._batch_update_points.return_value = None
 
         mock_fts_manager = MagicMock()
@@ -292,19 +304,21 @@ class TestFTSParameterSignature:
     ):
         """hide_files_not_in_branch_thread_safe() accepts fts_manager parameter."""
         import inspect
+
         processor = _make_processor(tmp_path)
         sig = inspect.signature(processor.hide_files_not_in_branch_thread_safe)
-        assert "fts_manager" in sig.parameters, (
-            "hide_files_not_in_branch_thread_safe() must accept fts_manager parameter"
-        )
+        assert (
+            "fts_manager" in sig.parameters
+        ), "hide_files_not_in_branch_thread_safe() must accept fts_manager parameter"
 
     def test_fts_manager_parameter_defaults_to_none(self, tmp_path: Path):
         """fts_manager parameter defaults to None in hide_files_not_in_branch_thread_safe()."""
         import inspect
+
         processor = _make_processor(tmp_path)
         sig = inspect.signature(processor.hide_files_not_in_branch_thread_safe)
         param = sig.parameters.get("fts_manager")
         assert param is not None, "fts_manager parameter must exist"
-        assert param.default is None, (
-            f"fts_manager should default to None, got {param.default}"
-        )
+        assert (
+            param.default is None
+        ), f"fts_manager should default to None, got {param.default}"

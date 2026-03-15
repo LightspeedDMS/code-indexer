@@ -8,10 +8,9 @@ ownership checks, and encryption round-trips.
 """
 
 import pytest
-import sqlite3
 import tempfile
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 
 @pytest.fixture
@@ -24,6 +23,7 @@ def db_path():
     path = os.path.join(test_dir, "test_git_creds.db")
     yield path
     import shutil
+
     shutil.rmtree(test_dir, ignore_errors=True)
 
 
@@ -442,9 +442,17 @@ class TestGitCredentialManager:
         assert len(credentials) == 1
         cred = credentials[0]
         # Must NOT contain full encrypted token
-        assert "token_suffix" in cred or "token_hint" in cred or "redacted" in str(cred).lower() or len(cred.get("token_suffix", "xxxx")) == 4
+        assert (
+            "token_suffix" in cred
+            or "token_hint" in cred
+            or "redacted" in str(cred).lower()
+            or len(cred.get("token_suffix", "xxxx")) == 4
+        )
         # Full encrypted token must not be present
-        assert "encrypted_token" not in cred or cred.get("encrypted_token") != "base64encryptedlongstring"
+        assert (
+            "encrypted_token" not in cred
+            or cred.get("encrypted_token") != "base64encryptedlongstring"
+        )
 
     def test_list_credentials_returns_identity_fields(self, initialized_db):
         """list_credentials includes forge_username, git_user_name, git_user_email."""

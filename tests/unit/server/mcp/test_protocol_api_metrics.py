@@ -16,7 +16,7 @@ AC7: ssh_key_manager no longer imports or calls api_metrics_service
 import json
 import pytest
 from datetime import datetime
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
 from code_indexer.server.auth.user_manager import User, UserRole
 
@@ -49,7 +49,9 @@ def _make_mock_tool_registry(tool_name: str, permission: str = "query_repos") ->
 def _make_mock_handler(return_value: dict = None) -> Mock:
     """Build a mock sync handler returning given value."""
     if return_value is None:
-        return_value = {"content": [{"type": "text", "text": json.dumps({"success": True})}]}
+        return_value = {
+            "content": [{"type": "text", "text": json.dumps({"success": True})}]
+        }
     return Mock(return_value=return_value)
 
 
@@ -427,7 +429,6 @@ class TestServiceLevelTrackingRemoved:
         file_crud_service should NOT import api_metrics_service after Bug #350 fix.
         Tracking is now centralized in protocol.py.
         """
-        import ast
         import pathlib
 
         source_path = pathlib.Path(

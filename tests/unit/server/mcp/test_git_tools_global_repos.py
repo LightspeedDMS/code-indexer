@@ -14,7 +14,6 @@ Tests:
 import json
 import os
 from datetime import datetime
-from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
 import pytest
@@ -75,15 +74,19 @@ class TestResolveGitRepoPath:
         repo_dir = tmp_path / "cidx-meta"
         repo_dir.mkdir()
 
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value=str(tmp_path),
-        ), patch(
-            "code_indexer.server.mcp.handlers.get_server_global_registry",
-            _make_mock_registry("local://cidx-meta"),
-        ), patch(
-            "code_indexer.server.mcp.handlers._resolve_repo_path",
-            return_value=str(repo_dir),
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value=str(tmp_path),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                _make_mock_registry("local://cidx-meta"),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value=str(repo_dir),
+            ),
         ):
             path, error_msg = _resolve_git_repo_path("cidx-meta-global", "testuser")
 
@@ -97,15 +100,19 @@ class TestResolveGitRepoPath:
         """Global repo that cannot be resolved returns error message."""
         from code_indexer.server.mcp.handlers import _resolve_git_repo_path
 
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value=str(tmp_path),
-        ), patch(
-            "code_indexer.server.mcp.handlers.get_server_global_registry",
-            _make_mock_registry_not_found(),
-        ), patch(
-            "code_indexer.server.mcp.handlers._resolve_repo_path",
-            return_value=None,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value=str(tmp_path),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                _make_mock_registry_not_found(),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value=None,
+            ),
         ):
             path, error_msg = _resolve_git_repo_path("missing-global", "testuser")
 
@@ -123,15 +130,19 @@ class TestResolveGitRepoPath:
         repo_dir.mkdir()
         (repo_dir / ".git").mkdir()
 
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value=str(tmp_path),
-        ), patch(
-            "code_indexer.server.mcp.handlers.get_server_global_registry",
-            _make_mock_registry_git_repo(),
-        ), patch(
-            "code_indexer.server.mcp.handlers._resolve_repo_path",
-            return_value=str(repo_dir),
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value=str(tmp_path),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                _make_mock_registry_git_repo(),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value=str(repo_dir),
+            ),
         ):
             path, error_msg = _resolve_git_repo_path("my-repo-global", "testuser")
 
@@ -178,15 +189,19 @@ class TestGitHandlersWithGlobalRepo:
         """git_status returns clear error message for local:// global repos."""
         from code_indexer.server.mcp import handlers
 
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value=os.path.dirname(mock_local_global_repo),
-        ), patch(
-            "code_indexer.server.mcp.handlers.get_server_global_registry",
-            _make_mock_registry("local://cidx-meta"),
-        ), patch(
-            "code_indexer.server.mcp.handlers._resolve_repo_path",
-            return_value=mock_local_global_repo,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value=os.path.dirname(mock_local_global_repo),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                _make_mock_registry("local://cidx-meta"),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value=mock_local_global_repo,
+            ),
         ):
             response = handlers.git_status(
                 {"repository_alias": "cidx-meta-global"}, mock_user
@@ -203,15 +218,19 @@ class TestGitHandlersWithGlobalRepo:
         """git_log returns clear error message for local:// global repos."""
         from code_indexer.server.mcp import handlers
 
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value=os.path.dirname(mock_local_global_repo),
-        ), patch(
-            "code_indexer.server.mcp.handlers.get_server_global_registry",
-            _make_mock_registry("local://cidx-meta"),
-        ), patch(
-            "code_indexer.server.mcp.handlers._resolve_repo_path",
-            return_value=mock_local_global_repo,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value=os.path.dirname(mock_local_global_repo),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                _make_mock_registry("local://cidx-meta"),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value=mock_local_global_repo,
+            ),
         ):
             response = handlers.git_log(
                 {"repository_alias": "cidx-meta-global"}, mock_user
@@ -228,15 +247,19 @@ class TestGitHandlersWithGlobalRepo:
         """git_diff returns clear error message for local:// global repos."""
         from code_indexer.server.mcp import handlers
 
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value=os.path.dirname(mock_local_global_repo),
-        ), patch(
-            "code_indexer.server.mcp.handlers.get_server_global_registry",
-            _make_mock_registry("local://cidx-meta"),
-        ), patch(
-            "code_indexer.server.mcp.handlers._resolve_repo_path",
-            return_value=mock_local_global_repo,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value=os.path.dirname(mock_local_global_repo),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                _make_mock_registry("local://cidx-meta"),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value=mock_local_global_repo,
+            ),
         ):
             response = handlers.git_diff(
                 {"repository_alias": "cidx-meta-global"}, mock_user
@@ -264,15 +287,19 @@ class TestFirstGenGitHandlersWithGlobalRepo:
         """handle_git_show_commit returns clear error for local:// global repos."""
         from code_indexer.server.mcp import handlers
 
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value=os.path.dirname(mock_local_global_repo),
-        ), patch(
-            "code_indexer.server.mcp.handlers.get_server_global_registry",
-            _make_mock_registry("local://cidx-meta"),
-        ), patch(
-            "code_indexer.server.mcp.handlers._resolve_repo_path",
-            return_value=mock_local_global_repo,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value=os.path.dirname(mock_local_global_repo),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                _make_mock_registry("local://cidx-meta"),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value=mock_local_global_repo,
+            ),
         ):
             response = handlers.handle_git_show_commit(
                 {"repository_alias": "cidx-meta-global", "commit_hash": "abc123"},
@@ -290,15 +317,19 @@ class TestFirstGenGitHandlersWithGlobalRepo:
         """handle_git_file_at_revision returns clear error for local:// global repos."""
         from code_indexer.server.mcp import handlers
 
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value=os.path.dirname(mock_local_global_repo),
-        ), patch(
-            "code_indexer.server.mcp.handlers.get_server_global_registry",
-            _make_mock_registry("local://cidx-meta"),
-        ), patch(
-            "code_indexer.server.mcp.handlers._resolve_repo_path",
-            return_value=mock_local_global_repo,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value=os.path.dirname(mock_local_global_repo),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                _make_mock_registry("local://cidx-meta"),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value=mock_local_global_repo,
+            ),
         ):
             response = handlers.handle_git_file_at_revision(
                 {
@@ -320,15 +351,19 @@ class TestFirstGenGitHandlersWithGlobalRepo:
         """handle_git_blame returns clear error for local:// global repos."""
         from code_indexer.server.mcp import handlers
 
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value=os.path.dirname(mock_local_global_repo),
-        ), patch(
-            "code_indexer.server.mcp.handlers.get_server_global_registry",
-            _make_mock_registry("local://cidx-meta"),
-        ), patch(
-            "code_indexer.server.mcp.handlers._resolve_repo_path",
-            return_value=mock_local_global_repo,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value=os.path.dirname(mock_local_global_repo),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                _make_mock_registry("local://cidx-meta"),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value=mock_local_global_repo,
+            ),
         ):
             response = handlers.handle_git_blame(
                 {"repository_alias": "cidx-meta-global", "path": "README.md"},
@@ -346,15 +381,19 @@ class TestFirstGenGitHandlersWithGlobalRepo:
         """handle_git_file_history returns clear error for local:// global repos."""
         from code_indexer.server.mcp import handlers
 
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value=os.path.dirname(mock_local_global_repo),
-        ), patch(
-            "code_indexer.server.mcp.handlers.get_server_global_registry",
-            _make_mock_registry("local://cidx-meta"),
-        ), patch(
-            "code_indexer.server.mcp.handlers._resolve_repo_path",
-            return_value=mock_local_global_repo,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value=os.path.dirname(mock_local_global_repo),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                _make_mock_registry("local://cidx-meta"),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value=mock_local_global_repo,
+            ),
         ):
             response = handlers.handle_git_file_history(
                 {"repository_alias": "cidx-meta-global", "path": "README.md"},
@@ -372,15 +411,19 @@ class TestFirstGenGitHandlersWithGlobalRepo:
         """handle_git_search_commits returns clear error for local:// global repos."""
         from code_indexer.server.mcp import handlers
 
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value=os.path.dirname(mock_local_global_repo),
-        ), patch(
-            "code_indexer.server.mcp.handlers.get_server_global_registry",
-            _make_mock_registry("local://cidx-meta"),
-        ), patch(
-            "code_indexer.server.mcp.handlers._resolve_repo_path",
-            return_value=mock_local_global_repo,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value=os.path.dirname(mock_local_global_repo),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                _make_mock_registry("local://cidx-meta"),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value=mock_local_global_repo,
+            ),
         ):
             response = handlers.handle_git_search_commits(
                 {"repository_alias": "cidx-meta-global", "query": "fix bug"},
@@ -398,15 +441,19 @@ class TestFirstGenGitHandlersWithGlobalRepo:
         """handle_git_search_diffs returns clear error for local:// global repos."""
         from code_indexer.server.mcp import handlers
 
-        with patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value=os.path.dirname(mock_local_global_repo),
-        ), patch(
-            "code_indexer.server.mcp.handlers.get_server_global_registry",
-            _make_mock_registry("local://cidx-meta"),
-        ), patch(
-            "code_indexer.server.mcp.handlers._resolve_repo_path",
-            return_value=mock_local_global_repo,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value=os.path.dirname(mock_local_global_repo),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                _make_mock_registry("local://cidx-meta"),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value=mock_local_global_repo,
+            ),
         ):
             response = handlers.handle_git_search_diffs(
                 {

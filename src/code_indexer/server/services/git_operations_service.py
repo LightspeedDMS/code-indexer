@@ -184,8 +184,10 @@ class GitOperationsService:
                 return
 
             # Get golden repo path from golden repo manager
-            golden_repo = self.activated_repo_manager.golden_repo_manager.get_golden_repo(
-                golden_repo_alias
+            golden_repo = (
+                self.activated_repo_manager.golden_repo_manager.get_golden_repo(
+                    golden_repo_alias
+                )
             )
             if golden_repo is None:
                 logger.warning(
@@ -1265,7 +1267,9 @@ class GitOperationsService:
             env = os.environ.copy()
             env["GIT_AUTHOR_NAME"] = user_name
             env["GIT_AUTHOR_EMAIL"] = user_email
-            env["GIT_COMMITTER_EMAIL"] = committer_email if committer_email else user_email
+            env["GIT_COMMITTER_EMAIL"] = (
+                committer_email if committer_email else user_email
+            )
             env["GIT_COMMITTER_NAME"] = committer_name if committer_name else user_name
 
             cmd = ["git", "commit", "-m", attributed_message]
@@ -1380,10 +1384,12 @@ class GitOperationsService:
         branch: Optional[str],
         credential: Dict[str, Any],
         remote_url: Optional[str] = None,
+        set_upstream: bool = True,
     ) -> Dict[str, Any]:
         """Push commits using PAT authentication via GIT_ASKPASS.
 
         Story #387: PAT-Authenticated Git Push with User Attribution.
+        Story #445: Fix branches with no upstream tracking.
 
         Uses GIT_ASKPASS to provide the PAT, converts SSH remotes to HTTPS,
         and sets GIT_AUTHOR/COMMITTER env vars from stored identity.
@@ -1391,9 +1397,10 @@ class GitOperationsService:
         Args:
             repo_path: Path to git repository
             remote: Remote name (e.g., "origin")
-            branch: Optional branch name
+            branch: Optional branch name; auto-detected from HEAD when None
             credential: Dict with token, git_user_name, git_user_email
             remote_url: Pre-resolved remote URL (avoids redundant subprocess call)
+            set_upstream: When True (default), sets upstream tracking after push
 
         Returns:
             Dict with success flag and push details
@@ -1401,7 +1408,9 @@ class GitOperationsService:
         Raises:
             GitCommandError: If git push fails
         """
-        from code_indexer.server.services.git_credential_helper import GitCredentialHelper
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
 
         helper = GitCredentialHelper()
 
@@ -1440,10 +1449,26 @@ class GitOperationsService:
                 env["GIT_AUTHOR_EMAIL"] = credential["git_user_email"]
                 env["GIT_COMMITTER_EMAIL"] = credential["git_user_email"]
 
-            # Push using HTTPS URL directly (not modifying remote config)
-            cmd = ["git", "push", https_url]
-            if branch:
-                cmd.append(branch)
+            # Auto-detect branch when not provided (Story #445)
+            if not branch:
+                rev_result = run_git_command(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    cwd=repo_path,
+                    check=True,
+                )
+                branch = rev_result.stdout.strip()
+                # Guard against detached HEAD (rev-parse returns "HEAD" literally)
+                if not branch or branch == "HEAD":
+                    raise GitCommandError(
+                        "Cannot push: repository is in detached HEAD state. "
+                        "Provide an explicit branch name.",
+                        stderr="",
+                        returncode=1,
+                    )
+
+            # Push using HTTPS URL with explicit refspec (Story #445)
+            # HEAD:refs/heads/<branch> works even when no upstream tracking exists
+            cmd = ["git", "push", https_url, f"HEAD:refs/heads/{branch}"]
 
             result = run_git_command(
                 cmd,
@@ -1453,11 +1478,42 @@ class GitOperationsService:
                 env=env,
             )
 
+            # Set upstream tracking after successful push (Story #445)
+            upstream_warning = None
+            if set_upstream:
+                try:
+                    run_git_command(
+                        [
+                            "git",
+                            "branch",
+                            f"--set-upstream-to={remote}/{branch}",
+                            branch,
+                        ],
+                        cwd=repo_path,
+                        check=True,
+                    )
+                except subprocess.CalledProcessError as upstream_err:
+                    logger.warning(
+                        "Failed to set upstream tracking for %s/%s: %s",
+                        remote,
+                        branch,
+                        upstream_err,
+                    )
+                    upstream_warning = (
+                        f"Push succeeded but upstream tracking not set: {upstream_err}"
+                    )
+
             pushed_commits = 0
             if ".." in result.stdout:
                 pushed_commits = 1
 
-            return {"success": True, "pushed_commits": pushed_commits}
+            response: Dict[str, Any] = {
+                "success": True,
+                "pushed_commits": pushed_commits,
+            }
+            if upstream_warning:
+                response["warning"] = upstream_warning
+            return response
 
         except subprocess.CalledProcessError as e:
             stderr = getattr(e, "stderr", "")
@@ -1725,9 +1781,7 @@ class GitOperationsService:
                 check=False,  # Don't raise on conflicts (non-zero exit)
             )
         except subprocess.TimeoutExpired as e:
-            raise GitCommandError(
-                f"git merge timed out after {e.timeout}s", stderr=""
-            )
+            raise GitCommandError(f"git merge timed out after {e.timeout}s", stderr="")
 
         if result.returncode == 0:
             return {
@@ -1896,21 +1950,25 @@ class GitOperationsService:
                 continue
 
             if status_code == "DD":
-                conflicted_files.append({
-                    "file": file_path,
-                    "status": "both_deleted",
-                    "regions": [],
-                    "is_binary": False,
-                })
+                conflicted_files.append(
+                    {
+                        "file": file_path,
+                        "status": "both_deleted",
+                        "regions": [],
+                        "is_binary": False,
+                    }
+                )
                 continue
 
             regions = self.parse_conflict_markers(repo_path, file_path)
-            conflicted_files.append({
-                "file": file_path,
-                "status": status_code,
-                "regions": regions,
-                "is_binary": len(regions) == 0,
-            })
+            conflicted_files.append(
+                {
+                    "file": file_path,
+                    "status": status_code,
+                    "regions": regions,
+                    "is_binary": len(regions) == 0,
+                }
+            )
 
         return {
             "in_merge": in_merge,
@@ -1918,7 +1976,9 @@ class GitOperationsService:
             "total_conflicts": len(conflicted_files),
         }
 
-    def parse_conflict_markers(self, repo_path: Path, file_path: str) -> List[Dict[str, Any]]:
+    def parse_conflict_markers(
+        self, repo_path: Path, file_path: str
+    ) -> List[Dict[str, Any]]:
         """Parse conflict markers from a file, extracting ours/theirs regions.
 
         Returns list of region dicts with:
@@ -2359,6 +2419,324 @@ class GitOperationsService:
             # Token is valid - consume it (single-use)
             del self._tokens[token]
             return True
+
+    # -------------------------------------------------------------------------
+    # Story #453: Git Stash Operations
+    # -------------------------------------------------------------------------
+
+    def git_stash_push(
+        self,
+        repo_path: Path,
+        message: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Stash current working directory changes.
+
+        Runs 'git stash push [-m "message"]'.
+
+        Args:
+            repo_path: Path to git repository
+            message: Optional stash message
+
+        Returns:
+            Dict with success, stash_ref ('stash@{0}'), and message
+
+        Raises:
+            GitCommandError: If git stash push fails
+        """
+        try:
+            cmd = ["git", "stash", "push"]
+            if message:
+                cmd.extend(["-m", message])
+
+            result = run_git_command(
+                cmd,
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_local_timeout,
+                check=True,
+            )
+
+            return {
+                "success": True,
+                "stash_ref": "stash@{0}",
+                "message": result.stdout.strip(),
+            }
+
+        except subprocess.CalledProcessError as e:
+            raise GitCommandError(
+                f"git stash push failed: {e}",
+                stderr=getattr(e, "stderr", ""),
+                returncode=e.returncode,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise GitCommandError(
+                f"git stash push timed out after {e.timeout}s", stderr=""
+            )
+
+    def git_stash_pop(
+        self,
+        repo_path: Path,
+        index: int = 0,
+    ) -> Dict[str, Any]:
+        """Apply and remove a stash entry.
+
+        Runs 'git stash pop stash@{N}'.
+
+        Args:
+            repo_path: Path to git repository
+            index: Stash index to pop (default 0)
+
+        Returns:
+            Dict with success and message
+
+        Raises:
+            GitCommandError: If git stash pop fails
+        """
+        try:
+            result = run_git_command(
+                ["git", "stash", "pop", f"stash@{{{index}}}"],
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_local_timeout,
+                check=True,
+            )
+
+            return {
+                "success": True,
+                "message": result.stdout.strip(),
+            }
+
+        except subprocess.CalledProcessError as e:
+            raise GitCommandError(
+                f"git stash pop failed: {e}",
+                stderr=getattr(e, "stderr", ""),
+                returncode=e.returncode,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise GitCommandError(
+                f"git stash pop timed out after {e.timeout}s", stderr=""
+            )
+
+    def git_stash_apply(
+        self,
+        repo_path: Path,
+        index: int = 0,
+    ) -> Dict[str, Any]:
+        """Apply a stash entry without removing it.
+
+        Runs 'git stash apply stash@{N}'.
+
+        Args:
+            repo_path: Path to git repository
+            index: Stash index to apply (default 0)
+
+        Returns:
+            Dict with success and message
+
+        Raises:
+            GitCommandError: If git stash apply fails
+        """
+        try:
+            result = run_git_command(
+                ["git", "stash", "apply", f"stash@{{{index}}}"],
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_local_timeout,
+                check=True,
+            )
+
+            return {
+                "success": True,
+                "message": result.stdout.strip(),
+            }
+
+        except subprocess.CalledProcessError as e:
+            raise GitCommandError(
+                f"git stash apply failed: {e}",
+                stderr=getattr(e, "stderr", ""),
+                returncode=e.returncode,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise GitCommandError(
+                f"git stash apply timed out after {e.timeout}s", stderr=""
+            )
+
+    def git_stash_list(
+        self,
+        repo_path: Path,
+    ) -> Dict[str, Any]:
+        """List all stash entries.
+
+        Runs 'git stash list --format=%gd|||%gs|||%ci' and parses output.
+
+        Args:
+            repo_path: Path to git repository
+
+        Returns:
+            Dict with success and stashes list. Each entry has:
+            index (int), message (str), created_at (str)
+
+        Raises:
+            GitCommandError: If git stash list fails
+        """
+        try:
+            result = run_git_command(
+                ["git", "stash", "list", "--format=%gd|||%gs|||%ci"],
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_local_timeout,
+                check=True,
+            )
+
+            stashes = []
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split("|||")
+                if len(parts) >= 2:
+                    ref = parts[0].strip()  # e.g. stash@{0}
+                    msg = parts[1].strip()  # e.g. WIP on main: abc123 message
+                    created_at = parts[2].strip() if len(parts) >= 3 else ""
+                    # Extract numeric index from stash@{N}
+                    idx = 0
+                    if ref.startswith("stash@{") and ref.endswith("}"):
+                        try:
+                            idx = int(ref[7:-1])
+                        except ValueError:
+                            pass
+                    stashes.append(
+                        {
+                            "index": idx,
+                            "message": msg,
+                            "created_at": created_at,
+                        }
+                    )
+
+            return {
+                "success": True,
+                "stashes": stashes,
+            }
+
+        except subprocess.CalledProcessError as e:
+            raise GitCommandError(
+                f"git stash list failed: {e}",
+                stderr=getattr(e, "stderr", ""),
+                returncode=e.returncode,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise GitCommandError(
+                f"git stash list timed out after {e.timeout}s", stderr=""
+            )
+
+    def git_stash_drop(
+        self,
+        repo_path: Path,
+        index: int = 0,
+    ) -> Dict[str, Any]:
+        """Remove a stash entry without applying it.
+
+        Runs 'git stash drop stash@{N}'.
+
+        Args:
+            repo_path: Path to git repository
+            index: Stash index to drop (default 0)
+
+        Returns:
+            Dict with success and message
+
+        Raises:
+            GitCommandError: If git stash drop fails
+        """
+        try:
+            result = run_git_command(
+                ["git", "stash", "drop", f"stash@{{{index}}}"],
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_local_timeout,
+                check=True,
+            )
+
+            return {
+                "success": True,
+                "message": result.stdout.strip(),
+            }
+
+        except subprocess.CalledProcessError as e:
+            raise GitCommandError(
+                f"git stash drop failed: {e}",
+                stderr=getattr(e, "stderr", ""),
+                returncode=e.returncode,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise GitCommandError(
+                f"git stash drop timed out after {e.timeout}s", stderr=""
+            )
+
+    # -------------------------------------------------------------------------
+    # Story #454: Git Amend Operation
+    # -------------------------------------------------------------------------
+
+    def git_amend(
+        self,
+        repo_path: Path,
+        message: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Amend the most recent git commit.
+
+        With message: runs 'git commit --amend -m "msg"'.
+        Without message: runs 'git commit --amend --no-edit'.
+
+        Args:
+            repo_path: Path to git repository
+            message: New commit message. If None, uses --no-edit to keep current message.
+            env: Optional environment variables dict (e.g. GIT_AUTHOR_NAME/EMAIL,
+                 GIT_COMMITTER_NAME/EMAIL). If None, inherits current environment.
+
+        Returns:
+            Dict with success, commit_hash (new HEAD hash), and message
+
+        Raises:
+            GitCommandError: If git commit --amend fails
+        """
+        try:
+            cmd = ["git", "commit", "--amend"]
+            if message is not None:
+                cmd.extend(["-m", message])
+            else:
+                cmd.append("--no-edit")
+
+            run_kwargs: Dict[str, Any] = {
+                "cwd": repo_path,
+                "timeout": self._git_timeouts.git_local_timeout,
+                "check": True,
+            }
+            if env is not None:
+                run_kwargs["env"] = env
+
+            run_git_command(cmd, **run_kwargs)
+
+            # Get the new commit hash via rev-parse HEAD
+            hash_result = run_git_command(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_path,
+                timeout=self._git_timeouts.git_local_timeout,
+                check=True,
+            )
+            commit_hash = hash_result.stdout.strip()
+
+            return {
+                "success": True,
+                "commit_hash": commit_hash,
+                "message": f"Amended commit {commit_hash[:8]}",
+            }
+
+        except subprocess.CalledProcessError as e:
+            raise GitCommandError(
+                f"git commit --amend failed: {e}",
+                stderr=getattr(e, "stderr", ""),
+                returncode=e.returncode,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise GitCommandError(
+                f"git commit --amend timed out after {e.timeout}s", stderr=""
+            )
 
 
 # Global service instance (lazy initialization to avoid circular imports)

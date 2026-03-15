@@ -16,8 +16,7 @@ Tests cover:
 
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, Optional
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -65,6 +64,10 @@ class TestGitPushWithPatEnvVars:
                 result = MagicMock()
                 result.stdout = "git@github.com:owner/repo.git"
                 return result
+            elif "rev-parse" in cmd:
+                result = MagicMock()
+                result.stdout = "main"
+                return result
             # Capture env for the push command
             captured_env.update(kwargs.get("env", {}))
             result = MagicMock()
@@ -76,9 +79,7 @@ class TestGitPushWithPatEnvVars:
             "code_indexer.server.services.git_operations_service.run_git_command",
             side_effect=mock_run_git,
         ):
-            git_ops_service.git_push_with_pat(
-                repo_dir, "origin", None, MOCK_CREDENTIAL
-            )
+            git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
         assert "GIT_ASKPASS" in captured_env
         # Should be an absolute path to a script
@@ -95,6 +96,10 @@ class TestGitPushWithPatEnvVars:
                 result = MagicMock()
                 result.stdout = "git@github.com:owner/repo.git"
                 return result
+            elif "rev-parse" in cmd:
+                result = MagicMock()
+                result.stdout = "main"
+                return result
             captured_env.update(kwargs.get("env", {}))
             result = MagicMock()
             result.stdout = ""
@@ -104,9 +109,7 @@ class TestGitPushWithPatEnvVars:
             "code_indexer.server.services.git_operations_service.run_git_command",
             side_effect=mock_run_git,
         ):
-            git_ops_service.git_push_with_pat(
-                repo_dir, "origin", None, MOCK_CREDENTIAL
-            )
+            git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
         assert captured_env.get("GIT_TERMINAL_PROMPT") == "0"
 
@@ -119,6 +122,10 @@ class TestGitPushWithPatEnvVars:
                 result = MagicMock()
                 result.stdout = "git@github.com:owner/repo.git"
                 return result
+            elif "rev-parse" in cmd:
+                result = MagicMock()
+                result.stdout = "main"
+                return result
             captured_env.update(kwargs.get("env", {}))
             result = MagicMock()
             result.stdout = ""
@@ -128,9 +135,7 @@ class TestGitPushWithPatEnvVars:
             "code_indexer.server.services.git_operations_service.run_git_command",
             side_effect=mock_run_git,
         ):
-            git_ops_service.git_push_with_pat(
-                repo_dir, "origin", None, MOCK_CREDENTIAL
-            )
+            git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
         assert captured_env.get("GIT_AUTHOR_NAME") == "Alice Smith"
 
@@ -143,6 +148,10 @@ class TestGitPushWithPatEnvVars:
                 result = MagicMock()
                 result.stdout = "git@github.com:owner/repo.git"
                 return result
+            elif "rev-parse" in cmd:
+                result = MagicMock()
+                result.stdout = "main"
+                return result
             captured_env.update(kwargs.get("env", {}))
             result = MagicMock()
             result.stdout = ""
@@ -152,9 +161,7 @@ class TestGitPushWithPatEnvVars:
             "code_indexer.server.services.git_operations_service.run_git_command",
             side_effect=mock_run_git,
         ):
-            git_ops_service.git_push_with_pat(
-                repo_dir, "origin", None, MOCK_CREDENTIAL
-            )
+            git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
         assert captured_env.get("GIT_AUTHOR_EMAIL") == "alice@example.com"
 
@@ -167,6 +174,10 @@ class TestGitPushWithPatEnvVars:
                 result = MagicMock()
                 result.stdout = "git@github.com:owner/repo.git"
                 return result
+            elif "rev-parse" in cmd:
+                result = MagicMock()
+                result.stdout = "main"
+                return result
             captured_env.update(kwargs.get("env", {}))
             result = MagicMock()
             result.stdout = ""
@@ -176,9 +187,7 @@ class TestGitPushWithPatEnvVars:
             "code_indexer.server.services.git_operations_service.run_git_command",
             side_effect=mock_run_git,
         ):
-            git_ops_service.git_push_with_pat(
-                repo_dir, "origin", None, MOCK_CREDENTIAL
-            )
+            git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
         assert captured_env.get("GIT_COMMITTER_NAME") == "Alice Smith"
 
@@ -191,6 +200,10 @@ class TestGitPushWithPatEnvVars:
                 result = MagicMock()
                 result.stdout = "git@github.com:owner/repo.git"
                 return result
+            elif "rev-parse" in cmd:
+                result = MagicMock()
+                result.stdout = "main"
+                return result
             captured_env.update(kwargs.get("env", {}))
             result = MagicMock()
             result.stdout = ""
@@ -200,9 +213,7 @@ class TestGitPushWithPatEnvVars:
             "code_indexer.server.services.git_operations_service.run_git_command",
             side_effect=mock_run_git,
         ):
-            git_ops_service.git_push_with_pat(
-                repo_dir, "origin", None, MOCK_CREDENTIAL
-            )
+            git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
         assert captured_env.get("GIT_COMMITTER_EMAIL") == "alice@example.com"
 
@@ -215,6 +226,10 @@ class TestGitPushWithPatEnvVars:
             if "get-url" in cmd:
                 result = MagicMock()
                 result.stdout = "git@github.com:owner/repo.git"
+                return result
+            elif "rev-parse" in cmd:
+                result = MagicMock()
+                result.stdout = "main"
                 return result
             captured_env.update(kwargs.get("env", {}))
             result = MagicMock()
@@ -237,7 +252,9 @@ class TestGitPushWithPatEnvVars:
 class TestGitPushWithPatUrlConversion:
     """Tests for SSH-to-HTTPS URL conversion in git_push_with_pat."""
 
-    def test_ssh_url_converted_to_https_in_push_command(self, repo_dir, git_ops_service):
+    def test_ssh_url_converted_to_https_in_push_command(
+        self, repo_dir, git_ops_service
+    ):
         """SSH remote URL is converted to HTTPS for the push command."""
         push_cmd = []
 
@@ -245,6 +262,10 @@ class TestGitPushWithPatUrlConversion:
             if "get-url" in cmd:
                 result = MagicMock()
                 result.stdout = "git@github.com:owner/repo.git"
+                return result
+            elif "rev-parse" in cmd:
+                result = MagicMock()
+                result.stdout = "main"
                 return result
             push_cmd.extend(cmd)
             result = MagicMock()
@@ -255,9 +276,7 @@ class TestGitPushWithPatUrlConversion:
             "code_indexer.server.services.git_operations_service.run_git_command",
             side_effect=mock_run_git,
         ):
-            git_ops_service.git_push_with_pat(
-                repo_dir, "origin", None, MOCK_CREDENTIAL
-            )
+            git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
         # The push command should use HTTPS URL, not SSH
         assert "https://github.com/owner/repo.git" in push_cmd
@@ -274,6 +293,10 @@ class TestGitPushWithPatUrlConversion:
                 result = MagicMock()
                 result.stdout = "https://github.com/owner/repo.git"
                 return result
+            elif "rev-parse" in cmd:
+                result = MagicMock()
+                result.stdout = "main"
+                return result
             push_cmd.extend(cmd)
             result = MagicMock()
             result.stdout = ""
@@ -283,49 +306,58 @@ class TestGitPushWithPatUrlConversion:
             "code_indexer.server.services.git_operations_service.run_git_command",
             side_effect=mock_run_git,
         ):
-            git_ops_service.git_push_with_pat(
-                repo_dir, "origin", None, MOCK_CREDENTIAL
-            )
+            git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
         assert "https://github.com/owner/repo.git" in push_cmd
 
-    def test_push_without_branch_omits_branch_from_cmd(self, repo_dir, git_ops_service):
-        """Push without branch does not append branch to command."""
+    def test_push_without_branch_auto_detects_and_uses_refspec(
+        self, repo_dir, git_ops_service
+    ):
+        """Push without branch auto-detects current branch and uses explicit refspec.
+
+        Story #445: branch=None triggers rev-parse and HEAD:refs/heads/<branch> refspec.
+        """
         push_cmd = []
 
         def mock_run_git(cmd, **kwargs):
-            if "get-url" in cmd:
-                result = MagicMock()
-                result.stdout = "git@github.com:owner/repo.git"
-                return result
-            push_cmd.extend(cmd)
             result = MagicMock()
-            result.stdout = ""
+            if "get-url" in cmd:
+                result.stdout = "git@github.com:owner/repo.git"
+            elif "rev-parse" in cmd and "--abbrev-ref" in cmd:
+                result.stdout = "main"
+            elif "push" in cmd:
+                push_cmd.extend(cmd)
+                result.stdout = ""
+            else:
+                result.stdout = ""
             return result
 
         with patch(
             "code_indexer.server.services.git_operations_service.run_git_command",
             side_effect=mock_run_git,
         ):
-            git_ops_service.git_push_with_pat(
-                repo_dir, "origin", None, MOCK_CREDENTIAL
-            )
+            git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
-        # cmd is ["git", "push", url] — length should be 3
-        assert len(push_cmd) == 3
+        # Story #445: push uses explicit refspec, not bare branch name
+        assert "HEAD:refs/heads/main" in push_cmd
+        assert len(push_cmd) == 4  # ["git", "push", url, "HEAD:refs/heads/main"]
 
-    def test_push_with_branch_appends_branch_to_cmd(self, repo_dir, git_ops_service):
-        """Push with branch appends branch to command."""
+    def test_push_with_branch_uses_explicit_refspec(self, repo_dir, git_ops_service):
+        """Push with branch uses explicit HEAD:refs/heads/<branch> refspec.
+
+        Story #445: refspec form works even without upstream tracking.
+        """
         push_cmd = []
 
         def mock_run_git(cmd, **kwargs):
-            if "get-url" in cmd:
-                result = MagicMock()
-                result.stdout = "git@github.com:owner/repo.git"
-                return result
-            push_cmd.extend(cmd)
             result = MagicMock()
-            result.stdout = ""
+            if "get-url" in cmd:
+                result.stdout = "git@github.com:owner/repo.git"
+            elif "push" in cmd:
+                push_cmd.extend(cmd)
+                result.stdout = ""
+            else:
+                result.stdout = ""
             return result
 
         with patch(
@@ -336,15 +368,24 @@ class TestGitPushWithPatUrlConversion:
                 repo_dir, "origin", "main", MOCK_CREDENTIAL
             )
 
-        assert "main" in push_cmd
-        assert len(push_cmd) == 4  # ["git", "push", url, "main"]
+        # Story #445: refspec form used, not bare branch name
+        assert "HEAD:refs/heads/main" in push_cmd
+        assert len(push_cmd) == 4  # ["git", "push", url, "HEAD:refs/heads/main"]
 
-    def test_uses_provided_remote_url_without_subprocess_call(self, repo_dir, git_ops_service):
+    def test_uses_provided_remote_url_without_subprocess_call(
+        self, repo_dir, git_ops_service
+    ):
         """When remote_url is pre-provided, no 'get-url' subprocess call is made."""
         push_cmd = []
 
         def mock_run_git(cmd, **kwargs):
-            assert "get-url" not in cmd, "Should not call git remote get-url when URL pre-provided"
+            assert (
+                "get-url" not in cmd
+            ), "Should not call git remote get-url when URL pre-provided"
+            if "rev-parse" in cmd:
+                result = MagicMock()
+                result.stdout = "main"
+                return result
             push_cmd.extend(cmd)
             result = MagicMock()
             result.stdout = ""
@@ -355,7 +396,10 @@ class TestGitPushWithPatUrlConversion:
             side_effect=mock_run_git,
         ):
             git_ops_service.git_push_with_pat(
-                repo_dir, "origin", None, MOCK_CREDENTIAL,
+                repo_dir,
+                "origin",
+                None,
+                MOCK_CREDENTIAL,
                 remote_url="git@github.com:owner/repo.git",
             )
 
@@ -385,6 +429,10 @@ class TestGitPushWithPatErrorHandling:
             if "get-url" in cmd:
                 result = MagicMock()
                 result.stdout = "git@github.com:owner/repo.git"
+                return result
+            elif "rev-parse" in cmd:
+                result = MagicMock()
+                result.stdout = "main"
                 return result
             result = MagicMock()
             result.stdout = ""
@@ -430,7 +478,9 @@ class TestGitPushWithPatErrorHandling:
                 "code_indexer.server.services.git_credential_helper.GitCredentialHelper.cleanup_askpass_script",
                 side_effect=lambda p: cleanup_called.append(p),
             ):
-                from code_indexer.server.services.git_operations_service import GitCommandError
+                from code_indexer.server.services.git_operations_service import (
+                    GitCommandError,
+                )
 
                 with pytest.raises(GitCommandError):
                     git_ops_service.git_push_with_pat(
@@ -439,7 +489,9 @@ class TestGitPushWithPatErrorHandling:
 
         assert len(cleanup_called) == 1
 
-    def test_called_process_error_raises_git_command_error(self, repo_dir, git_ops_service):
+    def test_called_process_error_raises_git_command_error(
+        self, repo_dir, git_ops_service
+    ):
         """CalledProcessError from git push is wrapped in GitCommandError."""
         from code_indexer.server.services.git_operations_service import GitCommandError
 
@@ -485,7 +537,9 @@ class TestGitPushWithPatErrorHandling:
 
         assert "timed out" in str(exc_info.value)
 
-    def test_get_remote_url_failure_raises_git_command_error(self, repo_dir, git_ops_service):
+    def test_get_remote_url_failure_raises_git_command_error(
+        self, repo_dir, git_ops_service
+    ):
         """Failed git remote get-url raises GitCommandError."""
         from code_indexer.server.services.git_operations_service import GitCommandError
 
@@ -511,6 +565,7 @@ class TestGitPushWithPatReturn:
 
     def test_returns_success_true_on_successful_push(self, repo_dir, git_ops_service):
         """Returns {'success': True, 'pushed_commits': ...} on success."""
+
         def mock_run_git(cmd, **kwargs):
             if "get-url" in cmd:
                 result = MagicMock()

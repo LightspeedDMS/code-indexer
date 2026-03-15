@@ -661,9 +661,9 @@ class TestSimpleWatchHandlerTmpPrefixFiltering:
 
         # Suffix is .md but basename starts with .tmp_
         p = Path("/repo/.tmp_XYZ12345_README.md")
-        assert handler._should_ignore_file(p), (
-            f"File {p.name} has .md extension but .tmp_ prefix — must be ignored"
-        )
+        assert handler._should_ignore_file(
+            p
+        ), f"File {p.name} has .md extension but .tmp_ prefix — must be ignored"
 
     def test_regular_md_file_is_not_ignored(self):
         """Regular .md files without .tmp_ prefix must NOT be ignored."""
@@ -738,13 +738,13 @@ class TestSimpleWatchHandlerTmpPrefixFiltering:
         handler.stop_watching()
 
         # .tmp_ prefixed file must not appear in any callback
-        assert not any(".tmp_" in f for f in callback_files), (
-            f".tmp_ prefixed file must not trigger callback. Got: {callback_files}"
-        )
+        assert not any(
+            ".tmp_" in f for f in callback_files
+        ), f".tmp_ prefixed file must not trigger callback. Got: {callback_files}"
         # The real file should have triggered callback
-        assert any("real_content.md" in f for f in callback_files), (
-            f"real_content.md should have triggered callback. Got: {callback_files}"
-        )
+        assert any(
+            "real_content.md" in f for f in callback_files
+        ), f"real_content.md should have triggered callback. Got: {callback_files}"
 
 
 class TestSimpleWatchHandlerAdditionalHandlers:
@@ -777,7 +777,7 @@ class TestSimpleWatchHandlerAdditionalHandlers:
     def test_additional_handlers_scheduled_on_observer(self, temp_folder):
         """Test that additional handlers are scheduled on the observer and receive events."""
         from code_indexer.services.simple_watch_handler import SimpleWatchHandler
-        from watchdog.events import FileSystemEventHandler, FileSystemEvent
+        from watchdog.events import FileSystemEventHandler
 
         # Create event recorder handler (Anti-Mock: real FileSystemEventHandler)
         class EventRecorder(FileSystemEventHandler):
