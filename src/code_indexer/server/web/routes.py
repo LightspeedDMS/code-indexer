@@ -607,7 +607,9 @@ def langfuse_sync_trigger(request: Request):
         )
 
     try:
-        from ..app import langfuse_sync_service
+        from ..app import app as _app
+
+        langfuse_sync_service = getattr(_app.state, "langfuse_sync_service", None)
 
         if langfuse_sync_service is None:
             return JSONResponse(

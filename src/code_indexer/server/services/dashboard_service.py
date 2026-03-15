@@ -469,8 +469,13 @@ class DashboardService:
                 - config: Sync configuration (pull_enabled, interval)
         """
         try:
-            from ..app import langfuse_sync_service
             from ..services.config_service import get_config_service
+
+            # Get langfuse_sync_service from app.state (not module global,
+            # which is stale after lifespan.py refactor)
+            from ..app import app as _app
+
+            langfuse_sync_service = getattr(_app.state, "langfuse_sync_service", None)
 
             # Get config
             config_service = get_config_service()
