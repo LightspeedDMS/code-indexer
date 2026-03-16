@@ -22,72 +22,7 @@ JOB_STATUS_PENDING = "pending"
 JOB_STATUS_RUNNING = "running"
 
 # Pydantic models — re-exported for backward compatibility with existing tests and callers.
-from .models.auth import (
-    LoginRequest,
-    LoginResponse,
-    RefreshTokenRequest,
-    RefreshTokenResponse,
-    UserInfo,
-    CreateUserRequest,
-    UpdateUserRequest,
-    ChangePasswordRequest,
-    UserResponse,
-    MessageResponse,
-    RegistrationRequest,
-    PasswordResetRequest,
-    CreateApiKeyRequest,
-    CreateApiKeyResponse,
-    ApiKeyListResponse,
-    CreateMCPCredentialRequest,
-    CreateMCPCredentialResponse,
-    MCPCredentialListResponse,
-)
-from .models.repos import (
-    AddGoldenRepoRequest,
-    GoldenRepoInfo,
-    ActivateRepositoryRequest,
-    ActivatedRepositoryInfo,
-    SwitchBranchRequest,
-    RepositoryInfo,
-    RepositoryDetailsResponse,
-    RepositoryListResponse,
-    AvailableRepositoryListResponse,
-    RepositorySyncResponse,
-    BranchInfo,
-    RepositoryBranchesResponse,
-    RepositoryStatistics,
-    GitInfo,
-    RepositoryConfiguration,
-    RepositoryDetailsV2Response,
-    ComponentRepoInfo,
-    CompositeRepositoryDetails,
-    RepositorySyncRequest,
-    SyncProgress,
-    SyncJobOptions,
-    RepositorySyncJobResponse,
-    GeneralRepositorySyncRequest,
-)
-from .models.jobs import (
-    AddIndexRequest,
-    AddIndexResponse,
-    IndexInfo,
-    IndexStatusResponse,
-    JobResponse,
-    JobStatusResponse,
-    JobListResponse,
-    JobCancellationResponse,
-    JobCleanupResponse,
-)
-from .models.query import (
-    SemanticQueryRequest,
-    QueryMetadata,
-    SemanticQueryResponse,
-    FTSResultItem,
-    UnifiedSearchMetadata,
-    UnifiedSearchResponse,
-)
 # Re-export QueryResultItem for backward compatibility
-from .models.api_models import QueryResultItem
 
 
 # Global managers (initialized in create_app)
@@ -103,10 +38,16 @@ semantic_query_manager: Optional[SemanticQueryManager] = None
 workspace_cleanup_service: Optional[WorkspaceCleanupService] = None
 langfuse_sync_service: Optional[Any] = None  # Story #168: Langfuse trace sync service
 _server_hnsw_cache: Optional[Any] = None  # Server-wide HNSW cache (Story #526)
-_server_fts_cache: Optional[Any] = None   # Server-wide FTS cache
+_server_fts_cache: Optional[Any] = None  # Server-wide FTS cache
+
+# Module-level service singletons (imported for backward compat with handlers.py app_module pattern)
+from .services.file_service import file_service as file_service  # noqa: F401
+
+# Pydantic models re-exported for backward compatibility
+from .models.api_models import QueryResultItem as QueryResultItem  # noqa: F401
 
 # Helper functions re-exported from app_helpers.py for backward compatibility.
-from .app_helpers import (
+from .app_helpers import (  # noqa: F401
     set_server_start_time,
     get_server_uptime,
     get_server_start_time,
@@ -123,7 +64,7 @@ from .app_helpers import (
 
 # Story #409 AC5: Bootstrap helpers extracted to startup/bootstrap.py
 # Re-exported here for backward compatibility.
-from .startup.bootstrap import (
+from .startup.bootstrap import (  # noqa: F401
     _detect_repo_root,
     migrate_legacy_cidx_meta,
     bootstrap_cidx_meta,
