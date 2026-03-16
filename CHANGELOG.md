@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.21
+
+### Bug Fixes
+
+- fix: Bug #464 -- get_cached_content page parameter not converted from string to int, causing TypeError
+- fix: Bug #443 -- GitLab CI client does not follow HTTP 301 redirects for renamed/moved projects
+- fix: 94 undefined name errors in inline_routes.py from v9.5.16 app.py modularization
+- fix: Langfuse sync status showing Unknown -- stale module-level global after lifespan refactor
+- fix: OAuth discovery endpoint broken import path after modularization
+- fix: file_service missing from app.py globals (broke browse_directory, get_file_content, list_files)
+- fix: 8 missing Pydantic model re-exports in app.py (broke 100+ test files)
+- fix: non-blocking poll_delegation_job with repeatable result retrieval
+- fix: large delegation results use PayloadCache for chunked retrieval
+- fix: 7 failing unit tests -- fixture, expectation, and categorization fixes
+
+### Features
+
+- feat: MCP route smoke test regression suite (Story #463) -- 39 TestClient tests catching refactor bug class
+- test: normal_user denial tests for cs_list_repositories and cs_check_health
+
+### Documentation
+
+- docs: improved delegation MCP tool descriptions for accuracy and completeness
+
 ## v9.5.17
 
 ### Features
