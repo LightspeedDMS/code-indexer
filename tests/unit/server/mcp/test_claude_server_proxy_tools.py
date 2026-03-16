@@ -403,6 +403,26 @@ class TestCsListRepositories:
     """Tests for handle_cs_list_repositories handler."""
 
     @pytest.mark.asyncio
+    async def test_normal_user_is_denied(self, normal_user, mock_delegation_config):
+        """Normal user receives Access denied error for cs_list_repositories."""
+        from code_indexer.server.mcp.handlers import handle_cs_list_repositories
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "code_indexer.server.mcp.handlers._get_delegation_config",
+                lambda: mock_delegation_config,
+            )
+
+            response = await handle_cs_list_repositories(
+                {},
+                normal_user,
+            )
+
+        data = json.loads(response["content"][0]["text"])
+        assert data["success"] is False
+        assert "denied" in data["error"].lower() or "access" in data["error"].lower()
+
+    @pytest.mark.asyncio
     async def test_returns_formatted_list_from_claude_server(
         self,
         power_user,
@@ -545,6 +565,26 @@ class TestCsListRepositories:
 
 class TestCsCheckHealth:
     """Tests for handle_cs_check_health handler."""
+
+    @pytest.mark.asyncio
+    async def test_normal_user_is_denied(self, normal_user, mock_delegation_config):
+        """Normal user receives Access denied error for cs_check_health."""
+        from code_indexer.server.mcp.handlers import handle_cs_check_health
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "code_indexer.server.mcp.handlers._get_delegation_config",
+                lambda: mock_delegation_config,
+            )
+
+            response = await handle_cs_check_health(
+                {},
+                normal_user,
+            )
+
+        data = json.loads(response["content"][0]["text"])
+        assert data["success"] is False
+        assert "denied" in data["error"].lower() or "access" in data["error"].lower()
 
     @pytest.mark.asyncio
     async def test_returns_health_data_when_server_healthy(
