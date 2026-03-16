@@ -76,7 +76,7 @@ class TestLanguageMapperCore:
     def test_web_languages_support(self):
         """Test support for web-specific languages."""
         test_cases = [
-            ("html", {"html", "htm"}),
+            ("html", {"html", "htm", "htmx"}),
             ("css", {"css"}),
             ("vue", {"vue"}),
         ]

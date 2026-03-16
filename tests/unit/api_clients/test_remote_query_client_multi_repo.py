@@ -26,8 +26,13 @@ from tests.unit.api_clients.test_isolation_utils import (
 )
 
 
+@pytest.mark.slow
 class TestRemoteQueryClientMultiRepo:
-    """Test multi-repository search with real server infrastructure."""
+    """Test multi-repository search with real server infrastructure.
+
+    Requires a running CIDX server on port 8001 with test repositories.
+    Excluded from fast-automation.sh via @pytest.mark.slow.
+    """
 
     @pytest_asyncio.fixture
     async def isolation_manager(self):
