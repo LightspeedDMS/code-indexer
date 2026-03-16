@@ -22,7 +22,15 @@ JOB_STATUS_PENDING = "pending"
 JOB_STATUS_RUNNING = "running"
 
 # Pydantic models — re-exported for backward compatibility with existing tests and callers.
-# Re-export QueryResultItem for backward compatibility
+from .models.api_models import QueryResultItem as QueryResultItem  # noqa: F401
+from .models.query import SemanticQueryRequest as SemanticQueryRequest  # noqa: F401
+from .models.query import SemanticQueryResponse as SemanticQueryResponse  # noqa: F401
+from .models.repos import ActivateRepositoryRequest as ActivateRepositoryRequest  # noqa: F401
+from .models.repos import AddGoldenRepoRequest as AddGoldenRepoRequest  # noqa: F401
+from .models.repos import ComponentRepoInfo as ComponentRepoInfo  # noqa: F401
+from .models.repos import RepositoryDetailsResponse as RepositoryDetailsResponse  # noqa: F401
+from .models.jobs import AddIndexRequest as AddIndexRequest  # noqa: F401
+from .models.auth import ChangePasswordRequest as ChangePasswordRequest  # noqa: F401
 
 
 # Global managers (initialized in create_app)
@@ -44,7 +52,6 @@ _server_fts_cache: Optional[Any] = None  # Server-wide FTS cache
 from .services.file_service import file_service as file_service  # noqa: F401
 
 # Pydantic models re-exported for backward compatibility
-from .models.api_models import QueryResultItem as QueryResultItem  # noqa: F401
 
 # Helper functions re-exported from app_helpers.py for backward compatibility.
 from .app_helpers import (  # noqa: F401
