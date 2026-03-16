@@ -13200,22 +13200,24 @@ async def handle_poll_delegation_job(
     args: Dict[str, Any], user: User, *, session_state=None
 ) -> Dict[str, Any]:
     """
-    Wait for delegation job completion via callback mechanism.
+    Non-blocking poll for delegation job result.
 
     Story #720: Callback-Based Delegation Job Completion
     Story #50: This handler remains async (justified exception) because
     DelegationJobTracker uses asyncio.Future for callback-based completion.
 
-    Instead of polling Claude Server repeatedly, this waits on a Future
-    that gets resolved when Claude Server POSTs the callback to CIDX.
+    Returns immediately with the result if available, or status='waiting' if not.
+    The job stays in the tracker so the client can poll again without losing state.
+
+    timeout_seconds is silently ignored (kept for backward compatibility).
 
     Args:
-        args: Tool arguments with job_id and optional timeout
+        args: Tool arguments with job_id (timeout_seconds silently ignored)
         user: The authenticated user making the request
         session_state: Optional MCPSessionState for impersonation
 
     Returns:
-        MCP response with result when callback arrives, or timeout/error
+        MCP response with result if available, or waiting status to retry
     """
     from ..services.delegation_job_tracker import DelegationJobTracker
 
@@ -13235,51 +13237,33 @@ async def handle_poll_delegation_job(
                 {"success": False, "error": "Missing required parameter: job_id"}
             )
 
-        # Story #720: Get timeout_seconds from args (default 45s, below MCP's 60s)
-        # Also support legacy "timeout" parameter for backward compatibility
-        timeout = args.get("timeout_seconds", args.get("timeout", 45))
-        if not isinstance(timeout, (int, float)):
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "timeout_seconds must be a number (recommended: 5-300)",
-                }
-            )
-        # Minimum 0.01s (for testing), maximum 300s (5 minutes)
-        # Recommended range for production: 5-300 seconds
-        if timeout < 0.01 or timeout > 300:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "timeout_seconds must be between 0.01 and 300",
-                }
-            )
-
-        # Check if job exists in tracker before waiting
+        # timeout_seconds silently ignored — polling is now non-blocking
         tracker = DelegationJobTracker.get_instance()
+
+        # Check if job exists (in tracker or cache)
         job_exists = await tracker.has_job(job_id)
         if not job_exists:
             return _mcp_response(
                 {
                     "success": False,
-                    "error": f"Job {job_id} not found or already completed",
+                    "error": f"Job {job_id} not found or expired",
                 }
             )
 
-        # Wait for callback via DelegationJobTracker
-        result = await tracker.wait_for_job(job_id, timeout=timeout)
+        # Non-blocking: check if result is ready
+        result = await tracker.get_result(job_id)
 
         if result is None:
-            # Timeout - job still exists, caller can try again
+            # Not ready yet — tell client to try again
             return _mcp_response(
                 {
                     "status": "waiting",
-                    "message": "Job still running, callback not yet received",
+                    "message": "Job still running, try again",
                     "continue_polling": True,
                 }
             )
 
-        # Return result based on status from callback
+        # Result available — return based on status from callback
         if result.status == "completed":
             response_dict: Dict[str, Any] = {
                 "status": "completed",
@@ -13291,14 +13275,18 @@ async def handle_poll_delegation_job(
             if result_text:
                 payload_cache = getattr(app_module.app.state, "payload_cache", None)
                 if payload_cache is not None:
-                    truncated = payload_cache.truncate_result(result_text)
-                    if truncated.get("has_more", False):
-                        response_dict["preview"] = truncated["preview"]
-                        response_dict["cache_handle"] = truncated["cache_handle"]
-                        response_dict["has_more"] = True
-                        response_dict["total_size"] = truncated["total_size"]
-                        del response_dict["result"]
-                    else:
+                    try:
+                        truncated = payload_cache.truncate_result(result_text)
+                        if truncated.get("has_more", False):
+                            response_dict["preview"] = truncated["preview"]
+                            response_dict["cache_handle"] = truncated["cache_handle"]
+                            response_dict["has_more"] = True
+                            response_dict["total_size"] = truncated["total_size"]
+                            del response_dict["result"]
+                        else:
+                            response_dict["has_more"] = False
+                            response_dict["cache_handle"] = None
+                    except Exception:
                         response_dict["has_more"] = False
                         response_dict["cache_handle"] = None
             return _mcp_response(response_dict)
@@ -13316,12 +13304,12 @@ async def handle_poll_delegation_job(
         logger.error(
             format_error_log(
                 "MCP-GENERAL-128",
-                f"Error waiting for delegation job {job_id}: {e}",
+                f"Error polling delegation job {job_id}: {e}",
                 extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
-            {"success": False, "error": f"Error waiting for job completion: {str(e)}"}
+            {"success": False, "error": f"Error polling job: {str(e)}"}
         )
 
 

@@ -97,16 +97,73 @@ class DelegationJobTracker:
 
     async def has_job(self, job_id: str) -> bool:
         """
-        Check if a job is registered in the tracker.
+        Check if a job is registered in the tracker or has a cached result.
 
         Args:
             job_id: The job identifier to check
 
         Returns:
-            True if the job is registered (pending completion), False otherwise
+            True if the job is registered (pending completion) or result is cached,
+            False otherwise
         """
         async with self._lock:
-            return job_id in self._pending_jobs
+            if job_id in self._pending_jobs:
+                return True
+        # Also check cache — if result was cached, job "exists" for retry purposes
+        if self._payload_cache is not None:
+            try:
+                cache_key = f"delegation:{job_id}"
+                return bool(self._payload_cache.has_key(cache_key))
+            except Exception as e:
+                logger.debug(f"has_job: cache lookup failed for job {job_id}: {e}")
+        return False
+
+    async def get_result(self, job_id: str) -> Optional[JobResult]:
+        """
+        Non-blocking check for job result. Does NOT remove the job from tracking.
+
+        Checks:
+        1. Cache (PayloadCache with key delegation:{job_id}) — result persisted by callback
+        2. Future — if done, returns result without removing it from pending
+
+        The job stays in the tracker so the client can poll again if needed.
+
+        Args:
+            job_id: The job identifier to check
+
+        Returns:
+            JobResult if the job is done (via cache or completed future), None if not ready
+        """
+        # Check cache first (result persisted from complete_job callback)
+        if self._payload_cache is not None:
+            try:
+                cache_key = f"delegation:{job_id}"
+                if self._payload_cache.has_key(cache_key):
+                    cached = self._payload_cache.retrieve(cache_key, page=0)
+                    cached_dict = json.loads(cached.content)
+                    logger.debug(
+                        f"get_result: returning cached result for job: {job_id}"
+                    )
+                    return JobResult(**cached_dict)
+            except Exception as e:
+                logger.debug(f"get_result: cache lookup failed for job {job_id}: {e}")
+
+        # Check if future is done (non-blocking — no await on the future itself)
+        async with self._lock:
+            future = self._pending_jobs.get(job_id)
+
+        if future is not None and future.done():
+            try:
+                result: JobResult = future.result()
+                logger.debug(f"get_result: returning future result for job: {job_id}")
+                return result
+            except Exception as e:
+                logger.debug(
+                    f"get_result: failed to get future result for job {job_id}: {e}"
+                )
+                return None
+
+        return None  # Not ready yet
 
     async def complete_job(self, result: JobResult) -> bool:
         """

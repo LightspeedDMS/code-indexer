@@ -2,18 +2,13 @@
 name: poll_delegation_job
 category: admin
 required_permission: query_repos
-tl_dr: Wait for delegation job completion and retrieve results.
+tl_dr: Non-blocking check for delegation job result. Returns immediately with result or waiting status.
 inputSchema:
   type: object
   properties:
     job_id:
       type: string
       description: Job ID from execute_delegation_function or execute_open_delegation
-    timeout_seconds:
-      type: number
-      description: 'How long to wait for callback in seconds. Default: 45 (safely below MCP''s 60s timeout). Range: 0.01-300
-        (recommended: 5-300 for production). If timeout occurs, returns status=''waiting'' with continue_polling=true - you
-        can retry the same job_id to get cached result.'
   required:
   - job_id
   additionalProperties: false
@@ -56,17 +51,18 @@ outputSchema:
       description: False if request failed (job not found, not configured)
 ---
 
-Wait for delegation job completion and retrieve results. Use this tool after execute_delegation_function or execute_open_delegation to get the AI's response.
+Non-blocking check for delegation job result. Returns immediately with result or waiting status. Use this tool after execute_delegation_function or execute_open_delegation to get the AI's response.
 
-HOW IT WORKS: This tool uses a callback-based mechanism for efficiency. Instead of repeatedly polling Claude Server, it waits for Claude Server to notify CIDX when the job completes. This means results are returned immediately when available.
-
-TIMEOUT BEHAVIOR: If the job doesn't complete within timeout_seconds, returns status='waiting' with continue_polling=true. The job is NOT lost - simply call this tool again with the same job_id. Results are cached, so if the callback arrived while you were timing out, the next call returns immediately with the result.
+HOW IT WORKS: This tool uses a callback-based mechanism. Claude Server POSTs results back to CIDX when a job completes. This tool checks whether the result has arrived yet — it returns immediately either way. If the result is not ready, call again after a short delay.
 
 POLLING STRATEGY:
 1. Call poll_delegation_job with the job_id from execute_delegation_function or execute_open_delegation
 2. Check 'continue_polling' field in response:
-   - true: Job still in progress, call again after a short delay
+   - true: Job still in progress, wait a moment and call again
    - false: Job completed or failed, stop polling
+3. Repeat until continue_polling is false
+
+The job stays tracked between calls so multiple retrieval attempts work correctly. Results are cached after the first callback, so repeated polls after completion return the same result.
 
 
 RESPONSE FIELDS:
