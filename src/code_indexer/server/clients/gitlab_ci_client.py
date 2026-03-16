@@ -161,7 +161,7 @@ class GitLabCIClient:
             "Accept": "application/json",
         }
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             response = await client.get(url, headers=headers)
 
             # AC10: Check for authentication failure
@@ -248,7 +248,7 @@ class GitLabCIClient:
             "Accept": "application/json",
         }
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             # Get main pipeline data
             pipeline_response = await client.get(pipeline_url, headers=headers)
 
@@ -335,7 +335,7 @@ class GitLabCIClient:
             "Accept": "application/json",
         }
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             # Get jobs
             jobs_response = await client.get(jobs_url, headers=headers)
 
@@ -417,7 +417,7 @@ class GitLabCIClient:
             "Accept": "application/json",
         }
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             response = await client.get(url, headers=headers)
 
             if response.status_code != 200:
@@ -463,7 +463,7 @@ class GitLabCIClient:
             "Accept": "application/json",
         }
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             response = await client.post(url, headers=headers)
 
             if response.status_code != 201:
@@ -512,7 +512,7 @@ class GitLabCIClient:
             "Accept": "application/json",
         }
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             response = await client.post(url, headers=headers)
 
             if response.status_code != 200:

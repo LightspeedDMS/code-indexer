@@ -12640,7 +12640,7 @@ def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any
     from code_indexer.server.cache.payload_cache import CacheNotFoundError
 
     handle = args.get("handle")
-    page = args.get("page", 0)
+    page = int(args.get("page", 0))  # Bug #464: MCP clients may send page as string
 
     if not handle:
         return _mcp_response(
