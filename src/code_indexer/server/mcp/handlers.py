@@ -13281,13 +13281,27 @@ async def handle_poll_delegation_job(
 
         # Return result based on status from callback
         if result.status == "completed":
-            return _mcp_response(
-                {
-                    "status": "completed",
-                    "result": result.output,
-                    "continue_polling": False,
-                }
-            )
+            response_dict: Dict[str, Any] = {
+                "status": "completed",
+                "result": result.output,
+                "continue_polling": False,
+            }
+            # Apply PayloadCache truncation for large results
+            result_text = result.output
+            if result_text:
+                payload_cache = getattr(app_module.app.state, "payload_cache", None)
+                if payload_cache is not None:
+                    truncated = payload_cache.truncate_result(result_text)
+                    if truncated.get("has_more", False):
+                        response_dict["preview"] = truncated["preview"]
+                        response_dict["cache_handle"] = truncated["cache_handle"]
+                        response_dict["has_more"] = True
+                        response_dict["total_size"] = truncated["total_size"]
+                        del response_dict["result"]
+                    else:
+                        response_dict["has_more"] = False
+                        response_dict["cache_handle"] = None
+            return _mcp_response(response_dict)
         else:
             # Failed or other status
             return _mcp_response(

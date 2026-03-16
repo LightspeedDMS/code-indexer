@@ -71,7 +71,13 @@ POLLING STRATEGY:
 
 RESPONSE FIELDS:
 - status: 'waiting', 'completed', or 'failed'
-- result: The AI's response (only when status='completed')
+- result: The AI's response (only when status='completed' and has_more=false)
+- preview: First 2000 chars of result (only when status='completed' and has_more=true)
+- has_more: true if result was truncated due to size, false otherwise (only when status='completed')
+- cache_handle: handle string for retrieving full result via get_cached_content (only when has_more=true), null when has_more=false
+- total_size: total character count of full result (only when has_more=true)
 - error: Error message (only when status='failed')
 - message: Human-readable status message
 - continue_polling: Whether to continue polling
+
+LARGE RESULTS: When the delegation result exceeds 2000 characters, 'result' is replaced by 'preview' (first 2000 chars). Use get_cached_content with the cache_handle to retrieve the full result in pages.
