@@ -5,7 +5,7 @@ Extracted from app.py as part of Story #409 (app.py modularization).
 """
 
 import datetime as _datetime_module
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import List, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .api_models import QueryResultItem

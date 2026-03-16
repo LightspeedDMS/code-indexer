@@ -5,7 +5,7 @@ from fastapi import FastAPI
 import logging
 import os
 from pathlib import Path
-from typing import Any, Optional, Callable
+from typing import Any, Callable
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
@@ -292,7 +292,9 @@ def make_lifespan(
             # AC4: Migration is recoverable — historical data loss, not functional failure
             try:
                 flat_file = Path(server_data_dir) / "password_audit.log"
-                migrated, skipped = migrate_flat_file_to_sqlite(flat_file, audit_service)
+                migrated, skipped = migrate_flat_file_to_sqlite(
+                    flat_file, audit_service
+                )
                 if migrated > 0 or skipped > 0:
                     logger.info(
                         f"Story #399: Migrated {migrated} entries from password_audit.log, "
@@ -504,11 +506,20 @@ def make_lifespan(
         llm_lifecycle_service = None
         claude_config = server_config.claude_integration_config
         if claude_config and claude_config.claude_auth_mode == "subscription":
-            if claude_config.llm_creds_provider_url and claude_config.llm_creds_provider_api_key:
+            if (
+                claude_config.llm_creds_provider_url
+                and claude_config.llm_creds_provider_api_key
+            ):
                 from code_indexer.server.services.llm_creds_client import LlmCredsClient
-                from code_indexer.server.config.llm_lease_state import LlmLeaseStateManager
-                from code_indexer.server.services.claude_credentials_file_manager import ClaudeCredentialsFileManager
-                from code_indexer.server.services.llm_lease_lifecycle import LlmLeaseLifecycleService
+                from code_indexer.server.config.llm_lease_state import (
+                    LlmLeaseStateManager,
+                )
+                from code_indexer.server.services.claude_credentials_file_manager import (
+                    ClaudeCredentialsFileManager,
+                )
+                from code_indexer.server.services.llm_lease_lifecycle import (
+                    LlmLeaseLifecycleService,
+                )
 
                 llm_client = LlmCredsClient(
                     provider_url=claude_config.llm_creds_provider_url,
@@ -638,7 +649,7 @@ def make_lifespan(
 
             # Get config
             server_config = config_service.get_config()
-            db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")
+            db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")  # type: ignore[assignment]
 
             # Create scheduler instance
             meta_dir = Path(golden_repos_dir) / "cidx-meta"
@@ -647,7 +658,9 @@ def make_lifespan(
                 config_manager=config_service,
                 claude_cli_manager=get_claude_cli_manager(),
                 meta_dir=meta_dir,
-                analysis_model=server_config.golden_repos_config.analysis_model if server_config.golden_repos_config else "opus",
+                analysis_model=server_config.golden_repos_config.analysis_model
+                if server_config.golden_repos_config
+                else "opus",
                 job_tracker=job_tracker,
             )
 
@@ -776,7 +789,7 @@ def make_lifespan(
             # Get dependencies
             config_service = get_config_service()
             server_config = config_service.get_config()
-            db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")
+            db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")  # type: ignore[assignment]
             golden_repos_manager = golden_repo_manager
 
             # Create tracking backend
@@ -788,16 +801,21 @@ def make_lifespan(
             # RefreshScheduler would index it and bake it into versioned snapshots,
             # polluting semantic search. Remove it before the scheduler starts.
             try:
-                staging_dir = Path(golden_repos_dir) / "cidx-meta" / "dependency-map.staging"
+                staging_dir = (
+                    Path(golden_repos_dir) / "cidx-meta" / "dependency-map.staging"
+                )
                 if staging_dir.exists():
                     import shutil as _shutil
+
                     _shutil.rmtree(staging_dir)
                     logger.info(
                         "Cleaned stale dependency-map.staging directory on startup (Bug #383)",
                         extra={"correlation_id": get_correlation_id()},
                     )
             except Exception as _staging_err:
-                logger.debug(f"Staging dir startup cleanup failed (non-fatal): {_staging_err}")
+                logger.debug(
+                    f"Staging dir startup cleanup failed (non-fatal): {_staging_err}"
+                )
 
             # Create analyzer
             cidx_meta_path = Path(golden_repos_dir) / "cidx-meta"
@@ -806,7 +824,9 @@ def make_lifespan(
                 cidx_meta_path=cidx_meta_path,
                 pass_timeout=server_config.claude_integration_config.dependency_map_pass_timeout_seconds,
                 mcp_registration_service=mcp_registration_service,
-                analysis_model=server_config.golden_repos_config.analysis_model if server_config.golden_repos_config else "opus",
+                analysis_model=server_config.golden_repos_config.analysis_model
+                if server_config.golden_repos_config
+                else "opus",
             )
 
             # Create service
@@ -815,7 +835,9 @@ def make_lifespan(
                 config_manager=config_service,
                 tracking_backend=tracking_backend,
                 analyzer=analyzer,
-                refresh_scheduler=global_lifecycle_manager.refresh_scheduler if global_lifecycle_manager else None,
+                refresh_scheduler=global_lifecycle_manager.refresh_scheduler
+                if global_lifecycle_manager
+                else None,
                 job_tracker=job_tracker,  # Story #312: Unified job tracking (Epic #261)
             )
 
@@ -863,7 +885,7 @@ def make_lifespan(
             sm_config = server_config.self_monitoring_config
 
             # Get required paths
-            db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")
+            db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")  # type: ignore[assignment]
             log_db_path_val = str(Path(server_data_dir) / "logs.db")
 
             # Auto-detect repo root and GitHub repository from git remote
@@ -1203,7 +1225,7 @@ def make_lifespan(
 
         # Startup: Initialize Langfuse Trace Sync Service (Story #168)
         global langfuse_sync_service
-        langfuse_sync_service = None
+        langfuse_sync_service = None  # type: ignore[name-defined]
         logger.info(
             "Server startup: Initializing Langfuse Trace Sync Service",
             extra={"correlation_id": get_correlation_id()},
@@ -1226,18 +1248,20 @@ def make_lifespan(
                     )
 
             # Create service with config_getter callable
-            langfuse_sync_service = LangfuseTraceSyncService(
+            langfuse_sync_service = LangfuseTraceSyncService(  # type: ignore[name-defined]
                 config_getter=config_service.get_config,
                 data_dir=str(Path(server_data_dir) / "data"),
                 on_sync_complete=_on_langfuse_sync_complete,
-                refresh_scheduler=global_lifecycle_manager.refresh_scheduler if global_lifecycle_manager else None,
+                refresh_scheduler=global_lifecycle_manager.refresh_scheduler
+                if global_lifecycle_manager
+                else None,
                 job_tracker=job_tracker,
             )
 
             # Start background sync if pull is enabled
             config = config_service.get_config()
             if config.langfuse_config and config.langfuse_config.pull_enabled:
-                langfuse_sync_service.start()
+                langfuse_sync_service.start()  # type: ignore[name-defined]
                 logger.info(
                     f"Langfuse Trace Sync Service started (interval={config.langfuse_config.pull_sync_interval_seconds}s, "
                     f"projects={len(config.langfuse_config.pull_projects)})",
@@ -1250,7 +1274,7 @@ def make_lifespan(
                 )
 
             # Store in app state for dashboard access
-            app.state.langfuse_sync_service = langfuse_sync_service
+            app.state.langfuse_sync_service = langfuse_sync_service  # type: ignore[name-defined]
 
         except Exception as e:
             # Log error but don't block server startup
@@ -1403,7 +1427,10 @@ def make_lifespan(
         if cidx_meta_debouncer_state is not None:
             try:
                 cidx_meta_debouncer_state.shutdown()
-                from code_indexer.global_repos.meta_description_hook import set_debouncer
+                from code_indexer.global_repos.meta_description_hook import (
+                    set_debouncer,
+                )
+
                 set_debouncer(None)
                 logger.info(
                     "CidxMetaRefreshDebouncer shut down",
@@ -1459,9 +1486,9 @@ def make_lifespan(
                 )
 
         # Shutdown: Stop Langfuse Trace Sync Service (Story #168)
-        if langfuse_sync_service is not None:
+        if langfuse_sync_service is not None:  # type: ignore[name-defined]
             try:
-                langfuse_sync_service.stop()
+                langfuse_sync_service.stop()  # type: ignore[name-defined]
                 logger.info(
                     "Langfuse Trace Sync Service stopped",
                     extra={"correlation_id": get_correlation_id()},
@@ -1499,6 +1526,5 @@ def make_lifespan(
             "Server shutdown: Cleaning up resources",
             extra={"correlation_id": get_correlation_id()},
         )
-
 
     return lifespan

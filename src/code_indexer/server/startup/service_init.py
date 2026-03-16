@@ -36,17 +36,22 @@ def initialize_services() -> Dict[str, Any]:
     from code_indexer.server.utils.jwt_secret_manager import JWTSecretManager
     from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
-    from code_indexer.server.repositories.activated_repo_manager import ActivatedRepoManager
-    from code_indexer.server.repositories.repository_listing_manager import RepositoryListingManager
+    from code_indexer.server.repositories.activated_repo_manager import (
+        ActivatedRepoManager,
+    )
+    from code_indexer.server.repositories.repository_listing_manager import (
+        RepositoryListingManager,
+    )
     from code_indexer.server.query.semantic_query_manager import SemanticQueryManager
-    from code_indexer.server.services.workspace_cleanup_service import WorkspaceCleanupService
+    from code_indexer.server.services.workspace_cleanup_service import (
+        WorkspaceCleanupService,
+    )
     from code_indexer.server.app_helpers import set_server_start_time
     from code_indexer.server.startup.bootstrap import (
         migrate_legacy_cidx_meta,
         bootstrap_cidx_meta,
         register_langfuse_golden_repos,
     )
-    from code_indexer.server.routers.groups import set_group_manager
     from code_indexer.server.routers.repo_categories import set_category_service
 
     # Story #526: Initialize server-side HNSW cache at bootstrap for 1800x performance
@@ -66,7 +71,9 @@ def initialize_services() -> Dict[str, Any]:
     )
 
     # Register index memory provider with metrics collector
-    from code_indexer.server.services.system_metrics_collector import get_system_metrics_collector
+    from code_indexer.server.services.system_metrics_collector import (
+        get_system_metrics_collector,
+    )
     from code_indexer.server.cache import get_total_index_memory_mb
 
     metrics_collector = get_system_metrics_collector()
@@ -188,7 +195,9 @@ def initialize_services() -> Dict[str, Any]:
 
     # Story #313: Inject job_tracker into ClaudeCliManager singleton
     try:
-        from code_indexer.server.services.claude_cli_manager import get_claude_cli_manager
+        from code_indexer.server.services.claude_cli_manager import (
+            get_claude_cli_manager,
+        )
 
         _cli_manager = get_claude_cli_manager()
         if _cli_manager is not None:
@@ -210,9 +219,13 @@ def initialize_services() -> Dict[str, Any]:
 
     # Migration and bootstrap using the main golden_repo_manager instance
     try:
-        migrate_legacy_cidx_meta(golden_repo_manager, golden_repo_manager.golden_repos_dir)
+        migrate_legacy_cidx_meta(
+            golden_repo_manager, golden_repo_manager.golden_repos_dir
+        )
         bootstrap_cidx_meta(golden_repo_manager, golden_repo_manager.golden_repos_dir)
-        register_langfuse_golden_repos(golden_repo_manager, golden_repo_manager.golden_repos_dir)
+        register_langfuse_golden_repos(
+            golden_repo_manager, golden_repo_manager.golden_repos_dir
+        )
         logger.info(
             "cidx-meta migration and bootstrap completed",
             extra={"correlation_id": get_correlation_id()},
@@ -224,7 +237,9 @@ def initialize_services() -> Dict[str, Any]:
         cidx_meta_path = Path(golden_repo_manager.golden_repos_dir) / "cidx-meta"
         file_crud_service.register_write_exception("cidx-meta-global", cidx_meta_path)
         # Inject golden_repos_dir for write-mode marker lookup (Story #231)
-        file_crud_service.set_golden_repos_dir(Path(golden_repo_manager.golden_repos_dir))
+        file_crud_service.set_golden_repos_dir(
+            Path(golden_repo_manager.golden_repos_dir)
+        )
         logger.info(
             "Registered cidx-meta-global as write exception for direct editing",
             extra={"correlation_id": get_correlation_id()},
@@ -280,7 +295,9 @@ def initialize_services() -> Dict[str, Any]:
     mcp_credential_manager = MCPCredentialManager(user_manager=user_manager)
 
     # Initialize MCP self-registration service (Story #203)
-    from code_indexer.server.services.mcp_self_registration_service import MCPSelfRegistrationService
+    from code_indexer.server.services.mcp_self_registration_service import (
+        MCPSelfRegistrationService,
+    )
 
     mcp_registration_service = MCPSelfRegistrationService(
         config_manager=config_service,

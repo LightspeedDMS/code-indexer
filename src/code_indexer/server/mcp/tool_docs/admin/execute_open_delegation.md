@@ -88,7 +88,10 @@ EXECUTION FLOW:
 9. Returns job_id for async polling via poll_delegation_job
 
 REPOSITORY READINESS:
-Repositories are checked for registration and clone status on Claude Server before job creation. If a repository is not yet registered, it will be registered automatically. The tool waits for cloneStatus="success" before proceeding. If a repository fails to become ready within the timeout, an error is returned.
+Repositories are checked for registration and clone status on Claude Server before job creation. If a repository is not yet registered, it will be registered automatically. The tool waits for cloneStatus="completed" before proceeding. If a repository fails to become ready within the timeout, an error is returned.
+
+GUARDRAILS:
+When guardrails are enabled in the server configuration, safety guardrails are automatically prepended to your prompt before it is sent to Claude Server. This includes rules about filesystem safety, process safety, git safety, system safety, package authorization, and secrets handling. The guardrails are loaded from a configured golden repo or use a default template. This happens transparently -- you do not need to include safety instructions in your prompt.
 
 ERRORS:
 - 'Access denied' -> User does not have delegate_open permission (requires power_user or admin)

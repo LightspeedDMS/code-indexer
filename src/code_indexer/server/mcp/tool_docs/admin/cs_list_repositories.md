@@ -54,6 +54,15 @@ CLONE STATUS VALUES:
 - failed: Clone failed, repository cannot be used
 - unknown: Status not yet determined
 
+RESPONSE FIELDS (per repository):
+- name: Repository name/alias
+- clone_status: Current clone status (cloning, completed, failed, unknown)
+- cidx_aware: Whether CIDX indexing is enabled for this repository
+- git_url: Repository git URL
+- branch: Target branch
+- current_branch: Currently checked-out branch
+- registered_at: When the repository was registered
+
 ERRORS:
 - 'Claude Delegation not configured' -> Delegation configuration not set up
 - 'Access denied' -> User does not have delegate_open permission

@@ -51,6 +51,9 @@ CLONE STATUS VALUES:
 - failed: Clone failed, repository cannot be used
 - unknown: Status not yet determined
 
+CIDX INDEXING:
+Repositories are registered with cidxAware=true, which means Claude Server will run CIDX semantic and full-text indexing on the repository after cloning. This enables code search capabilities within delegation jobs that use the repository.
+
 ERRORS:
 - 'Claude Delegation not configured' -> Delegation configuration not set up
 - 'Access denied' -> User does not have delegate_open permission
