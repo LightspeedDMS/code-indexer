@@ -266,6 +266,7 @@ class ClaudeDelegationManager:
         username: str,
         credential: str,
         credential_type: str,
+        skip_ssl_verify: bool = False,
     ) -> ConnectivityResult:
         """
         Validate connectivity to Claude Server by attempting authentication.
@@ -301,7 +302,7 @@ class ClaudeDelegationManager:
         login_url = f"{url.rstrip('/')}/auth/login"
 
         try:
-            with httpx.Client(timeout=10.0) as client:
+            with httpx.Client(timeout=10.0, verify=not skip_ssl_verify) as client:
                 response = client.post(
                     login_url,
                     json={"username": username, credential_type: credential},

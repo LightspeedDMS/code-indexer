@@ -6485,11 +6485,13 @@ async def update_claude_delegation_config(
 
     # Validate connectivity before saving
     cred_type = form_data.get("claude_server_credential_type", "password")
+    skip_ssl = form_data.get("skip_ssl_verify", "false").lower() == "true"  # type: ignore[union-attr]
     result = delegation_manager.validate_connectivity(
         url,
         username,
         credential,
         cred_type,  # type: ignore[arg-type]
+        skip_ssl_verify=skip_ssl,
     )
 
     if not result.success:
