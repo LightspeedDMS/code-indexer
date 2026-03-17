@@ -2152,7 +2152,7 @@ function saveLlmCredsConfig() {
             </div>
         </div>
         <!-- Edit Mode -->
-        <form id="edit-form-claude_delegation" method="post" action="/config/claude_delegation" style="display: none;">
+        <form id="edit-form-claude_delegation" method="post" action="/admin/config/claude_delegation" style="display: none;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             {% if validation_errors.claude_delegation %}
             <div class="validation-error">{{ validation_errors.claude_delegation }}</div>
