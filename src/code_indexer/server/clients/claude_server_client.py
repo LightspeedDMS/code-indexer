@@ -108,9 +108,9 @@ class ClaudeServerClient:
                 # Calculate expiration time
                 # Claude Server returns "expires" (ISO datetime), standard returns "expires_in" (seconds)
                 if "expires" in data:
-                    from dateutil.parser import parse as parse_datetime  # type: ignore[import-untyped]
-
-                    self._jwt_expires = parse_datetime(data["expires"])
+                    # Parse ISO 8601 datetime from Claude Server (e.g. "2026-03-18T04:10:30.254241Z")
+                    expires_str = data["expires"].replace("Z", "+00:00")
+                    self._jwt_expires = datetime.fromisoformat(expires_str)
                 else:
                     expires_in = data.get("expires_in", 3600)
                     self._jwt_expires = datetime.now(timezone.utc) + timedelta(
