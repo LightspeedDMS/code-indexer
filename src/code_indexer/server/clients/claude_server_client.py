@@ -108,8 +108,13 @@ class ClaudeServerClient:
                 # Calculate expiration time
                 # Claude Server returns "expires" (ISO datetime), standard returns "expires_in" (seconds)
                 if "expires" in data:
-                    # Parse ISO 8601 datetime from Claude Server (e.g. "2026-03-18T04:10:30.254241Z")
+                    # Parse ISO 8601 datetime from Claude Server
+                    # .NET returns 7-digit fractional seconds (e.g. ".5910721")
+                    # Python fromisoformat() only handles up to 6 digits (microseconds)
+                    import re
+
                     expires_str = data["expires"].replace("Z", "+00:00")
+                    expires_str = re.sub(r"(\.\d{6})\d+", r"\1", expires_str)
                     self._jwt_expires = datetime.fromisoformat(expires_str)
                 else:
                     expires_in = data.get("expires_in", 3600)
