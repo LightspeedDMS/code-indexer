@@ -5,13 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v9.5.27
+## v9.5.28
 
 ### Bug Fixes
 
 - fix: add_index semantic rebuild now uses --clear flag for full re-index (Bug #468)
   - Previously ran bare `cidx index` (incremental) which was a no-op on already-indexed repos
   - Now runs `cidx index --clear` to force full semantic vector regeneration
+- fix: multi-select add_index (semantic+fts) no longer triggers false DuplicateJobError (Bug #468)
+  - Root cause: all index types shared operation_type="add_index", so second submission conflicted with first
+  - Fix: operation_type now includes index type (e.g., "add_index_semantic", "add_index_fts")
+- fix: DuplicateJobError returns 409 Conflict instead of 500 Internal Server Error
+- fix: JS handles multi-select job_ids response (was only reading job_id, null for multi-select)
 
 ## v9.5.26
 
