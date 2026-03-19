@@ -76,7 +76,6 @@ class ServerResourceConfig:
     git_update_index_timeout: int = 300  # 5 minutes for git update-index --refresh
     git_restore_timeout: int = 300  # 5 minutes for git restore .
     cidx_fix_config_timeout: int = 60  # 1 minute for cidx fix-config
-    cidx_index_timeout: int = 3600  # 1 hour for cidx index on large repos
     cidx_scip_generate_timeout: int = 1800  # 30 minutes for cidx scip generate (AC4)
 
     # NOTE: Artificial resource limits (max_golden_repos, max_repo_size_bytes, max_jobs_per_user)
@@ -393,16 +392,66 @@ class IndexingConfig:
     # 60 unique extensions with leading dots matching CLI Config.file_extensions defaults.
     indexable_extensions: List[str] = field(
         default_factory=lambda: [
-            ".py", ".js", ".jsx", ".ts", ".tsx",
-            ".java", ".scala", ".kt", ".kts", ".groovy",
-            ".c", ".h", ".cpp", ".cxx", ".cc", ".hpp", ".hxx",
-            ".cs", ".go", ".rs", ".rb", ".erb",
-            ".php", ".swift", ".m", ".mm",
-            ".r", ".lua", ".pl", ".pm",
-            ".sh", ".bash", ".zsh", ".fish", ".ps1", ".psm1", ".bat", ".cmd",
-            ".sql", ".html", ".htm", ".css", ".scss", ".sass", ".less",
-            ".xml", ".xsl", ".xsd", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
-            ".md", ".mdx", ".rst", ".txt", ".tex",
+            ".py",
+            ".js",
+            ".jsx",
+            ".ts",
+            ".tsx",
+            ".java",
+            ".scala",
+            ".kt",
+            ".kts",
+            ".groovy",
+            ".c",
+            ".h",
+            ".cpp",
+            ".cxx",
+            ".cc",
+            ".hpp",
+            ".hxx",
+            ".cs",
+            ".go",
+            ".rs",
+            ".rb",
+            ".erb",
+            ".php",
+            ".swift",
+            ".m",
+            ".mm",
+            ".r",
+            ".lua",
+            ".pl",
+            ".pm",
+            ".sh",
+            ".bash",
+            ".zsh",
+            ".fish",
+            ".ps1",
+            ".psm1",
+            ".bat",
+            ".cmd",
+            ".sql",
+            ".html",
+            ".htm",
+            ".css",
+            ".scss",
+            ".sass",
+            ".less",
+            ".xml",
+            ".xsl",
+            ".xsd",
+            ".json",
+            ".yaml",
+            ".yml",
+            ".toml",
+            ".ini",
+            ".cfg",
+            ".conf",
+            ".md",
+            ".mdx",
+            ".rst",
+            ".txt",
+            ".tex",
         ]
     )
 
@@ -979,6 +1028,8 @@ class ServerConfigManager:
             if "resource_config" in config_dict and isinstance(
                 config_dict["resource_config"], dict
             ):
+                # Bug #467: Remove obsolete cidx_index_timeout (indexing no longer has timeout)
+                config_dict["resource_config"].pop("cidx_index_timeout", None)
                 config_dict["resource_config"] = ServerResourceConfig(
                     **config_dict["resource_config"]
                 )
@@ -1177,13 +1228,13 @@ class ServerConfigManager:
                 if "scip_config" not in config_dict:
                     config_dict["scip_config"] = {}
                 if isinstance(config_dict["scip_config"], dict):
-                    config_dict["scip_config"][
-                        "scip_workspace_retention_days"
-                    ] = retention_days
-                elif isinstance(config_dict["scip_config"], ScipConfig):
-                    config_dict["scip_config"].scip_workspace_retention_days = (
+                    config_dict["scip_config"]["scip_workspace_retention_days"] = (
                         retention_days
                     )
+                elif isinstance(config_dict["scip_config"], ScipConfig):
+                    config_dict[
+                        "scip_config"
+                    ].scip_workspace_retention_days = retention_days
 
             # Story #15 AC2: Final conversion of scip_config after migration
             # This handles the case where scip_config was created by migration above
@@ -1267,9 +1318,14 @@ class ServerConfigManager:
             # Only migrates if data_retention_config is not already explicitly set.
             if "data_retention_config" not in config_dict:
                 old_bg_jobs = config_dict.get("background_jobs_config")
-                if isinstance(old_bg_jobs, dict) and "cleanup_max_age_hours" in old_bg_jobs:
+                if (
+                    isinstance(old_bg_jobs, dict)
+                    and "cleanup_max_age_hours" in old_bg_jobs
+                ):
                     config_dict["data_retention_config"] = {
-                        "background_jobs_retention_hours": old_bg_jobs["cleanup_max_age_hours"]
+                        "background_jobs_retention_hours": old_bg_jobs[
+                            "cleanup_max_age_hours"
+                        ]
                     }
 
             # Story #400: Remove obsolete cleanup_max_age_hours from background_jobs_config dict
@@ -1324,9 +1380,7 @@ class ServerConfigManager:
             if "wiki_config" in config_dict and isinstance(
                 config_dict["wiki_config"], dict
             ):
-                config_dict["wiki_config"] = WikiConfig(
-                    **config_dict["wiki_config"]
-                )
+                config_dict["wiki_config"] = WikiConfig(**config_dict["wiki_config"])
 
             # Story #400: Convert data_retention_config dict to DataRetentionConfig
             if "data_retention_config" in config_dict and isinstance(
@@ -1830,7 +1884,10 @@ class ServerConfigManager:
         if config.data_retention_config:
             dr = config.data_retention_config
             retention_fields = [
-                ("operational_logs_retention_hours", dr.operational_logs_retention_hours),
+                (
+                    "operational_logs_retention_hours",
+                    dr.operational_logs_retention_hours,
+                ),
                 ("audit_logs_retention_hours", dr.audit_logs_retention_hours),
                 ("sync_jobs_retention_hours", dr.sync_jobs_retention_hours),
                 ("dep_map_history_retention_hours", dr.dep_map_history_retention_hours),

@@ -1443,11 +1443,6 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ config.timeouts.git_refresh_timeout }}</td>
                         <td class="config-note"></td>
                     </tr>
-                    <tr>
-                        <td class="config-label">CIDX Index Timeout (sec)</td>
-                        <td class="config-value">{{ config.timeouts.cidx_index_timeout }}</td>
-                        <td class="config-note"></td>
-                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -1472,10 +1467,6 @@ function saveLlmCredsConfig() {
                 <label for="timeout-refresh">
                     Git Refresh Timeout (sec)
                     <input type="number" id="timeout-refresh" name="git_refresh_timeout" value="{{ config.timeouts.git_refresh_timeout }}" min="1">
-                </label>
-                <label for="timeout-index">
-                    CIDX Index Timeout (sec)
-                    <input type="number" id="timeout-index" name="cidx_index_timeout" value="{{ config.timeouts.cidx_index_timeout }}" min="1">
                 </label>
             </div>
             <div class="form-actions">

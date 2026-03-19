@@ -234,12 +234,7 @@ class MaintenanceState:
 
         # Resource config timeouts
         if config.resource_config:
-            timeouts.extend(
-                [
-                    config.resource_config.git_refresh_timeout,
-                    config.resource_config.cidx_index_timeout,
-                ]
-            )
+            timeouts.append(config.resource_config.git_refresh_timeout)
 
         # SCIP config timeouts
         if config.scip_config:

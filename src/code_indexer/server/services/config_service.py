@@ -152,7 +152,6 @@ class ConfigService:
                 "git_clone_timeout": config.resource_config.git_clone_timeout,
                 "git_pull_timeout": config.resource_config.git_pull_timeout,
                 "git_refresh_timeout": config.resource_config.git_refresh_timeout,
-                "cidx_index_timeout": config.resource_config.cidx_index_timeout,
             },
             # Password security
             "password_security": {
@@ -598,8 +597,6 @@ class ConfigService:
             timeouts.git_pull_timeout = int(value)
         elif key == "git_refresh_timeout":
             timeouts.git_refresh_timeout = int(value)
-        elif key == "cidx_index_timeout":
-            timeouts.cidx_index_timeout = int(value)
         else:
             raise ValueError(f"Unknown timeout setting: {key}")
 

@@ -5139,7 +5139,6 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             "git_clone_timeout",
             "git_pull_timeout",
             "git_refresh_timeout",
-            "cidx_index_timeout",
         ]:
             value = data.get(field)
             if value is not None:

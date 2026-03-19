@@ -170,10 +170,11 @@ class BackgroundJobManager:
     @property
     def max_concurrent_jobs(self) -> int:
         """Get the maximum number of concurrent background jobs (Story #26)."""
-        return self._background_jobs_config.max_concurrent_background_jobs
+        return self._background_jobs_config.max_concurrent_background_jobs  # type: ignore[no-any-return]
 
-    # Staleness threshold buffer added to cidx_index_timeout (Bug #374 defense-in-depth)
-    STALE_JOB_BUFFER_SECONDS: int = 300
+    # Bug #467: Staleness threshold for detecting truly stuck jobs.
+    # Since indexing no longer has a timeout, use a generous 24-hour threshold.
+    STALE_JOB_THRESHOLD_SECONDS: int = 86400  # 24 hours
 
     def _check_operation_conflict(
         self, operation_type: str, repo_alias: str
@@ -183,10 +184,10 @@ class BackgroundJobManager:
         Bug #133: Prevent duplicate jobs with same (operation_type, repo_alias)
         from running concurrently.
 
-        Bug #374: Auto-expire stale RUNNING jobs that exceeded the indexing
-        timeout plus buffer. This handles cases where the job's thread was
-        killed (e.g., by SIGTERM during server restart) but the job status
-        was not persisted as FAILED due to SQLite contention.
+        Bug #374: Auto-expire stale RUNNING jobs that exceeded the staleness
+        threshold. This handles cases where the job's thread was killed
+        (e.g., by SIGTERM during server restart) but the job status was not
+        persisted as FAILED due to SQLite contention.
 
         Returns job_id of conflicting job, or None if no conflict.
         Must be called while holding self._lock.
@@ -198,9 +199,7 @@ class BackgroundJobManager:
         Returns:
             Job ID of conflicting job if found, None otherwise
         """
-        stale_threshold = getattr(
-            self.resource_config, "cidx_index_timeout", 3600
-        ) + self.STALE_JOB_BUFFER_SECONDS
+        stale_threshold = self.STALE_JOB_THRESHOLD_SECONDS
 
         for job in self.jobs.values():
             if (
@@ -210,7 +209,9 @@ class BackgroundJobManager:
             ):
                 # Bug #374: Check if job is stale (exceeded timeout + buffer)
                 if job.started_at is not None:
-                    elapsed = (datetime.now(timezone.utc) - job.started_at).total_seconds()
+                    elapsed = (
+                        datetime.now(timezone.utc) - job.started_at
+                    ).total_seconds()
                     if elapsed > stale_threshold:
                         logging.warning(
                             f"Auto-expiring stale job {job.job_id} for {repo_alias} "
@@ -363,7 +364,9 @@ class BackgroundJobManager:
                     "operation_type": job.operation_type,
                     "status": job.status.value,
                     "created_at": job.created_at.isoformat(),
-                    "started_at": job.started_at.isoformat() if job.started_at else None,
+                    "started_at": job.started_at.isoformat()
+                    if job.started_at
+                    else None,
                     "completed_at": (
                         job.completed_at.isoformat() if job.completed_at else None
                     ),
@@ -385,7 +388,7 @@ class BackgroundJobManager:
             try:
                 db_job = self._sqlite_backend.get_job(job_id)
                 if db_job and db_job.get("username") == username:
-                    return db_job
+                    return db_job  # type: ignore[no-any-return]
             except Exception as e:
                 logging.error(f"Failed to get job {job_id} from SQLite: {e}")
 
@@ -630,7 +633,8 @@ class BackgroundJobManager:
             # Story #267 Component 8: Remove completed/cancelled jobs from memory
             # Only when SQLite backend is available (data is preserved in DB)
             if self._sqlite_backend and job.status in (
-                JobStatus.COMPLETED, JobStatus.CANCELLED
+                JobStatus.COMPLETED,
+                JobStatus.CANCELLED,
             ):
                 with self._lock:
                     self.jobs.pop(job_id, None)
@@ -829,7 +833,7 @@ class BackgroundJobManager:
         if self._sqlite_backend:
             try:
                 status_counts = self._sqlite_backend.count_jobs_by_status()
-                return status_counts.get("failed", 0)
+                return status_counts.get("failed", 0)  # type: ignore[no-any-return]
             except Exception as e:
                 logging.error(f"Failed to get failed job count from SQLite: {e}")
                 return 0
@@ -904,9 +908,7 @@ class BackgroundJobManager:
                     logging.info(f"Job {job_id} cancelled during shutdown")
 
             # Snapshot jobs under lock for persistence
-            jobs_snapshot = {
-                jid: self._snapshot_job(j) for jid, j in self.jobs.items()
-            }
+            jobs_snapshot = {jid: self._snapshot_job(j) for jid, j in self.jobs.items()}
 
             # Get list of threads to wait for
             threads_to_wait = list(self._running_jobs.values())
@@ -1339,7 +1341,7 @@ class BackgroundJobManager:
         # Story #267 Component 8: Use SQLite for stats (completed/failed not in memory)
         if self._sqlite_backend:
             try:
-                return self._sqlite_backend.get_job_stats(time_filter)
+                return self._sqlite_backend.get_job_stats(time_filter)  # type: ignore[no-any-return]
             except Exception as e:
                 logging.error(f"Failed to get job stats from SQLite: {e}")
                 return {"completed": 0, "failed": 0}
@@ -1504,7 +1506,9 @@ class BackgroundJobManager:
             # Determine repository_name: prefer repo_alias, fall back to result dict
             repository_name = getattr(job, "repo_alias", None)
             if not repository_name and job.result and isinstance(job.result, dict):
-                repository_name = job.result.get("alias") or job.result.get("repository")
+                repository_name = job.result.get("alias") or job.result.get(
+                    "repository"
+                )
 
             # Calculate duration_seconds for completed jobs
             duration_seconds = None
@@ -1512,8 +1516,12 @@ class BackgroundJobManager:
                 try:
                     completed = job.completed_at
                     started = job.started_at
-                    completed_aware = hasattr(completed, "tzinfo") and completed.tzinfo is not None
-                    started_aware = hasattr(started, "tzinfo") and started.tzinfo is not None
+                    completed_aware = (
+                        hasattr(completed, "tzinfo") and completed.tzinfo is not None
+                    )
+                    started_aware = (
+                        hasattr(started, "tzinfo") and started.tzinfo is not None
+                    )
                     if completed_aware and not started_aware:
                         completed = completed.replace(tzinfo=None)
                     elif started_aware and not completed_aware:
@@ -1566,18 +1574,20 @@ class BackgroundJobManager:
                 "completed_at": completed_at_str,
                 "error_message": job.get("error"),
                 "username": job.get("username"),
-                "user_alias": job.get("username"),  # DB jobs have no separate user_alias
+                "user_alias": job.get(
+                    "username"
+                ),  # DB jobs have no separate user_alias
                 "repository_name": job.get("repo_alias"),
                 "repository_url": None,  # Not stored in DB
-                "progress_info": None,   # Not stored in DB
+                "progress_info": None,  # Not stored in DB
                 "duration_seconds": duration_seconds,
             }
 
     def get_jobs_for_display(
         self,
-        status_filter: str = None,
-        type_filter: str = None,
-        search_text: str = None,
+        status_filter: str = None,  # type: ignore[assignment]
+        type_filter: str = None,  # type: ignore[assignment]
+        search_text: str = None,  # type: ignore[assignment]
         page: int = 1,
         page_size: int = 50,
     ) -> tuple:
@@ -1613,7 +1623,11 @@ class BackgroundJobManager:
                     continue
 
                 # Apply filters to memory jobs in Python
-                status_str = job.status.value if hasattr(job.status, "value") else str(job.status)
+                status_str = (
+                    job.status.value
+                    if hasattr(job.status, "value")
+                    else str(job.status)
+                )
                 if status_filter and status_str != status_filter:
                     continue
                 if type_filter and job.operation_type != type_filter:
@@ -1660,6 +1674,6 @@ class BackgroundJobManager:
         # Step 4: Paginate
         total_pages = max(1, (total_count + page_size - 1) // page_size)
         offset = (page - 1) * page_size
-        paginated = all_jobs[offset: offset + page_size]
+        paginated = all_jobs[offset : offset + page_size]
 
         return paginated, total_count, total_pages

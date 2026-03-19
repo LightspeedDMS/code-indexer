@@ -202,7 +202,9 @@ class GoldenRepoManager:
                 migrated_file = metadata_file + ".migrated"
                 try:
                     os.rename(metadata_file, migrated_file)
-                    logging.info(f"Renamed metadata.json to {os.path.basename(migrated_file)}")
+                    logging.info(
+                        f"Renamed metadata.json to {os.path.basename(migrated_file)}"
+                    )
                 except OSError as rename_error:
                     logging.warning(
                         f"Failed to rename metadata.json: {rename_error}. "
@@ -327,8 +329,8 @@ class GoldenRepoManager:
                     clone_path=clone_path,
                     created_at=created_at,
                     enable_temporal=enable_temporal,
-                        temporal_options=temporal_options,
-                    )
+                    temporal_options=temporal_options,
+                )
 
                 # Auto-assign category (Story #181 AC1)
                 # Non-blocking: log error but don't fail registration
@@ -447,7 +449,7 @@ class GoldenRepoManager:
         Returns:
             List of golden repository dictionaries
         """
-        return self._sqlite_backend.list_repos()
+        return self._sqlite_backend.list_repos()  # type: ignore[no-any-return]
 
     def register_local_repo(
         self,
@@ -515,8 +517,8 @@ class GoldenRepoManager:
                 clone_path=str(folder_path),
                 created_at=created_at,
                 enable_temporal=False,
-                    temporal_options=None,
-                )
+                temporal_options=None,
+            )
 
             # Auto-assign category (Story #181 AC1)
             # Non-blocking: log error but don't fail registration
@@ -547,9 +549,7 @@ class GoldenRepoManager:
                 enable_temporal=False,
                 temporal_options=None,
             )
-            logging.info(
-                f"Local repo '{alias}' activated globally as '{alias}-global'"
-            )
+            logging.info(f"Local repo '{alias}' activated globally as '{alias}-global'")
         except Exception as activation_error:
             logging.error(
                 f"Global activation failed for local repo '{alias}': {activation_error}. "
@@ -568,16 +568,16 @@ class GoldenRepoManager:
                     capture_output=True,
                     text=True,
                 )
-                logging.info(f"Initialized CIDX index structure for local repo '{alias}'")
+                logging.info(
+                    f"Initialized CIDX index structure for local repo '{alias}'"
+                )
             except subprocess.CalledProcessError as e:
                 logging.error(
                     f"Failed to initialize CIDX for '{alias}': {e.stderr if e.stderr else str(e)}"
                 )
                 # Continue with registration even if init fails
             except Exception as e:
-                logging.error(
-                    f"Unexpected error during CIDX init for '{alias}': {e}"
-                )
+                logging.error(f"Unexpected error during CIDX init for '{alias}': {e}")
                 # Continue with registration even if init fails
 
         # Lifecycle hooks (controlled by fire_lifecycle_hooks parameter)
@@ -606,9 +606,7 @@ class GoldenRepoManager:
 
                     group_access_on_repo_added(alias, self.group_access_manager)
             except Exception as hook_error:
-                logging.error(
-                    f"Group access hook failed for '{alias}': {hook_error}"
-                )
+                logging.error(f"Group access hook failed for '{alias}': {hook_error}")
 
         return True
 
@@ -787,6 +785,7 @@ class GoldenRepoManager:
                 # Lifecycle hook: Delete wiki article view records (Story #287, AC4)
                 try:
                     from code_indexer.server.wiki.wiki_cache import WikiCache
+
                     wiki_cache = WikiCache(self.db_path)
                     wiki_cache.delete_views_for_repo(alias)
                 except Exception as hook_error:
@@ -1344,11 +1343,17 @@ class GoldenRepoManager:
                 if command == init_command:
                     try:
                         from ..services.config_service import get_config_service
+
                         config_svc = get_config_service()
                         config_svc.seed_repo_extensions_from_server_config(clone_path)
-                        logging.info("Seeded file_extensions from server config for %s", clone_path)
+                        logging.info(
+                            "Seeded file_extensions from server config for %s",
+                            clone_path,
+                        )
                     except Exception as e:
-                        logging.warning("Could not seed extensions for %s: %s", clone_path, e)
+                        logging.warning(
+                            "Could not seed extensions for %s: %s", clone_path, e
+                        )
 
             logging.info(f"Post-clone workflow completed successfully for {clone_path}")
 
@@ -1893,10 +1898,9 @@ class GoldenRepoManager:
     # Story #303: Change active branch of golden repository
     # Default timeouts (seconds) used when resource_config is absent.
     # ------------------------------------------------------------------
-    _CB_GIT_TIMEOUT: int = 600        # 10 min for fetch / checkout / pull
-    _CB_INDEX_TIMEOUT: int = 3600     # 1 h  for cidx index
-    _CB_COW_TIMEOUT: int = 600        # 10 min for CoW clone
-    _CB_FIX_TIMEOUT: int = 60         # 1 min for cidx fix-config
+    _CB_GIT_TIMEOUT: int = 600  # 10 min for fetch / checkout / pull
+    _CB_COW_TIMEOUT: int = 600  # 10 min for CoW clone
+    _CB_FIX_TIMEOUT: int = 60  # 1 min for cidx fix-config
 
     def _cb_git_fetch_and_validate(
         self, base_clone_path: str, target_branch: str, git_timeout: int
@@ -1947,15 +1951,12 @@ class GoldenRepoManager:
             check=True,
         )
 
-    def _cb_cidx_index(
-        self, base_clone_path: str, cidx_index_timeout: int
-    ) -> None:
+    def _cb_cidx_index(self, base_clone_path: str) -> None:
         """Run cidx index --fts on the base clone.
 
-        The HNSW filtered rebuild now handles branch isolation by rebuilding
-        the HNSW index with only visible-branch files, eliminating ghost vectors
-        without destroying the underlying vector JSON files. The --clear flag
-        is no longer needed here.
+        Bug #467: No timeout — let indexing run to completion.
+        The HNSW filtered rebuild handles branch isolation by rebuilding
+        the HNSW index with only visible-branch files.
         """
         try:
             result = subprocess.run(
@@ -1963,7 +1964,6 @@ class GoldenRepoManager:
                 cwd=base_clone_path,
                 capture_output=True,
                 text=True,
-                timeout=cidx_index_timeout,
                 check=True,
             )
             if result.stdout:
@@ -2115,7 +2115,9 @@ class GoldenRepoManager:
 
         try:
             # Lazy import to keep cidx --help fast (per CLAUDE.md)
-            from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+            from code_indexer.storage.filesystem_vector_store import (
+                FilesystemVectorStore,
+            )
 
             # Get list of files in target branch via git ls-files on the snapshot
             result = subprocess.run(
@@ -2208,7 +2210,9 @@ class GoldenRepoManager:
             ValueError: If target branch does not exist on remote.
             RuntimeError: If any git or indexing step fails.
         """
-        if not target_branch or not re.match(r"^[a-zA-Z0-9_][a-zA-Z0-9_./-]*$", target_branch):
+        if not target_branch or not re.match(
+            r"^[a-zA-Z0-9_][a-zA-Z0-9_./-]*$", target_branch
+        ):
             raise ValueError(f"Invalid branch name: '{target_branch}'")
 
         if alias not in self.golden_repos:
@@ -2232,15 +2236,26 @@ class GoldenRepoManager:
 
         try:
             rc = self.resource_config
-            git_t = getattr(rc, "git_pull_timeout", self._CB_GIT_TIMEOUT) if rc else self._CB_GIT_TIMEOUT
-            idx_t = getattr(rc, "cidx_index_timeout", self._CB_INDEX_TIMEOUT) if rc else self._CB_INDEX_TIMEOUT
-            cow_t = getattr(rc, "cow_clone_timeout", self._CB_COW_TIMEOUT) if rc else self._CB_COW_TIMEOUT
-            fix_t = getattr(rc, "cidx_fix_config_timeout", self._CB_FIX_TIMEOUT) if rc else self._CB_FIX_TIMEOUT
+            git_t = (
+                getattr(rc, "git_pull_timeout", self._CB_GIT_TIMEOUT)
+                if rc
+                else self._CB_GIT_TIMEOUT
+            )
+            cow_t = (
+                getattr(rc, "cow_clone_timeout", self._CB_COW_TIMEOUT)
+                if rc
+                else self._CB_COW_TIMEOUT
+            )
+            fix_t = (
+                getattr(rc, "cidx_fix_config_timeout", self._CB_FIX_TIMEOUT)
+                if rc
+                else self._CB_FIX_TIMEOUT
+            )
 
             base = golden_repo.clone_path
             self._cb_git_fetch_and_validate(base, target_branch, git_t)
             self._cb_checkout_and_pull(base, target_branch, git_t)
-            self._cb_cidx_index(base, idx_t)
+            self._cb_cidx_index(base)
             snapshot = self._cb_cow_snapshot(alias, base, cow_t, fix_t)
             self._cb_fts_branch_cleanup(snapshot, target_branch)
             self._cb_hnsw_branch_cleanup(snapshot, target_branch)
@@ -2300,7 +2315,9 @@ class GoldenRepoManager:
             GoldenRepoNotFoundError: If alias is not registered.
             DuplicateJobError: If a change_branch job is already running for this repo.
         """
-        if not target_branch or not re.match(r"^[a-zA-Z0-9_][a-zA-Z0-9_./-]*$", target_branch):
+        if not target_branch or not re.match(
+            r"^[a-zA-Z0-9_][a-zA-Z0-9_./-]*$", target_branch
+        ):
             raise ValueError(f"Invalid branch name: '{target_branch}'")
 
         if alias not in self.golden_repos:
@@ -2357,8 +2374,8 @@ class GoldenRepoManager:
                 f"Invalid index_type: {index_type}. Must be one of: {', '.join(valid_index_types)}"
             )
 
-        # Get golden repo reference for background worker
-        golden_repo = self.golden_repos[alias]
+        # Validate alias exists (raises KeyError if not)
+        _ = self.golden_repos[alias]
         # Note: _index_exists check removed - allow rebuilding existing indexes
 
         # AC1: Create background job and return job_id
@@ -2564,11 +2581,7 @@ class GoldenRepoManager:
                     "stderr": captured_stderr,
                 }
             except subprocess.CalledProcessError as e:
-                error_details = (
-                    e.stderr
-                    or e.stdout
-                    or f"Exit code {e.returncode}"
-                )
+                error_details = e.stderr or e.stdout or f"Exit code {e.returncode}"
                 raise GoldenRepoError(
                     f"Failed to add index: Command failed: {error_details}"
                 )
@@ -2796,4 +2809,4 @@ def get_golden_repo_manager() -> "GoldenRepoManager":
             "golden_repo_manager not initialized. "
             "Server must set app.state.golden_repo_manager during startup."
         )
-    return manager
+    return manager  # type: ignore[no-any-return]
