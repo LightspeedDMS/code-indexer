@@ -202,8 +202,8 @@ class SmartIndexer(HighThroughputProcessor):
         try:
             path = Path(file_path)
 
-            # Check file extension
-            if path.suffix.lower() not in self.config.file_extensions:
+            # Check file extension (lstrip dot: .java -> java to match config format)
+            if path.suffix.lower().lstrip(".") not in self.config.file_extensions:
                 return False
 
             # Check exclude patterns (simplified check)
