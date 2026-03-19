@@ -22,6 +22,7 @@ from .git_pull_updater import GitPullUpdater
 from .query_tracker import QueryTracker
 from .cleanup_manager import CleanupManager
 from .shared_operations import GlobalRepoOperations
+from code_indexer.server.repositories.background_jobs import DuplicateJobError
 
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import ServerResourceConfig
@@ -807,6 +808,11 @@ class RefreshScheduler:
                     # Repo is due for refresh — submit job
                     try:
                         self._submit_refresh_job(alias_name)
+                    except DuplicateJobError:
+                        # Job already running for this repo — skip silently
+                        logger.debug(
+                            f"Refresh already running for {alias_name}, skipping this cycle"
+                        )
                     except Exception as e:
                         logger.error(
                             f"Refresh failed for {alias_name}: {type(e).__name__}: {e}",
