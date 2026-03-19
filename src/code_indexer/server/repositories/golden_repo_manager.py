@@ -2419,9 +2419,10 @@ class GoldenRepoManager:
                 if init_result.stderr:
                     captured_stderr += f"[init] {init_result.stderr}\n"
 
-                # semantic - execute cidx index (semantic embeddings only)
+                # semantic - execute cidx index --clear (force full rebuild)
+                # Bug #468: without --clear this is a no-op for already-indexed repos
                 if index_type == "semantic":
-                    command = ["cidx", "index"]
+                    command = ["cidx", "index", "--clear"]
                     result = subprocess.run(
                         command,
                         cwd=repo_path,
