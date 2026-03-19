@@ -126,7 +126,9 @@ class ProgressiveMetadata:
         Returns:
             Timestamp to resume from, or 0.0 if full index needed
         """
-        if self.metadata["status"] not in ["in_progress", "completed"]:
+        # Bug #467: Accept "failed" status for resume — interrupted indexing
+        # may have been marked failed, but vectors on disk are still valid
+        if self.metadata["status"] not in ["in_progress", "completed", "failed"]:
             return 0.0
 
         last_timestamp = self.metadata.get("last_index_timestamp", 0.0)
@@ -286,9 +288,14 @@ class ProgressiveMetadata:
         self._save_metadata()
 
     def can_resume_interrupted_operation(self) -> bool:
-        """Check if there's an interrupted indexing operation that can be resumed."""
+        """Check if there's an interrupted indexing operation that can be resumed.
+
+        Bug #467: Accept both "in_progress" and "failed" status.
+        Interrupted indexing (timeout, kill, restart) may have been marked
+        "failed" but vectors on disk are valid and work should resume.
+        """
         return (
-            self.metadata.get("status") == "in_progress"
+            self.metadata.get("status") in ("in_progress", "failed")
             and len(self.metadata.get("files_to_index", [])) > 0
             and self.metadata.get("current_file_index", 0)
             < len(self.metadata.get("files_to_index", []))

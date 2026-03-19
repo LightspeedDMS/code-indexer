@@ -100,6 +100,7 @@ def _make_snapshot_mock_run():
       _create_snapshot() does NOT run cidx index itself)
     - all others: no-op success
     """
+
     def mock_run(cmd, **kwargs):
         result = MagicMock()
         result.returncode = 0
@@ -231,7 +232,9 @@ class TestTemporalIndexingInIndexSource:
             if cmd[:2] == ["cidx", "index"] and "--index-commits" in cmd:
                 temporal_calls.append((list(cmd), str(cwd)))
             elif cmd[:2] == ["cidx", "index"] and "--fts" in cmd:
-                (Path(cwd) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+                (Path(cwd) / ".code-indexer" / "index").mkdir(
+                    parents=True, exist_ok=True
+                )
 
             return result
 
@@ -248,9 +251,9 @@ class TestTemporalIndexingInIndexSource:
         )
 
         cmd, cwd = temporal_calls[0]
-        assert cwd == str(source_repo), (
-            f"cidx index --index-commits cwd={cwd} must be source_path={source_repo}."
-        )
+        assert cwd == str(
+            source_repo
+        ), f"cidx index --index-commits cwd={cwd} must be source_path={source_repo}."
         assert "--max-commits" in cmd, "temporal option --max-commits not passed"
         assert "500" in cmd, "temporal option max_commits value 500 not passed"
         assert "--since-date" in cmd, "temporal option --since-date not passed"
@@ -285,7 +288,9 @@ class TestTemporalIndexingInIndexSource:
             if cmd[:2] == ["cidx", "index"] and "--index-commits" in cmd:
                 temporal_calls.append(list(cmd))
             elif cmd[:2] == ["cidx", "index"] and "--fts" in cmd:
-                (Path(cwd) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+                (Path(cwd) / ".code-indexer" / "index").mkdir(
+                    parents=True, exist_ok=True
+                )
 
             return result
 
@@ -309,9 +314,7 @@ class TestTemporalIndexingInIndexSource:
 class TestScipIndexingInIndexSource:
     """C7: SCIP indexing runs on source in _index_source(), not in _create_snapshot()."""
 
-    def test_scip_runs_on_source_when_enabled(
-        self, scheduler, registry, source_repo
-    ):
+    def test_scip_runs_on_source_when_enabled(self, scheduler, registry, source_repo):
         """
         AC: cidx scip generate runs on source path when enable_scip=True.
         """
@@ -335,7 +338,9 @@ class TestScipIndexingInIndexSource:
             if cmd[:2] == ["cidx", "scip"] and "generate" in cmd:
                 scip_calls.append((list(cmd), str(cwd)))
             elif cmd[:2] == ["cidx", "index"] and "--fts" in cmd:
-                (Path(cwd) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+                (Path(cwd) / ".code-indexer" / "index").mkdir(
+                    parents=True, exist_ok=True
+                )
 
             return result
 
@@ -350,13 +355,11 @@ class TestScipIndexingInIndexSource:
             "C7: SCIP indexing must run on source in _index_source()."
         )
         cmd, cwd = scip_calls[0]
-        assert cwd == str(source_repo), (
-            f"cidx scip generate cwd={cwd} must be source_path={source_repo}."
-        )
+        assert cwd == str(
+            source_repo
+        ), f"cidx scip generate cwd={cwd} must be source_path={source_repo}."
 
-    def test_scip_not_called_in_create_snapshot(
-        self, scheduler, registry, source_repo
-    ):
+    def test_scip_not_called_in_create_snapshot(self, scheduler, registry, source_repo):
         """
         AC: cidx scip generate does NOT run in _create_snapshot().
         The clone inherits the SCIP index from the source via CoW.
@@ -382,7 +385,9 @@ class TestScipIndexingInIndexSource:
                 dst = cmd[-1]
                 shutil.copytree(cmd[-2], dst)
                 # Simulate source was already indexed before the CoW clone
-                (Path(dst) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+                (Path(dst) / ".code-indexer" / "index").mkdir(
+                    parents=True, exist_ok=True
+                )
             elif cmd[:2] == ["cidx", "scip"] and "generate" in cmd:
                 scip_calls.append((list(cmd), str(cwd)))
 
@@ -480,7 +485,9 @@ class TestIndexingFailureAbortsPipeline:
                     alias_name="abort-test-global",
                     source_path=str(source_repo),
                 )
-                pytest.fail("_index_source() must raise RuntimeError on indexing failure")
+                pytest.fail(
+                    "_index_source() must raise RuntimeError on indexing failure"
+                )
             except RuntimeError:
                 pass  # expected — caller would not call _create_snapshot()
 
@@ -489,31 +496,17 @@ class TestIndexingFailureAbortsPipeline:
             "The caller aborts before calling _create_snapshot()."
         )
 
-    def test_index_source_timeout_raises_runtime_error(
-        self, scheduler, registry, source_repo
-    ):
+    def test_index_source_has_no_timeout(self, scheduler, registry, source_repo):
         """
-        AC: When cidx index times out, _index_source() raises RuntimeError.
+        Bug #467: _index_source() no longer uses subprocess timeout.
+        Timeouts caused fail_indexing() to poison metadata, losing all
+        progress and wasting VoyageAI API credits. Indexing runs until done.
         """
-        registry.register_global_repo(
-            "timeout-test",
-            "timeout-test-global",
-            "git@github.com:org/repo.git",
-            str(source_repo),
-        )
+        import inspect
+        from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 
-        def mock_run_timeout(cmd, **kwargs):
-            if cmd[:2] == ["cidx", "index"] and "--fts" in cmd:
-                raise subprocess.TimeoutExpired(cmd=cmd, timeout=3600)
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = ""
-            result.stderr = ""
-            return result
-
-        with pytest.raises(RuntimeError):
-            with patch("subprocess.run", side_effect=mock_run_timeout):
-                scheduler._index_source(
-                    alias_name="timeout-test-global",
-                    source_path=str(source_repo),
-                )
+        source = inspect.getsource(RefreshScheduler._index_source)
+        # Verify no TimeoutExpired handler exists
+        assert (
+            "TimeoutExpired" not in source
+        ), "_index_source should not handle TimeoutExpired (Bug #467)"

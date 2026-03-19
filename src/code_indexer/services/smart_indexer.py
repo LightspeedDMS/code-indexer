@@ -571,7 +571,28 @@ class SmartIndexer(HighThroughputProcessor):
             logger.info("Indexing operation was cancelled by user - can be resumed")
             raise
         except Exception as e:
-            self.progressive_metadata.fail_indexing(str(e))
+            # Bug #467: Don't poison metadata on process interruptions.
+            # Interruptions leave status="in_progress" so resume works on next run.
+            # Only genuine errors (import failures, config errors, etc.) get "failed".
+            error_str = str(e).lower()
+            is_interruption = any(
+                kw in error_str
+                for kw in [
+                    "timeout",
+                    "interrupt",
+                    "killed",
+                    "signal",
+                    "sigterm",
+                    "sigkill",
+                    "broken pipe",
+                    "process",
+                    "shutdown",
+                ]
+            )
+            if is_interruption:
+                logger.warning(f"Indexing interrupted (will resume on next run): {e}")
+            else:
+                self.progressive_metadata.fail_indexing(str(e))
             raise
         finally:
             # Commit FTS index if it was initialized
@@ -786,7 +807,10 @@ class SmartIndexer(HighThroughputProcessor):
                         0, 0, Path(""), info="Applying branch isolation cleanup..."
                     )
                 self.hide_files_not_in_branch_thread_safe(
-                    current_branch, all_relative_files, collection_name, progress_callback,
+                    current_branch,
+                    all_relative_files,
+                    collection_name,
+                    progress_callback,
                     fts_manager=fts_manager,
                 )
 
@@ -1119,7 +1143,10 @@ class SmartIndexer(HighThroughputProcessor):
             # Only apply branch isolation for git repositories
             if self.git_topology_service.is_git_available():
                 self.hide_files_not_in_branch_thread_safe(
-                    current_branch, all_relative_files, collection_name, progress_callback,
+                    current_branch,
+                    all_relative_files,
+                    collection_name,
+                    progress_callback,
                     fts_manager=fts_manager,
                 )
 
@@ -2104,7 +2131,9 @@ class SmartIndexer(HighThroughputProcessor):
                     # Only apply branch isolation for git repositories
                     if self.git_topology_service.is_git_available():
                         self.hide_files_not_in_branch_thread_safe(
-                            current_branch, all_relative_files, collection_name,
+                            current_branch,
+                            all_relative_files,
+                            collection_name,
                             fts_manager=fts_manager,
                         )
 

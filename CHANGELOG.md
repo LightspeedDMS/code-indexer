@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.25
+
+### Bug Fixes
+
+- fix: Bug #467 -- Golden repo refresh indexing resilience (critical)
+  - Removed subprocess timeout from _index_source() for semantic+FTS, temporal, and SCIP indexing
+  - Interruptions (timeout, kill, SIGTERM) no longer poison metadata with status="failed"
+  - Progressive metadata now accepts "failed" status for resume (can_resume_interrupted_operation, get_resume_timestamp)
+  - Conditional --reconcile: uses reconcile mode only when metadata shows interrupted state (in_progress/failed), normal incremental otherwise
+  - Prevents wasting VoyageAI API credits re-embedding identical content after interrupted indexing
+- fix: .NET 7-digit fractional seconds in Claude Server timestamps (v9.5.24)
+- fix: dateutil dependency replaced with stdlib datetime.fromisoformat (v9.5.23)
+
 ## v9.5.21
 
 ### Bug Fixes

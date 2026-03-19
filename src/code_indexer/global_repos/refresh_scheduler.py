@@ -70,7 +70,7 @@ class RefreshScheduler:
         cleanup_manager: CleanupManager,
         resource_config: Optional["ServerResourceConfig"] = None,
         background_job_manager: Optional["BackgroundJobManager"] = None,
-        registry: Optional["GlobalRegistry"] = None,
+        registry: Optional["GlobalRegistry"] = None,  # type: ignore[name-defined]  # noqa: F821
     ):
         """
         Initialize the refresh scheduler.
@@ -102,6 +102,7 @@ class RefreshScheduler:
             from code_indexer.server.utils.registry_factory import (
                 get_server_global_registry,
             )
+
             self.registry = get_server_global_registry(str(self.golden_repos_dir))
 
         # Thread management
@@ -117,7 +118,10 @@ class RefreshScheduler:
         # Replaces the in-memory threading.Lock registry from Story #227.
         # Keyed by repo alias without -global suffix (e.g., "cidx-meta").
         from .write_lock_manager import WriteLockManager
-        self.write_lock_manager = WriteLockManager(golden_repos_dir=self.golden_repos_dir)
+
+        self.write_lock_manager = WriteLockManager(
+            golden_repos_dir=self.golden_repos_dir
+        )
 
         # Story #295: Per-alias consecutive fetch failure counters and re-clone
         # cooldown timestamps.  In-memory only — reset on server restart is fine
@@ -372,7 +376,9 @@ class RefreshScheduler:
     # Write-lock registry (Story #227, delegating to WriteLockManager Story #230)
     # ------------------------------------------------------------------
 
-    def acquire_write_lock(self, alias: str, owner_name: str = "refresh_scheduler") -> bool:
+    def acquire_write_lock(
+        self, alias: str, owner_name: str = "refresh_scheduler"
+    ) -> bool:
         """
         Non-blocking acquire of the write lock for a repo alias.
 
@@ -391,7 +397,9 @@ class RefreshScheduler:
         """
         return self.write_lock_manager.acquire(alias, owner_name=owner_name)
 
-    def release_write_lock(self, alias: str, owner_name: str = "refresh_scheduler") -> None:
+    def release_write_lock(
+        self, alias: str, owner_name: str = "refresh_scheduler"
+    ) -> None:
         """
         Release the write lock for a repo alias.
 
@@ -535,7 +543,9 @@ class RefreshScheduler:
                         entered_at = datetime.fromisoformat(entered_at_str)
                         if entered_at.tzinfo is None:
                             entered_at = entered_at.replace(tzinfo=timezone.utc)
-                        elapsed = (datetime.now(timezone.utc) - entered_at).total_seconds()
+                        elapsed = (
+                            datetime.now(timezone.utc) - entered_at
+                        ).total_seconds()
                         if elapsed > WRITE_MODE_MARKER_TTL_SECONDS:
                             should_remove = True
                     except (ValueError, TypeError):
@@ -570,7 +580,9 @@ class RefreshScheduler:
                 f"{marker_path.name} (alias={alias!r})"
             )
         except OSError as exc:
-            logger.warning(f"Could not delete write mode marker {marker_path.name}: {exc}")
+            logger.warning(
+                f"Could not delete write mode marker {marker_path.name}: {exc}"
+            )
             return
 
         # Release the corresponding write lock so the scheduler is not blocked
@@ -747,14 +759,13 @@ class RefreshScheduler:
                 # the scheduled refresh cycle and are only refreshed via
                 # explicit trigger_refresh_for_repo() calls.
                 git_repos = [
-                    r for r in repos
+                    r
+                    for r in repos
                     if r.get("alias_name") and _is_git_repo_url(r.get("repo_url", ""))
                 ]
 
                 # Story #284 AC2: assign initial spread to repos with no next_refresh
-                unscheduled = [
-                    r for r in git_repos if r.get("next_refresh") is None
-                ]
+                unscheduled = [r for r in git_repos if r.get("next_refresh") is None]
                 if unscheduled:
                     self._assign_initial_spread(unscheduled, refresh_interval)
 
@@ -762,8 +773,10 @@ class RefreshScheduler:
                 if unscheduled:
                     repos = self.registry.list_global_repos()
                     git_repos = [
-                        r for r in repos
-                        if r.get("alias_name") and _is_git_repo_url(r.get("repo_url", ""))
+                        r
+                        for r in repos
+                        if r.get("alias_name")
+                        and _is_git_repo_url(r.get("repo_url", ""))
                     ]
 
                 # Check each repo individually against its next_refresh timestamp
@@ -962,7 +975,7 @@ class RefreshScheduler:
                         return {
                             "success": True,
                             "alias": alias_name,
-                            "message": f"Not yet initialized, skipped",
+                            "message": "Not yet initialized, skipped",
                         }
 
                     # Story #227: Skip CoW clone if an external writer holds the write lock.
@@ -992,7 +1005,9 @@ class RefreshScheduler:
                             "message": "No changes detected",
                         }
 
-                    logger.info(f"Changes detected in local repo {alias_name}, creating new index")
+                    logger.info(
+                        f"Changes detected in local repo {alias_name}, creating new index"
+                    )
                 else:
                     # Bug #239: Check write lock for git repos too. Protects against
                     # reconciliation restoring a master while refresh tries to snapshot it.
@@ -1054,11 +1069,18 @@ class RefreshScheduler:
 
                 # Story #223 AC7: Sync file extensions from server config before indexing
                 try:
-                    from code_indexer.server.services.config_service import get_config_service
+                    from code_indexer.server.services.config_service import (
+                        get_config_service,
+                    )
+
                     config_service = get_config_service()
                     config_service.sync_repo_extensions_if_drifted(source_path)
                 except Exception as e:
-                    logger.warning("Could not sync extensions before index for %s: %s", alias_name, e)
+                    logger.warning(
+                        "Could not sync extensions before index for %s: %s",
+                        alias_name,
+                        e,
+                    )
 
                 # Index source first, then create versioned snapshot (Story #229)
                 self._index_source(alias_name=alias_name, source_path=source_path)
@@ -1079,7 +1101,9 @@ class RefreshScheduler:
                 # On first refresh, current_target IS the master golden repo — scheduling it
                 # for cleanup would permanently destroy the master.
                 if ".versioned" in current_target:
-                    logger.info(f"Scheduling cleanup of old versioned snapshot: {current_target}")
+                    logger.info(
+                        f"Scheduling cleanup of old versioned snapshot: {current_target}"
+                    )
                     self.cleanup_manager.schedule_cleanup(current_target)
                 else:
                     logger.info(
@@ -1105,10 +1129,15 @@ class RefreshScheduler:
                 }
 
             except Exception as e:
-                logger.error(f"Refresh failed for {alias_name}: {type(e).__name__}: {e}", exc_info=True)
+                logger.error(
+                    f"Refresh failed for {alias_name}: {type(e).__name__}: {e}",
+                    exc_info=True,
+                )
                 # Bug #84 fix: Raise exception instead of returning error dict
                 # BackgroundJobManager marks jobs as FAILED only when exceptions are raised
-                raise RuntimeError(f"Refresh failed for {alias_name}: {type(e).__name__}: {e}")
+                raise RuntimeError(
+                    f"Refresh failed for {alias_name}: {type(e).__name__}: {e}"
+                )
 
     def _index_source(self, alias_name: str, source_path: str) -> None:
         """
@@ -1130,14 +1159,35 @@ class RefreshScheduler:
         Raises:
             RuntimeError: If any indexing step fails or times out
         """
-        cidx_index_timeout = 3600  # Default: 1 hour
-        if self.resource_config:
-            cidx_index_timeout = self.resource_config.cidx_index_timeout
-
         # Step 1: Run cidx index for semantic + FTS (always required)
-        index_command = ["cidx", "index", "--fts"]
+        # Bug #467: No timeout — let indexing run to completion.
+        # Check if previous indexing was interrupted — use --reconcile to recover.
+        # --reconcile compares content IDs against existing vectors, skips unchanged
+        # files. Only used when needed (interrupted state), otherwise normal incremental.
+        needs_reconcile = False
+        metadata_path = Path(source_path) / ".code-indexer" / "metadata.json"
+        if metadata_path.exists():
+            try:
+                import json as _json
+
+                with open(metadata_path) as _f:
+                    _meta = _json.load(_f)
+                meta_status = _meta.get("status", "")
+                if meta_status in ("in_progress", "failed"):
+                    needs_reconcile = True
+                    logger.info(
+                        f"Previous indexing interrupted (status={meta_status}), "
+                        f"using --reconcile for crash recovery on {alias_name}"
+                    )
+            except Exception:
+                pass  # If metadata unreadable, proceed with normal indexing
+
+        if needs_reconcile:
+            index_command = ["cidx", "index", "--fts", "--reconcile"]
+        else:
+            index_command = ["cidx", "index", "--fts"]
         logger.info(
-            f"Running cidx index (semantic+FTS) on source for {alias_name}: {' '.join(index_command)}"
+            f"Running cidx index on source for {alias_name}: {' '.join(index_command)}"
         )
         try:
             subprocess.run(
@@ -1145,39 +1195,30 @@ class RefreshScheduler:
                 cwd=str(source_path),
                 capture_output=True,
                 text=True,
-                timeout=cidx_index_timeout,
                 check=True,
             )
-            logger.info("cidx index (semantic+FTS) on source completed successfully")
+            logger.info(f"cidx index on source completed successfully for {alias_name}")
         except subprocess.CalledProcessError as e:
             if e.returncode == -15:  # SIGTERM — server restart interrupted indexing
                 logger.warning(
-                    f"Indexing (semantic+FTS) on source interrupted by server shutdown for {alias_name}"
+                    f"Indexing on source interrupted by server shutdown for {alias_name}"
                 )
                 raise RuntimeError(
                     f"Indexing interrupted by server shutdown for {alias_name}"
                 )
             logger.error(
-                f"Indexing (semantic+FTS) on source failed for {alias_name}: {type(e).__name__}: {e.stderr}",
+                f"Indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}",
                 exc_info=True,
             )
             raise RuntimeError(
-                f"Indexing (semantic+FTS) on source failed for {alias_name}: {type(e).__name__}: {e.stderr}"
-            )
-        except subprocess.TimeoutExpired as e:
-            logger.error(
-                f"Indexing (semantic+FTS) on source timed out for {alias_name} "
-                f"after {cidx_index_timeout} seconds: {type(e).__name__}",
-                exc_info=True,
-            )
-            raise RuntimeError(
-                f"Indexing (semantic+FTS) on source timed out for {alias_name} "
-                f"after {cidx_index_timeout} seconds: {type(e).__name__}"
+                f"Indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}"
             )
 
         # Step 2: Temporal indexing on source (if enabled and not local://)
         repo_info = self.registry.get_global_repo(alias_name)
-        enable_temporal = repo_info.get("enable_temporal", False) if repo_info else False
+        enable_temporal = (
+            repo_info.get("enable_temporal", False) if repo_info else False
+        )
         temporal_options = repo_info.get("temporal_options") if repo_info else None
 
         repo_url = repo_info.get("repo_url", "") if repo_info else ""
@@ -1217,7 +1258,6 @@ class RefreshScheduler:
                     cwd=str(source_path),
                     capture_output=True,
                     text=True,
-                    timeout=cidx_index_timeout,
                     check=True,
                 )
                 logger.info("cidx index (temporal) on source completed successfully")
@@ -1236,25 +1276,11 @@ class RefreshScheduler:
                 raise RuntimeError(
                     f"Temporal indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}"
                 )
-            except subprocess.TimeoutExpired as e:
-                logger.error(
-                    f"Temporal indexing on source timed out for {alias_name} "
-                    f"after {cidx_index_timeout} seconds: {type(e).__name__}",
-                    exc_info=True,
-                )
-                raise RuntimeError(
-                    f"Temporal indexing on source timed out for {alias_name} "
-                    f"after {cidx_index_timeout} seconds: {type(e).__name__}"
-                )
 
         # Step 3: SCIP indexing on source (if enabled)
         enable_scip = repo_info.get("enable_scip", False) if repo_info else False
 
         if enable_scip:
-            scip_timeout = 1800  # Default: 30 minutes
-            if self.resource_config:
-                scip_timeout = getattr(self.resource_config, "cidx_scip_generate_timeout", 1800)
-
             scip_command = ["cidx", "scip", "generate"]
             logger.info(f"SCIP indexing enabled for {alias_name}")
             logger.info(
@@ -1266,7 +1292,6 @@ class RefreshScheduler:
                     cwd=str(source_path),
                     capture_output=True,
                     text=True,
-                    timeout=scip_timeout,
                     check=True,
                 )
                 logger.info("cidx scip generate on source completed successfully")
@@ -1284,16 +1309,6 @@ class RefreshScheduler:
                 )
                 raise RuntimeError(
                     f"SCIP indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}"
-                )
-            except subprocess.TimeoutExpired as e:
-                logger.error(
-                    f"SCIP indexing on source timed out for {alias_name} "
-                    f"after {scip_timeout} seconds: {type(e).__name__}",
-                    exc_info=True,
-                )
-                raise RuntimeError(
-                    f"SCIP indexing on source timed out for {alias_name} "
-                    f"after {scip_timeout} seconds: {type(e).__name__}"
                 )
 
     def _create_snapshot(self, alias_name: str, source_path: str) -> str:
@@ -1458,7 +1473,9 @@ class RefreshScheduler:
             index_dir = versioned_path / ".code-indexer" / "index"
             if not index_dir.exists():
                 logger.error(f"Index validation failed: {index_dir} does not exist")
-                raise RuntimeError("Index validation failed: index directory not created")
+                raise RuntimeError(
+                    "Index validation failed: index directory not created"
+                )
 
             logger.info(f"Versioned snapshot created successfully at: {versioned_path}")
             return str(versioned_path)
@@ -1543,7 +1560,8 @@ class RefreshScheduler:
             return True
 
         version_dirs = [
-            d for d in versioned_base.iterdir()
+            d
+            for d in versioned_base.iterdir()
             if d.is_dir() and d.name.startswith("v_")
         ]
 
@@ -1667,7 +1685,9 @@ class RefreshScheduler:
         scip_db_files = list(scip_dir.glob("*.scip.db"))
         return len(scip_db_files) > 0
 
-    def _restore_master_from_versioned(self, alias_name: str, master_path: Path) -> bool:
+    def _restore_master_from_versioned(
+        self, alias_name: str, master_path: Path
+    ) -> bool:
         """
         Restore a missing master golden repo via reverse CoW clone from latest versioned snapshot.
 
@@ -1686,16 +1706,21 @@ class RefreshScheduler:
         versioned_base = self.golden_repos_dir / ".versioned" / repo_name
 
         if not versioned_base.exists():
-            logger.warning(f"Reconciliation: {alias_name} has no master and no versioned dir")
+            logger.warning(
+                f"Reconciliation: {alias_name} has no master and no versioned dir"
+            )
             return False
 
         version_dirs = [
-            d for d in versioned_base.iterdir()
+            d
+            for d in versioned_base.iterdir()
             if d.is_dir() and d.name.startswith("v_")
         ]
 
         if not version_dirs:
-            logger.warning(f"Reconciliation: {alias_name} has no v_* snapshots to restore from")
+            logger.warning(
+                f"Reconciliation: {alias_name} has no v_* snapshots to restore from"
+            )
             return False
 
         def _parse_ts(d: Path) -> int:
@@ -1712,12 +1737,16 @@ class RefreshScheduler:
         try:
             subprocess.run(
                 ["cp", "--reflink=auto", "-a", str(latest_version), str(master_path)],
-                capture_output=True, text=True, timeout=600, check=True,
+                capture_output=True,
+                text=True,
+                timeout=600,
+                check=True,
             )
         except Exception as e:
             logger.error(
                 f"Reconciliation: reverse CoW clone failed for {alias_name}: "
-                f"{type(e).__name__}: {e}", exc_info=True,
+                f"{type(e).__name__}: {e}",
+                exc_info=True,
             )
             return False
 
@@ -1725,9 +1754,15 @@ class RefreshScheduler:
         try:
             subprocess.run(
                 ["cidx", "fix-config", "--force"],
-                cwd=str(master_path), capture_output=True, text=True, timeout=60, check=False,
+                cwd=str(master_path),
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
             )
-            logger.info(f"Reconciliation: cidx fix-config --force done for {alias_name}")
+            logger.info(
+                f"Reconciliation: cidx fix-config --force done for {alias_name}"
+            )
         except Exception as fix_err:
             logger.warning(
                 f"Reconciliation: cidx fix-config failed for {alias_name} "
@@ -1800,7 +1835,9 @@ class RefreshScheduler:
         marker_file = self.golden_repos_dir / ".reconciliation_complete_v1"
 
         if marker_file.exists():
-            logger.info("Startup reconciliation already completed (marker exists), skipping")
+            logger.info(
+                "Startup reconciliation already completed (marker exists), skipping"
+            )
             return
 
         logger.info("Starting startup reconciliation of golden repos (Story #236)")
@@ -1810,8 +1847,12 @@ class RefreshScheduler:
         try:
             all_repos = self.registry.list_global_repos()
         except Exception as e:
-            logger.error(f"Failed to list repos for reconciliation: {type(e).__name__}: {e}")
-            marker_file.write_text(f"Completed (with errors) at {datetime.now().isoformat()}")
+            logger.error(
+                f"Failed to list repos for reconciliation: {type(e).__name__}: {e}"
+            )
+            marker_file.write_text(
+                f"Completed (with errors) at {datetime.now().isoformat()}"
+            )
             return
 
         for repo in all_repos:
@@ -1847,17 +1888,18 @@ class RefreshScheduler:
                 except Exception as e:
                     logger.error(
                         f"Reconciliation: unexpected error for {alias_name}: "
-                        f"{type(e).__name__}: {e}", exc_info=True,
+                        f"{type(e).__name__}: {e}",
+                        exc_info=True,
                     )
                 finally:
-                    self.release_write_lock(
-                        repo_name, owner_name="reconciliation"
-                    )
+                    self.release_write_lock(repo_name, owner_name="reconciliation")
 
             # AC5: Queue description generation if cidx-meta file is missing
             if claude_cli_manager is not None:
                 try:
-                    if self._queue_missing_description(alias_name, master_path, claude_cli_manager):
+                    if self._queue_missing_description(
+                        alias_name, master_path, claude_cli_manager
+                    ):
                         description_queued_count += 1
                 except Exception as e:
                     logger.warning(
