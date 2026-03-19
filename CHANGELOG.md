@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.26
+
+### Bug Fixes
+
+- fix: removed cidx_index_timeout entirely from codebase (Bug #467 continued)
+  - Removed from config model, config service, Web UI, golden_repo_manager, maintenance_service
+  - Indexing subprocess calls in golden_repo_manager no longer have timeout
+  - Background job staleness threshold changed from timeout-based to fixed 24h
+  - Backward compatible: old config files with cidx_index_timeout load without error
+- fix: DuplicateJobError silently skipped instead of logged as ERROR with full traceback
+
 ## v9.5.25
 
 ### Bug Fixes
