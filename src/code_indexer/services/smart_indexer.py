@@ -206,10 +206,11 @@ class SmartIndexer(HighThroughputProcessor):
             if path.suffix.lower().lstrip(".") not in self.config.file_extensions:
                 return False
 
-            # Check exclude patterns (simplified check)
-            path_str = str(path)
+            # Check exclude patterns using path component boundaries
+            # (not substring: "build" must match "build/" dir, not "builder/")
+            parts = Path(file_path).parts
             for exclude_dir in self.config.exclude_dirs:
-                if exclude_dir in path_str:
+                if exclude_dir in parts:
                     return False
 
             return True
