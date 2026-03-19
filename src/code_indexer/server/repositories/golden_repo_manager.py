@@ -2590,8 +2590,10 @@ class GoldenRepoManager:
                 raise GoldenRepoError(f"Failed to add index: {str(e)}")
 
         # Submit to BackgroundJobManager
+        # Bug #468: Use index_type in operation_type so different index types
+        # don't conflict with each other in duplicate detection
         job_id = self.background_job_manager.submit_job(
-            operation_type="add_index",
+            operation_type=f"add_index_{index_type}",
             func=background_worker,
             submitter_username=submitter_username,
             is_admin=True,

@@ -147,6 +147,7 @@ from ..middleware.correlation import get_correlation_id
 
 # Import services
 from ..repositories.golden_repo_manager import GoldenRepoError, GitOperationError
+from ..repositories.background_jobs import DuplicateJobError
 from ..services.maintenance_service import get_maintenance_state
 
 # Import routers used in register_inline_routes (were module-level imports in app.py)
@@ -1881,6 +1882,11 @@ def register_inline_routes(
                     headers={"Location": f"/api/jobs/{job_ids[0]}"},
                 )
 
+        except DuplicateJobError as e:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(e),
+            )
         except ValueError as e:
             error_msg = str(e)
             # Determine if it's 404 (not found) or 409 (conflict) or 400 (invalid)
