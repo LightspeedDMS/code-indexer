@@ -107,7 +107,8 @@ async function submitAddIndex(alias) {
         }
 
         const data = await response.json();
-        const jobId = data.job_id;
+        // Handle both single (job_id) and multi-select (job_ids) responses
+        const jobId = data.job_id || (data.job_ids && data.job_ids[0]);
 
         // Start polling job status
         if (jobId) {
