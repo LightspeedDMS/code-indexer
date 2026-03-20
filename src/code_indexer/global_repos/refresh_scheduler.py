@@ -1058,7 +1058,9 @@ class RefreshScheduler:
                                 self.golden_repos_dir.parent / "cidx_server.db"
                             )
                             _meta_backend = GoldenRepoMetadataSqliteBackend(db_path)
-                            meta = _meta_backend.get_repo(alias_name)
+                            # golden_repos_metadata uses base alias (no -global suffix)
+                            base_alias = alias_name.replace("-global", "")
+                            meta = _meta_backend.get_repo(base_alias)
                             if meta and meta.get("default_branch"):
                                 default_branch = meta["default_branch"]
                         except Exception as e:
