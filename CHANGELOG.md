@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.29
+
+### Bug Fixes
+
+- fix: branch change path indexed binary files (.jar, .zip, .exe, .psd) bypassing extension filter (Bug #469)
+  - Root cause: GitTopologyService.analyze_branch_change() returned raw git diff output without filtering by file_extensions
+  - Every binary file differing between branches was sent to VoyageAI for embedding, burning API credits and causing multi-hour timeouts
+  - Fix: analyze_branch_change() now filters files_to_reindex by config.file_extensions
+- fix: _should_index_file() dot mismatch broke git-aware incremental indexing since v2.15.0 (Bug #469)
+  - path.suffix.lower() returns ".java" (with dot) but config.file_extensions stores "java" (without dot)
+  - Git delta TRACK 1 rejected ALL source files, falling back entirely to mtime-based detection
+- fix: _should_index_file() exclude_dirs used substring match instead of path components (Bug #469)
+  - "build" excluded "src/builder/App.java", "bin" excluded "src/bindings/ffi.rs", etc.
+  - Now uses Path.parts for proper directory boundary matching
+
+### Tests
+
+- Added 96 TDD tests for Bug #469 covering binary file exclusion, git delta filtering, branch change scenarios, exclude_dirs substring collisions, and production-scale mixed Java/Kotlin repos
+
 ## v9.5.28
 
 ### Bug Fixes
