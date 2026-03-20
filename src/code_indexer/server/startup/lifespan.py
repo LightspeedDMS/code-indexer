@@ -403,6 +403,14 @@ def make_lifespan(
             app.state.query_tracker = global_lifecycle_manager.query_tracker
             app.state.golden_repos_dir = str(golden_repos_dir)
 
+            # Wire refresh_scheduler into golden_repo_manager so that
+            # add_indexes_to_golden_repo() and change_branch() can acquire
+            # write locks and perform CoW snapshots (Bug B fix).
+            if golden_repo_manager is not None:
+                golden_repo_manager._refresh_scheduler = (
+                    global_lifecycle_manager.refresh_scheduler
+                )
+
             logger.info(
                 "Global repos background services started successfully",
                 extra={"correlation_id": get_correlation_id()},

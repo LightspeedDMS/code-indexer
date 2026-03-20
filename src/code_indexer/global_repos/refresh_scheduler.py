@@ -1044,7 +1044,30 @@ class RefreshScheduler:
                             timeout=10,
                         )
                         current_branch = branch_result.stdout.strip()
+                        # Bug #469 Fix A: default_branch lives in golden_repos_metadata,
+                        # NOT in global_repos.  repo_info comes from global_repos which
+                        # has no default_branch column, so .get() always returned "main".
+                        # Read the real value from GoldenRepoMetadataSqliteBackend.
                         default_branch = repo_info.get("default_branch", "main")
+                        try:
+                            from code_indexer.server.storage.sqlite_backends import (
+                                GoldenRepoMetadataSqliteBackend,
+                            )
+
+                            db_path = str(
+                                self.golden_repos_dir.parent / "cidx_server.db"
+                            )
+                            _meta_backend = GoldenRepoMetadataSqliteBackend(db_path)
+                            meta = _meta_backend.get_repo(alias_name)
+                            if meta and meta.get("default_branch"):
+                                default_branch = meta["default_branch"]
+                        except Exception as e:
+                            logger.debug(
+                                "Could not read default_branch from golden_repos_metadata"
+                                " for %s: %s",
+                                alias_name,
+                                e,
+                            )
 
                         if current_branch and current_branch != default_branch:
                             logger.warning(
