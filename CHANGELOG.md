@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.30
+
+### Bug Fixes
+
+- fix: temporal indexer indexed binary files (.jar, .zip, .exe) — no file_extensions check (Bug #469)
+  - TemporalDiffScanner._should_include_file() set base_result=True for ALL files without checking file_extensions
+  - Every binary file in every git commit was embedded by temporal indexing
+  - Fix: Added file_extensions filtering before override logic, matching FileFinder behavior
+
+### Tests
+
+- Added 45 TDD tests for temporal diff scanner binary filtering + E2E verification
+
 ## v9.5.29
 
 ### Bug Fixes
