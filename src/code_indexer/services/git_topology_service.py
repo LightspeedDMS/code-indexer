@@ -43,13 +43,17 @@ class FileAnalysis:
 class GitTopologyService:
     """Advanced git topology analysis for smart incremental indexing."""
 
-    def __init__(self, codebase_dir: Path):
+    def __init__(self, codebase_dir: Path, config=None):
         """Initialize the git topology service.
 
         Args:
             codebase_dir: Root directory of the git repository
+            config: Optional Config object. When provided, analyze_branch_change
+                    filters files_to_reindex by file_extensions so binary files
+                    (.jar, .zip, .exe, etc.) are excluded.
         """
         self.codebase_dir = Path(codebase_dir)
+        self.config = config
         self._git_available: Optional[bool] = None
         self._current_branch_cache: Optional[str] = None
         self._cache_timestamp: float = 0
@@ -220,6 +224,21 @@ class GitTopologyService:
         # Filter changed files to only include files that exist in the target branch
         # Files that don't exist in target branch should be hidden, not processed as "changed"
         changed_files = [f for f in raw_changed_files if f in all_files]
+
+        # Bug #469: Filter by file_extensions to exclude binary files (.jar, .zip, .exe, etc.)
+        # Without this, raw git diff output sends ALL changed files to the embedding pipeline.
+        if (
+            self.config
+            and hasattr(self.config, "file_extensions")
+            and self.config.file_extensions
+        ):
+            allowed_extensions = set(self.config.file_extensions)
+            changed_files = [
+                f
+                for f in changed_files
+                if Path(f).suffix.lower().lstrip(".") in allowed_extensions
+            ]
+
         unchanged_files = [f for f in all_files if f not in changed_files]
 
         # Get working directory changes

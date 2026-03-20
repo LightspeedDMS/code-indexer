@@ -104,7 +104,9 @@ class SmartIndexer(HighThroughputProcessor):
         self.progressive_metadata = ProgressiveMetadata(metadata_path)
 
         # Initialize branch topology services
-        self.git_topology_service = GitTopologyService(config.codebase_dir)
+        self.git_topology_service = GitTopologyService(
+            config.codebase_dir, config=config
+        )
         # Removed: SmartBranchIndexer initialization (abandoned code)
 
         # Initialize structured progress logging
