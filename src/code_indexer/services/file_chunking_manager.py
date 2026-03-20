@@ -379,6 +379,10 @@ class FileChunkingManager:
         payload["point_id"] = point_id
         payload["unique_key"] = point_id_data
 
+        # Story #470: Smart embedding cache - store content hash for future cache lookups
+        content_hash = hashlib.sha256(chunk["text"].encode("utf-8")).hexdigest()
+        payload["content_hash"] = content_hash
+
         # Create vector point
         vector_point = {"id": point_id, "vector": embedding, "payload": payload}
 
@@ -482,6 +486,58 @@ class FileChunkingManager:
             # PROGRESS REPORTING ADJUSTMENT: Remove intermediate callback
             # Status updates are tracked by CleanSlotTracker for display
             # HighThroughputProcessor handles file-level progress reporting
+
+            # Story #470: Smart embedding cache - skip unchanged chunks
+            cached_points = []
+            uncached_regular_chunks = []
+            chunks_skipped = 0
+
+            collection_name = metadata.get("collection_name")
+            file_path_for_lookup = self._normalize_path_for_storage(file_path)
+            existing_hashes: Dict[int, Any] = {}
+            if collection_name:
+                try:
+                    existing_hashes = (
+                        self.vector_store_client.get_existing_content_hashes(
+                            file_path_for_lookup, collection_name
+                        )
+                    )
+                except Exception as e:
+                    logger.debug(f"Could not load existing hashes for {file_path}: {e}")
+
+            for chunk in regular_chunks:
+                chunk_text = chunk["text"]
+                new_hash = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
+                chunk_idx = chunk.get("chunk_index", 0)
+                existing = existing_hashes.get(chunk_idx)
+
+                if existing and existing.get("content_hash") == new_hash:
+                    # Cache hit: reuse existing vector, rebuild payload with current metadata
+                    chunk_data = {
+                        "text": chunk_text,
+                        "chunk_index": chunk_idx,
+                        "total_chunks": chunk.get("total_chunks", 1),
+                        "line_start": chunk.get("line_start"),
+                        "line_end": chunk.get("line_end"),
+                        "file_extension": file_path.suffix.lstrip(".") or "txt",
+                    }
+                    vector_point = self._create_vector_point(
+                        chunk_data, existing["vector"], metadata, file_path
+                    )
+                    cached_points.append(vector_point)
+                    chunks_skipped += 1
+                else:
+                    # Cache miss: needs embedding
+                    uncached_regular_chunks.append(chunk)
+
+            if chunks_skipped > 0:
+                logger.info(
+                    f"Smart cache: {file_path.name}: {chunks_skipped} cached, "
+                    f"{len(uncached_regular_chunks)} to embed"
+                )
+
+            # Replace regular_chunks with only uncached ones for batching
+            regular_chunks = uncached_regular_chunks
 
             # Phase 2: TOKEN-AWARE BATCHING - Count tokens as we chunk, submit when limit reached
             # Get token limit from VoyageAI client configuration (with safety margin from YAML)
@@ -685,7 +741,7 @@ class FileChunkingManager:
                         # Continue processing other chunks rather than failing entire file
                         continue
 
-            if not batch_futures and not multimodal_chunks:
+            if not batch_futures and not multimodal_chunks and not cached_points:
                 logger.warning(f"No batches created for {file_path}")
                 return FileProcessingResult(
                     success=False,
@@ -784,7 +840,7 @@ class FileChunkingManager:
                 )
 
             # Phase 4: Atomic write to vector storage if we have valid vectors
-            if file_points:
+            if file_points or cached_points:
                 try:
                     points_data = []
                     for i, point in enumerate(file_points):
@@ -803,6 +859,10 @@ class FileChunkingManager:
                             chunk_data, point["vector"], point["metadata"], file_path
                         )
                         points_data.append(vector_point)
+
+                    # Story #470: Add cached points (reused vectors) to upsert batch
+                    if cached_points:
+                        points_data.extend(cached_points)
 
                     # Atomic write to vector storage
                     success = self.vector_store_client.upsert_points(

@@ -427,7 +427,7 @@ class SmartIndexer(HighThroughputProcessor):
 
                         # Update progressive metadata with new git status
                         updated_git_status = git_status.copy()
-                        updated_git_status["branch"] = current_branch
+                        updated_git_status["current_branch"] = current_branch
                         self.progressive_metadata.start_indexing(
                             provider_name, model_name, updated_git_status
                         )
@@ -1012,9 +1012,11 @@ class SmartIndexer(HighThroughputProcessor):
             set([str(f) for f in committed_files] + [str(f) for f in working_dir_files])
         )
 
-        # Convert to Path objects
+        # Convert to Path objects, ensuring absolute paths
+        codebase = Path(self.config.codebase_dir)
         files_to_index = [
-            Path(f) if isinstance(f, str) else f for f in all_files_to_index
+            codebase / f if not Path(f).is_absolute() else Path(f)
+            for f in all_files_to_index
         ]
 
         if not files_to_index and not deleted_files:
@@ -1281,6 +1283,9 @@ class SmartIndexer(HighThroughputProcessor):
                 Path(""),
                 info=f"📊 Found {len(indexed_files_with_timestamps)} files in database collection '{collection_name}', {len(all_files_to_index)} files on disk",
             )
+
+        # Bug #471: Batch-check all modified files in one subprocess call
+        self._reconcile_modified_files = self._get_modified_files_set()
 
         # Find files that need to be indexed using working directory aware comparison
         files_to_index = []
@@ -1705,8 +1710,12 @@ class SmartIndexer(HighThroughputProcessor):
             self.progress_log.complete_session()
             return ProcessingStats()
 
-        # Convert strings back to Path objects
-        remaining_files = [Path(f) for f in remaining_file_strings]
+        # Convert strings back to Path objects, ensuring absolute paths
+        codebase = Path(self.config.codebase_dir)
+        remaining_files = [
+            codebase / f if not Path(f).is_absolute() else Path(f)
+            for f in remaining_file_strings
+        ]
 
         # Filter out files that no longer exist
         existing_files = [f for f in remaining_files if f.exists()]
@@ -2796,27 +2805,55 @@ class SmartIndexer(HighThroughputProcessor):
             commit = self._get_file_commit(file_path)
             return f"{file_path}:{commit}"
 
-    def _file_differs_from_committed_version(self, file_path: str) -> bool:
-        """Check if working directory file differs from committed version."""
+    def _get_modified_files_set(self) -> set:
+        """Get set of files that differ from HEAD (unstaged + staged) in one batch call.
+
+        Bug #471: Replaces per-file git diff subprocess calls with a single batched check.
+        """
+        modified: set = set()
         try:
-            # Use git diff to check if file differs from HEAD
+            # Unstaged changes
             result = subprocess.run(
-                ["git", "diff", "--quiet", "HEAD", "--", file_path],
+                ["git", "diff", "--name-only", "HEAD"],
                 cwd=self.config.codebase_dir,
                 capture_output=True,
-                timeout=10,
+                text=True,
+                timeout=30,
             )
-            # git diff --quiet returns 0 if no differences, 1 if differences exist
-            differs = result.returncode != 0
-            if differs:
-                logger.debug(
-                    f"RECONCILE: File {file_path} differs from committed version (git diff returncode={result.returncode})"
+            if result.returncode == 0:
+                modified.update(
+                    line.strip()
+                    for line in result.stdout.strip().splitlines()
+                    if line.strip()
                 )
-            return differs
+
+            # Staged changes
+            result = subprocess.run(
+                ["git", "diff", "--name-only", "--staged", "HEAD"],
+                cwd=self.config.codebase_dir,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                modified.update(
+                    line.strip()
+                    for line in result.stdout.strip().splitlines()
+                    if line.strip()
+                )
         except Exception as e:
-            # If git command fails, assume no differences
-            logger.debug(f"RECONCILE: Git diff failed for {file_path}: {e}")
-            return False
+            logger.warning(f"Failed to batch-check modified files: {e}")
+        return modified
+
+    def _file_differs_from_committed_version(self, file_path: str) -> bool:
+        """Check if file differs from committed version using cached batch result.
+
+        Bug #471: Uses pre-computed set from _get_modified_files_set() instead of
+        spawning a per-file subprocess.
+        """
+        if hasattr(self, "_reconcile_modified_files"):
+            return file_path in self._reconcile_modified_files
+        return False
 
     def _get_file_commit(self, file_path: str) -> str:
         """Get current commit hash for file, or working directory indicator if modified."""

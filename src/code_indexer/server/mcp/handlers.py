@@ -8246,6 +8246,19 @@ def git_branch_switch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
 
+    # Bug #469: Block git_branch_switch on golden repo base clones.
+    # Use change_golden_repo_branch for golden repos instead.
+    if repository_alias.endswith("-global"):
+        return _mcp_response(
+            {
+                "success": False,
+                "error": (
+                    "Cannot use git_branch_switch on golden repositories. "
+                    "Use change_golden_repo_branch instead."
+                ),
+            }
+        )
+
     branch_name = args.get("branch_name")
     if not branch_name:
         return _mcp_response(

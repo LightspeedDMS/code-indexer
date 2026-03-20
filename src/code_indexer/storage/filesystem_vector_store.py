@@ -1662,6 +1662,52 @@ class FilesystemVectorStore:
             except (json.JSONDecodeError, KeyError):
                 return None
 
+    def get_existing_content_hashes(
+        self, file_path: str, collection_name: str
+    ) -> Dict[int, Dict[str, Any]]:
+        """Get existing content hashes for a file's chunks.
+
+        Story #470: Enables smart embedding cache by loading existing
+        content_hash values for comparison before re-embedding.
+
+        Args:
+            file_path: Relative file path (as stored in payload)
+            collection_name: Vector collection name
+
+        Returns:
+            Dict mapping chunk_index -> {"content_hash": str, "vector": list, "point_id": str}
+            Empty dict if no existing vectors or no content_hash.
+        """
+        result: Dict[int, Dict[str, Any]] = {}
+
+        with self._path_index_lock:
+            if collection_name not in self._path_indexes:
+                self._path_indexes[collection_name] = self._load_path_index(
+                    collection_name
+                )
+            path_index = self._path_indexes[collection_name]
+
+        point_ids = path_index.get_point_ids(file_path)
+        if not point_ids:
+            return result
+
+        for point_id in point_ids:
+            point_data = self.get_point(point_id, collection_name)
+            if point_data is None:
+                continue
+            payload = point_data.get("payload", {})
+            content_hash = payload.get("content_hash")
+            if not content_hash:
+                continue
+            chunk_idx = payload.get("chunk_index", 0)
+            result[chunk_idx] = {
+                "content_hash": content_hash,
+                "vector": point_data["vector"],
+                "point_id": point_data["id"],
+            }
+
+        return result
+
     def _parse_filter(self, filter_conditions: Optional[Dict[str, Any]]) -> Any:
         """Parse filter to callable that evaluates payload.
 

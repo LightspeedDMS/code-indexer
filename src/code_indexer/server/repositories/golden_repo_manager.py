@@ -2253,13 +2253,32 @@ class GoldenRepoManager:
             )
 
             base = golden_repo.clone_path
+            previous_branch = golden_repo.default_branch
             self._cb_git_fetch_and_validate(base, target_branch, git_t)
             self._cb_checkout_and_pull(base, target_branch, git_t)
-            self._cb_cidx_index(base)
-            snapshot = self._cb_cow_snapshot(alias, base, cow_t, fix_t)
-            self._cb_fts_branch_cleanup(snapshot, target_branch)
-            self._cb_hnsw_branch_cleanup(snapshot, target_branch)
-            self._cb_swap_alias(alias, snapshot)
+            try:
+                self._cb_cidx_index(base)
+                snapshot = self._cb_cow_snapshot(alias, base, cow_t, fix_t)
+                self._cb_fts_branch_cleanup(snapshot, target_branch)
+                self._cb_hnsw_branch_cleanup(snapshot, target_branch)
+                self._cb_swap_alias(alias, snapshot)
+            except Exception as exc:
+                # Bug #469: Rollback git HEAD to previous branch on partial failure.
+                try:
+                    subprocess.run(
+                        ["git", "checkout", previous_branch],
+                        cwd=base,
+                        check=True,
+                        capture_output=True,
+                    )
+                except Exception as rollback_exc:
+                    logger.error(
+                        "[change_branch] Rollback to '%s' failed for '%s': %s",
+                        previous_branch,
+                        alias,
+                        rollback_exc,
+                    )
+                raise exc
 
             self._sqlite_backend.update_default_branch(alias, target_branch)
             # Invalidate branch-dependent tracking metadata (AC1, Story #303)
@@ -2347,10 +2366,10 @@ class GoldenRepoManager:
         submitter_username: str = "admin",
     ) -> str:
         """
-        Add an index type to an existing golden repository.
+        Add a single index type to an existing golden repository.
 
-        This method submits a background job and returns immediately with a job_id.
-        Use BackgroundJobManager to track progress and results.
+        Delegates to add_indexes_to_golden_repo (plural) for backward compatibility.
+        Kept because MCP handlers and external callers use the singular form.
 
         Args:
             alias: The golden repo alias
@@ -2363,43 +2382,83 @@ class GoldenRepoManager:
         Raises:
             ValueError: If alias not found or index_type invalid
         """
-        # AC4: Validate alias exists
+        return self.add_indexes_to_golden_repo(
+            alias=alias,
+            index_types=[index_type],
+            submitter_username=submitter_username,
+        )
+
+    def add_indexes_to_golden_repo(
+        self,
+        alias: str,
+        index_types: List[str],
+        submitter_username: str = "admin",
+    ) -> str:
+        """
+        Add one or more index types to an existing golden repository atomically.
+
+        Bug #473 Fix: This method acquires the write lock before indexing starts,
+        runs all index types sequentially in a single background job, then creates
+        a CoW snapshot + alias swap so the rebuilt indexes become visible to queries.
+
+        The old add_index_to_golden_repo (singular) delegates to this method.
+
+        Args:
+            alias: The golden repo alias
+            index_types: List of index types, each one of "semantic", "fts", "temporal", "scip"
+            submitter_username: Username for audit logging
+
+        Returns:
+            job_id: The background job ID for tracking
+
+        Raises:
+            ValueError: If alias not found or any index_type is invalid
+        """
+        # Validate alias exists
         if alias not in self.golden_repos:
             raise ValueError(f"Golden repository '{alias}' not found")
 
-        # AC2: Validate index_type - individual types only (semantic_fts removed)
+        # Validate all index types up front
         valid_index_types = ["semantic", "fts", "temporal", "scip"]
-        if index_type not in valid_index_types:
-            raise ValueError(
-                f"Invalid index_type: {index_type}. Must be one of: {', '.join(valid_index_types)}"
-            )
+        for index_type in index_types:
+            if index_type not in valid_index_types:
+                raise ValueError(
+                    f"Invalid index_type: {index_type}. Must be one of: {', '.join(valid_index_types)}"
+                )
 
-        # Validate alias exists (raises KeyError if not)
-        _ = self.golden_repos[alias]
-        # Note: _index_exists check removed - allow rebuilding existing indexes
-
-        # AC1: Create background job and return job_id
         def background_worker() -> Dict[str, Any]:
-            """Execute add index operation in background thread."""
+            """Execute add index operations in a single background thread with write lock + CoW."""
+            # Acquire write lock (Bug #473 Fix 1)
+            scheduler = getattr(self, "_refresh_scheduler", None)
+            lock_acquired = False
+
+            if scheduler is not None:
+                lock_acquired = scheduler.acquire_write_lock(
+                    alias, owner_name="add_index"
+                )
+                if not lock_acquired:
+                    raise GoldenRepoError(
+                        f"Repository '{alias}' is currently being refreshed or indexed. "
+                        "Try again later."
+                    )
+
             try:
                 # Get repository details
                 repo = self.golden_repos[alias]
-                # Use canonical path resolution to handle versioned structure repos
+                # Use canonical path resolution (base clone, not versioned snapshot)
                 repo_path = self.get_actual_repo_path(alias)
 
-                # Initialize stdout/stderr tracking (AC5, AC6, AC7)
-                captured_stdout = ""
-                captured_stderr = ""
+                # Accumulated stdout/stderr across all index types
+                all_stdout = ""
+                all_stderr = ""
 
                 # Ensure repo is initialized before running cidx index commands (idempotent)
-                # Always attempt init - it's safe to run on already-initialized repos
                 init_result = subprocess.run(
                     ["cidx", "init"],
                     cwd=repo_path,
                     capture_output=True,
                     text=True,
                 )
-                # Success or "already exists" are both acceptable outcomes
                 init_output = (init_result.stdout or "") + (init_result.stderr or "")
                 if (
                     init_result.returncode != 0
@@ -2413,191 +2472,216 @@ class GoldenRepoManager:
                     raise GoldenRepoError(
                         f"Failed to initialize repo before indexing: {error_details}"
                     )
-                # Capture output for logging regardless of outcome
                 if init_result.stdout:
-                    captured_stdout += f"[init] {init_result.stdout}\n"
+                    all_stdout += f"[init] {init_result.stdout}\n"
                 if init_result.stderr:
-                    captured_stderr += f"[init] {init_result.stderr}\n"
+                    all_stderr += f"[init] {init_result.stderr}\n"
 
-                # semantic - execute cidx index --clear (force full rebuild)
-                # Bug #468: without --clear this is a no-op for already-indexed repos
-                if index_type == "semantic":
-                    command = ["cidx", "index", "--clear"]
-                    result = subprocess.run(
-                        command,
-                        cwd=repo_path,
-                        capture_output=True,
-                        text=True,
-                    )
-                    captured_stdout = result.stdout
-                    captured_stderr = result.stderr
-                    if result.returncode != 0:
-                        error_details = (
-                            result.stderr
-                            or result.stdout
-                            or f"Exit code {result.returncode}"
+                # Run each requested index type sequentially
+                for index_type in index_types:
+                    if index_type == "semantic":
+                        # Bug #468: --clear forces full rebuild for already-indexed repos
+                        command = ["cidx", "index", "--clear"]
+                        result = subprocess.run(
+                            command,
+                            cwd=repo_path,
+                            capture_output=True,
+                            text=True,
                         )
-                        raise GoldenRepoError(
-                            f"Failed to create semantic index: {error_details}"
-                        )
-
-                # fts - execute cidx index --rebuild-fts-index (FTS only)
-                elif index_type == "fts":
-                    command = ["cidx", "index", "--rebuild-fts-index"]
-                    result = subprocess.run(
-                        command,
-                        cwd=repo_path,
-                        capture_output=True,
-                        text=True,
-                    )
-                    captured_stdout = result.stdout
-                    captured_stderr = result.stderr
-                    if result.returncode != 0:
-                        error_details = (
-                            result.stderr
-                            or result.stdout
-                            or f"Exit code {result.returncode}"
-                        )
-                        raise GoldenRepoError(
-                            f"Failed to create FTS index: {error_details}"
-                        )
-
-                # temporal - execute cidx index --index-commits with options
-                elif index_type == "temporal":
-                    command = ["cidx", "index", "--index-commits"]
-
-                    # Read temporal options from GoldenRepo
-                    temporal_options = repo.temporal_options or {}
-
-                    # Apply temporal options or use defaults
-                    max_commits = temporal_options.get("max_commits", 1000)
-                    command.extend(["--max-commits", str(max_commits)])
-
-                    if "since_date" in temporal_options:
-                        command.extend(["--since-date", temporal_options["since_date"]])
-
-                    diff_context = temporal_options.get("diff_context", 5)
-                    command.extend(["--diff-context", str(diff_context)])
-
-                    if temporal_options.get("all_branches"):
-                        command.append("--all-branches")
-
-                    result = subprocess.run(
-                        command,
-                        cwd=repo_path,
-                        capture_output=True,
-                        text=True,
-                    )
-                    captured_stdout = result.stdout
-                    captured_stderr = result.stderr
-                    if result.returncode != 0:
-                        error_details = (
-                            result.stderr
-                            or result.stdout
-                            or f"Exit code {result.returncode}"
-                        )
-                        raise GoldenRepoError(
-                            f"Failed to create temporal index: {error_details}"
-                        )
-
-                    # Bug #131: Update enable_temporal flag in BOTH tables after successful temporal index creation
-                    # Update golden_repos_metadata table (existing)
-                    if self._sqlite_backend.update_enable_temporal(alias, True):
-                        self.golden_repos[alias].enable_temporal = True
-                        logging.info(
-                            f"Updated enable_temporal=True for repo {alias} in golden_repos_metadata"
-                        )
-                    else:
-                        logging.warning(
-                            f"Failed to update enable_temporal for {alias} in golden_repos_metadata"
-                        )
-
-                    # Bug #131: ALSO update global_repos table via GlobalRegistry
-                    # Convert alias to global format: "python-mock" -> "python-mock-global"
-                    global_alias = f"{alias}-global"
-                    try:
-                        from code_indexer.global_repos.global_registry import (
-                            GlobalRegistry,
-                        )
-
-                        # Compute db_path (same pattern as app.py)
-                        from pathlib import Path as PathLib
-
-                        data_dir = PathLib(self.data_dir)
-                        golden_repos_dir = data_dir / "golden-repos"
-                        sqlite_db_path = str(data_dir / "cidx_server.db")
-
-                        # Instantiate GlobalRegistry with SQLite backend
-                        registry = GlobalRegistry(
-                            str(golden_repos_dir),
-                            use_sqlite=True,
-                            db_path=sqlite_db_path,
-                        )
-
-                        # Update enable_temporal in global_repos table via backend
-                        if (
-                            registry._sqlite_backend is not None
-                            and registry._sqlite_backend.update_enable_temporal(
-                                global_alias, True
+                        all_stdout += result.stdout or ""
+                        all_stderr += result.stderr or ""
+                        if result.returncode != 0:
+                            error_details = (
+                                result.stderr
+                                or result.stdout
+                                or f"Exit code {result.returncode}"
                             )
-                        ):
+                            raise GoldenRepoError(
+                                f"Failed to create semantic index: {error_details}"
+                            )
+
+                    elif index_type == "fts":
+                        command = ["cidx", "index", "--rebuild-fts-index"]
+                        result = subprocess.run(
+                            command,
+                            cwd=repo_path,
+                            capture_output=True,
+                            text=True,
+                        )
+                        all_stdout += result.stdout or ""
+                        all_stderr += result.stderr or ""
+                        if result.returncode != 0:
+                            error_details = (
+                                result.stderr
+                                or result.stdout
+                                or f"Exit code {result.returncode}"
+                            )
+                            raise GoldenRepoError(
+                                f"Failed to create FTS index: {error_details}"
+                            )
+
+                    elif index_type == "temporal":
+                        command = ["cidx", "index", "--index-commits"]
+
+                        temporal_options = repo.temporal_options or {}
+                        max_commits = temporal_options.get("max_commits", 1000)
+                        command.extend(["--max-commits", str(max_commits)])
+
+                        if "since_date" in temporal_options:
+                            command.extend(
+                                ["--since-date", temporal_options["since_date"]]
+                            )
+
+                        diff_context = temporal_options.get("diff_context", 5)
+                        command.extend(["--diff-context", str(diff_context)])
+
+                        if temporal_options.get("all_branches"):
+                            command.append("--all-branches")
+
+                        result = subprocess.run(
+                            command,
+                            cwd=repo_path,
+                            capture_output=True,
+                            text=True,
+                        )
+                        all_stdout += result.stdout or ""
+                        all_stderr += result.stderr or ""
+                        if result.returncode != 0:
+                            error_details = (
+                                result.stderr
+                                or result.stdout
+                                or f"Exit code {result.returncode}"
+                            )
+                            raise GoldenRepoError(
+                                f"Failed to create temporal index: {error_details}"
+                            )
+
+                        # Bug #131: Update enable_temporal flag in BOTH tables
+                        if self._sqlite_backend.update_enable_temporal(alias, True):
+                            self.golden_repos[alias].enable_temporal = True
                             logging.info(
-                                f"Updated enable_temporal=True for repo {global_alias} in global_repos"
+                                f"Updated enable_temporal=True for repo {alias} in golden_repos_metadata"
                             )
                         else:
                             logging.warning(
-                                f"Failed to update enable_temporal for {global_alias} in global_repos"
+                                f"Failed to update enable_temporal for {alias} in golden_repos_metadata"
                             )
-                    except Exception as e:
-                        logging.error(
-                            f"Error updating global_repos table for {global_alias}: {e}"
-                        )
 
-                # AC7: scip - execute cidx scip generate
-                elif index_type == "scip":
-                    command = ["cidx", "scip", "generate"]
-                    result = subprocess.run(
-                        command,
-                        cwd=repo_path,
-                        capture_output=True,
-                        text=True,
-                    )
-                    captured_stdout = result.stdout
-                    captured_stderr = result.stderr
-                    if result.returncode != 0:
-                        error_details = (
-                            result.stderr
-                            or result.stdout
-                            or f"Exit code {result.returncode}"
+                        global_alias_temporal = f"{alias}-global"
+                        try:
+                            from code_indexer.global_repos.global_registry import (
+                                GlobalRegistry,
+                            )
+                            from pathlib import Path as PathLib
+
+                            data_dir = PathLib(self.data_dir)
+                            golden_repos_dir = data_dir / "golden-repos"
+                            sqlite_db_path = str(data_dir / "cidx_server.db")
+
+                            registry = GlobalRegistry(
+                                str(golden_repos_dir),
+                                use_sqlite=True,
+                                db_path=sqlite_db_path,
+                            )
+                            if (
+                                registry._sqlite_backend is not None
+                                and registry._sqlite_backend.update_enable_temporal(
+                                    global_alias_temporal, True
+                                )
+                            ):
+                                logging.info(
+                                    f"Updated enable_temporal=True for repo {global_alias_temporal} in global_repos"
+                                )
+                            else:
+                                logging.warning(
+                                    f"Failed to update enable_temporal for {global_alias_temporal} in global_repos"
+                                )
+                        except Exception as e:
+                            logging.error(
+                                f"Error updating global_repos table for {global_alias_temporal}: {e}"
+                            )
+
+                    elif index_type == "scip":
+                        command = ["cidx", "scip", "generate"]
+                        result = subprocess.run(
+                            command,
+                            cwd=repo_path,
+                            capture_output=True,
+                            text=True,
                         )
-                        raise GoldenRepoError(
-                            f"Failed to create SCIP index: {error_details}"
+                        all_stdout += result.stdout or ""
+                        all_stderr += result.stderr or ""
+                        if result.returncode != 0:
+                            error_details = (
+                                result.stderr
+                                or result.stdout
+                                or f"Exit code {result.returncode}"
+                            )
+                            raise GoldenRepoError(
+                                f"Failed to create SCIP index: {error_details}"
+                            )
+
+                # Bug #473 Fix 2: Create CoW snapshot + alias swap after all indexing succeeds
+                if scheduler is not None:
+                    global_alias = f"{alias}-global"
+                    # base clone path (NOT the versioned snapshot — indexing ran there)
+                    source_path = str(
+                        __import__("pathlib").Path(self.data_dir)
+                        / "golden-repos"
+                        / alias
+                    )
+                    current_target = scheduler.alias_manager.read_alias(global_alias)
+
+                    new_snapshot = scheduler._create_snapshot(
+                        alias_name=global_alias,
+                        source_path=source_path,
+                    )
+                    scheduler.alias_manager.swap_alias(
+                        alias_name=global_alias,
+                        new_target=new_snapshot,
+                        old_target=current_target,
+                    )
+                    # Only schedule cleanup for versioned snapshots (never for master clone)
+                    if ".versioned" in current_target:
+                        scheduler.cleanup_manager.schedule_cleanup(current_target)
+                    else:
+                        logging.info(
+                            f"[add_index] Preserving master golden repo (not scheduling cleanup): "
+                            f"{current_target}"
                         )
 
                 return {
                     "success": True,
                     "alias": alias,
-                    "message": f"Index type '{index_type}' added successfully to '{alias}'",
-                    "stdout": captured_stdout,
-                    "stderr": captured_stderr,
+                    "message": (
+                        f"Index type(s) {index_types} added successfully to '{alias}'"
+                    ),
+                    "stdout": all_stdout,
+                    "stderr": all_stderr,
                 }
             except subprocess.CalledProcessError as e:
                 error_details = e.stderr or e.stdout or f"Exit code {e.returncode}"
                 raise GoldenRepoError(
                     f"Failed to add index: Command failed: {error_details}"
                 )
+            except GoldenRepoError:
+                raise
             except Exception as e:
                 raise GoldenRepoError(f"Failed to add index: {str(e)}")
+            finally:
+                # Release write lock if we acquired it (Bug #473 Fix 1)
+                if scheduler is not None and lock_acquired:
+                    scheduler.release_write_lock(alias, owner_name="add_index")
 
-        # Submit to BackgroundJobManager
-        # Bug #468: Use index_type in operation_type so different index types
-        # don't conflict with each other in duplicate detection
+        # Bug #473: Use combined operation_type for all index types to avoid
+        # multiple independent jobs racing each other
+        combined_type = "_".join(["add_index"] + sorted(index_types))
         job_id = self.background_job_manager.submit_job(
-            operation_type=f"add_index_{index_type}",
+            operation_type=combined_type,
             func=background_worker,
             submitter_username=submitter_username,
             is_admin=True,
-            repo_alias=alias,  # AC5: Fix unknown repo bug
+            repo_alias=alias,
         )
         return cast(str, job_id)
 

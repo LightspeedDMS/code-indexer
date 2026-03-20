@@ -1853,19 +1853,20 @@ def register_inline_routes(
             )
 
         try:
-            # Submit job for each index type
-            job_ids = []
-            for index_type in index_types:
-                job_id = golden_repo_manager.add_index_to_golden_repo(
-                    alias=alias,
-                    index_type=index_type,
-                    submitter_username=current_user.username,
-                )
-                job_ids.append(job_id)
+            # Bug #473 Fix: Submit ONE combined job for all index types (atomic, with lock + CoW).
+            # Previously submitted N independent jobs which raced each other without a write lock
+            # and never created a CoW snapshot, making rebuilt indexes invisible to queries.
+            job_id = golden_repo_manager.add_indexes_to_golden_repo(
+                alias=alias,
+                index_types=index_types,
+                submitter_username=current_user.username,
+            )
+            job_ids = [job_id]
 
-            # Build response based on single vs multi-select
-            if len(job_ids) == 1:
-                # Single job - backward compatible response
+            # Build response — always single job now, but keep multi-job path for
+            # API shape backward compatibility (job_ids field).
+            if len(index_types) == 1:
+                # Single index type - backward compatible response with job_id
                 response = AddIndexResponse(job_id=job_ids[0], status="pending")
                 return JSONResponse(
                     content=response.model_dump(),
@@ -1873,12 +1874,11 @@ def register_inline_routes(
                     headers={"Location": f"/api/jobs/{job_ids[0]}"},
                 )
             else:
-                # Multi-job response
+                # Multi-type response - one job covers all types
                 response = AddIndexResponse(job_ids=job_ids, status="pending")
                 return JSONResponse(
                     content=response.model_dump(),
                     status_code=202,
-                    # Location header points to first job (can be used to check overall status)
                     headers={"Location": f"/api/jobs/{job_ids[0]}"},
                 )
 

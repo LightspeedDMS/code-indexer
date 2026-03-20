@@ -1032,6 +1032,42 @@ class RefreshScheduler:
                     # refresh, but git pull must always operate on the canonical master.
                     updater = GitPullUpdater(master_path)
 
+                    # Bug #469 Fix 1: Verify base clone is on expected default_branch before
+                    # pulling.  If the clone was switched to a wrong branch by any previous
+                    # operation, reset it now so we don't perpetuate the contamination.
+                    try:
+                        branch_result = subprocess.run(
+                            ["git", "branch", "--show-current"],
+                            cwd=master_path,
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                        )
+                        current_branch = branch_result.stdout.strip()
+                        default_branch = repo_info.get("default_branch", "main")
+
+                        if current_branch and current_branch != default_branch:
+                            logger.warning(
+                                f"Base clone for {alias_name} on '{current_branch}' instead of "
+                                f"'{default_branch}', resetting to default branch"
+                            )
+                            checkout_result = subprocess.run(
+                                ["git", "checkout", default_branch],
+                                cwd=master_path,
+                                capture_output=True,
+                                text=True,
+                                timeout=30,
+                            )
+                            if checkout_result.returncode != 0:
+                                logger.error(
+                                    f"Failed to reset {alias_name} to {default_branch}: "
+                                    f"{checkout_result.stderr}"
+                                )
+                    except Exception as e:
+                        logger.warning(
+                            f"Branch verification failed for {alias_name}: {e}"
+                        )
+
                     if force_reset:
                         # AC4 (Story #272): Force reset — skip change detection and force-reset
                         # the master clone to the remote branch before indexing.

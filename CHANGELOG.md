@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.31
+
+### Bug Fixes
+- fix: refresh scheduler enforces default_branch before git pull, preventing branch contamination (Bug #469 Fix 1)
+- fix: block git_branch_switch on golden repo -global aliases (Bug #469 Fix 2)
+- fix: change_golden_repo_branch rolls back git checkout on partial failure (Bug #469 Fix 3)
+- fix: SmartIndexer writes correct 'current_branch' key instead of 'branch' (Bug #469 Fix 4)
+- fix: incremental indexing converts relative paths from git diff to absolute (Bug #469 Fix 5)
+- fix: temporal indexer handles mock config file_extensions gracefully (Bug #469 regression)
+- fix: --reconcile uses single batched git diff instead of per-file subprocess (Bug #471)
+- fix: Research Assistant sanitizes dash-prefixed user messages to prevent CLI arg injection (Bug #472)
+- fix: golden repo index rebuild acquires write lock and creates CoW snapshot (Bug #473)
+
+### Features
+- feat: smart embedding cache skips VoyageAI API calls for unchanged chunks via content hash matching (Story #470)
+
 ## v9.5.30
 
 ### Bug Fixes

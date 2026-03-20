@@ -113,13 +113,19 @@ class TemporalIndexer:
 
         # Initialize components with diff_context_lines from config
         diff_context_lines = self.config.temporal.diff_context_lines
+        try:
+            file_extensions = (
+                list(self.config.file_extensions)
+                if self.config.file_extensions
+                else None
+            )
+        except TypeError:
+            file_extensions = None
         self.diff_scanner = TemporalDiffScanner(
             self.codebase_dir,
             override_filter_service=override_filter_service,
             diff_context_lines=diff_context_lines,
-            file_extensions=list(self.config.file_extensions)
-            if self.config.file_extensions
-            else None,
+            file_extensions=file_extensions,
         )
         self.chunker = FixedSizeChunker(self.config)
 

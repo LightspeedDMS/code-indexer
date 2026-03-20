@@ -154,7 +154,9 @@ class ResearchAssistantService:
             cidx_repo_root = self._detect_repo_root()
 
         if cidx_repo_root:
-            return str(Path(cidx_repo_root) / "src" / "code_indexer" / "server" / "config")
+            return str(
+                Path(cidx_repo_root) / "src" / "code_indexer" / "server" / "config"
+            )
 
         # Fallback: relative to this file
         return str(Path(__file__).parent.parent / "config")
@@ -323,7 +325,7 @@ class ResearchAssistantService:
             html,
             tags=allowed_tags,
             attributes=allowed_attrs,
-            protocols=["http", "https", "mailto"]
+            protocols=["http", "https", "mailto"],
         )
 
         return clean_html
@@ -345,7 +347,11 @@ class ResearchAssistantService:
         Returns:
             A valid UUID string for Claude CLI (--session-id or --resume)
         """
-        result: dict = {"claude_session_id": None, "not_found": False, "generated": False}
+        result: dict = {
+            "claude_session_id": None,
+            "not_found": False,
+            "generated": False,
+        }
 
         def _do_get_or_create(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()
@@ -378,11 +384,15 @@ class ResearchAssistantService:
 
         if result["not_found"]:
             # Session doesn't exist - should not happen, but return a new UUID
-            logger.warning(f"Session {session_id} not found, generating new Claude session ID")
+            logger.warning(
+                f"Session {session_id} not found, generating new Claude session ID"
+            )
             return str(uuid.uuid4())
 
         if result["generated"]:
-            logger.info(f"Generated new Claude session ID for session {session_id}: {result['claude_session_id']}")
+            logger.info(
+                f"Generated new Claude session ID for session {session_id}: {result['claude_session_id']}"
+            )
 
         return result["claude_session_id"]
 
@@ -519,11 +529,15 @@ class ResearchAssistantService:
                 shutil.rmtree(claude_project_path)
                 logger.info(f"Deleted Claude CLI project folder: {claude_project_path}")
             else:
-                logger.debug(f"Claude CLI project folder not found (may not exist): {claude_project_path}")
+                logger.debug(
+                    f"Claude CLI project folder not found (may not exist): {claude_project_path}"
+                )
 
         except Exception as e:
             # Don't fail the session deletion if Claude cleanup fails
-            logger.warning(f"Failed to cleanup Claude CLI project folder for {folder_path}: {e}")
+            logger.warning(
+                f"Failed to cleanup Claude CLI project folder for {folder_path}: {e}"
+            )
 
     def generate_session_name(self, first_prompt: str) -> str:
         """
@@ -793,7 +807,9 @@ class ResearchAssistantService:
                 issue_manager_source = bundled_path
 
         if not issue_manager_source:
-            fallback_path = Path.home() / ".claude" / "scripts" / "utils" / "issue_manager.py"
+            fallback_path = (
+                Path.home() / ".claude" / "scripts" / "utils" / "issue_manager.py"
+            )
             if fallback_path.exists():
                 issue_manager_source = fallback_path
 
@@ -925,7 +941,9 @@ class ResearchAssistantService:
         if self._job_tracker is not None:
             try:
                 self._job_tracker.register_job(
-                    job_id, "research_assistant_chat", username="system",
+                    job_id,
+                    "research_assistant_chat",
+                    username="system",
                     repo_alias="server",
                 )
                 self._job_tracker.update_status(job_id, status="running")
@@ -1043,6 +1061,7 @@ class ResearchAssistantService:
             analysis_model = "opus"
             try:
                 from code_indexer.server.utils.config_manager import ServerConfigManager
+
                 config_manager = ServerConfigManager()
                 config = config_manager.load_config()
                 if config and config.claude_integration_config:
@@ -1050,7 +1069,9 @@ class ResearchAssistantService:
                 if config and config.golden_repos_config:
                     analysis_model = config.golden_repos_config.analysis_model
             except Exception as e:
-                logger.warning(f"Failed to load research assistant config, using defaults (timeout={timeout_seconds}s, model={analysis_model}): {e}")
+                logger.warning(
+                    f"Failed to load research assistant config, using defaults (timeout={timeout_seconds}s, model={analysis_model}): {e}"
+                )
 
             # Get the stored Claude session ID from database
             claude_session_id = self._get_or_create_claude_session_id(session_id)
@@ -1061,13 +1082,29 @@ class ResearchAssistantService:
                 env["GITHUB_TOKEN"] = self._github_token
                 env["GH_TOKEN"] = self._github_token
 
+            # Bug #472: Prevent CLI argument injection from user text starting with --
+            # When user text starts with dashes, CLI argparse may interpret it as a flag
+            # instead of as the value for -p. Prepend a space to prevent this.
+            if claude_prompt.startswith("-"):
+                claude_prompt = " " + claude_prompt
+
             # Build base command
-            base_cmd = ["claude", "--dangerously-skip-permissions", "--model", analysis_model]
+            base_cmd = [
+                "claude",
+                "--dangerously-skip-permissions",
+                "--model",
+                analysis_model,
+            ]
 
             # Bug #153 Fix: Use --session-id for first message, --resume for subsequent
             if is_first_prompt:
                 # First message - create new session
-                cmd = base_cmd + ["--session-id", claude_session_id, "-p", claude_prompt]
+                cmd = base_cmd + [
+                    "--session-id",
+                    claude_session_id,
+                    "-p",
+                    claude_prompt,
+                ]
                 result = subprocess.run(
                     cmd,
                     cwd=str(working_dir),
@@ -1096,7 +1133,12 @@ class ResearchAssistantService:
                     logger.info(
                         f"Resume failed (session cleared or expired), retrying with --session-id: {result.stderr}"
                     )
-                    cmd = base_cmd + ["--session-id", claude_session_id, "-p", claude_prompt]
+                    cmd = base_cmd + [
+                        "--session-id",
+                        claude_session_id,
+                        "-p",
+                        claude_prompt,
+                    ]
                     result = subprocess.run(
                         cmd,
                         cwd=str(working_dir),
@@ -1122,7 +1164,9 @@ class ResearchAssistantService:
                     try:
                         self._job_tracker.complete_job(job_id)
                     except Exception as e:
-                        logger.debug(f"Failed to mark job {job_id} complete in tracker: {e}")
+                        logger.debug(
+                            f"Failed to mark job {job_id} complete in tracker: {e}"
+                        )
             else:
                 error = (
                     result.stderr.strip()
@@ -1140,7 +1184,9 @@ class ResearchAssistantService:
                     try:
                         self._job_tracker.fail_job(job_id, error=error)
                     except Exception as e:
-                        logger.debug(f"Failed to mark job {job_id} failed in tracker: {e}")
+                        logger.debug(
+                            f"Failed to mark job {job_id} failed in tracker: {e}"
+                        )
 
         except subprocess.TimeoutExpired:
             error = "Claude CLI execution timed out"
