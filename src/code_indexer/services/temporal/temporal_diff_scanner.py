@@ -28,15 +28,18 @@ class TemporalDiffScanner:
         codebase_dir,
         override_filter_service: Optional[OverrideFilterService] = None,
         diff_context_lines: int = 5,
+        file_extensions: Optional[list] = None,
     ):
         from pathlib import Path
 
         self.codebase_dir = Path(codebase_dir)
         self.override_filter_service = override_filter_service
         self.diff_context_lines = diff_context_lines
+        # Bug #469: Store allowed extensions for filtering (same as FileFinder)
+        self._allowed_extensions = set(file_extensions) if file_extensions else None
 
     def _should_include_file(self, file_path: str) -> bool:
-        """Check if file should be included based on override filtering.
+        """Check if file should be included based on extension and override filtering.
 
         Args:
             file_path: Relative file path from git diff
@@ -44,13 +47,19 @@ class TemporalDiffScanner:
         Returns:
             True if file should be included, False if filtered out
         """
-        if self.override_filter_service is None:
-            return True  # No filtering - include all files
-
         from pathlib import Path
 
-        # Convert string path to Path object
         path_obj = Path(file_path)
+
+        # Bug #469: Check file_extensions FIRST — reject binary files (.jar, .zip, etc.)
+        # before they ever reach the override logic. This matches FileFinder behavior.
+        if self._allowed_extensions is not None:
+            ext = path_obj.suffix.lower().lstrip(".")
+            if ext not in self._allowed_extensions:
+                return False
+
+        if self.override_filter_service is None:
+            return True
 
         # For temporal indexing, base_result is True (include by default)
         # Override filtering applies exclusion rules on top

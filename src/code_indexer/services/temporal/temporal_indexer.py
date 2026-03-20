@@ -117,6 +117,9 @@ class TemporalIndexer:
             self.codebase_dir,
             override_filter_service=override_filter_service,
             diff_context_lines=diff_context_lines,
+            file_extensions=list(self.config.file_extensions)
+            if self.config.file_extensions
+            else None,
         )
         self.chunker = FixedSizeChunker(self.config)
 
@@ -699,9 +702,7 @@ class TemporalIndexer:
 
                             # Token-aware batching: split chunks into multiple batches if needed
                             # to respect 120,000 token limit (90% safety margin = 108,000)
-                            model_limit = (
-                                vector_manager.embedding_provider._get_model_token_limit()
-                            )
+                            model_limit = vector_manager.embedding_provider._get_model_token_limit()
                             TOKEN_LIMIT = int(model_limit * 0.9)  # 90% safety margin
 
                             # First, calculate all batch indices (don't submit yet)
