@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.32
+
+### Refactoring
+- refac: modularize inline_routes.py (5,264 lines) into 9 domain-specific modules (Story #409)
+  - inline_auth.py (8 routes: login, register, reset, refresh, api keys)
+  - inline_mcp_creds.py (7 routes: MCP credential CRUD and admin ops)
+  - inline_admin_users.py (6 routes: user CRUD and password management)
+  - inline_admin_ops.py (12 routes: golden repos, scip admin, job admin)
+  - inline_jobs.py (3 routes: job status, list, cancel)
+  - inline_misc.py (7 routes: health, cache, oauth, favicon, system)
+  - inline_query.py (1 route: semantic query)
+  - inline_repos.py (14 routes: repos activation, sync, branches, golden)
+  - inline_repos_v2.py (6 routes: repositories v2 API)
+  - inline_routes.py reduced to 435-line delegation hub
+
+### Tests
+- test: add 140 route coverage tests covering 100% of 158 routes as safety net for modularization
+
 ## v9.5.31
 
 ### Bug Fixes
