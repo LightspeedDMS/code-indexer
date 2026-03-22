@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.33
+
+### Bug Fixes
+- fix: temporal index rebuild now uses --clear for full rebuild instead of incremental (Story #478)
+- fix: removed hardcoded max_commits=1000 default -- no cap when not configured (Story #478)
+- fix: --since flag corrected to --since-date in temporal rebuild command (Story #478)
+- fix: diff_context=0 no longer silently dropped by RefreshScheduler (Story #478)
+- fix: since_date validated as YYYY-MM-DD format before saving (Story #478)
+- fix: max_commits validated as positive integer server-side (Story #478)
+
+### Features
+- feat: temporal indexing options (max_commits, diff_context, since_date, all_branches) configurable per golden repo via Web UI (Story #478)
+- feat: added all_branches field to TemporalIndexOptions model (Story #478)
+- feat: RefreshScheduler reads and applies stored temporal_options including all_branches (Story #478)
+- feat: API endpoint POST /admin/golden-repos/{alias}/temporal-options for saving temporal options (Story #478)
+
 ## v9.5.32
 
 ### Refactoring

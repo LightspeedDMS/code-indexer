@@ -1722,6 +1722,23 @@ class GoldenRepoManager:
         """Set wiki_enabled flag for a golden repo (Story #280)."""
         self._sqlite_backend.update_wiki_enabled(alias, enabled)
 
+    def save_temporal_options(self, alias: str, options: Optional[Dict]) -> bool:
+        """
+        Persist temporal indexing options for a golden repo (Story #478).
+
+        Args:
+            alias: Repository alias.
+            options: Dict with temporal options (max_commits, diff_context,
+                     since_date, all_branches), or None to clear.
+
+        Returns:
+            True if updated, False if alias not found.
+        """
+        updated = self._sqlite_backend.update_temporal_options(alias, options)
+        if updated and alias in self.golden_repos:
+            self.golden_repos[alias].temporal_options = options
+        return updated
+
     def get_actual_repo_path(self, alias: str) -> str:
         """
         Resolve actual filesystem path for golden/global repo.
@@ -2521,19 +2538,21 @@ class GoldenRepoManager:
                             )
 
                     elif index_type == "temporal":
-                        command = ["cidx", "index", "--index-commits"]
+                        command = ["cidx", "index", "--index-commits", "--clear"]
 
                         temporal_options = repo.temporal_options or {}
-                        max_commits = temporal_options.get("max_commits", 1000)
-                        command.extend(["--max-commits", str(max_commits)])
 
-                        if "since_date" in temporal_options:
-                            command.extend(
-                                ["--since-date", temporal_options["since_date"]]
-                            )
+                        max_commits = temporal_options.get("max_commits")
+                        if max_commits is not None:
+                            command.extend(["--max-commits", str(max_commits)])
 
-                        diff_context = temporal_options.get("diff_context", 5)
-                        command.extend(["--diff-context", str(diff_context)])
+                        since_date = temporal_options.get("since_date")
+                        if since_date:
+                            command.extend(["--since-date", since_date])
+
+                        diff_context = temporal_options.get("diff_context")
+                        if diff_context is not None:
+                            command.extend(["--diff-context", str(diff_context)])
 
                         if temporal_options.get("all_branches"):
                             command.append("--all-branches")

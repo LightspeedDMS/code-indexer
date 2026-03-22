@@ -1311,10 +1311,13 @@ class RefreshScheduler:
                     temporal_command.extend(
                         ["--since-date", temporal_options["since_date"]]
                     )
-                if temporal_options.get("diff_context"):
+                diff_context = temporal_options.get("diff_context")
+                if diff_context is not None:
                     temporal_command.extend(
-                        ["--diff-context", str(temporal_options["diff_context"])]
+                        ["--diff-context", str(diff_context)]
                     )
+                if temporal_options.get("all_branches"):
+                    temporal_command.append("--all-branches")
 
             logger.info(
                 f"Running cidx index (temporal) on source for {alias_name}: {' '.join(temporal_command)}"

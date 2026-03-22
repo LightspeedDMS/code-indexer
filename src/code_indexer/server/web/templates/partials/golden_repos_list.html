@@ -264,6 +264,43 @@
                                         SCIP{% if repo.has_scip %} <span class="rebuild-label">(rebuild)</span>{% endif %}
                                     </label>
                                 </div>
+
+                                <!-- Temporal Options (Story #478) -->
+                                <details id="temporal-options-{{ repo.alias }}" style="margin-top: 0.5rem;">
+                                    <summary style="cursor: pointer; font-size: 0.9em; color: var(--pico-muted-color);">Temporal indexing options</summary>
+                                    <form method="post" action="/admin/golden-repos/{{ repo.alias }}/temporal-options" style="margin-top: 0.5rem;">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; font-size: 0.85em;">
+                                            <label>
+                                                Max commits (empty = all):
+                                                <input type="number" name="max_commits" min="1"
+                                                       value="{{ repo.temporal_options.max_commits if repo.temporal_options and repo.temporal_options.max_commits else '' }}"
+                                                       placeholder="no limit" style="font-size: 0.85em;">
+                                            </label>
+                                            <label>
+                                                Diff context lines (0-50):
+                                                <input type="number" name="diff_context" min="0" max="50"
+                                                       value="{{ repo.temporal_options.diff_context if repo.temporal_options and repo.temporal_options.diff_context is not none else 5 }}"
+                                                       placeholder="5" style="font-size: 0.85em;">
+                                            </label>
+                                            <label>
+                                                Since date (YYYY-MM-DD, optional):
+                                                <input type="date" name="since_date"
+                                                       value="{{ repo.temporal_options.since_date if repo.temporal_options and repo.temporal_options.since_date else '' }}"
+                                                       style="font-size: 0.85em;">
+                                            </label>
+                                            <label style="align-self: end; padding-bottom: 0.5rem;">
+                                                <input type="checkbox" name="all_branches" value="1"
+                                                       {% if repo.temporal_options and repo.temporal_options.all_branches %}checked{% endif %}>
+                                                All branches
+                                            </label>
+                                        </div>
+                                        <div style="margin-top: 0.5rem;">
+                                            <button type="submit" class="small">Save temporal options</button>
+                                        </div>
+                                    </form>
+                                </details>
+
                                 <div class="form-actions">
                                     <button class="small" onclick="submitAddIndex('{{ repo.alias }}')">Submit</button>
                                     <button class="outline small" onclick="hideAddIndexForm('{{ repo.alias }}')">Cancel</button>

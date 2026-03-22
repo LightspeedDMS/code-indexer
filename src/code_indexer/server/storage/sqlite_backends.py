@@ -1762,6 +1762,37 @@ class GoldenRepoMetadataSqliteBackend:
             )
         return updated
 
+    def update_temporal_options(
+        self, alias: str, options: Optional[Dict]
+    ) -> bool:
+        """
+        Update the temporal_options JSON for a golden repository.
+
+        Story #478: Persist temporal indexing configuration (max_commits,
+        diff_context, since_date, all_branches) per repository so that
+        admin-triggered rebuilds and scheduled refreshes apply stored options.
+
+        Args:
+            alias: Alias of the repository to update.
+            options: Dict of temporal options, or None to clear.
+
+        Returns:
+            True if a record was updated, False if alias not found.
+        """
+        temporal_json = json.dumps(options) if options is not None else None
+
+        def operation(conn):
+            cursor = conn.execute(
+                "UPDATE golden_repos_metadata SET temporal_options = ? WHERE alias = ?",
+                (temporal_json, alias),
+            )
+            return cursor.rowcount > 0
+
+        updated: bool = self._conn_manager.execute_atomic(operation)
+        if updated:
+            logger.info(f"Updated temporal_options for golden repo: {alias}")
+        return updated
+
     def update_repo_url(self, alias: str, repo_url: str) -> bool:
         """
         Update the repo_url for a golden repository.
