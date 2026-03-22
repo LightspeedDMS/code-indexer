@@ -268,36 +268,49 @@
                                 <!-- Temporal Options (Story #478) -->
                                 <details id="temporal-options-{{ repo.alias }}" style="margin-top: 0.5rem;">
                                     <summary style="cursor: pointer; font-size: 0.9em; color: var(--pico-muted-color);">Temporal indexing options</summary>
-                                    <form method="post" action="/admin/golden-repos/{{ repo.alias }}/temporal-options" style="margin-top: 0.5rem;">
+                                    <form method="post" action="/admin/golden-repos/{{ repo.alias }}/temporal-options" style="margin-top: 0.4rem;">
                                         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; font-size: 0.85em;">
-                                            <label>
-                                                Max commits (empty = all):
-                                                <input type="number" name="max_commits" min="1"
-                                                       value="{{ repo.temporal_options.max_commits if repo.temporal_options and repo.temporal_options.max_commits else '' }}"
-                                                       placeholder="no limit" style="font-size: 0.85em;">
-                                            </label>
-                                            <label>
-                                                Diff context lines (0-50):
-                                                <input type="number" name="diff_context" min="0" max="50"
-                                                       value="{{ repo.temporal_options.diff_context if repo.temporal_options and repo.temporal_options.diff_context is not none else 5 }}"
-                                                       placeholder="5" style="font-size: 0.85em;">
-                                            </label>
-                                            <label>
-                                                Since date (YYYY-MM-DD, optional):
-                                                <input type="date" name="since_date"
-                                                       value="{{ repo.temporal_options.since_date if repo.temporal_options and repo.temporal_options.since_date else '' }}"
-                                                       style="font-size: 0.85em;">
-                                            </label>
-                                            <label style="align-self: end; padding-bottom: 0.5rem;">
-                                                <input type="checkbox" name="all_branches" value="1"
-                                                       {% if repo.temporal_options and repo.temporal_options.all_branches %}checked{% endif %}>
-                                                All branches
-                                            </label>
-                                        </div>
-                                        <div style="margin-top: 0.5rem;">
-                                            <button type="submit" class="small">Save temporal options</button>
-                                        </div>
+                                        <table style="border: none; margin: 0; padding: 0; font-size: 0.82em; border-collapse: collapse;">
+                                            <tr>
+                                                <td style="border: none; padding: 0.2rem 0.4rem 0.2rem 0; white-space: nowrap; vertical-align: middle;">Max commits</td>
+                                                <td style="border: none; padding: 0.2rem 0; vertical-align: middle;">
+                                                    <input type="number" name="max_commits" min="1"
+                                                           value="{{ repo.temporal_options.max_commits if repo.temporal_options and repo.temporal_options.max_commits else '' }}"
+                                                           placeholder="no limit" style="font-size: 0.9em; margin: 0; padding: 0.2rem 0.3rem; width: 120px;">
+                                                </td>
+                                            </tr>
+                                            <tr>
+                                                <td style="border: none; padding: 0.2rem 0.4rem 0.2rem 0; white-space: nowrap; vertical-align: middle;">Context lines</td>
+                                                <td style="border: none; padding: 0.2rem 0; vertical-align: middle;">
+                                                    <input type="number" name="diff_context" min="0" max="50"
+                                                           value="{{ repo.temporal_options.diff_context if repo.temporal_options and repo.temporal_options.diff_context is not none else 5 }}"
+                                                           placeholder="5" style="font-size: 0.9em; margin: 0; padding: 0.2rem 0.3rem; width: 80px;">
+                                                </td>
+                                            </tr>
+                                            <tr>
+                                                <td style="border: none; padding: 0.2rem 0.4rem 0.2rem 0; white-space: nowrap; vertical-align: middle;">Since date</td>
+                                                <td style="border: none; padding: 0.2rem 0; vertical-align: middle;">
+                                                    <input type="date" name="since_date"
+                                                           value="{{ repo.temporal_options.since_date if repo.temporal_options and repo.temporal_options.since_date else '' }}"
+                                                           style="font-size: 0.9em; margin: 0; padding: 0.2rem 0.3rem; width: 150px;">
+                                                </td>
+                                            </tr>
+                                            <tr>
+                                                <td colspan="2" style="border: none; padding: 0.2rem 0; vertical-align: middle;">
+                                                    <label style="display: inline-flex; align-items: center; gap: 0.3rem; margin: 0; cursor: pointer;">
+                                                        <input type="checkbox" name="all_branches" value="1"
+                                                               style="margin: 0; width: auto; height: auto;"
+                                                               {% if repo.temporal_options and repo.temporal_options.all_branches %}checked{% endif %}>
+                                                        All branches
+                                                    </label>
+                                                </td>
+                                            </tr>
+                                            <tr>
+                                                <td colspan="2" style="border: none; padding: 0.3rem 0 0 0;">
+                                                    <button type="submit" class="small outline" style="padding: 0.2rem 0.6rem; font-size: 0.85em; width: auto;">Save</button>
+                                                </td>
+                                            </tr>
+                                        </table>
                                     </form>
                                 </details>
 
