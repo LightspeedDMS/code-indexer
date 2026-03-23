@@ -50,9 +50,11 @@ def _make_registry(alias_name, enable_temporal=True, temporal_options=None, repo
 
 def _capture_subprocess_cmds(scheduler, alias_name, source_path):
     """
-    Call _index_source and capture all subprocess.run commands.
+    Call _index_source and capture all commands issued to subprocess.run
+    and run_with_popen_progress (used for semantic/temporal indexing since
+    Story #482 switched those paths to Popen-based progress reporting).
 
-    Returns list of command lists that were passed to subprocess.run.
+    Returns list of command lists that were passed to either mechanism.
     """
     captured = []
 
@@ -64,7 +66,16 @@ def _capture_subprocess_cmds(scheduler, alias_name, source_path):
         result.stderr = ""
         return result
 
-    with patch("subprocess.run", side_effect=recording_run):
+    def recording_popen_progress(
+        command, phase_name, allocator, progress_callback,
+        all_stdout, all_stderr, cwd, error_label=None
+    ):
+        captured.append(list(command))
+        # No-op: don't actually spawn subprocess
+
+    import code_indexer.services.progress_subprocess_runner as psr_mod
+    with patch("subprocess.run", side_effect=recording_run), \
+         patch.object(psr_mod, "run_with_popen_progress", side_effect=recording_popen_progress):
         scheduler._index_source(alias_name, str(source_path))
 
     return captured

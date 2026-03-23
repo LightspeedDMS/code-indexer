@@ -20,6 +20,7 @@ V1 Format (Legacy):
 import hashlib
 import logging
 import sqlite3
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Set
@@ -76,6 +77,14 @@ class TemporalMetadataStore:
 
         conn = sqlite3.connect(self.db_path)
         try:
+            # Bug #484 Fix: Enable WAL mode for concurrent access.
+            # WAL (Write-Ahead Logging) allows multiple readers and one writer
+            # to coexist without blocking. This is essential when TemporalIndexer
+            # runs 8+ parallel threads all writing via save_metadata().
+            conn.execute("PRAGMA journal_mode=WAL")
+            # Bug #484 Fix: Set busy_timeout so writers wait instead of
+            # immediately raising OperationalError: database is locked.
+            conn.execute("PRAGMA busy_timeout=30000")
             cursor = conn.cursor()
 
             # Create table
@@ -157,29 +166,54 @@ class TemporalMetadataStore:
 
         created_at = datetime.now().isoformat()
 
-        conn = sqlite3.connect(self.db_path)
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT OR REPLACE INTO temporal_metadata
-                (hash_prefix, point_id, commit_hash, file_path, chunk_index, created_at, format_version)
-                VALUES (?, ?, ?, ?, ?, ?, 2)
-            """,
-                (
-                    hash_prefix,
+        # Bug #484 Fix: Retry logic for concurrent write contention.
+        # TemporalIndexer runs 8+ parallel threads; even with WAL mode and
+        # busy_timeout, transient lock contention can occur.  Retry up to 3
+        # times with exponential backoff before propagating the error.
+        max_retries = 3
+        last_error: Optional[Exception] = None
+        for attempt in range(max_retries):
+            conn = sqlite3.connect(self.db_path)
+            try:
+                # Bug #484 Fix: Enable WAL mode and busy_timeout on every
+                # connection so writers wait instead of failing immediately.
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA busy_timeout=30000")
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO temporal_metadata
+                    (hash_prefix, point_id, commit_hash, file_path, chunk_index, created_at, format_version)
+                    VALUES (?, ?, ?, ?, ?, ?, 2)
+                """,
+                    (
+                        hash_prefix,
+                        point_id,
+                        commit_hash,
+                        file_path,
+                        chunk_index,
+                        created_at,
+                    ),
+                )
+                conn.commit()
+                return hash_prefix
+            except sqlite3.OperationalError as e:
+                last_error = e
+                logger.warning(
+                    "save_metadata: attempt %d/%d failed for %s: %s",
+                    attempt + 1,
+                    max_retries,
                     point_id,
-                    commit_hash,
-                    file_path,
-                    chunk_index,
-                    created_at,
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+                    e,
+                )
+                if attempt < max_retries - 1:
+                    time.sleep(0.05 * (2**attempt))  # 50ms, 100ms backoff
+            finally:
+                conn.close()
 
-        return hash_prefix
+        raise sqlite3.OperationalError(
+            f"save_metadata failed after {max_retries} attempts for {point_id}: {last_error}"
+        )
 
     def get_point_id(self, hash_prefix: str) -> Optional[str]:
         """Retrieve point_id from hash prefix.

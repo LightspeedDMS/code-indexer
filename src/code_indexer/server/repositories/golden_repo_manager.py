@@ -53,8 +53,8 @@ def _gather_repo_metrics(repo_path) -> tuple:
     """
     Gather file count and commit count for a repository.
 
-    Used by add_indexes_to_golden_repo background_worker to compute
-    ProgressPhaseAllocator weights.  Both commands are fast for most repos.
+    Delegates to the shared gather_repo_metrics utility in
+    code_indexer.services.progress_subprocess_runner.
 
     Args:
         repo_path: Path to the git repository (str or Path)
@@ -63,53 +63,8 @@ def _gather_repo_metrics(repo_path) -> tuple:
         (file_count, commit_count) as integers.  Returns (0, 0) if repo is
         not a git repository or if git commands fail (graceful degradation).
     """
-    repo_str = str(repo_path)
-
-    # Count tracked files
-    try:
-        ls_result = subprocess.run(
-            ["git", "-C", repo_str, "ls-files"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if ls_result.returncode == 0:
-            file_count = len([line for line in ls_result.stdout.splitlines() if line.strip()])
-        else:
-            logger.warning(
-                "_gather_repo_metrics: git ls-files failed in %s (exit %d): %s",
-                repo_str,
-                ls_result.returncode,
-                ls_result.stderr.strip(),
-            )
-            file_count = 0
-    except Exception as e:
-        logger.warning("_gather_repo_metrics: failed to count tracked files in %s: %s", repo_str, e)
-        file_count = 0
-
-    # Count commits on current branch
-    try:
-        rev_result = subprocess.run(
-            ["git", "-C", repo_str, "rev-list", "--count", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if rev_result.returncode == 0:
-            commit_count = int(rev_result.stdout.strip() or "0")
-        else:
-            logger.warning(
-                "_gather_repo_metrics: git rev-list failed in %s (exit %d): %s",
-                repo_str,
-                rev_result.returncode,
-                rev_result.stderr.strip(),
-            )
-            commit_count = 0
-    except Exception as e:
-        logger.warning("_gather_repo_metrics: failed to count commits in %s: %s", repo_str, e)
-        commit_count = 0
-
-    return file_count, commit_count
+    from code_indexer.services.progress_subprocess_runner import gather_repo_metrics
+    return gather_repo_metrics(repo_path)
 
 
 class GoldenRepoNotFoundError(GoldenRepoError):
@@ -356,8 +311,9 @@ class GoldenRepoManager:
                     f"Invalid or inaccessible git repository: {repo_url}"
                 )
 
-        # Create no-args wrapper for background execution
-        def background_worker() -> Dict[str, Any]:
+        # Create wrapper for background execution that accepts progress_callback
+        # so BackgroundJobManager can inject it (Story #482 PATH A).
+        def background_worker(progress_callback=None) -> Dict[str, Any]:
             """Execute add operation in background thread."""
             try:
                 # Clone repository
@@ -369,6 +325,7 @@ class GoldenRepoManager:
                     force_init=False,
                     enable_temporal=enable_temporal,
                     temporal_options=temporal_options,
+                    progress_callback=progress_callback,
                 )
 
                 # Create golden repository record
@@ -1255,6 +1212,7 @@ class GoldenRepoManager:
         force_init: bool = False,
         enable_temporal: bool = False,
         temporal_options: Optional[Dict] = None,
+        progress_callback=None,
     ) -> None:
         """
         Execute the required workflow after successful repository cloning.
@@ -1283,9 +1241,6 @@ class GoldenRepoManager:
         if force_init:
             init_command.append("--force")
 
-        # Build index command for semantic + FTS (always required)
-        index_command = ["cidx", "index", "--fts"]
-
         # Skip cidx init if config already exists and force_init=False (incremental refresh)
         config_path = Path(clone_path) / ".code-indexer" / "config.json"
         skip_init = not force_init and config_path.exists()
@@ -1294,17 +1249,10 @@ class GoldenRepoManager:
                 f"Skipping cidx init for {clone_path}: config exists and force_init=False (incremental refresh)"
             )
 
-        # Build workflow commands list
-        workflow_commands = []
-        if not skip_init:
-            workflow_commands.append(init_command)
-        workflow_commands.append(index_command)
-
-        # If temporal indexing is enabled, add a SEPARATE command for temporal index
-        # Note: --index-commits ONLY does temporal indexing, not semantic+FTS
-        # So we need two separate cidx index calls: one for semantic+FTS, one for temporal
+        # If temporal indexing is enabled, build temporal command
+        temporal_command: Optional[List[str]] = None
         if enable_temporal:
-            temporal_command = ["cidx", "index", "--index-commits"]
+            temporal_command = ["cidx", "index", "--index-commits", "--progress-json"]
 
             if temporal_options:
                 if temporal_options.get("max_commits"):
@@ -1328,98 +1276,141 @@ class GoldenRepoManager:
                         f"increase storage. Recommended range: 3-10 lines."
                     )
 
-            workflow_commands.append(temporal_command)
+        # Story #482 PATH A: Build ProgressPhaseAllocator for phase-aware progress reporting.
+        # Phases: "semantic" (covers cidx index --fts), "temporal" (if enabled).
+        # cidx init is fast (coarse markers only); no separate phase needed.
+        from code_indexer.services.progress_phase_allocator import ProgressPhaseAllocator
+        from code_indexer.services.progress_subprocess_runner import (
+            gather_repo_metrics,
+            run_with_popen_progress,
+            IndexingSubprocessError,
+        )
+
+        _phase_index_types = ["semantic"]
+        if enable_temporal:
+            _phase_index_types.append("temporal")
+
+        file_count, commit_count = gather_repo_metrics(clone_path)
+        _opts = temporal_options or {}
+        max_commits_opt = _opts.get("max_commits") if temporal_options else None
+
+        allocator = ProgressPhaseAllocator()
+        allocator.calculate_weights(
+            index_types=_phase_index_types,
+            file_count=file_count,
+            commit_count=commit_count,
+            max_commits=max_commits_opt,
+        )
+
+        # Helper for Popen-based indexing with progress forwarding
+        _popen_stdout: List[str] = []
+        _popen_stderr: List[str] = []
+
+        def _run_popen(command: List[str], phase_name: str, error_label: str) -> None:
+            """Run command with Popen progress, re-raising as GitOperationError on failure."""
+            _popen_stdout.clear()
+            _popen_stderr.clear()
+            try:
+                run_with_popen_progress(
+                    command=command,
+                    phase_name=phase_name,
+                    allocator=allocator,
+                    progress_callback=progress_callback,
+                    all_stdout=_popen_stdout,
+                    all_stderr=_popen_stderr,
+                    cwd=clone_path,
+                    error_label=error_label,
+                )
+            except IndexingSubprocessError as e:
+                # Check for "No files found" — acceptable for golden repo registration
+                combined = "".join(_popen_stdout) + "".join(_popen_stderr)
+                if "No files found to index" in combined:
+                    logging.warning(
+                        f"PATH A: Repository has no indexable files — acceptable for golden repo registration"
+                    )
+                    return
+                raise GitOperationError(str(e)) from e
 
         try:
-            for i, command in enumerate(workflow_commands, 1):
-                logging.info(
-                    f"Executing workflow step {i}/{len(workflow_commands)}: {' '.join(command)}"
-                )
+            # Step 1: cidx init (fast — coarse markers only)
+            if not skip_init:
+                logging.info(f"Executing cidx init for {clone_path}")
+                if progress_callback is not None:
+                    progress_callback(
+                        0,
+                        phase="init",
+                        detail="init: initializing repository...",
+                    )
 
                 result = subprocess.run(
-                    command,
+                    init_command,
                     cwd=clone_path,
                     capture_output=True,
                     text=True,
                 )
 
                 if result.returncode != 0:
-                    # Analyze command failure and determine if it's recoverable
-                    command_name = command[1] if len(command) > 1 else command[0]
                     combined_output = result.stdout + result.stderr
-
-                    # Special handling for cidx index command when no files are found to index
-                    # Check if this is the index command (regardless of step number)
-                    if (
-                        command_name == "index"
-                        and "No files found to index" in combined_output
-                    ):
+                    if self._is_recoverable_init_error(combined_output):
                         logging.warning(
-                            f"Workflow step {i}: Repository has no indexable files - this is acceptable for golden repository registration"
-                        )
-                        logging.info(
-                            f"Workflow step {i} completed with acceptable condition (no indexable files)"
-                        )
-                        continue  # This is acceptable, continue to next step
-
-                    # Check for recoverable configuration conflicts
-                    if command_name == "init" and self._is_recoverable_init_error(
-                        combined_output
-                    ):
-                        logging.warning(
-                            f"Workflow step {i}: Recoverable configuration conflict detected. "
+                            f"Recoverable configuration conflict during init. "
                             f"Attempting to resolve: {combined_output}"
                         )
-                        # Try to resolve the conflict and retry
-                        if self._attempt_init_conflict_resolution(
-                            clone_path, force_init
-                        ):
-                            logging.info(
-                                f"Workflow step {i}: Configuration conflict resolved, continuing"
+                        if not self._attempt_init_conflict_resolution(clone_path, force_init):
+                            raise GitOperationError(
+                                f"Init failed: {combined_output}"
                             )
-                            continue
-
-                    # Check for recoverable service conflicts
-                    if command_name == "start" and self._is_recoverable_service_error(
-                        combined_output
-                    ):
-                        logging.warning(
-                            f"Workflow step {i}: Recoverable service conflict detected. "
-                            f"Attempting to resolve: {combined_output}"
+                    else:
+                        raise GitOperationError(
+                            f"cidx init failed: {combined_output}"
                         )
-                        # Try to resolve service conflicts
-                        if self._attempt_service_conflict_resolution(clone_path):
-                            logging.info(
-                                f"Workflow step {i}: Service conflict resolved, continuing"
-                            )
-                            continue
 
-                    # Unrecoverable error - fail the workflow
-                    error_msg = f"Workflow step {i} failed: {' '.join(command)}\nStdout: {result.stdout}\nStderr: {result.stderr}"
-                    logging.error(error_msg)
-                    raise GitOperationError(error_msg)
-
-                logging.info(f"Workflow step {i} completed successfully")
+                logging.info(f"cidx init completed for {clone_path}")
+                if progress_callback is not None:
+                    progress_callback(
+                        5,
+                        phase="init",
+                        detail="init: complete",
+                    )
 
                 # Story #223 AC6: Seed repo with server-configured file extensions after cidx init
-                # Must run after cidx init creates .code-indexer/config.json, before cidx index
-                if command == init_command:
-                    try:
-                        from ..services.config_service import get_config_service
+                try:
+                    from ..services.config_service import get_config_service
 
-                        config_svc = get_config_service()
-                        config_svc.seed_repo_extensions_from_server_config(clone_path)
-                        logging.info(
-                            "Seeded file_extensions from server config for %s",
-                            clone_path,
-                        )
-                    except Exception as e:
-                        logging.warning(
-                            "Could not seed extensions for %s: %s", clone_path, e
-                        )
+                    config_svc = get_config_service()
+                    config_svc.seed_repo_extensions_from_server_config(clone_path)
+                    logging.info(
+                        "Seeded file_extensions from server config for %s",
+                        clone_path,
+                    )
+                except Exception as e:
+                    logging.warning(
+                        "Could not seed extensions for %s: %s", clone_path, e
+                    )
+
+            # Step 2: cidx index --fts --progress-json (semantic + FTS, Popen for real progress)
+            logging.info(f"Executing cidx index --fts for {clone_path}")
+            _run_popen(
+                ["cidx", "index", "--fts", "--progress-json"],
+                phase_name="semantic",
+                error_label="semantic+FTS indexing",
+            )
+            logging.info(f"cidx index --fts completed for {clone_path}")
+
+            # Step 3: cidx index --index-commits --progress-json (temporal, if enabled)
+            if temporal_command is not None:
+                logging.info(f"Executing cidx index --index-commits for {clone_path}")
+                _run_popen(
+                    temporal_command,
+                    phase_name="temporal",
+                    error_label="temporal indexing",
+                )
+                logging.info(f"cidx index --index-commits completed for {clone_path}")
 
             logging.info(f"Post-clone workflow completed successfully for {clone_path}")
 
+        except GitOperationError:
+            raise
         except subprocess.TimeoutExpired:
             raise GitOperationError("Post-clone workflow timed out")
         except subprocess.CalledProcessError as e:
@@ -2271,7 +2262,9 @@ class GoldenRepoManager:
                     f"[change_branch] Cleanup scheduling failed (non-fatal): {exc}"
                 )
 
-    def change_branch(self, alias: str, target_branch: str) -> Dict[str, Any]:
+    def change_branch(
+        self, alias: str, target_branch: str, progress_callback=None
+    ) -> Dict[str, Any]:
         """
         Change the active branch of a golden repository (Story #303).
 
@@ -2337,11 +2330,44 @@ class GoldenRepoManager:
             self._cb_git_fetch_and_validate(base, target_branch, git_t)
             self._cb_checkout_and_pull(base, target_branch, git_t)
             try:
+                # Story #482 PATH D: coarse progress markers around each major step.
+                # _cb_cidx_index/_cb_cow_snapshot are shared callbacks used elsewhere;
+                # we emit markers before/after each call in change_branch() itself.
+                if progress_callback is not None:
+                    progress_callback(
+                        0,
+                        phase="index",
+                        detail="branch change: rebuilding index on base clone...",
+                    )
                 self._cb_cidx_index(base)
+                if progress_callback is not None:
+                    progress_callback(
+                        60,
+                        phase="cow",
+                        detail="branch change: creating versioned snapshot...",
+                    )
                 snapshot = self._cb_cow_snapshot(alias, base, cow_t, fix_t)
+                if progress_callback is not None:
+                    progress_callback(
+                        80,
+                        phase="cleanup",
+                        detail="branch change: cleaning up FTS/HNSW branch data...",
+                    )
                 self._cb_fts_branch_cleanup(snapshot, target_branch)
                 self._cb_hnsw_branch_cleanup(snapshot, target_branch)
+                if progress_callback is not None:
+                    progress_callback(
+                        95,
+                        phase="swap",
+                        detail="branch change: activating new snapshot...",
+                    )
                 self._cb_swap_alias(alias, snapshot)
+                if progress_callback is not None:
+                    progress_callback(
+                        100,
+                        phase="complete",
+                        detail=f"branch change: switched to '{target_branch}'",
+                    )
             except Exception as exc:
                 # Bug #469: Rollback git HEAD to previous branch on partial failure.
                 try:
@@ -2426,9 +2452,9 @@ class GoldenRepoManager:
         if target_branch == golden_repo.default_branch:
             return {"success": True, "job_id": None}
 
-        def background_worker() -> Dict[str, Any]:
-            """Execute change_branch in a background thread."""
-            return self.change_branch(alias, target_branch)
+        def background_worker(progress_callback=None) -> Dict[str, Any]:
+            """Execute change_branch in a background thread (Story #482 PATH D)."""
+            return self.change_branch(alias, target_branch, progress_callback=progress_callback)
 
         job_id = self.background_job_manager.submit_job(
             operation_type="change_branch",
@@ -2535,7 +2561,10 @@ class GoldenRepoManager:
                 # Story #480: Gather repo metrics and build phase allocator
                 from code_indexer.services.progress_phase_allocator import (
                     ProgressPhaseAllocator,
-                    parse_progress_line,
+                )
+                from code_indexer.services.progress_subprocess_runner import (
+                    run_with_popen_progress as _run_with_popen_progress_shared,
+                    IndexingSubprocessError,
                 )
 
                 file_count, commit_count = _gather_repo_metrics(repo_path)
@@ -2550,94 +2579,40 @@ class GoldenRepoManager:
                     max_commits=max_commits_opt,
                 )
 
-                def _report_phase_progress(
-                    phase_name: str, local_current: int, local_total: int, info: str = ""
-                ) -> None:
-                    """Map local phase progress to global 0-100 and invoke progress_callback."""
-                    if progress_callback is None:
-                        return
-                    global_pct = int(
-                        allocator.map_phase_progress(phase_name, local_current, local_total)
-                    )
-                    progress_callback(
-                        global_pct,
-                        phase=phase_name,
-                        detail=info,
-                    )
+                # Adapt all_stdout/all_stderr strings to list form for shared utility
+                _stdout_lines: List[str] = []
+                _stderr_lines: List[str] = []
 
                 def _run_with_popen_progress(
                     command: List[str],
                     phase_name: str,
                     error_label: str,
                 ) -> None:
-                    """
-                    Run command with Popen, reading JSON progress lines from stdout.
+                    """Delegate to shared run_with_popen_progress utility.
 
-                    Non-JSON lines are accumulated in all_stdout for error reporting
-                    but not parsed as progress.  Stderr is captured for error details.
-                    On non-zero exit, raises GoldenRepoError with captured stderr.
+                    Catches IndexingSubprocessError (raised by the shared utility
+                    to avoid circular imports) and re-raises as GoldenRepoError
+                    which is the expected error type for callers of this path.
                     """
                     nonlocal all_stdout, all_stderr
-
-                    process = subprocess.Popen(
-                        command,
-                        cwd=repo_path,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                    )
-
-                    # Report phase start (coarse marker before any lines arrive)
-                    if progress_callback is not None:
-                        global_start = int(allocator.phase_start(phase_name))
-                        progress_callback(
-                            global_start,
-                            phase=phase_name,
-                            detail=f"{phase_name}: starting...",
+                    try:
+                        _run_with_popen_progress_shared(
+                            command=command,
+                            phase_name=phase_name,
+                            allocator=allocator,
+                            progress_callback=progress_callback,
+                            all_stdout=_stdout_lines,
+                            all_stderr=_stderr_lines,
+                            cwd=str(repo_path),
+                            error_label=error_label,
                         )
-
-                    # Read stdout line by line
-                    if process.stdout is None:
-                        raise GoldenRepoError(
-                            f"Failed to {error_label}: subprocess stdout pipe was not created"
-                        )
-
-                    # Drain stderr in background thread to prevent deadlock if child
-                    # writes >64KB to stderr while parent is blocked reading stdout.
-                    stderr_lines: list[str] = []
-
-                    def _drain_stderr() -> None:
-                        if process.stderr:
-                            stderr_lines.extend(process.stderr.readlines())
-
-                    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
-                    stderr_thread.start()
-
-                    for line in process.stdout:
-                        all_stdout += line
-                        parsed = parse_progress_line(line)
-                        if parsed is not None:
-                            _report_phase_progress(
-                                phase_name,
-                                parsed["current"],
-                                parsed["total"],
-                                parsed.get("info", ""),
-                            )
-                        # Non-JSON lines: already accumulated in all_stdout, skip parsing
-
-                    process.wait()
-                    stderr_thread.join(timeout=30)
-                    stderr_output = "".join(stderr_lines)
-                    all_stderr += stderr_output
-
-                    if process.returncode != 0:
-                        error_details = (
-                            stderr_output
-                            or f"Exit code {process.returncode}"
-                        )
-                        raise GoldenRepoError(
-                            f"Failed to {error_label}: {error_details}"
-                        )
+                    except IndexingSubprocessError as e:
+                        raise GoldenRepoError(str(e)) from e
+                    finally:
+                        all_stdout += "".join(_stdout_lines)
+                        all_stderr += "".join(_stderr_lines)
+                        _stdout_lines.clear()
+                        _stderr_lines.clear()
 
                 # Ensure repo is initialized before running cidx index commands (idempotent)
                 init_result = subprocess.run(

@@ -587,9 +587,6 @@ class BackgroundJobManager:
             # Check if function accepts progress callback
             func_signature = inspect.signature(func)
 
-            # Update progress during execution
-            progress_callback(25)
-
             # Check for cancellation before execution
             cancelled = False
             with self._lock:
@@ -604,13 +601,18 @@ class BackgroundJobManager:
 
             # Execute the actual operation with frequent cancellation checks
             if "progress_callback" in func_signature.parameters:
-                # Add progress_callback to kwargs
+                # Function manages its own progress via ProgressPhaseAllocator.
+                # Bug #483 Fix: Do NOT emit hardcoded 25% here — it would create
+                # a visible 25->0 regression when the function's first phase
+                # starts at 0 (e.g., phase_start("semantic") == 0).
                 enhanced_kwargs = kwargs.copy()
                 enhanced_kwargs["progress_callback"] = progress_callback
                 result = func(*args, **enhanced_kwargs)
             else:
-                # For functions without progress callback, we need to wrap execution
-                # to check for cancellation periodically
+                # For functions without progress callback, emit a coarse 25%
+                # marker to indicate execution has started, then wrap execution
+                # to check for cancellation periodically.
+                progress_callback(25)
                 result = self._execute_with_cancellation_check(
                     job_id, func, args, kwargs
                 )

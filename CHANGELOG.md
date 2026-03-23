@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.35
+
+### Features
+- feat: extend real-time progress reporting to all user-facing indexing paths (Story #482)
+  - PATH A (golden repo registration): progress during post-clone indexing
+  - PATH C (refresh scheduler): progress during _index_source semantic/temporal
+  - PATH D (change branch): coarse progress markers for 4-step workflow
+  - PATH E (activated repo reindex): ProgressPhaseAllocator replaces hardcoded 10/50/90%
+  - Shared utility: extracted run_with_popen_progress and gather_repo_metrics to progress_subprocess_runner.py
+  - IndexingSubprocessError eliminates circular import between progress utility and golden_repo_manager
+
+### Bug Fixes
+- fix: progress regression 1% to 0% during composite rebuild — moved hardcoded progress_callback(25) to else block (Bug #483)
+- fix: temporal indexer sqlite3 database is locked — enabled WAL mode, busy_timeout, and retry with exponential backoff (Bug #484)
+
 ## v9.5.34
 
 ### Features

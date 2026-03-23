@@ -114,7 +114,7 @@ def test_concurrent_refreshes_different_repos_no_interference(
         # Track when each refresh starts and completes
         refresh_events = {"repo1": [], "repo2": []}
 
-        def slow_index_source(alias_name, source_path):
+        def slow_index_source(alias_name, source_path, progress_callback=None):
             """Simulate slow indexing to test concurrency."""
             repo_key = "repo1" if "repo1" in alias_name else "repo2"
             refresh_events[repo_key].append(("start", time.time()))
@@ -199,7 +199,7 @@ def test_concurrent_refreshes_same_repo_serialized(scheduler, mock_git_pull_upda
         refresh_order = []
         lock = threading.Lock()
 
-        def slow_index_source(alias_name, source_path):
+        def slow_index_source(alias_name, source_path, progress_callback=None):
             """Simulate slow indexing to test serialization."""
             with lock:
                 refresh_order.append(("start", threading.current_thread().name))
@@ -286,7 +286,7 @@ def test_refresh_lock_released_on_exception(scheduler, mock_git_pull_updater):
         # First call raises exception, second succeeds
         call_count = [0]
 
-        def index_source_with_exception(alias_name, source_path):
+        def index_source_with_exception(alias_name, source_path, progress_callback=None):
             call_count[0] += 1
             if call_count[0] == 1:
                 raise RuntimeError("Index creation failed")
@@ -408,7 +408,7 @@ def test_refresh_lock_prevents_duplicate_refresh(scheduler, mock_git_pull_update
         # Track number of index_source calls (represents one indexing cycle)
         create_count = [0]
 
-        def track_index_source(alias_name, source_path):
+        def track_index_source(alias_name, source_path, progress_callback=None):
             create_count[0] += 1
             time.sleep(0.1)  # Simulate work
 

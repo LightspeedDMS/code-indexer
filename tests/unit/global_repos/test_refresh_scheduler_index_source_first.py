@@ -343,7 +343,7 @@ class TestExecuteRefreshCallSite:
             golden_repos_dir / ".versioned" / "exec-refresh-test" / "v_1234567890"
         )
 
-        def mock_index_source(alias_name, source_path):
+        def mock_index_source(alias_name, source_path, progress_callback=None):
             call_order.append("_index_source")
 
         def mock_create_snapshot(alias_name, source_path):

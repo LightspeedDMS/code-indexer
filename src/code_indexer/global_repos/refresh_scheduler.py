@@ -867,9 +867,16 @@ class RefreshScheduler:
             self._execute_refresh(alias_name, force_reset=force_reset)
             return None
 
+        # Story #482 PATH C: Use a named function (not a lambda) so
+        # BackgroundJobManager can detect and inject progress_callback.
+        def _refresh_worker(progress_callback=None):
+            return self._execute_refresh(
+                alias_name, force_reset=force_reset, progress_callback=progress_callback
+            )
+
         job_id: str = self.background_job_manager.submit_job(
             operation_type="global_repo_refresh",
-            func=lambda: self._execute_refresh(alias_name, force_reset=force_reset),
+            func=_refresh_worker,
             submitter_username=submitter_username,
             is_admin=True,
             repo_alias=alias_name,
@@ -889,7 +896,7 @@ class RefreshScheduler:
         self._execute_refresh(alias_name)
 
     def _execute_refresh(
-        self, alias_name: str, force_reset: bool = False
+        self, alias_name: str, force_reset: bool = False, progress_callback=None
     ) -> Dict[str, Any]:
         """
         Execute refresh for a repository (called by BackgroundJobManager).
@@ -1150,7 +1157,12 @@ class RefreshScheduler:
                     )
 
                 # Index source first, then create versioned snapshot (Story #229)
-                self._index_source(alias_name=alias_name, source_path=source_path)
+                # Story #482 PATH C: Forward progress_callback into _index_source
+                self._index_source(
+                    alias_name=alias_name,
+                    source_path=source_path,
+                    progress_callback=progress_callback,
+                )
                 new_index_path = self._create_snapshot(
                     alias_name=alias_name, source_path=source_path
                 )
@@ -1206,7 +1218,9 @@ class RefreshScheduler:
                     f"Refresh failed for {alias_name}: {type(e).__name__}: {e}"
                 )
 
-    def _index_source(self, alias_name: str, source_path: str) -> None:
+    def _index_source(
+        self, alias_name: str, source_path: str, progress_callback=None
+    ) -> None:
         """
         Index the golden repo source in place (Story #229: index-source-first).
 
@@ -1250,36 +1264,9 @@ class RefreshScheduler:
                 pass  # If metadata unreadable, proceed with normal indexing
 
         if needs_reconcile:
-            index_command = ["cidx", "index", "--fts", "--reconcile"]
+            index_command = ["cidx", "index", "--fts", "--reconcile", "--progress-json"]
         else:
-            index_command = ["cidx", "index", "--fts"]
-        logger.info(
-            f"Running cidx index on source for {alias_name}: {' '.join(index_command)}"
-        )
-        try:
-            subprocess.run(
-                index_command,
-                cwd=str(source_path),
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            logger.info(f"cidx index on source completed successfully for {alias_name}")
-        except subprocess.CalledProcessError as e:
-            if e.returncode == -15:  # SIGTERM — server restart interrupted indexing
-                logger.warning(
-                    f"Indexing on source interrupted by server shutdown for {alias_name}"
-                )
-                raise RuntimeError(
-                    f"Indexing interrupted by server shutdown for {alias_name}"
-                )
-            logger.error(
-                f"Indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}",
-                exc_info=True,
-            )
-            raise RuntimeError(
-                f"Indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}"
-            )
+            index_command = ["cidx", "index", "--fts", "--progress-json"]
 
         # Step 2: Temporal indexing on source (if enabled and not local://)
         repo_info = self.registry.get_global_repo(alias_name)
@@ -1298,8 +1285,9 @@ class RefreshScheduler:
             )
             enable_temporal = False
 
+        temporal_command = None
         if enable_temporal:
-            temporal_command = ["cidx", "index", "--index-commits"]
+            temporal_command = ["cidx", "index", "--index-commits", "--progress-json"]
             logger.info(f"Temporal indexing enabled for {alias_name}")
 
             if temporal_options:
@@ -1319,43 +1307,109 @@ class RefreshScheduler:
                 if temporal_options.get("all_branches"):
                     temporal_command.append("--all-branches")
 
-            logger.info(
-                f"Running cidx index (temporal) on source for {alias_name}: {' '.join(temporal_command)}"
-            )
+        # Step 3: SCIP indexing on source (if enabled)
+        enable_scip = repo_info.get("enable_scip", False) if repo_info else False
+
+        # Story #482 PATH C: Build ProgressPhaseAllocator for phase-aware progress.
+        # Phases: "semantic" (covers cidx index --fts), "temporal" (if enabled),
+        # "scip" (if enabled, coarse markers only).
+        from code_indexer.services.progress_phase_allocator import ProgressPhaseAllocator
+        from code_indexer.services.progress_subprocess_runner import (
+            gather_repo_metrics,
+            run_with_popen_progress,
+            IndexingSubprocessError,
+        )
+
+        _phase_types = ["semantic"]
+        if enable_temporal:
+            _phase_types.append("temporal")
+        if enable_scip:
+            _phase_types.append("scip")
+
+        file_count, commit_count = gather_repo_metrics(source_path)
+        _opts = temporal_options or {}
+        max_commits_opt = _opts.get("max_commits") if temporal_options else None
+
+        allocator = ProgressPhaseAllocator()
+        allocator.calculate_weights(
+            index_types=_phase_types,
+            file_count=file_count,
+            commit_count=commit_count,
+            max_commits=max_commits_opt,
+        )
+
+        _popen_stdout: list = []
+        _popen_stderr: list = []
+
+        def _run_popen_c(command: list, phase_name: str, error_label: str) -> None:
+            """Run command with Popen progress, re-raising as RuntimeError on failure."""
+            _popen_stdout.clear()
+            _popen_stderr.clear()
             try:
-                subprocess.run(
-                    temporal_command,
+                run_with_popen_progress(
+                    command=command,
+                    phase_name=phase_name,
+                    allocator=allocator,
+                    progress_callback=progress_callback,
+                    all_stdout=_popen_stdout,
+                    all_stderr=_popen_stderr,
                     cwd=str(source_path),
-                    capture_output=True,
-                    text=True,
-                    check=True,
+                    error_label=error_label,
                 )
-                logger.info("cidx index (temporal) on source completed successfully")
-            except subprocess.CalledProcessError as e:
-                if e.returncode == -15:  # SIGTERM — server restart interrupted indexing
+            except IndexingSubprocessError as e:
+                error_msg = str(e)
+                # SIGTERM check — returncode -15 is in the error message from popen
+                if "Exit code -15" in error_msg or "returncode=-15" in error_msg:
                     logger.warning(
-                        f"Temporal indexing on source interrupted by server shutdown for {alias_name}"
+                        f"{phase_name} indexing on source interrupted by server shutdown for {alias_name}"
                     )
                     raise RuntimeError(
                         f"Indexing interrupted by server shutdown for {alias_name}"
                     )
                 logger.error(
-                    f"Temporal indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}",
+                    f"{phase_name} indexing on source failed for {alias_name}: {error_msg}",
                     exc_info=True,
                 )
                 raise RuntimeError(
-                    f"Temporal indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}"
+                    f"{phase_name} indexing on source failed for {alias_name}: {error_msg}"
                 )
 
-        # Step 3: SCIP indexing on source (if enabled)
-        enable_scip = repo_info.get("enable_scip", False) if repo_info else False
+        # Execute Step 1: cidx index --fts (semantic + FTS, Popen for real progress)
+        logger.info(
+            f"Running cidx index on source for {alias_name}: {' '.join(index_command)}"
+        )
+        _run_popen_c(
+            index_command,
+            phase_name="semantic",
+            error_label=f"indexing on source for {alias_name}",
+        )
+        logger.info(f"cidx index on source completed successfully for {alias_name}")
 
+        # Execute Step 2: temporal indexing (if enabled)
+        if temporal_command is not None:
+            logger.info(
+                f"Running cidx index (temporal) on source for {alias_name}: {' '.join(temporal_command)}"
+            )
+            _run_popen_c(
+                temporal_command,
+                phase_name="temporal",
+                error_label=f"temporal indexing on source for {alias_name}",
+            )
+            logger.info("cidx index (temporal) on source completed successfully")
+
+        # Execute Step 3: SCIP indexing (coarse markers, subprocess.run stays — it has no --progress-json)
         if enable_scip:
             scip_command = ["cidx", "scip", "generate"]
             logger.info(f"SCIP indexing enabled for {alias_name}")
             logger.info(
                 f"Running cidx scip generate on source for {alias_name}: {' '.join(scip_command)}"
             )
+            if progress_callback is not None:
+                progress_callback(
+                    int(allocator.phase_start("scip")),
+                    phase="scip",
+                    detail="SCIP: generating code intelligence index...",
+                )
             try:
                 subprocess.run(
                     scip_command,
@@ -1365,6 +1419,12 @@ class RefreshScheduler:
                     check=True,
                 )
                 logger.info("cidx scip generate on source completed successfully")
+                if progress_callback is not None:
+                    progress_callback(
+                        int(allocator.phase_end("scip")),
+                        phase="scip",
+                        detail="SCIP: complete",
+                    )
             except subprocess.CalledProcessError as e:
                 if e.returncode == -15:  # SIGTERM — server restart interrupted indexing
                     logger.warning(
