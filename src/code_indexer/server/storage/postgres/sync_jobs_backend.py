@@ -38,6 +38,8 @@ _ALLOWED_SYNC_COLUMNS = frozenset(
         "progress_history",
         "recovery_checkpoint",
         "analytics_data",
+        "error_message",
+        "current_phase",
     }
 )
 
@@ -159,9 +161,9 @@ class SyncJobsPostgresBackend:
         params: List[Any] = []
 
         for key, value in kwargs.items():
+            if key not in _ALLOWED_SYNC_COLUMNS:
+                raise ValueError(f"Column {key!r} is not allowed")
             if value is not None:
-                if key not in _ALLOWED_SYNC_COLUMNS:
-                    raise ValueError(f"Column {key!r} is not allowed")
                 updates.append(f"{key} = %s")
                 params.append(json.dumps(value) if key in _JSON_FIELDS else value)
 

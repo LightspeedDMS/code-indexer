@@ -402,8 +402,9 @@ class BackgroundJobsPostgresBackend:
                         error = %s,
                         completed_at = %s
                     WHERE status IN ('running', 'pending')
+                      AND (%s IS NULL OR executing_node = %s)
                     """,
-                    (error_message, interrupted_at),
+                    (error_message, interrupted_at, node_id, node_id),
                 )
                 count: int = cur.rowcount
         if count > 0:

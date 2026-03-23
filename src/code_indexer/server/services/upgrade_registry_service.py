@@ -89,8 +89,9 @@ class UpgradeRegistryService:
         Idempotent — safe to call on every operation.  Uses a module-level
         flag to avoid redundant DDL round-trips after the first call.
         """
-        if self._table_ensured:
-            return
+        with self._table_lock:
+            if self._table_ensured:
+                return
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(_CREATE_UPGRADE_REGISTRY)

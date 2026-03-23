@@ -36,8 +36,7 @@ class ClusterHealthProvider:
                 and ``is_active() -> bool`` methods.
             nfs_validator: Optional validator with ``get_mount_path() -> str`` and
                 ``is_mounted() -> bool`` methods.
-            pg_pool: Optional PostgreSQL connection pool with ``getconn()`` /
-                ``putconn()`` methods and a connection supporting
+            pg_pool: Optional PostgreSQL connection pool with ``connection()`` context manager providing connections with
                 ``cursor()`` / ``execute()`` / ``fetchone()``.
         """
         self._node_id = node_id

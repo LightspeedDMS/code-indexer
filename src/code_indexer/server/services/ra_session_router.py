@@ -189,8 +189,9 @@ class RASessionRouter:
         are safe.  Result is cached in ``_column_ensured`` to skip the DDL
         on subsequent calls.
         """
-        if self._column_ensured:
-            return
+        with self._column_lock:
+            if self._column_ensured:
+                return
         assert self._pool is not None  # only called from cluster-mode paths
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
