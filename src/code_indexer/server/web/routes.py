@@ -2566,6 +2566,82 @@ def toggle_wiki_enabled(
     )
 
 
+@web_router.post("/golden-repos/{alias}/temporal-options", response_class=HTMLResponse)
+def save_temporal_options(
+    request: Request,
+    alias: str,
+    max_commits: Optional[str] = Form(None),
+    diff_context: Optional[str] = Form(None),
+    since_date: Optional[str] = Form(None),
+    all_branches: Optional[str] = Form(None),
+    csrf_token: Optional[str] = Form(None),
+):
+    """Save temporal indexing options for a golden repo (Story #478)."""
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+    if not validate_login_csrf_token(request, csrf_token):
+        return templates.TemplateResponse(
+            "partials/error_message.html",
+            {"request": request, "error": "Invalid CSRF token"},
+            status_code=400,
+        )
+
+    options = {}
+
+    if max_commits and max_commits.strip():
+        try:
+            mc = int(max_commits.strip())
+            if mc < 1:
+                raise ValueError("max_commits must be a positive integer")
+            options["max_commits"] = mc
+        except ValueError:
+            return templates.TemplateResponse(
+                "partials/error_message.html",
+                {"request": request, "error": "max_commits must be a positive integer"},
+                status_code=400,
+            )
+
+    if diff_context and diff_context.strip():
+        try:
+            dc = int(diff_context.strip())
+            if dc < 0 or dc > 50:
+                raise ValueError("out of range")
+            options["diff_context"] = dc
+        except ValueError:
+            return templates.TemplateResponse(
+                "partials/error_message.html",
+                {"request": request, "error": "diff_context must be an integer 0-50"},
+                status_code=400,
+            )
+
+    if since_date and since_date.strip():
+        since_date_val = since_date.strip()
+        try:
+            from datetime import datetime
+
+            datetime.strptime(since_date_val, "%Y-%m-%d")
+        except ValueError:
+            return templates.TemplateResponse(
+                "partials/error_message.html",
+                {
+                    "request": request,
+                    "error": "since_date must be in YYYY-MM-DD format",
+                },
+                status_code=400,
+            )
+        options["since_date"] = since_date_val
+
+    options["all_branches"] = all_branches == "1"
+
+    manager = _get_golden_repo_manager()
+    manager.save_temporal_options(alias, options)
+
+    return _create_golden_repos_page_response(
+        request, session, success_message="Temporal options saved successfully"
+    )
+
+
 @web_router.post("/golden-repos/{alias}/wiki-refresh", response_class=HTMLResponse)
 def refresh_wiki_cache(
     request: Request,

@@ -94,6 +94,9 @@ def register_job_routes(
             result=job_status["result"],
             error=job_status["error"],
             username=job_status["username"],
+            # Story #480: Real-time phase progress fields (AC7)
+            current_phase=job_status.get("current_phase"),
+            phase_detail=job_status.get("phase_detail"),
         )
 
     @app.get("/api/jobs", response_model=JobListResponse)

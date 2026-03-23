@@ -78,6 +78,10 @@ class BackgroundJob:
         None  # Per-project tracking
     )
 
+    # Story #480: Real-time phase progress fields
+    current_phase: Optional[str] = None  # e.g., "semantic", "temporal", "fts", "scip", "cow"
+    phase_detail: Optional[str] = None  # e.g., "150/500 files indexed"
+
 
 class BackgroundJobManager:
     """
@@ -381,6 +385,9 @@ class BackgroundJobManager:
                     "failure_reason": job.failure_reason,
                     "extended_error": job.extended_error,
                     "language_resolution_status": job.language_resolution_status,
+                    # Story #480: Real-time phase progress fields
+                    "current_phase": job.current_phase,
+                    "phase_detail": job.phase_detail,
                 }
 
         # Story #267 Component 8: Fall back to SQLite for completed/failed jobs
@@ -561,18 +568,24 @@ class BackgroundJobManager:
             logging.info(f"Starting background job {job_id}")
 
             # Create progress callback function
-            def progress_callback(progress: int):
+            def progress_callback(
+                progress: int,
+                phase: Optional[str] = None,
+                detail: Optional[str] = None,
+            ):
                 with self._lock:
                     if job_id in self.jobs and not self.jobs[job_id].cancelled:
                         self.jobs[job_id].progress = progress
+                        # Story #480: Update phase info when provided
+                        if phase is not None:
+                            self.jobs[job_id].current_phase = phase
+                        if detail is not None:
+                            self.jobs[job_id].phase_detail = detail
                 # Story #267 Component 3-4: Persist outside lock
                 self._persist_jobs(job_id=job_id)
 
             # Check if function accepts progress callback
             func_signature = inspect.signature(func)
-
-            # Update progress during execution
-            progress_callback(25)
 
             # Check for cancellation before execution
             cancelled = False
@@ -588,13 +601,18 @@ class BackgroundJobManager:
 
             # Execute the actual operation with frequent cancellation checks
             if "progress_callback" in func_signature.parameters:
-                # Add progress_callback to kwargs
+                # Function manages its own progress via ProgressPhaseAllocator.
+                # Bug #483 Fix: Do NOT emit hardcoded 25% here — it would create
+                # a visible 25->0 regression when the function's first phase
+                # starts at 0 (e.g., phase_start("semantic") == 0).
                 enhanced_kwargs = kwargs.copy()
                 enhanced_kwargs["progress_callback"] = progress_callback
                 result = func(*args, **enhanced_kwargs)
             else:
-                # For functions without progress callback, we need to wrap execution
-                # to check for cancellation periodically
+                # For functions without progress callback, emit a coarse 25%
+                # marker to indicate execution has started, then wrap execution
+                # to check for cancellation periodically.
+                progress_callback(25)
                 result = self._execute_with_cancellation_check(
                     job_id, func, args, kwargs
                 )
@@ -1002,6 +1020,9 @@ class BackgroundJobManager:
             "failure_reason": job.failure_reason,
             "extended_error": job.extended_error,
             "language_resolution_status": job.language_resolution_status,
+            # Story #480: Real-time phase progress fields (Bug fix: persist to SQLite)
+            "current_phase": job.current_phase,
+            "phase_detail": job.phase_detail,
         }
 
     def _persist_job_to_sqlite(self, job_id: str, snapshot: Dict[str, Any]) -> None:
@@ -1029,6 +1050,8 @@ class BackgroundJobManager:
                     failure_reason=snapshot["failure_reason"],
                     extended_error=snapshot["extended_error"],
                     language_resolution_status=snapshot["language_resolution_status"],
+                    current_phase=snapshot.get("current_phase"),
+                    phase_detail=snapshot.get("phase_detail"),
                 )
             else:
                 self._sqlite_backend.save_job(
@@ -1050,6 +1073,8 @@ class BackgroundJobManager:
                     failure_reason=snapshot["failure_reason"],
                     extended_error=snapshot["extended_error"],
                     language_resolution_status=snapshot["language_resolution_status"],
+                    current_phase=snapshot.get("current_phase"),
+                    phase_detail=snapshot.get("phase_detail"),
                 )
         except Exception as e:
             logging.error(f"Failed to persist job {job_id} to SQLite: {e}")

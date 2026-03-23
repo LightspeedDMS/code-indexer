@@ -2762,6 +2762,14 @@ def show_global_config():
     help="Number of context lines for git diffs (0-50, default: 5). "
     "Higher values improve search quality but increase storage.",
 )
+@click.option(
+    "--progress-json",
+    is_flag=True,
+    default=False,
+    hidden=True,
+    help="Internal: Emit JSON progress lines to stdout instead of Rich progress bar. "
+    "Used by the server's background worker to stream progress updates.",
+)
 @click.pass_context
 @require_mode("local")
 def index(
@@ -2780,6 +2788,7 @@ def index(
     max_commits: Optional[int],
     since_date: Optional[str],
     diff_context: Optional[int],
+    progress_json: bool = False,
 ):
     """Index the codebase for semantic search.
 
@@ -2859,6 +2868,12 @@ def index(
       Filesystem backend stores vectors as optimized JSON files.
     """
     config_manager = ctx.obj["config_manager"]
+
+    # H2: When --progress-json is active, redirect the module-level console to
+    # stderr so Rich human-readable output does not corrupt the JSON stream on stdout.
+    global console
+    if progress_json:
+        console = Console(stderr=True)
 
     # Validate --diff-context flag (must happen before daemon delegation)
     if diff_context is not None and not index_commits:
@@ -3194,27 +3209,54 @@ def index(
                     rich_table = progress_manager.get_integrated_display()
                     rich_live_manager.async_handle_progress_update(rich_table)
 
-                def progress_callback(
-                    current: int,
-                    total: int,
-                    path: Path,
-                    info: str = "",
-                    concurrent_files=None,
-                    slot_tracker=None,
-                    item_type: str = "commits",
-                ):
-                    """Multi-threaded progress callback - uses Rich Live progress display."""
-                    # Handle setup messages (total=0)
-                    if info and total == 0:
-                        show_setup_message(info)
-                        return
+                if progress_json:
+                    # AC6: --progress-json active — emit JSON lines, suppress Rich display
+                    from .services.progress_phase_allocator import emit_progress_json
 
-                    # Handle commit progress (total>0)
-                    if total and total > 0:
-                        update_commit_progress(
-                            current, total, info, concurrent_files, slot_tracker
-                        )
-                        return
+                    def progress_callback(  # type: ignore[misc]
+                        current: int,
+                        total: int,
+                        path=None,
+                        info: str = "",
+                        concurrent_files=None,
+                        slot_tracker=None,
+                        item_type: str = "commits",
+                    ):
+                        """JSON-emitting progress callback for --progress-json mode."""
+                        if total and total > 0:
+                            emit_progress_json(current=current, total=total, info=info)
+
+                    # M4: Attach no-op implementations so indexing code that calls these
+                    # attributes does not raise AttributeError in --progress-json mode.
+                    progress_callback.show_setup_message = lambda *a, **kw: None  # type: ignore[attr-defined]
+                    progress_callback.update_file_progress = lambda *a, **kw: None  # type: ignore[attr-defined]
+                    progress_callback.show_error_message = lambda *a, **kw: None  # type: ignore[attr-defined]
+                    progress_callback.check_for_interruption = lambda: None  # type: ignore[attr-defined]
+                    progress_callback.reset_progress_timers = lambda: None  # type: ignore[attr-defined]
+
+                else:
+
+                    def progress_callback(  # type: ignore[misc]
+                        current: int,
+                        total: int,
+                        path: Path,
+                        info: str = "",
+                        concurrent_files=None,
+                        slot_tracker=None,
+                        item_type: str = "commits",
+                    ):
+                        """Multi-threaded progress callback - uses Rich Live progress display."""
+                        # Handle setup messages (total=0)
+                        if info and total == 0:
+                            show_setup_message(info)
+                            return
+
+                        # Handle commit progress (total>0)
+                        if total and total > 0:
+                            update_commit_progress(
+                                current, total, info, concurrent_files, slot_tracker
+                            )
+                            return
 
                 # Run temporal indexing
                 console.print(
@@ -3588,61 +3630,90 @@ def index(
                 return "INTERRUPT"
             return None
 
-        def progress_callback(  # type: ignore[misc]
-            current,
-            total,
-            file_path,
-            error=None,
-            info=None,
-            concurrent_files=None,
-            slot_tracker=None,
-        ):
-            """Multi-threaded progress callback - uses Rich Live progress display."""
-            # Check for interruption first
-            interrupt_result = check_for_interruption()
-            if interrupt_result:
-                return interrupt_result
+        if progress_json:
+            # AC6: --progress-json active — emit JSON lines, suppress Rich display
+            from .services.progress_phase_allocator import (
+                emit_progress_json as _emit_json,
+            )
 
-            # Handle setup messages (total=0)
-            if info and total == 0:
-                show_setup_message(info)
-                return
+            def progress_callback(  # type: ignore[misc]
+                current,
+                total,
+                file_path=None,
+                error=None,
+                info=None,
+                concurrent_files=None,
+                slot_tracker=None,
+            ):
+                """JSON-emitting progress callback for --progress-json mode."""
+                if total and total > 0 and info:
+                    _emit_json(current=current, total=total, info=info or "")
 
-            # Handle file progress (total>0) with cancellation status
-            if total and total > 0 and info:
-                # Add cancellation indicator to progress info if interrupted
-                if interrupt_handler and interrupt_handler.interrupted:
-                    cancellation_info = f"🛑 CANCELLING - {info}"
-                    update_file_progress_with_concurrent_files(
-                        current, total, cancellation_info, concurrent_files
-                    )
-                else:
-                    update_file_progress_with_concurrent_files(
-                        current, total, info, concurrent_files
-                    )
-                return
+            # M4: Attach no-op implementations so indexing code that calls these
+            # attributes does not raise AttributeError in --progress-json mode.
+            progress_callback.show_setup_message = lambda *a, **kw: None  # type: ignore[attr-defined]
+            progress_callback.update_file_progress = lambda *a, **kw: None  # type: ignore[attr-defined]
+            progress_callback.show_error_message = lambda *a, **kw: None  # type: ignore[attr-defined]
+            progress_callback.check_for_interruption = lambda: None  # type: ignore[attr-defined]
+            progress_callback.reset_progress_timers = lambda: None  # type: ignore[attr-defined]
 
-            # Show errors
-            if error:
-                show_error_message(file_path, error)
-                return
+        else:
 
-            # Fallback: if somehow no display exists, just print info (should rarely happen)
-            if info:
-                show_setup_message(info)
+            def progress_callback(  # type: ignore[misc]
+                current,
+                total,
+                file_path,
+                error=None,
+                info=None,
+                concurrent_files=None,
+                slot_tracker=None,
+            ):
+                """Multi-threaded progress callback - uses Rich Live progress display."""
+                # Check for interruption first
+                interrupt_result = check_for_interruption()
+                if interrupt_result:
+                    return interrupt_result
 
-        # Clean API for components to use directly (no magic parameters!)
-        # Note: mypy doesn't like adding attributes to functions, but this works at runtime
-        progress_callback.show_setup_message = show_setup_message  # type: ignore[attr-defined]
-        progress_callback.update_file_progress = lambda current, total, info: (  # type: ignore[attr-defined]
-            check_for_interruption()
-            or update_file_progress_with_concurrent_files(current, total, info)
-        )
-        progress_callback.show_error_message = show_error_message  # type: ignore[attr-defined]
-        progress_callback.check_for_interruption = check_for_interruption  # type: ignore[attr-defined]
-        progress_callback.reset_progress_timers = (  # type: ignore[attr-defined]
-            lambda: progress_manager.reset_progress_timers()
-        )
+                # Handle setup messages (total=0)
+                if info and total == 0:
+                    show_setup_message(info)
+                    return
+
+                # Handle file progress (total>0) with cancellation status
+                if total and total > 0 and info:
+                    # Add cancellation indicator to progress info if interrupted
+                    if interrupt_handler and interrupt_handler.interrupted:
+                        cancellation_info = f"🛑 CANCELLING - {info}"
+                        update_file_progress_with_concurrent_files(
+                            current, total, cancellation_info, concurrent_files
+                        )
+                    else:
+                        update_file_progress_with_concurrent_files(
+                            current, total, info, concurrent_files
+                        )
+                    return
+
+                # Show errors
+                if error:
+                    show_error_message(file_path, error)
+                    return
+
+                # Fallback: if somehow no display exists, just print info (should rarely happen)
+                if info:
+                    show_setup_message(info)
+
+            # Clean API for components to use directly (no magic parameters!)
+            # Note: mypy doesn't like adding attributes to functions, but this works at runtime
+            progress_callback.show_setup_message = show_setup_message  # type: ignore[attr-defined]
+            progress_callback.update_file_progress = lambda current, total, info: (  # type: ignore[attr-defined]
+                check_for_interruption()
+                or update_file_progress_with_concurrent_files(current, total, info)
+            )
+            progress_callback.show_error_message = show_error_message  # type: ignore[attr-defined]
+            progress_callback.check_for_interruption = check_for_interruption  # type: ignore[attr-defined]
+            progress_callback.reset_progress_timers = (  # type: ignore[attr-defined]
+                lambda: progress_manager.reset_progress_timers()
+            )
 
         # Check for conflicting flags
         if clear and reconcile:

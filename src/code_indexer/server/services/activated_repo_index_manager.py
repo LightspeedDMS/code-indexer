@@ -270,26 +270,46 @@ class ActivatedRepoIndexManager:
         repo_path: str,
         index_types: List[str],
         clear: bool,
-        progress_callback: Optional[Callable[[int], None]] = None,
+        progress_callback: Optional[Callable[..., None]] = None,
     ) -> Dict[str, Any]:
         """
         Execute indexing job for specified index types.
+
+        Story #482 PATH E: Uses ProgressPhaseAllocator for dynamic phase-aware
+        progress reporting instead of hardcoded 10/50/90 milestones.
 
         Args:
             repo_alias: Repository alias
             repo_path: Repository filesystem path
             index_types: List of index types to rebuild
             clear: Rebuild from scratch vs incremental
-            progress_callback: Optional progress callback (0-100)
+            progress_callback: Optional progress callback(pct, phase=..., detail=...)
 
         Returns:
             Result dictionary with success status and details
         """
+        from code_indexer.services.progress_subprocess_runner import (
+            gather_repo_metrics,
+        )
+        from code_indexer.services.progress_phase_allocator import (
+            ProgressPhaseAllocator,
+        )
 
-        def update_progress(percent: int, message: str = "") -> None:
-            """Helper to update progress with logging."""
+        # Build allocator for phase-aware progress (Story #482 PATH E)
+        file_count, commit_count = gather_repo_metrics(repo_path)
+        allocator = ProgressPhaseAllocator()
+        allocator.calculate_weights(
+            index_types=index_types,
+            file_count=file_count,
+            commit_count=commit_count,
+        )
+
+        def update_progress(
+            percent: int, message: str = "", phase: Optional[str] = None
+        ) -> None:
+            """Helper to update progress with logging and phase info."""
             if progress_callback:
-                progress_callback(percent)
+                progress_callback(percent, phase=phase, detail=message)
             if message:
                 self.logger.info(
                     f"Reindex progress ({percent}%): {message}",
@@ -297,14 +317,22 @@ class ActivatedRepoIndexManager:
                 )
 
         try:
+            # Report start of first phase using allocator (replaces hardcoded 10%)
+            first_phase = index_types[0] if index_types else "semantic"
+            start_pct = int(allocator.phase_start(first_phase))
             update_progress(
-                10,
+                start_pct,
                 f"Starting reindex for '{repo_alias}' (types: {index_types}, clear: {clear})",
+                phase=first_phase,
             )
 
             # Execute each index type and collect results
+            # Pass a phase-aware update_progress wrapper
+            def phase_update(percent: int, message: str = "") -> None:
+                update_progress(percent, message)
+
             results = self._execute_all_index_types(
-                repo_path, index_types, clear, update_progress
+                repo_path, index_types, clear, phase_update, allocator
             )
 
             # Determine overall success
@@ -318,7 +346,7 @@ class ActivatedRepoIndexManager:
             else:
                 message = f"Reindex completed with failures: {', '.join(failed_types)}"
 
-            update_progress(100, message)
+            update_progress(100, message, phase="complete")
 
             return {
                 "success": all_success,
@@ -335,7 +363,7 @@ class ActivatedRepoIndexManager:
             )
 
             if progress_callback:
-                progress_callback(0)  # Reset progress to indicate failure
+                progress_callback(0, phase="error", detail=error_msg)
 
             return {
                 "success": False,
@@ -350,15 +378,23 @@ class ActivatedRepoIndexManager:
         index_types: List[str],
         clear: bool,
         update_progress: Callable,
+        allocator=None,
     ) -> Dict[str, Dict[str, Any]]:
         """
         Execute indexing for all requested index types.
+
+        Story #482 PATH E: Uses ProgressPhaseAllocator when provided to compute
+        phase-aware start/end progress values instead of hardcoded arithmetic.
+        Falls back to evenly-spaced values only when allocator is None.
 
         Args:
             repo_path: Repository path
             index_types: List of index types to process
             clear: Clear flag
             update_progress: Progress callback function
+            allocator: Optional ProgressPhaseAllocator for phase-aware progress.
+                When provided, phase_start/phase_end values are used instead of
+                the old hardcoded `10 + int((idx / total_types) * 80)` formula.
 
         Returns:
             Dictionary mapping index type to result
@@ -367,8 +403,25 @@ class ActivatedRepoIndexManager:
         total_types = len(index_types)
 
         for idx, index_type in enumerate(index_types):
-            base_progress = 10 + int((idx / total_types) * 80)
-            next_progress = 10 + int(((idx + 1) / total_types) * 80)
+            # Use allocator if available; fall back to evenly-spaced arithmetic only
+            # when allocator is absent (legacy callers without phase weights).
+            if allocator is not None:
+                try:
+                    base_progress = int(allocator.phase_start(index_type))
+                    next_progress = int(allocator.phase_end(index_type))
+                except (ValueError, AttributeError) as e:
+                    # Unknown phase in allocator — log and fall back gracefully
+                    logger.warning(
+                        "Allocator phase lookup failed for '%s': %s. "
+                        "Falling back to evenly-spaced progress.",
+                        index_type,
+                        e,
+                    )
+                    base_progress = 10 + int((idx / total_types) * 80)
+                    next_progress = 10 + int(((idx + 1) / total_types) * 80)
+            else:
+                base_progress = 10 + int((idx / total_types) * 80)
+                next_progress = 10 + int(((idx + 1) / total_types) * 80)
 
             update_progress(
                 base_progress, f"Processing {index_type} index ({idx+1}/{total_types})"

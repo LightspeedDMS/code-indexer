@@ -351,24 +351,16 @@ def register_admin_ops_routes(
             )
             job_ids = [job_id]
 
-            # Build response — always single job now, but keep multi-job path for
-            # API shape backward compatibility (job_ids field).
-            if len(index_types) == 1:
-                # Single index type - backward compatible response with job_id
-                response = AddIndexResponse(job_id=job_ids[0], status="pending")
-                return JSONResponse(
-                    content=response.model_dump(),
-                    status_code=202,
-                    headers={"Location": f"/api/jobs/{job_ids[0]}"},
-                )
-            else:
-                # Multi-type response - one job covers all types
-                response = AddIndexResponse(job_ids=job_ids, status="pending")
-                return JSONResponse(
-                    content=response.model_dump(),
-                    status_code=202,
-                    headers={"Location": f"/api/jobs/{job_ids[0]}"},
-                )
+            # Bug #473: Always single atomic job now. Return job_id for all cases.
+            # Also include job_ids for backward compatibility with multi-select consumers.
+            response = AddIndexResponse(
+                job_id=job_ids[0], job_ids=job_ids, status="pending"
+            )
+            return JSONResponse(
+                content=response.model_dump(),
+                status_code=202,
+                headers={"Location": f"/api/jobs/{job_ids[0]}"},
+            )
 
         except DuplicateJobError as e:
             raise HTTPException(

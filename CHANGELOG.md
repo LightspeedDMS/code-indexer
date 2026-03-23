@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v9.5.33
+## v9.5.37
 
 ### Features (Epic #408 -- CIDX Server Clusterization, Junction 1)
 - feat: Protocol interfaces for all 14 storage backends (Story #410)
@@ -19,6 +19,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 All new files, zero modifications to existing code. SQLite standalone mode unchanged.
 PostgreSQL backends only loaded when storage_mode="postgres" in config.json.
+
+## v9.5.36
+
+### Bug Fixes
+- fix: monotonic progress guard prevents progress bar dips during clear+index phases
+- fix: progress, current_phase, phase_detail persisted to SQLite — completed jobs now show 100% instead of 0%
+- fix: SQLite migration adds current_phase/phase_detail columns to background_jobs table
+
+## v9.5.35
+
+### Features
+- feat: extend real-time progress reporting to all user-facing indexing paths (Story #482)
+  - PATH A (golden repo registration): progress during post-clone indexing
+  - PATH C (refresh scheduler): progress during _index_source semantic/temporal
+  - PATH D (change branch): coarse progress markers for 4-step workflow
+  - PATH E (activated repo reindex): ProgressPhaseAllocator replaces hardcoded 10/50/90%
+  - Shared utility: extracted run_with_popen_progress and gather_repo_metrics to progress_subprocess_runner.py
+  - IndexingSubprocessError eliminates circular import between progress utility and golden_repo_manager
+
+### Bug Fixes
+- fix: progress regression 1% to 0% during composite rebuild — moved hardcoded progress_callback(25) to else block (Bug #483)
+- fix: temporal indexer sqlite3 database is locked — enabled WAL mode, busy_timeout, and retry with exponential backoff (Bug #484)
+
+## v9.5.34
+
+### Features
+- feat: real-time progress reporting for index rebuild jobs (Story #480)
+  - ProgressPhaseAllocator with dynamic weights from repo metrics (file count, commit count)
+  - --progress-json CLI flag for machine-parseable progress output
+  - subprocess.Popen + line reader for semantic/temporal (replaces blocking subprocess.run)
+  - Job status endpoint includes current_phase and phase_detail fields
+  - Coarse start/end markers for FTS and SCIP phases
+  - Progress advances incrementally instead of 25% to 100% jump
+
+### Bug Fixes
+- fix: stderr pipe deadlock prevention with background drain thread (Story #480)
+- fix: console output redirected to stderr in --progress-json mode (Story #480)
+- fix: no-op callback attributes attached in --progress-json mode to prevent AttributeError (Story #480)
+- fix: flaky debouncer test timing with thread join before assertion
+
+## v9.5.33
+
+### Bug Fixes
+- fix: temporal index rebuild now uses --clear for full rebuild instead of incremental (Story #478)
+- fix: removed hardcoded max_commits=1000 default -- no cap when not configured (Story #478)
+- fix: --since flag corrected to --since-date in temporal rebuild command (Story #478)
+- fix: diff_context=0 no longer silently dropped by RefreshScheduler (Story #478)
+- fix: since_date validated as YYYY-MM-DD format before saving (Story #478)
+- fix: max_commits validated as positive integer server-side (Story #478)
+
+### Features
+- feat: temporal indexing options (max_commits, diff_context, since_date, all_branches) configurable per golden repo via Web UI (Story #478)
+- feat: added all_branches field to TemporalIndexOptions model (Story #478)
+- feat: RefreshScheduler reads and applies stored temporal_options including all_branches (Story #478)
+- feat: API endpoint POST /admin/golden-repos/{alias}/temporal-options for saving temporal options (Story #478)
 
 ## v9.5.32
 

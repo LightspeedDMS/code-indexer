@@ -344,3 +344,7 @@ class TemporalIndexOptions(BaseModel):
         ge=0,
         le=50,
     )
+    all_branches: bool = Field(
+        default=False,
+        description="Index commits from all branches (default: current branch only)",
+    )

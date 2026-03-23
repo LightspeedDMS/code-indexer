@@ -494,6 +494,8 @@ class DatabaseSchema:
             self._migrate_wiki_cache_tables(conn)
             # Epic #261: JobTracker schema additions
             self._migrate_background_jobs_job_tracker(conn)
+            # Bug fix: Add current_phase and phase_detail columns for progress persistence
+            self._migrate_background_jobs_phase_fields(conn)
             # Story #386: Git Credential Management
             self._migrate_user_git_credentials(conn)
 
@@ -501,6 +503,34 @@ class DatabaseSchema:
 
         finally:
             conn.close()
+
+    def _migrate_background_jobs_phase_fields(self, conn: sqlite3.Connection) -> None:
+        """
+        Add current_phase and phase_detail columns to background_jobs table.
+
+        These columns store real-time phase progress information (Story #480)
+        so it is persisted to SQLite and readable after a job leaves memory.
+
+        Idempotent: checks for existing columns before adding.
+        """
+        cursor = conn.execute("PRAGMA table_info(background_jobs)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        migrations_applied = []
+
+        if "current_phase" not in existing_columns:
+            conn.execute("ALTER TABLE background_jobs ADD COLUMN current_phase TEXT")
+            migrations_applied.append("current_phase")
+
+        if "phase_detail" not in existing_columns:
+            conn.execute("ALTER TABLE background_jobs ADD COLUMN phase_detail TEXT")
+            migrations_applied.append("phase_detail")
+
+        if migrations_applied:
+            conn.commit()
+            logger.info(
+                f"Migrated background_jobs schema for phase progress: added {migrations_applied}"
+            )
 
     def _migrate_user_git_credentials(self, conn: sqlite3.Connection) -> None:
         """

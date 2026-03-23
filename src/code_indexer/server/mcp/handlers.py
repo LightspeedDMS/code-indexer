@@ -3609,7 +3609,7 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
             include_patterns=args.get("include_patterns"),
             exclude_patterns=args.get("exclude_patterns"),
             case_sensitive=args.get("case_sensitive", True),
-            context_lines=args.get("context_lines", 0),
+            context_lines=int(args.get("context_lines", 0)),
             max_results=args.get("max_results", 100),
             timeout_seconds=search_limits.timeout_seconds,
         )

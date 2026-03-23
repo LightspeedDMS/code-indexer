@@ -489,7 +489,7 @@ class TestSubmitRefreshJobForceReset:
         ) as mock_execute:
             captured_funcs[0]()
 
-        mock_execute.assert_called_once_with(alias_name, force_reset=True)
+        mock_execute.assert_called_once_with(alias_name, force_reset=True, progress_callback=None)
 
     def test_submit_job_passes_force_reset_false_in_lambda(
         self,
@@ -530,7 +530,7 @@ class TestSubmitRefreshJobForceReset:
         ) as mock_execute:
             captured_funcs[0]()
 
-        mock_execute.assert_called_once_with(alias_name, force_reset=False)
+        mock_execute.assert_called_once_with(alias_name, force_reset=False, progress_callback=None)
 
     def test_submit_job_default_force_reset_is_false(
         self,
@@ -565,4 +565,4 @@ class TestSubmitRefreshJobForceReset:
             captured_funcs[0]()
 
         # Default must be force_reset=False
-        mock_execute.assert_called_once_with(alias_name, force_reset=False)
+        mock_execute.assert_called_once_with(alias_name, force_reset=False, progress_callback=None)
