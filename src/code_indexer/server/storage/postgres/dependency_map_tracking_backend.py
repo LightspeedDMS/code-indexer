@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
+
 logger = logging.getLogger(__name__)
 
 # Sentinel for "not provided" — matches the SQLite _UNSET pattern.

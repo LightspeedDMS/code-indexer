@@ -869,6 +869,10 @@ class ServerConfig:
     # Story #400 - Unified data retention configuration
     data_retention_config: Optional[DataRetentionConfig] = None
 
+    # Epic #408 - Cluster mode configuration
+    storage_mode: str = "sqlite"  # "sqlite" (standalone) or "postgres" (cluster)
+    postgres_dsn: Optional[str] = None  # PostgreSQL connection string for cluster mode
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:

@@ -26,6 +26,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from .pg_utils import sanitize_row
 from .connection_pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
@@ -295,7 +296,6 @@ class GlobalReposPostgresBackend:
     def _row_to_dict(row: tuple) -> Dict[str, Any]:
         """Convert a DB row tuple to the canonical repository dict."""
         temporal_options_raw = row[7]
-        # psycopg v3 with JSONB returns already-parsed dict; handle both
         if temporal_options_raw is None:
             temporal_options = None
         elif isinstance(temporal_options_raw, str):
@@ -303,15 +303,17 @@ class GlobalReposPostgresBackend:
         else:
             temporal_options = temporal_options_raw
 
-        return {
-            "alias_name": row[0],
-            "repo_name": row[1],
-            "repo_url": row[2],
-            "index_path": row[3],
-            "created_at": row[4],
-            "last_refresh": row[5],
-            "enable_temporal": bool(row[6]),
-            "temporal_options": temporal_options,
-            "enable_scip": bool(row[8]),
-            "next_refresh": row[9],
-        }
+        return sanitize_row(
+            {
+                "alias_name": row[0],
+                "repo_name": row[1],
+                "repo_url": row[2],
+                "index_path": row[3],
+                "created_at": row[4],
+                "last_refresh": row[5],
+                "enable_temporal": bool(row[6]),
+                "temporal_options": temporal_options,
+                "enable_scip": bool(row[8]),
+                "next_refresh": row[9],
+            }
+        )

@@ -19,6 +19,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from .pg_utils import sanitize_row
 from .connection_pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
@@ -87,16 +88,18 @@ class UsersPostgresBackend:
             api_keys = self._get_api_keys(conn, username)
             mcp_credentials = self._get_mcp_credentials(conn, username)
 
-        return {
-            "username": row[0],
-            "password_hash": row[1],
-            "role": row[2],
-            "email": row[3],
-            "created_at": row[4],
-            "oidc_identity": self._parse_json(row[5]),
-            "api_keys": api_keys,
-            "mcp_credentials": mcp_credentials,
-        }
+        return sanitize_row(
+            {
+                "username": row[0],
+                "password_hash": row[1],
+                "role": row[2],
+                "email": row[3],
+                "created_at": row[4],
+                "oidc_identity": self._parse_json(row[5]),
+                "api_keys": api_keys,
+                "mcp_credentials": mcp_credentials,
+            }
+        )
 
     def list_users(self) -> list:
         """List all users with their related data."""
@@ -427,16 +430,18 @@ class UsersPostgresBackend:
             api_keys = self._get_api_keys(conn, username)
             mcp_credentials = self._get_mcp_credentials(conn, username)
 
-        return {
-            "username": username,
-            "password_hash": row[1],
-            "role": row[2],
-            "email": row[3],
-            "created_at": row[4],
-            "oidc_identity": self._parse_json(row[5]),
-            "api_keys": api_keys,
-            "mcp_credentials": mcp_credentials,
-        }
+        return sanitize_row(
+            {
+                "username": username,
+                "password_hash": row[1],
+                "role": row[2],
+                "email": row[3],
+                "created_at": row[4],
+                "oidc_identity": self._parse_json(row[5]),
+                "api_keys": api_keys,
+                "mcp_credentials": mcp_credentials,
+            }
+        )
 
     def set_oidc_identity(self, username: str, identity: Dict[str, Any]) -> bool:
         """Set OIDC identity for a user."""

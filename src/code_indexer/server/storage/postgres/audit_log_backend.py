@@ -19,6 +19,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Tuple
 
+
 logger = logging.getLogger(__name__)
 
 # PR-related action_type values (mirrors AuditLogService constants)

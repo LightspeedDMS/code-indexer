@@ -21,6 +21,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
+from .pg_utils import sanitize_row
 from .connection_pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
@@ -455,16 +456,18 @@ class GoldenRepoMetadataPostgresBackend:
             6  temporal_options
             7  wiki_enabled
         """
-        return {
-            "alias": row[0],
-            "repo_url": row[1],
-            "default_branch": row[2],
-            "clone_path": row[3],
-            "created_at": row[4],
-            "enable_temporal": bool(row[5]),
-            "temporal_options": cls._parse_temporal_options(row[6]),
-            "wiki_enabled": bool(row[7]),
-        }
+        return sanitize_row(
+            {
+                "alias": row[0],
+                "repo_url": row[1],
+                "default_branch": row[2],
+                "clone_path": row[3],
+                "created_at": row[4],
+                "enable_temporal": bool(row[5]),
+                "temporal_options": cls._parse_temporal_options(row[6]),
+                "wiki_enabled": bool(row[7]),
+            }
+        )
 
     @classmethod
     def _row_to_dict_full(cls, row: tuple) -> Dict[str, Any]:
@@ -483,15 +486,17 @@ class GoldenRepoMetadataPostgresBackend:
             8  category_auto_assigned
             9  wiki_enabled
         """
-        return {
-            "alias": row[0],
-            "repo_url": row[1],
-            "default_branch": row[2],
-            "clone_path": row[3],
-            "created_at": row[4],
-            "enable_temporal": bool(row[5]),
-            "temporal_options": cls._parse_temporal_options(row[6]),
-            "category_id": row[7],
-            "category_auto_assigned": bool(row[8]),
-            "wiki_enabled": bool(row[9]),
-        }
+        return sanitize_row(
+            {
+                "alias": row[0],
+                "repo_url": row[1],
+                "default_branch": row[2],
+                "clone_path": row[3],
+                "created_at": row[4],
+                "enable_temporal": bool(row[5]),
+                "temporal_options": cls._parse_temporal_options(row[6]),
+                "category_id": row[7],
+                "category_auto_assigned": bool(row[8]),
+                "wiki_enabled": bool(row[9]),
+            }
+        )

@@ -28,6 +28,7 @@ from code_indexer.server.services.group_access_manager import (
     RepoGroupAccess,
 )
 
+
 logger = logging.getLogger(__name__)
 
 
