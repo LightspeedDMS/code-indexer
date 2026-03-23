@@ -16,7 +16,6 @@ Acceptance criteria covered here:
 """
 
 import shutil
-import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -27,6 +26,7 @@ from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
 from code_indexer.config import ConfigManager
+from code_indexer.services.progress_subprocess_runner import IndexingSubprocessError
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +206,9 @@ class TestTemporalIndexingInIndexSource:
         """
         AC: cidx index --index-commits runs on the golden repo source path
         when enable_temporal=True and repo is NOT local://.
+
+        In the Popen-based implementation, both semantic and temporal indexing
+        use run_with_popen_progress. We track which commands are passed to it.
         """
         registry.register_global_repo(
             "temporal-test",
@@ -221,28 +224,37 @@ class TestTemporalIndexingInIndexSource:
         )
 
         temporal_calls = []
+        popen_call_count = [0]
 
-        def mock_run(cmd, **kwargs):
+        def mock_popen_progress(**kwargs):
+            popen_call_count[0] += 1
+            command = kwargs.get("command", [])
             cwd = kwargs.get("cwd", "")
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = ""
-            result.stderr = ""
-
-            if cmd[:2] == ["cidx", "index"] and "--index-commits" in cmd:
-                temporal_calls.append((list(cmd), str(cwd)))
-            elif cmd[:2] == ["cidx", "index"] and "--fts" in cmd:
+            if "--index-commits" in command:
+                temporal_calls.append((list(command), str(cwd)))
+            elif "--fts" in command:
+                # semantic phase: create index dir
                 (Path(cwd) / ".code-indexer" / "index").mkdir(
                     parents=True, exist_ok=True
                 )
+            return 50
 
-            return result
-
-        with patch("subprocess.run", side_effect=mock_run):
-            scheduler._index_source(
-                alias_name="temporal-test-global",
-                source_path=str(source_repo),
-            )
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=mock_popen_progress,
+            ):
+                with patch(
+                    "subprocess.run",
+                    return_value=MagicMock(returncode=0, stdout="", stderr=""),
+                ):
+                    scheduler._index_source(
+                        alias_name="temporal-test-global",
+                        source_path=str(source_repo),
+                    )
 
         assert temporal_calls, (
             "cidx index --index-commits was not called by _index_source() "
@@ -278,27 +290,33 @@ class TestTemporalIndexingInIndexSource:
 
         temporal_calls = []
 
-        def mock_run(cmd, **kwargs):
+        def mock_popen_progress(**kwargs):
+            command = kwargs.get("command", [])
             cwd = kwargs.get("cwd", "")
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = ""
-            result.stderr = ""
-
-            if cmd[:2] == ["cidx", "index"] and "--index-commits" in cmd:
-                temporal_calls.append(list(cmd))
-            elif cmd[:2] == ["cidx", "index"] and "--fts" in cmd:
+            if "--index-commits" in command:
+                temporal_calls.append(list(command))
+            elif "--fts" in command:
                 (Path(cwd) / ".code-indexer" / "index").mkdir(
                     parents=True, exist_ok=True
                 )
+            return 50
 
-            return result
-
-        with patch("subprocess.run", side_effect=mock_run):
-            scheduler._index_source(
-                alias_name="local-temporal-test-global",
-                source_path=str(source_repo),
-            )
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=mock_popen_progress,
+            ):
+                with patch(
+                    "subprocess.run",
+                    return_value=MagicMock(returncode=0, stdout="", stderr=""),
+                ):
+                    scheduler._index_source(
+                        alias_name="local-temporal-test-global",
+                        source_path=str(source_repo),
+                    )
 
         assert temporal_calls == [], (
             "cidx index --index-commits must NOT be called for local:// repos. "
@@ -317,6 +335,10 @@ class TestScipIndexingInIndexSource:
     def test_scip_runs_on_source_when_enabled(self, scheduler, registry, source_repo):
         """
         AC: cidx scip generate runs on source path when enable_scip=True.
+
+        cidx scip generate uses subprocess.run directly (not Popen).
+        We mock subprocess.run to capture the cidx scip call,
+        and mock run_with_popen_progress for the semantic phase.
         """
         registry.register_global_repo(
             "scip-test",
@@ -337,18 +359,27 @@ class TestScipIndexingInIndexSource:
 
             if cmd[:2] == ["cidx", "scip"] and "generate" in cmd:
                 scip_calls.append((list(cmd), str(cwd)))
-            elif cmd[:2] == ["cidx", "index"] and "--fts" in cmd:
-                (Path(cwd) / ".code-indexer" / "index").mkdir(
-                    parents=True, exist_ok=True
-                )
 
             return result
 
-        with patch("subprocess.run", side_effect=mock_run):
-            scheduler._index_source(
-                alias_name="scip-test-global",
-                source_path=str(source_repo),
-            )
+        def mock_popen_progress(**kwargs):
+            cwd = kwargs.get("cwd", "")
+            (Path(cwd) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+            return 50
+
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=mock_popen_progress,
+            ):
+                with patch("subprocess.run", side_effect=mock_run):
+                    scheduler._index_source(
+                        alias_name="scip-test-global",
+                        source_path=str(source_repo),
+                    )
 
         assert scip_calls, (
             "cidx scip generate was not called by _index_source() even though enable_scip=True. "
@@ -406,7 +437,7 @@ class TestScipIndexingInIndexSource:
 
 
 # ---------------------------------------------------------------------------
-# Tests: error handling — indexing failure aborts before CoW clone
+# Tests: error handling -- indexing failure aborts before CoW clone
 # ---------------------------------------------------------------------------
 
 
@@ -428,34 +459,26 @@ class TestIndexingFailureAbortsPipeline:
             str(source_repo),
         )
 
-        def mock_run_fail(cmd, **kwargs):
-            if cmd[:2] == ["cidx", "index"] and "--fts" in cmd:
-                raise subprocess.CalledProcessError(
-                    returncode=1, cmd=cmd, stderr="indexing failed"
-                )
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = ""
-            result.stderr = ""
-            return result
-
-        with pytest.raises(RuntimeError, match="(?i)index"):
-            with patch("subprocess.run", side_effect=mock_run_fail):
-                scheduler._index_source(
-                    alias_name="fail-test-global",
-                    source_path=str(source_repo),
-                )
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=IndexingSubprocessError("indexing failed"),
+            ):
+                with pytest.raises(RuntimeError, match="(?i)index"):
+                    scheduler._index_source(
+                        alias_name="fail-test-global",
+                        source_path=str(source_repo),
+                    )
 
     def test_index_source_failure_does_not_trigger_cow_clone(
         self, scheduler, registry, source_repo
     ):
         """
         AC: When _index_source() fails, the CoW clone (cp --reflink=auto) is
-        never invoked — because _create_snapshot() is never called.
-
-        This test simulates the _execute_refresh() call-site pattern where
-        an exception from _index_source() propagates and prevents the
-        subsequent call to _create_snapshot().
+        never invoked -- because _create_snapshot() is never called.
         """
         registry.register_global_repo(
             "abort-test",
@@ -466,11 +489,7 @@ class TestIndexingFailureAbortsPipeline:
 
         cow_called = []
 
-        def mock_run_fail(cmd, **kwargs):
-            if cmd[:2] == ["cidx", "index"] and "--fts" in cmd:
-                raise subprocess.CalledProcessError(
-                    returncode=1, cmd=cmd, stderr="indexing failed"
-                )
+        def mock_run(cmd, **kwargs):
             if cmd[0] == "cp" and "--reflink=auto" in cmd:
                 cow_called.append(True)
             result = MagicMock()
@@ -479,17 +498,25 @@ class TestIndexingFailureAbortsPipeline:
             result.stderr = ""
             return result
 
-        with patch("subprocess.run", side_effect=mock_run_fail):
-            try:
-                scheduler._index_source(
-                    alias_name="abort-test-global",
-                    source_path=str(source_repo),
-                )
-                pytest.fail(
-                    "_index_source() must raise RuntimeError on indexing failure"
-                )
-            except RuntimeError:
-                pass  # expected — caller would not call _create_snapshot()
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=IndexingSubprocessError("indexing failed"),
+            ):
+                with patch("subprocess.run", side_effect=mock_run):
+                    try:
+                        scheduler._index_source(
+                            alias_name="abort-test-global",
+                            source_path=str(source_repo),
+                        )
+                        pytest.fail(
+                            "_index_source() must raise RuntimeError on indexing failure"
+                        )
+                    except RuntimeError:
+                        pass  # expected
 
         assert cow_called == [], (
             "CoW clone must NOT be called when _index_source() fails. "

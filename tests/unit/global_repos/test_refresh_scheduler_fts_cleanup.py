@@ -14,7 +14,7 @@ This forces a full FTS rebuild from scratch with no inherited stale entries.
 
 import shutil
 from pathlib import Path
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -115,8 +115,8 @@ class TestRefreshSchedulerFtsCleanup:
 
         Approach:
         - Source repo has .code-indexer/tantivy_index/ (pre-indexed FTS)
-        - _index_source runs cidx index --fts on source (mocked: no-op)
-        - _create_snapshot CoW-clones source → versioned path (shutil.copytree)
+        - _index_source runs cidx index --fts on source (mocked via run_with_popen_progress)
+        - _create_snapshot CoW-clones source -> versioned path (shutil.copytree)
         - Verify tantivy_index exists in the versioned path
         """
         # Register a dummy repo so registry.get_global_repo() returns something
@@ -130,9 +130,9 @@ class TestRefreshSchedulerFtsCleanup:
         def mock_subprocess_run(cmd, **kwargs):
             """
             Mock subprocess.run:
-            - cidx index --fts: no-op (FTS built on source — mocked away)
             - cp --reflink=auto: CoW clone via shutil.copytree; also creates index dir
-            - git / cidx fix-config: no-op
+            - git / cidx fix-config / cidx scip: no-op
+            Note: cidx index --fts is handled by run_with_popen_progress (patched separately).
             """
             mock_result = MagicMock()
             mock_result.returncode = 0
@@ -143,15 +143,25 @@ class TestRefreshSchedulerFtsCleanup:
                 dst = cmd[-1]
                 shutil.copytree(cmd[-2], dst)
                 # Simulate source was already indexed: index dir must exist
-                (Path(dst) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+                (Path(dst) / ".code-indexer" / "index").mkdir(
+                    parents=True, exist_ok=True
+                )
 
             return mock_result
 
-        with patch("subprocess.run", side_effect=mock_subprocess_run):
-            result_path = scheduler._create_new_index(
-                alias_name="test-repo-global",
-                source_path=str(source_repo_with_tantivy),
-            )
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                return_value=50,
+            ):
+                with patch("subprocess.run", side_effect=mock_subprocess_run):
+                    result_path = scheduler._create_new_index(
+                        alias_name="test-repo-global",
+                        source_path=str(source_repo_with_tantivy),
+                    )
 
         # Story #229: tantivy_index must be PRESENT in the versioned snapshot
         versioned_tantivy = Path(result_path) / ".code-indexer" / "tantivy_index"
@@ -191,12 +201,6 @@ class TestRefreshSchedulerFtsCleanup:
                 src = cmd[-2]
                 dst = cmd[-1]
                 shutil.copytree(src, dst)
-            elif cmd[:2] == ["cidx", "index"] and "--fts" in cmd:
-                cwd = Path(kwargs.get("cwd", "."))
-                tantivy_path = cwd / ".code-indexer" / "tantivy_index"
-                tantivy_state_at_cidx_index.append(tantivy_path.exists())
-                index_dir = cwd / ".code-indexer" / "index"
-                index_dir.mkdir(parents=True, exist_ok=True)
 
             return mock_result
 
@@ -208,12 +212,35 @@ class TestRefreshSchedulerFtsCleanup:
             str(source_dir),
         )
 
+        # Track tantivy state during _index_source (semantic phase)
+        popen_call_count = [0]
+
+        def mock_popen_progress(**kwargs):
+            popen_call_count[0] += 1
+            if popen_call_count[0] == 1:
+                # semantic phase: record tantivy state at source_dir
+                cwd = Path(kwargs.get("cwd", "."))
+                tantivy_path = cwd / ".code-indexer" / "tantivy_index"
+                tantivy_state_at_cidx_index.append(tantivy_path.exists())
+                # Create index dir to simulate successful indexing
+                index_dir = cwd / ".code-indexer" / "index"
+                index_dir.mkdir(parents=True, exist_ok=True)
+            return 50
+
         # Must not raise any exception when tantivy_index does not exist
-        with patch("subprocess.run", side_effect=mock_subprocess_run):
-            result_path = scheduler._create_new_index(
-                alias_name="no-tantivy-repo-global",
-                source_path=str(source_dir),
-            )
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=mock_popen_progress,
+            ):
+                with patch("subprocess.run", side_effect=mock_subprocess_run):
+                    result_path = scheduler._create_new_index(
+                        alias_name="no-tantivy-repo-global",
+                        source_path=str(source_dir),
+                    )
 
         # The process must complete successfully
         assert result_path is not None, (
@@ -221,15 +248,15 @@ class TestRefreshSchedulerFtsCleanup:
             "tantivy_index does not exist in the source repo."
         )
 
-        # cidx index --fts must still have been called
-        assert len(tantivy_state_at_cidx_index) >= 1, (
-            "cidx index --fts was not called when tantivy_index was absent."
-        )
+        # cidx index --fts must still have been called (via run_with_popen_progress)
+        assert (
+            len(tantivy_state_at_cidx_index) >= 1
+        ), "cidx index --fts (via run_with_popen_progress) was not called when tantivy_index was absent."
 
         # tantivy_index must still not exist at cidx index time (it was never there)
-        assert tantivy_state_at_cidx_index[0] is False, (
-            "tantivy_index should not exist in a fresh snapshot that never had one."
-        )
+        assert (
+            tantivy_state_at_cidx_index[0] is False
+        ), "tantivy_index should not exist in a fresh snapshot that never had one."
 
     def test_tantivy_cleanup_happens_before_cidx_fix_config(
         self,
@@ -261,7 +288,9 @@ class TestRefreshSchedulerFtsCleanup:
                 dst = cmd[-1]
                 shutil.copytree(cmd[-2], dst)
                 # Simulate source was already indexed: index dir must exist in clone
-                (Path(dst) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+                (Path(dst) / ".code-indexer" / "index").mkdir(
+                    parents=True, exist_ok=True
+                )
                 call_sequence.append("cow_clone")
             elif cmd[:2] == ["cidx", "fix-config"]:
                 # Record tantivy state at fix-config time — must be PRESENT
@@ -281,24 +310,28 @@ class TestRefreshSchedulerFtsCleanup:
             str(source_repo_with_tantivy),
         )
 
-        with patch("subprocess.run", side_effect=mock_subprocess_run):
-            scheduler._create_new_index(
-                alias_name="ordering-test-repo-global",
-                source_path=str(source_repo_with_tantivy),
-            )
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                return_value=50,
+            ):
+                with patch("subprocess.run", side_effect=mock_subprocess_run):
+                    scheduler._create_new_index(
+                        alias_name="ordering-test-repo-global",
+                        source_path=str(source_repo_with_tantivy),
+                    )
 
         # Verify cow_clone happened
-        assert "cow_clone" in call_sequence, (
-            "CoW clone step was not recorded in call sequence."
-        )
+        assert (
+            "cow_clone" in call_sequence
+        ), "CoW clone step was not recorded in call sequence."
 
         # Verify fix-config happened with tantivy PRESENT (Story #229: no deletion)
-        fix_config_entries = [
-            e for e in call_sequence if e.startswith("fix-config:")
-        ]
-        assert len(fix_config_entries) >= 1, (
-            "cidx fix-config was not called."
-        )
+        fix_config_entries = [e for e in call_sequence if e.startswith("fix-config:")]
+        assert len(fix_config_entries) >= 1, "cidx fix-config was not called."
         assert fix_config_entries[0] == "fix-config:tantivy_exists=True", (
             "Story #229: tantivy_index must be PRESENT when cidx fix-config runs. "
             f"Got: {fix_config_entries[0]}. "

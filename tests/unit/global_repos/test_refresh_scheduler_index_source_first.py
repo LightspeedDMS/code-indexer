@@ -107,7 +107,7 @@ class TestIndexSourceAndCreateSnapshotExist:
 
 
 # ---------------------------------------------------------------------------
-# Tests: call order — index source FIRST, then CoW clone
+# Tests: call order -- index source FIRST, then CoW clone
 # ---------------------------------------------------------------------------
 
 
@@ -121,7 +121,10 @@ class TestCallOrder:
         AC: cidx index --fts runs on golden repo source path BEFORE CoW clone.
 
         Story #229 requires indexing on the source so the snapshot inherits
-        the index via CoW reflink — not the other way around.
+        the index via CoW reflink -- not the other way around.
+
+        _index_source uses run_with_popen_progress for semantic indexing (Popen).
+        We track call order by recording when popen_progress and cp are called.
         """
         registry.register_global_repo(
             "test-repo",
@@ -131,6 +134,13 @@ class TestCallOrder:
         )
 
         call_sequence = []
+
+        def mock_popen_progress(**kwargs):
+            cwd = kwargs.get("cwd", "")
+            call_sequence.append(("cidx_index_fts", str(cwd)))
+            # Create index dir to allow _create_snapshot validation to pass
+            (Path(cwd) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+            return 50
 
         def mock_run(cmd, **kwargs):
             cwd = kwargs.get("cwd", "")
@@ -142,19 +152,26 @@ class TestCallOrder:
             if cmd[0] == "cp" and "--reflink=auto" in cmd:
                 call_sequence.append(("cow_clone", str(cwd)))
                 shutil.copytree(cmd[-2], cmd[-1])
-
-            elif cmd[:2] == ["cidx", "index"] and "--fts" in cmd:
-                call_sequence.append(("cidx_index_fts", str(cwd)))
-                (Path(cwd) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
-
             elif cmd[:2] == ["cidx", "fix-config"]:
                 call_sequence.append(("fix_config", str(cwd)))
 
             return result
 
-        with patch("subprocess.run", side_effect=mock_run):
-            scheduler._index_source(alias_name="test-repo-global", source_path=str(source_repo))
-            scheduler._create_snapshot(alias_name="test-repo-global", source_path=str(source_repo))
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=mock_popen_progress,
+            ):
+                with patch("subprocess.run", side_effect=mock_run):
+                    scheduler._index_source(
+                        alias_name="test-repo-global", source_path=str(source_repo)
+                    )
+                    scheduler._create_snapshot(
+                        alias_name="test-repo-global", source_path=str(source_repo)
+                    )
 
         index_positions = [
             i for i, (name, _) in enumerate(call_sequence) if name == "cidx_index_fts"
@@ -169,13 +186,15 @@ class TestCallOrder:
         first_index = min(index_positions)
         first_cow = min(cow_positions)
         assert first_index < first_cow, (
-            f"cidx index --fts (pos={first_index}) must run BEFORE CoW clone (pos={first_cow}). "
-            "Story #229 requires indexing source first."
+            f"cidx index --fts (pos={first_index}) must run BEFORE CoW clone "
+            f"(pos={first_cow}). Story #229 requires indexing source first."
         )
 
     def test_cidx_index_fts_cwd_is_source_path(self, scheduler, registry, source_repo):
         """
         AC: cidx index --fts must be invoked with cwd=source_path.
+
+        run_with_popen_progress receives cwd=str(source_path) from _index_source.
         """
         registry.register_global_repo(
             "cwd-test-repo",
@@ -186,32 +205,37 @@ class TestCallOrder:
 
         index_cwds = []
 
-        def mock_run(cmd, **kwargs):
+        def mock_popen_progress(**kwargs):
             cwd = kwargs.get("cwd", "")
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = ""
-            result.stderr = ""
+            index_cwds.append(str(cwd))
+            # Create index dir so _create_snapshot validation passes if needed
+            (Path(cwd) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+            return 50
 
-            if cmd[:2] == ["cidx", "index"] and "--fts" in cmd:
-                index_cwds.append(str(cwd))
-                (Path(cwd) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=mock_popen_progress,
+            ):
+                with patch(
+                    "subprocess.run",
+                    return_value=MagicMock(returncode=0, stdout="", stderr=""),
+                ):
+                    scheduler._index_source(
+                        alias_name="cwd-test-repo-global", source_path=str(source_repo)
+                    )
 
-            return result
-
-        with patch("subprocess.run", side_effect=mock_run):
-            scheduler._index_source(
-                alias_name="cwd-test-repo-global", source_path=str(source_repo)
-            )
-
-        assert index_cwds, "cidx index --fts was not called by _index_source()"
-        assert index_cwds[0] == str(source_repo), (
-            f"cidx index --fts cwd must be source_path={source_repo}, got cwd={index_cwds[0]}."
-        )
+        assert index_cwds, "cidx index --fts (via run_with_popen_progress) was not called by _index_source()"
+        assert (
+            index_cwds[0] == str(source_repo)
+        ), f"cidx index --fts cwd must be source_path={source_repo}, got cwd={index_cwds[0]}."
 
 
 # ---------------------------------------------------------------------------
-# Tests: fix-config — clone only, never source
+# Tests: fix-config -- clone only, never source
 # ---------------------------------------------------------------------------
 
 
@@ -242,15 +266,27 @@ class TestFixConfigOnCloneOnly:
 
             if cmd[:2] == ["cidx", "fix-config"]:
                 fix_config_cwds.append(str(cwd))
-            elif cmd[:2] == ["cidx", "index"] and "--fts" in cmd:
-                (Path(cwd) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
 
             return result
 
-        with patch("subprocess.run", side_effect=mock_run):
-            scheduler._index_source(
-                alias_name="fix-config-test-global", source_path=str(source_repo)
-            )
+        def mock_popen_progress(**kwargs):
+            cwd = kwargs.get("cwd", "")
+            (Path(cwd) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+            return 50
+
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=mock_popen_progress,
+            ):
+                with patch("subprocess.run", side_effect=mock_run):
+                    scheduler._index_source(
+                        alias_name="fix-config-test-global",
+                        source_path=str(source_repo),
+                    )
 
         assert fix_config_cwds == [], (
             f"C4: cidx fix-config was called {len(fix_config_cwds)} time(s) from _index_source(). "
@@ -284,8 +320,9 @@ class TestFixConfigOnCloneOnly:
                 dst = cmd[-1]
                 shutil.copytree(cmd[-2], dst)
                 # Simulate source was already indexed: create index dir in clone
-                # (_create_snapshot does NOT run cidx index — only _index_source does)
-                (Path(dst) / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+                (Path(dst) / ".code-indexer" / "index").mkdir(
+                    parents=True, exist_ok=True
+                )
             elif cmd[:2] == ["cidx", "fix-config"]:
                 fix_config_cwds.append(str(cwd))
 
@@ -300,12 +337,12 @@ class TestFixConfigOnCloneOnly:
             "cidx fix-config was never called from _create_snapshot(). "
             "C4: fix-config MUST run on the versioned clone."
         )
-        assert fix_config_cwds[0] != str(source_repo), (
-            f"cidx fix-config cwd must NOT be source_path={source_repo}."
-        )
-        assert fix_config_cwds[0] == result_path, (
-            f"cidx fix-config cwd={fix_config_cwds[0]} must equal returned versioned_path={result_path}."
-        )
+        assert fix_config_cwds[0] != str(
+            source_repo
+        ), f"cidx fix-config cwd must NOT be source_path={source_repo}."
+        assert (
+            fix_config_cwds[0] == result_path
+        ), f"cidx fix-config cwd={fix_config_cwds[0]} must equal returned versioned_path={result_path}."
 
 
 # ---------------------------------------------------------------------------
@@ -352,24 +389,38 @@ class TestExecuteRefreshCallSite:
             return fake_snapshot_path
 
         with patch.object(scheduler, "_index_source", side_effect=mock_index_source):
-            with patch.object(scheduler, "_create_snapshot", side_effect=mock_create_snapshot):
+            with patch.object(
+                scheduler, "_create_snapshot", side_effect=mock_create_snapshot
+            ):
                 with patch.object(scheduler.alias_manager, "swap_alias"):
                     with patch.object(scheduler.cleanup_manager, "schedule_cleanup"):
-                        with patch.object(scheduler.registry, "update_refresh_timestamp"):
-                            with patch.object(scheduler, "_detect_existing_indexes", return_value={}):
-                                with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
+                        with patch.object(
+                            scheduler.registry, "update_refresh_timestamp"
+                        ):
+                            with patch.object(
+                                scheduler, "_detect_existing_indexes", return_value={}
+                            ):
+                                with patch.object(
+                                    scheduler, "_reconcile_registry_with_filesystem"
+                                ):
                                     with patch(
                                         "code_indexer.global_repos.refresh_scheduler.GitPullUpdater"
                                     ) as mock_gpu:
                                         mock_updater = MagicMock()
                                         mock_updater.has_changes.return_value = True
-                                        mock_updater.get_source_path.return_value = str(source_repo)
+                                        mock_updater.get_source_path.return_value = str(
+                                            source_repo
+                                        )
                                         mock_gpu.return_value = mock_updater
 
                                         scheduler._execute_refresh(alias_name)
 
-        assert "_index_source" in call_order, "C5: _execute_refresh() must call _index_source()."
-        assert "_create_snapshot" in call_order, "C5: _execute_refresh() must call _create_snapshot()."
-        assert call_order.index("_index_source") < call_order.index("_create_snapshot"), (
-            "C5: _index_source() must be called before _create_snapshot()."
-        )
+        assert (
+            "_index_source" in call_order
+        ), "C5: _execute_refresh() must call _index_source()."
+        assert (
+            "_create_snapshot" in call_order
+        ), "C5: _execute_refresh() must call _create_snapshot()."
+        assert call_order.index("_index_source") < call_order.index(
+            "_create_snapshot"
+        ), "C5: _index_source() must be called before _create_snapshot()."

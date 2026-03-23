@@ -11,7 +11,6 @@ refresh submissions while git repos continue to be submitted normally.
 """
 
 import subprocess
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -118,9 +117,12 @@ class TestRefreshSchedulerLocalRepoSkip:
             # Stop after submitting the remote repo (only one submission expected)
             scheduler._running = False
 
-        with patch.object(
-            scheduler, "_submit_refresh_job", side_effect=capture_and_stop
-        ), patch.object(scheduler, "get_refresh_interval", return_value=0):
+        with (
+            patch.object(
+                scheduler, "_submit_refresh_job", side_effect=capture_and_stop
+            ),
+            patch.object(scheduler, "get_refresh_interval", return_value=0),
+        ):
             scheduler._running = True
             scheduler._scheduler_loop()
 
@@ -128,9 +130,9 @@ class TestRefreshSchedulerLocalRepoSkip:
             "Local:// repos must NOT be submitted to _submit_refresh_job. "
             "The scheduler loop skips local:// repos entirely."
         )
-        assert "test-repo-global" in submitted, (
-            "Remote repos must still be submitted (regression guard)."
-        )
+        assert (
+            "test-repo-global" in submitted
+        ), "Remote repos must still be submitted (regression guard)."
 
     def test_execute_refresh_local_repo_uses_mtime_not_early_return(
         self,
@@ -178,13 +180,17 @@ class TestRefreshSchedulerLocalRepoSkip:
             registry=registry,
         )
 
-        with patch.object(
-            scheduler, "_detect_existing_indexes", return_value={}
-        ) as mock_detect, patch.object(
-            scheduler, "_reconcile_registry_with_filesystem"
-        ) as mock_reconcile, patch.object(
-            scheduler, "_has_local_changes", return_value=False
-        ) as mock_mtime:
+        with (
+            patch.object(
+                scheduler, "_detect_existing_indexes", return_value={}
+            ) as mock_detect,
+            patch.object(
+                scheduler, "_reconcile_registry_with_filesystem"
+            ) as mock_reconcile,
+            patch.object(
+                scheduler, "_has_local_changes", return_value=False
+            ) as mock_mtime,
+        ):
             result = scheduler._execute_refresh("cidx-meta-global")
 
             # Reconciliation must happen for local repos (not skipped early)
@@ -192,12 +198,12 @@ class TestRefreshSchedulerLocalRepoSkip:
                 "C2 (Story #224): _detect_existing_indexes() must be called for local repos. "
                 "Local repos no longer return early."
             )
-            assert mock_reconcile.call_count >= 1, (
-                "C2 (Story #224): _reconcile_registry_with_filesystem() must be called for local repos."
-            )
-            assert mock_mtime.call_count == 1, (
-                "C2 (Story #224): _has_local_changes() must be called for mtime detection."
-            )
+            assert (
+                mock_reconcile.call_count >= 1
+            ), "C2 (Story #224): _reconcile_registry_with_filesystem() must be called for local repos."
+            assert (
+                mock_mtime.call_count == 1
+            ), "C2 (Story #224): _has_local_changes() must be called for mtime detection."
 
         # Result must not be the old "Local repo, skipped" early return
         assert result["success"] is True
@@ -356,14 +362,22 @@ class TestRefreshSchedulerVersionTimestamp:
                 return MagicMock(returncode=0, stdout="", stderr="")
             return original_subprocess_run(cmd, *args, **kwargs)
 
-        with patch("subprocess.run", side_effect=capture_subprocess_run):
-            try:
-                scheduler._create_new_index(
-                    alias_name="cidx-meta-global",
-                    source_path=str(local_repo_dir),
-                )
-            except Exception:
-                pass  # cidx commands are mocked, alias swap may fail
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                return_value=50,
+            ):
+                with patch("subprocess.run", side_effect=capture_subprocess_run):
+                    try:
+                        scheduler._create_new_index(
+                            alias_name="cidx-meta-global",
+                            source_path=str(local_repo_dir),
+                        )
+                    except Exception:
+                        pass  # cidx commands are mocked, alias swap may fail
 
         after = int(time_module.time()) + 5  # 5 second tolerance
 

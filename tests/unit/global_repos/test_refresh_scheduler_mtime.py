@@ -62,9 +62,7 @@ def scheduler(temp_golden_repos_dir, mock_registry):
 class TestHasLocalChanges:
     """C4: _has_local_changes() mtime-based change detection algorithm."""
 
-    def test_no_versioned_dir_returns_true(
-        self, scheduler, temp_golden_repos_dir
-    ):
+    def test_no_versioned_dir_returns_true(self, scheduler, temp_golden_repos_dir):
         """
         No .versioned/{repo}/ directory → return True (first version needed).
         """
@@ -72,12 +70,10 @@ class TestHasLocalChanges:
         source_path.mkdir(parents=True, exist_ok=True)
         (source_path / "some_repo.md").write_text("# content")
 
-        result = scheduler._has_local_changes(
-            str(source_path), "cidx-meta-global"
-        )
-        assert result is True, (
-            "No versioned dir means first indexing is needed — must return True"
-        )
+        result = scheduler._has_local_changes(str(source_path), "cidx-meta-global")
+        assert (
+            result is True
+        ), "No versioned dir means first indexing is needed — must return True"
 
     def test_files_newer_than_version_timestamp_returns_true(
         self, scheduler, temp_golden_repos_dir
@@ -90,10 +86,7 @@ class TestHasLocalChanges:
 
         # Latest version timestamp: 1000
         versioned_dir = (
-            Path(temp_golden_repos_dir)
-            / ".versioned"
-            / "cidx-meta"
-            / "v_1000"
+            Path(temp_golden_repos_dir) / ".versioned" / "cidx-meta" / "v_1000"
         )
         versioned_dir.mkdir(parents=True, exist_ok=True)
 
@@ -102,12 +95,10 @@ class TestHasLocalChanges:
         test_file.write_text("# New content")
         os.utime(test_file, (2000, 2000))
 
-        result = scheduler._has_local_changes(
-            str(source_path), "cidx-meta-global"
-        )
-        assert result is True, (
-            "File mtime 2000 > version timestamp 1000 → must return True"
-        )
+        result = scheduler._has_local_changes(str(source_path), "cidx-meta-global")
+        assert (
+            result is True
+        ), "File mtime 2000 > version timestamp 1000 → must return True"
 
     def test_files_older_than_version_timestamp_returns_false(
         self, scheduler, temp_golden_repos_dir
@@ -120,10 +111,7 @@ class TestHasLocalChanges:
 
         # Latest version timestamp: 9999999999 (far future)
         versioned_dir = (
-            Path(temp_golden_repos_dir)
-            / ".versioned"
-            / "cidx-meta"
-            / "v_9999999999"
+            Path(temp_golden_repos_dir) / ".versioned" / "cidx-meta" / "v_9999999999"
         )
         versioned_dir.mkdir(parents=True, exist_ok=True)
 
@@ -132,16 +120,12 @@ class TestHasLocalChanges:
         test_file.write_text("# Old content")
         os.utime(test_file, (1000, 1000))
 
-        result = scheduler._has_local_changes(
-            str(source_path), "cidx-meta-global"
-        )
-        assert result is False, (
-            "File mtime 1000 < version timestamp 9999999999 → must return False"
-        )
+        result = scheduler._has_local_changes(str(source_path), "cidx-meta-global")
+        assert (
+            result is False
+        ), "File mtime 1000 < version timestamp 9999999999 → must return False"
 
-    def test_empty_dir_returns_false(
-        self, scheduler, temp_golden_repos_dir
-    ):
+    def test_empty_dir_returns_false(self, scheduler, temp_golden_repos_dir):
         """
         Source directory with no non-hidden files → return False.
         """
@@ -149,17 +133,12 @@ class TestHasLocalChanges:
         source_path.mkdir(parents=True, exist_ok=True)
 
         versioned_dir = (
-            Path(temp_golden_repos_dir)
-            / ".versioned"
-            / "cidx-meta"
-            / "v_1000"
+            Path(temp_golden_repos_dir) / ".versioned" / "cidx-meta" / "v_1000"
         )
         versioned_dir.mkdir(parents=True, exist_ok=True)
 
         # No non-hidden files in source_path
-        result = scheduler._has_local_changes(
-            str(source_path), "cidx-meta-global"
-        )
+        result = scheduler._has_local_changes(str(source_path), "cidx-meta-global")
         assert result is False, "Empty source dir → must return False"
 
     def test_hidden_dirs_excluded_from_mtime_scan(
@@ -175,10 +154,7 @@ class TestHasLocalChanges:
 
         # Latest version timestamp: 9999999999
         versioned_dir = (
-            Path(temp_golden_repos_dir)
-            / ".versioned"
-            / "cidx-meta"
-            / "v_9999999999"
+            Path(temp_golden_repos_dir) / ".versioned" / "cidx-meta" / "v_9999999999"
         )
         versioned_dir.mkdir(parents=True, exist_ok=True)
 
@@ -190,18 +166,14 @@ class TestHasLocalChanges:
         # Set mtime FAR in the future (newer than version timestamp)
         os.utime(hidden_file, (99999999999, 99999999999))
 
-        result = scheduler._has_local_changes(
-            str(source_path), "cidx-meta-global"
-        )
+        result = scheduler._has_local_changes(str(source_path), "cidx-meta-global")
         # Hidden file excluded → no visible files → False
         assert result is False, (
             "Files inside .code-indexer/ must be excluded from mtime scan. "
             "Only hidden dir contents found → must return False."
         )
 
-    def test_hidden_files_at_root_excluded(
-        self, scheduler, temp_golden_repos_dir
-    ):
+    def test_hidden_files_at_root_excluded(self, scheduler, temp_golden_repos_dir):
         """
         Hidden files (starting with '.') at root level must also be excluded.
         """
@@ -209,10 +181,7 @@ class TestHasLocalChanges:
         source_path.mkdir(parents=True, exist_ok=True)
 
         versioned_dir = (
-            Path(temp_golden_repos_dir)
-            / ".versioned"
-            / "cidx-meta"
-            / "v_9999999999"
+            Path(temp_golden_repos_dir) / ".versioned" / "cidx-meta" / "v_9999999999"
         )
         versioned_dir.mkdir(parents=True, exist_ok=True)
 
@@ -221,9 +190,7 @@ class TestHasLocalChanges:
         hidden_file.write_text("hidden")
         os.utime(hidden_file, (99999999999, 99999999999))
 
-        result = scheduler._has_local_changes(
-            str(source_path), "cidx-meta-global"
-        )
+        result = scheduler._has_local_changes(str(source_path), "cidx-meta-global")
         assert result is False, "Hidden files at root level must be excluded from scan"
 
     def test_uses_latest_version_dir_when_multiple_exist(
@@ -246,9 +213,7 @@ class TestHasLocalChanges:
         test_file.write_text("# content")
         os.utime(test_file, (3000, 3000))
 
-        result = scheduler._has_local_changes(
-            str(source_path), "cidx-meta-global"
-        )
+        result = scheduler._has_local_changes(str(source_path), "cidx-meta-global")
         # Latest version is v_5000: file mtime 3000 < 5000 → False
         assert result is False, (
             "Must compare against latest version (v_5000). "
@@ -273,13 +238,11 @@ class TestHasLocalChanges:
         test_file.write_text("# content")
         os.utime(test_file, (7000, 7000))
 
-        result = scheduler._has_local_changes(
-            str(source_path), "cidx-meta-global"
-        )
+        result = scheduler._has_local_changes(str(source_path), "cidx-meta-global")
         # File mtime 7000 > latest v_5000 → True
-        assert result is True, (
-            "File mtime 7000 > latest version 5000 → must return True."
-        )
+        assert (
+            result is True
+        ), "File mtime 7000 > latest version 5000 → must return True."
 
 
 # ---------------------------------------------------------------------------
@@ -290,9 +253,7 @@ class TestHasLocalChanges:
 class TestCreateNewIndexGitGuards:
     """C5: _create_new_index() must skip git commands when .git dir is absent."""
 
-    def test_no_git_commands_for_non_git_repo(
-        self, scheduler, temp_golden_repos_dir
-    ):
+    def test_no_git_commands_for_non_git_repo(self, scheduler, temp_golden_repos_dir):
         """
         When the CoW clone does not contain .git/, no git commands must run.
 
@@ -327,19 +288,25 @@ class TestCreateNewIndexGitGuards:
             }
         )
 
-        with patch("subprocess.run", side_effect=mock_subprocess_run):
-            # Index validation will fail (no real cidx), which raises RuntimeError.
-            # That is expected — we only care that NO git commands were called.
-            with pytest.raises(RuntimeError):
-                scheduler._create_new_index(alias_name, str(source_path))
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                return_value=50,
+            ):
+                with patch("subprocess.run", side_effect=mock_subprocess_run):
+                    # Index validation will fail (no real cidx), which raises RuntimeError.
+                    # That is expected — we only care that NO git commands were called.
+                    with pytest.raises(RuntimeError):
+                        scheduler._create_new_index(alias_name, str(source_path))
 
-        assert git_calls == [], (
-            f"No git commands must run for non-git repos. Got: {git_calls}"
-        )
+        assert (
+            git_calls == []
+        ), f"No git commands must run for non-git repos. Got: {git_calls}"
 
-    def test_git_commands_run_for_git_repo(
-        self, scheduler, temp_golden_repos_dir
-    ):
+    def test_git_commands_run_for_git_repo(self, scheduler, temp_golden_repos_dir):
         """
         When the CoW clone DOES contain .git/, git commands must run.
 
@@ -363,7 +330,6 @@ class TestCreateNewIndexGitGuards:
                 elif cmd[0] == "cp":
                     # After CoW clone, create a fake .git dir in versioned path
                     # to trigger the git guard
-                    cwd_arg = kwargs.get("cwd")
                     # The destination is the last arg in cp command
                     dest = Path(cmd[-1])
                     dest.mkdir(parents=True, exist_ok=True)
@@ -379,16 +345,24 @@ class TestCreateNewIndexGitGuards:
             }
         )
 
-        with patch("subprocess.run", side_effect=mock_subprocess_run):
-            with pytest.raises(RuntimeError):
-                # Will fail at index validation, but git commands should have run
-                scheduler._create_new_index(alias_name, str(source_path))
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                return_value=50,
+            ):
+                with patch("subprocess.run", side_effect=mock_subprocess_run):
+                    with pytest.raises(RuntimeError):
+                        # Will fail at index validation, but git commands should have run
+                        scheduler._create_new_index(alias_name, str(source_path))
 
         # Should have called git update-index and git restore
         git_cmd_names = [cmd[1] for cmd in git_calls]
-        assert "update-index" in git_cmd_names, (
-            "git update-index must be called when .git dir exists"
-        )
-        assert "restore" in git_cmd_names, (
-            "git restore must be called when .git dir exists"
-        )
+        assert (
+            "update-index" in git_cmd_names
+        ), "git update-index must be called when .git dir exists"
+        assert (
+            "restore" in git_cmd_names
+        ), "git restore must be called when .git dir exists"
