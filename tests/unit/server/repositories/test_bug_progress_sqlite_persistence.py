@@ -26,6 +26,7 @@ import pytest
 from src.code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,
 )
+from src.code_indexer.server.services.job_tracker import JobTracker
 from src.code_indexer.server.storage.database_manager import DatabaseSchema
 from src.code_indexer.server.utils.config_manager import BackgroundJobsConfig
 
@@ -274,4 +275,84 @@ class TestProgressSqlitePersistence:
         assert status.get("progress") == 100, (
             f"Bug 2: progress={status.get('progress')} after full lifecycle. "
             f"Expected 100. Full status: {status}"
+        )
+
+
+class TestJobTrackerCompleteJobProgress:
+    """
+    Verify that JobTracker.complete_job() writes progress=100 to SQLite.
+
+    Bug: complete_job() called _upsert_job(job) where job.progress defaulted
+    to 0 (TrackedJob default), overwriting the correct progress=100 that
+    BackgroundJobManager had already persisted.
+
+    Fix: complete_job() now sets job.progress = 100 before _upsert_job(job).
+    """
+
+    def setup_method(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = str(Path(self.temp_dir) / "test.db")
+        DatabaseSchema(self.db_path).initialize_database()
+        self.tracker = JobTracker(self.db_path)
+
+    def teardown_method(self):
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir)
+
+    def test_complete_job_writes_progress_100_to_sqlite(self):
+        """
+        After JobTracker.complete_job(), the SQLite record must have progress=100.
+
+        This directly tests the fix: job.progress = 100 added in complete_job()
+        before _upsert_job(job), so the UPDATE statement writes 100 not 0.
+        """
+        job_id = "tracker-test-complete-progress"
+
+        # Register the job (status=pending, progress=0)
+        self.tracker.register_job(
+            job_id=job_id,
+            operation_type="test_op",
+            username="testuser",
+        )
+
+        # Transition to running and update progress to 50 to simulate work
+        self.tracker.update_status(job_id, status="running", progress=50)
+
+        # Complete the job
+        self.tracker.complete_job(job_id, result={"ok": True})
+
+        # Query SQLite directly via get_job (falls back to SQLite since job
+        # was removed from _active_jobs by complete_job)
+        job = self.tracker.get_job(job_id)
+        assert job is not None, "Job not found in SQLite after complete_job()"
+        assert job.status == "completed", (
+            f"Expected status='completed', got '{job.status}'"
+        )
+        assert job.progress == 100, (
+            f"JobTracker.complete_job() bug: progress={job.progress} "
+            f"instead of 100. The _upsert_job call overwrote progress with 0."
+        )
+
+    def test_complete_job_progress_100_when_previous_progress_was_zero(self):
+        """
+        complete_job() must write progress=100 even when no progress updates
+        were made (job.progress was never set, stays at TrackedJob default 0).
+        """
+        job_id = "tracker-test-complete-zero-progress"
+
+        self.tracker.register_job(
+            job_id=job_id,
+            operation_type="test_op_no_progress",
+            username="testuser",
+        )
+        self.tracker.update_status(job_id, status="running")
+
+        # Complete without any progress updates (progress is still 0)
+        self.tracker.complete_job(job_id)
+
+        job = self.tracker.get_job(job_id)
+        assert job is not None, "Job not found in SQLite after complete_job()"
+        assert job.progress == 100, (
+            f"complete_job() must set progress=100 regardless of prior value. "
+            f"Got progress={job.progress}."
         )

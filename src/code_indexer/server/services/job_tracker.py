@@ -352,6 +352,7 @@ class JobTracker:
 
         job.status = "completed"
         job.completed_at = now
+        job.progress = 100
         if result is not None:
             job.result = result
 
