@@ -886,7 +886,6 @@ def register_repo_routes(
             job_id = background_job_manager.submit_job(
                 "sync_repository",
                 sync_job_wrapper,
-                params={"repo_id": cleaned_repo_id},
                 submitter_username=current_user.username,
                 repo_alias=cleaned_repo_id,  # AC5: Fix unknown repo bug
             )
