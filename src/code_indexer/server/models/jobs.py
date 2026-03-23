@@ -94,6 +94,9 @@ class JobStatusResponse(BaseModel):
     result: Optional[Dict[str, Any]]
     error: Optional[str]
     username: str  # Added for user tracking
+    # Story #480: Real-time phase progress fields (AC7)
+    current_phase: Optional[str] = None  # e.g., "semantic", "temporal", "cow"
+    phase_detail: Optional[str] = None  # e.g., "150/500 files indexed"
 
 
 class JobListResponse(BaseModel):

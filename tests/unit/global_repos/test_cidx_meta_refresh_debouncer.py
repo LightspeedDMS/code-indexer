@@ -169,7 +169,10 @@ class TestCidxMetaRefreshDebouncerSignalDirty:
 
         # Timer should have been replaced
         assert first_timer is not second_timer
-        # First timer should be cancelled
+        # First timer should be cancelled - join briefly to let the thread finish
+        # threading.Timer.cancel() stops the callback but the thread may still
+        # be alive momentarily; join(timeout) eliminates the race condition.
+        first_timer.join(timeout=0.5)
         assert not first_timer.is_alive()
         # Second timer should still be alive
         assert second_timer.is_alive()

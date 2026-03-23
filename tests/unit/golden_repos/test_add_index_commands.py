@@ -17,6 +17,7 @@ Acceptance criteria:
 - RefreshScheduler temporal command applies all_branches option (AC5)
 """
 
+from io import StringIO
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -40,6 +41,29 @@ def _make_success_run(repo_path):
         return result
 
     return mock_run
+
+
+def _make_success_popen(collected_cmds):
+    """
+    Return a subprocess.Popen mock class that:
+    - Records the command in collected_cmds
+    - Returns a process with empty stdout, empty stderr, returncode=0
+
+    Story #480: semantic and temporal now use Popen + --progress-json
+    for real-time progress line reading.
+    """
+
+    class MockProcess:
+        def __init__(self, cmd, **kwargs):
+            collected_cmds.append(list(cmd))
+            self.stdout = StringIO("")  # Empty: no JSON progress lines
+            self.stderr = StringIO("")
+            self.returncode = 0
+
+        def wait(self):
+            pass
+
+    return MockProcess
 
 
 # ---------------------------------------------------------------------------
@@ -93,37 +117,38 @@ class TestAddIndexSemanticCommand:
 
     def _capture_subprocess_calls(self, registered_manager, repo_path, index_type):
         """
-        Call add_index_to_golden_repo and capture every subprocess.run invocation.
+        Call add_index_to_golden_repo and capture every subprocess.run / Popen invocation.
 
         The method submits a background job via BackgroundJobManager.  We
         intercept submit_job to run the worker function synchronously so we can
         capture subprocess calls without threading complexity.
+
+        Story #480: semantic and temporal now use subprocess.Popen with --progress-json.
+        Both subprocess.run AND subprocess.Popen are patched so all commands are captured.
         """
         captured_cmds = []
 
         def fake_submit_job(operation_type, func, **kwargs):
             """Run the background worker synchronously and capture subprocess calls."""
-            with patch("subprocess.run") as mock_run:
-                mock_run.side_effect = _make_success_run(str(repo_path))
-                # We need the mock to actually record calls.
-                collected = []
+            collected = []
 
-                def recording_run(cmd, **kw):
-                    collected.append(list(cmd))
-                    r = MagicMock()
-                    r.returncode = 0
-                    r.stdout = "ok"
-                    r.stderr = ""
-                    return r
+            def recording_run(cmd, **kw):
+                collected.append(list(cmd))
+                r = MagicMock()
+                r.returncode = 0
+                r.stdout = "ok"
+                r.stderr = ""
+                return r
 
-                mock_run.side_effect = recording_run
-                # Also patch get_actual_repo_path so it returns our temp path.
-                with patch.object(
-                    registered_manager,
-                    "get_actual_repo_path",
-                    return_value=str(repo_path),
-                ):
-                    func()
+            # Also patch get_actual_repo_path so it returns our temp path.
+            with patch("subprocess.run", side_effect=recording_run), \
+                 patch("subprocess.Popen", side_effect=_make_success_popen(collected)), \
+                 patch.object(
+                     registered_manager,
+                     "get_actual_repo_path",
+                     return_value=str(repo_path),
+                 ):
+                func()
             captured_cmds.extend(collected)
             return "fake-job-id"
 
@@ -182,7 +207,11 @@ class TestAddIndexFtsCommand:
     """Verify fts index_type is unchanged and uses --rebuild-fts-index (not --clear)."""
 
     def _capture_subprocess_calls(self, registered_manager, repo_path, index_type):
-        """Same helper pattern as TestAddIndexSemanticCommand."""
+        """Same helper pattern as TestAddIndexSemanticCommand.
+
+        Story #480: also patches subprocess.Popen for semantic/temporal Popen path.
+        FTS itself uses subprocess.run but the shared infrastructure may use Popen.
+        """
         captured_cmds = []
 
         def fake_submit_job(operation_type, func, **kwargs):
@@ -196,13 +225,14 @@ class TestAddIndexFtsCommand:
                 r.stderr = ""
                 return r
 
-            with patch("subprocess.run", side_effect=recording_run):
-                with patch.object(
-                    registered_manager,
-                    "get_actual_repo_path",
-                    return_value=str(repo_path),
-                ):
-                    func()
+            with patch("subprocess.run", side_effect=recording_run), \
+                 patch("subprocess.Popen", side_effect=_make_success_popen(collected)), \
+                 patch.object(
+                     registered_manager,
+                     "get_actual_repo_path",
+                     return_value=str(repo_path),
+                 ):
+                func()
             captured_cmds.extend(collected)
             return "fake-job-id"
 
@@ -286,13 +316,16 @@ class TestAddIndexTemporalCommand:
                 r.stderr = ""
                 return r
 
-            with patch("subprocess.run", side_effect=recording_run):
-                with patch.object(
-                    registered_manager,
-                    "get_actual_repo_path",
-                    return_value=str(repo_path),
-                ):
-                    func()
+            # Story #480: temporal now uses subprocess.Popen with --progress-json.
+            # Patch both run and Popen so all commands are captured for verification.
+            with patch("subprocess.run", side_effect=recording_run), \
+                 patch("subprocess.Popen", side_effect=_make_success_popen(collected)), \
+                 patch.object(
+                     registered_manager,
+                     "get_actual_repo_path",
+                     return_value=str(repo_path),
+                 ):
+                func()
             captured_cmds.extend(collected)
             return "fake-job-id"
 

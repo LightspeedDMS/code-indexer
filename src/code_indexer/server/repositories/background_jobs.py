@@ -78,6 +78,10 @@ class BackgroundJob:
         None  # Per-project tracking
     )
 
+    # Story #480: Real-time phase progress fields
+    current_phase: Optional[str] = None  # e.g., "semantic", "temporal", "fts", "scip", "cow"
+    phase_detail: Optional[str] = None  # e.g., "150/500 files indexed"
+
 
 class BackgroundJobManager:
     """
@@ -381,6 +385,9 @@ class BackgroundJobManager:
                     "failure_reason": job.failure_reason,
                     "extended_error": job.extended_error,
                     "language_resolution_status": job.language_resolution_status,
+                    # Story #480: Real-time phase progress fields
+                    "current_phase": job.current_phase,
+                    "phase_detail": job.phase_detail,
                 }
 
         # Story #267 Component 8: Fall back to SQLite for completed/failed jobs
@@ -561,10 +568,19 @@ class BackgroundJobManager:
             logging.info(f"Starting background job {job_id}")
 
             # Create progress callback function
-            def progress_callback(progress: int):
+            def progress_callback(
+                progress: int,
+                phase: Optional[str] = None,
+                detail: Optional[str] = None,
+            ):
                 with self._lock:
                     if job_id in self.jobs and not self.jobs[job_id].cancelled:
                         self.jobs[job_id].progress = progress
+                        # Story #480: Update phase info when provided
+                        if phase is not None:
+                            self.jobs[job_id].current_phase = phase
+                        if detail is not None:
+                            self.jobs[job_id].phase_detail = detail
                 # Story #267 Component 3-4: Persist outside lock
                 self._persist_jobs(job_id=job_id)
 

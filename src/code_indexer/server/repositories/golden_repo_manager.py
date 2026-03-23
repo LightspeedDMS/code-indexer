@@ -49,6 +49,69 @@ class GitOperationError(GoldenRepoError):
     pass
 
 
+def _gather_repo_metrics(repo_path) -> tuple:
+    """
+    Gather file count and commit count for a repository.
+
+    Used by add_indexes_to_golden_repo background_worker to compute
+    ProgressPhaseAllocator weights.  Both commands are fast for most repos.
+
+    Args:
+        repo_path: Path to the git repository (str or Path)
+
+    Returns:
+        (file_count, commit_count) as integers.  Returns (0, 0) if repo is
+        not a git repository or if git commands fail (graceful degradation).
+    """
+    repo_str = str(repo_path)
+
+    # Count tracked files
+    try:
+        ls_result = subprocess.run(
+            ["git", "-C", repo_str, "ls-files"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if ls_result.returncode == 0:
+            file_count = len([line for line in ls_result.stdout.splitlines() if line.strip()])
+        else:
+            logger.warning(
+                "_gather_repo_metrics: git ls-files failed in %s (exit %d): %s",
+                repo_str,
+                ls_result.returncode,
+                ls_result.stderr.strip(),
+            )
+            file_count = 0
+    except Exception as e:
+        logger.warning("_gather_repo_metrics: failed to count tracked files in %s: %s", repo_str, e)
+        file_count = 0
+
+    # Count commits on current branch
+    try:
+        rev_result = subprocess.run(
+            ["git", "-C", repo_str, "rev-list", "--count", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if rev_result.returncode == 0:
+            commit_count = int(rev_result.stdout.strip() or "0")
+        else:
+            logger.warning(
+                "_gather_repo_metrics: git rev-list failed in %s (exit %d): %s",
+                repo_str,
+                rev_result.returncode,
+                rev_result.stderr.strip(),
+            )
+            commit_count = 0
+    except Exception as e:
+        logger.warning("_gather_repo_metrics: failed to count commits in %s: %s", repo_str, e)
+        commit_count = 0
+
+    return file_count, commit_count
+
+
 class GoldenRepoNotFoundError(GoldenRepoError):
     """Exception raised when golden repository cannot be found on filesystem."""
 
@@ -2443,7 +2506,7 @@ class GoldenRepoManager:
                     f"Invalid index_type: {index_type}. Must be one of: {', '.join(valid_index_types)}"
                 )
 
-        def background_worker() -> Dict[str, Any]:
+        def background_worker(progress_callback=None) -> Dict[str, Any]:
             """Execute add index operations in a single background thread with write lock + CoW."""
             # Acquire write lock (Bug #473 Fix 1)
             scheduler = getattr(self, "_refresh_scheduler", None)
@@ -2468,6 +2531,113 @@ class GoldenRepoManager:
                 # Accumulated stdout/stderr across all index types
                 all_stdout = ""
                 all_stderr = ""
+
+                # Story #480: Gather repo metrics and build phase allocator
+                from code_indexer.services.progress_phase_allocator import (
+                    ProgressPhaseAllocator,
+                    parse_progress_line,
+                )
+
+                file_count, commit_count = _gather_repo_metrics(repo_path)
+                temporal_options = repo.temporal_options or {}
+                max_commits_opt = temporal_options.get("max_commits")
+
+                allocator = ProgressPhaseAllocator()
+                allocator.calculate_weights(
+                    index_types=index_types,
+                    file_count=file_count,
+                    commit_count=commit_count,
+                    max_commits=max_commits_opt,
+                )
+
+                def _report_phase_progress(
+                    phase_name: str, local_current: int, local_total: int, info: str = ""
+                ) -> None:
+                    """Map local phase progress to global 0-100 and invoke progress_callback."""
+                    if progress_callback is None:
+                        return
+                    global_pct = int(
+                        allocator.map_phase_progress(phase_name, local_current, local_total)
+                    )
+                    progress_callback(
+                        global_pct,
+                        phase=phase_name,
+                        detail=info,
+                    )
+
+                def _run_with_popen_progress(
+                    command: List[str],
+                    phase_name: str,
+                    error_label: str,
+                ) -> None:
+                    """
+                    Run command with Popen, reading JSON progress lines from stdout.
+
+                    Non-JSON lines are accumulated in all_stdout for error reporting
+                    but not parsed as progress.  Stderr is captured for error details.
+                    On non-zero exit, raises GoldenRepoError with captured stderr.
+                    """
+                    nonlocal all_stdout, all_stderr
+
+                    process = subprocess.Popen(
+                        command,
+                        cwd=repo_path,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+
+                    # Report phase start (coarse marker before any lines arrive)
+                    if progress_callback is not None:
+                        global_start = int(allocator.phase_start(phase_name))
+                        progress_callback(
+                            global_start,
+                            phase=phase_name,
+                            detail=f"{phase_name}: starting...",
+                        )
+
+                    # Read stdout line by line
+                    if process.stdout is None:
+                        raise GoldenRepoError(
+                            f"Failed to {error_label}: subprocess stdout pipe was not created"
+                        )
+
+                    # Drain stderr in background thread to prevent deadlock if child
+                    # writes >64KB to stderr while parent is blocked reading stdout.
+                    stderr_lines: list[str] = []
+
+                    def _drain_stderr() -> None:
+                        if process.stderr:
+                            stderr_lines.extend(process.stderr.readlines())
+
+                    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+                    stderr_thread.start()
+
+                    for line in process.stdout:
+                        all_stdout += line
+                        parsed = parse_progress_line(line)
+                        if parsed is not None:
+                            _report_phase_progress(
+                                phase_name,
+                                parsed["current"],
+                                parsed["total"],
+                                parsed.get("info", ""),
+                            )
+                        # Non-JSON lines: already accumulated in all_stdout, skip parsing
+
+                    process.wait()
+                    stderr_thread.join(timeout=30)
+                    stderr_output = "".join(stderr_lines)
+                    all_stderr += stderr_output
+
+                    if process.returncode != 0:
+                        error_details = (
+                            stderr_output
+                            or f"Exit code {process.returncode}"
+                        )
+                        raise GoldenRepoError(
+                            f"Failed to {error_label}: {error_details}"
+                        )
 
                 # Ensure repo is initialized before running cidx index commands (idempotent)
                 init_result = subprocess.run(
@@ -2498,26 +2668,22 @@ class GoldenRepoManager:
                 for index_type in index_types:
                     if index_type == "semantic":
                         # Bug #468: --clear forces full rebuild for already-indexed repos
-                        command = ["cidx", "index", "--clear"]
-                        result = subprocess.run(
+                        # Story #480: Add --progress-json for real-time progress streaming
+                        command = ["cidx", "index", "--clear", "--progress-json"]
+                        _run_with_popen_progress(
                             command,
-                            cwd=repo_path,
-                            capture_output=True,
-                            text=True,
+                            phase_name="semantic",
+                            error_label="create semantic index",
                         )
-                        all_stdout += result.stdout or ""
-                        all_stderr += result.stderr or ""
-                        if result.returncode != 0:
-                            error_details = (
-                                result.stderr
-                                or result.stdout
-                                or f"Exit code {result.returncode}"
-                            )
-                            raise GoldenRepoError(
-                                f"Failed to create semantic index: {error_details}"
-                            )
 
                     elif index_type == "fts":
+                        # FTS is fast: coarse start/end markers only
+                        if progress_callback is not None:
+                            progress_callback(
+                                int(allocator.phase_start("fts")),
+                                phase="fts",
+                                detail="FTS: building index...",
+                            )
                         command = ["cidx", "index", "--rebuild-fts-index"]
                         result = subprocess.run(
                             command,
@@ -2536,11 +2702,16 @@ class GoldenRepoManager:
                             raise GoldenRepoError(
                                 f"Failed to create FTS index: {error_details}"
                             )
+                        if progress_callback is not None:
+                            progress_callback(
+                                int(allocator.phase_end("fts")),
+                                phase="fts",
+                                detail="FTS: complete",
+                            )
 
                     elif index_type == "temporal":
-                        command = ["cidx", "index", "--index-commits", "--clear"]
-
-                        temporal_options = repo.temporal_options or {}
+                        # Story #480: Use Popen + line reader for real-time progress
+                        command = ["cidx", "index", "--index-commits", "--clear", "--progress-json"]
 
                         max_commits = temporal_options.get("max_commits")
                         if max_commits is not None:
@@ -2557,23 +2728,11 @@ class GoldenRepoManager:
                         if temporal_options.get("all_branches"):
                             command.append("--all-branches")
 
-                        result = subprocess.run(
+                        _run_with_popen_progress(
                             command,
-                            cwd=repo_path,
-                            capture_output=True,
-                            text=True,
+                            phase_name="temporal",
+                            error_label="create temporal index",
                         )
-                        all_stdout += result.stdout or ""
-                        all_stderr += result.stderr or ""
-                        if result.returncode != 0:
-                            error_details = (
-                                result.stderr
-                                or result.stdout
-                                or f"Exit code {result.returncode}"
-                            )
-                            raise GoldenRepoError(
-                                f"Failed to create temporal index: {error_details}"
-                            )
 
                         # Bug #131: Update enable_temporal flag in BOTH tables
                         if self._sqlite_backend.update_enable_temporal(alias, True):
@@ -2621,6 +2780,13 @@ class GoldenRepoManager:
                             )
 
                     elif index_type == "scip":
+                        # SCIP is fast: coarse start/end markers only
+                        if progress_callback is not None:
+                            progress_callback(
+                                int(allocator.phase_start("scip")),
+                                phase="scip",
+                                detail="SCIP: generating...",
+                            )
                         command = ["cidx", "scip", "generate"]
                         result = subprocess.run(
                             command,
@@ -2639,6 +2805,20 @@ class GoldenRepoManager:
                             raise GoldenRepoError(
                                 f"Failed to create SCIP index: {error_details}"
                             )
+                        if progress_callback is not None:
+                            progress_callback(
+                                int(allocator.phase_end("scip")),
+                                phase="scip",
+                                detail="SCIP: complete",
+                            )
+
+                # CoW snapshot phase: coarse start marker before operation
+                if progress_callback is not None:
+                    progress_callback(
+                        int(allocator.phase_start("cow")),
+                        phase="cow",
+                        detail="Creating snapshot...",
+                    )
 
                 # Bug #473 Fix 2: Create CoW snapshot + alias swap after all indexing succeeds
                 if scheduler is not None:
@@ -2668,6 +2848,14 @@ class GoldenRepoManager:
                             f"[add_index] Preserving master golden repo (not scheduling cleanup): "
                             f"{current_target}"
                         )
+
+                # CoW snapshot phase: end marker at 100% after swap completes
+                if progress_callback is not None:
+                    progress_callback(
+                        int(allocator.phase_end("cow")),
+                        phase="cow",
+                        detail="Snapshot complete",
+                    )
 
                 return {
                     "success": True,

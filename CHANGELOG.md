@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.34
+
+### Features
+- feat: real-time progress reporting for index rebuild jobs (Story #480)
+  - ProgressPhaseAllocator with dynamic weights from repo metrics (file count, commit count)
+  - --progress-json CLI flag for machine-parseable progress output
+  - subprocess.Popen + line reader for semantic/temporal (replaces blocking subprocess.run)
+  - Job status endpoint includes current_phase and phase_detail fields
+  - Coarse start/end markers for FTS and SCIP phases
+  - Progress advances incrementally instead of 25% to 100% jump
+
+### Bug Fixes
+- fix: stderr pipe deadlock prevention with background drain thread (Story #480)
+- fix: console output redirected to stderr in --progress-json mode (Story #480)
+- fix: no-op callback attributes attached in --progress-json mode to prevent AttributeError (Story #480)
+- fix: flaky debouncer test timing with thread join before assertion
+
 ## v9.5.33
 
 ### Bug Fixes
