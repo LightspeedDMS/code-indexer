@@ -125,7 +125,8 @@ def run_with_popen_progress(
     all_stderr: List[str],
     cwd: Optional[str],
     error_label: Optional[str] = None,
-) -> None:
+    last_reported: Optional[int] = None,
+) -> int:
     """
     Run a command with Popen, reading JSON progress lines from stdout.
 
@@ -139,6 +140,12 @@ def run_with_popen_progress(
     This is the shared implementation extracted from golden_repo_manager.py
     (PATH B) for reuse in all indexing paths (PATH A, C, D, E).
 
+    Monotonic guard: if last_reported is provided, any computed progress value
+    that is strictly lower than last_reported is suppressed (not forwarded to
+    progress_callback). This prevents visible progress regressions in the UI
+    when a new phase starts at a lower global percentage than the previous
+    phase ended at.
+
     Args:
         command: Command list to execute via subprocess.Popen
         phase_name: Phase name in the allocator (e.g., "semantic", "temporal")
@@ -148,11 +155,31 @@ def run_with_popen_progress(
         all_stderr: Mutable list — accumulated stderr lines are appended here
         cwd: Working directory for the subprocess (None = inherit)
         error_label: Human-readable label for error messages (defaults to phase_name)
+        last_reported: Optional monotonic high-water mark from previous calls.
+                       Any value below this will be suppressed. Defaults to None
+                       (no suppression). Returns the highest value reported this call.
+
+    Returns:
+        The highest progress value reported during this call (or last_reported if
+        nothing higher was emitted). Callers can pass this as last_reported to
+        the next call to enforce monotonic progress across phases.
     """
     from code_indexer.services.progress_phase_allocator import parse_progress_line
 
     if error_label is None:
         error_label = phase_name
+
+    # Monotonic high-water mark: never report below this value
+    high_water: int = last_reported if last_reported is not None else 0
+
+    def _emit(pct: int, phase: str, detail: str) -> None:
+        """Emit progress only if it does not regress below the high-water mark."""
+        nonlocal high_water
+        if pct < high_water:
+            return
+        high_water = pct
+        if progress_callback is not None:
+            progress_callback(pct, phase=phase, detail=detail)
 
     process = subprocess.Popen(
         command,
@@ -163,13 +190,8 @@ def run_with_popen_progress(
     )
 
     # Report phase start (coarse marker before any lines arrive)
-    if progress_callback is not None:
-        global_start = int(allocator.phase_start(phase_name))
-        progress_callback(
-            global_start,
-            phase=phase_name,
-            detail=f"{phase_name}: starting...",
-        )
+    global_start = int(allocator.phase_start(phase_name))
+    _emit(global_start, phase=phase_name, detail=f"{phase_name}: starting...")
 
     # Read stdout line by line
     if process.stdout is None:
@@ -191,17 +213,13 @@ def run_with_popen_progress(
     for line in process.stdout:
         all_stdout.append(line)
         parsed = parse_progress_line(line)
-        if parsed is not None and progress_callback is not None:
+        if parsed is not None:
             global_pct = int(
                 allocator.map_phase_progress(
                     phase_name, parsed["current"], parsed["total"]
                 )
             )
-            progress_callback(
-                global_pct,
-                phase=phase_name,
-                detail=parsed.get("info", ""),
-            )
+            _emit(global_pct, phase=phase_name, detail=parsed.get("info", ""))
         # Non-JSON lines: already accumulated in all_stdout, skip parsing
 
     process.wait()
@@ -212,3 +230,5 @@ def run_with_popen_progress(
     if process.returncode != 0:
         error_details = stderr_output or f"Exit code {process.returncode}"
         raise IndexingSubprocessError(f"Failed to {error_label}: {error_details}")
+
+    return high_water

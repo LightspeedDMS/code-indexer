@@ -2304,6 +2304,8 @@ class BackgroundJobsSqliteBackend:
         failure_reason: Optional[str] = None,
         extended_error: Optional[Dict[str, Any]] = None,
         language_resolution_status: Optional[Dict[str, Dict[str, Any]]] = None,
+        current_phase: Optional[str] = None,
+        phase_detail: Optional[str] = None,
     ) -> None:
         """Save a new background job."""
 
@@ -2313,8 +2315,8 @@ class BackgroundJobsSqliteBackend:
                    (job_id, operation_type, status, created_at, started_at, completed_at,
                     result, error, progress, username, is_admin, cancelled, repo_alias,
                     resolution_attempts, claude_actions, failure_reason, extended_error,
-                    language_resolution_status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    language_resolution_status, current_phase, phase_detail)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job_id,
                     operation_type,
@@ -2338,6 +2340,8 @@ class BackgroundJobsSqliteBackend:
                         if language_resolution_status
                         else None
                     ),
+                    current_phase,
+                    phase_detail,
                 ),
             )
             return None
@@ -2352,7 +2356,7 @@ class BackgroundJobsSqliteBackend:
             """SELECT job_id, operation_type, status, created_at, started_at, completed_at,
                       result, error, progress, username, is_admin, cancelled, repo_alias,
                       resolution_attempts, claude_actions, failure_reason, extended_error,
-                      language_resolution_status
+                      language_resolution_status, current_phase, phase_detail
                FROM background_jobs WHERE job_id = ?""",
             (job_id,),
         )
@@ -2382,6 +2386,8 @@ class BackgroundJobsSqliteBackend:
             "failure_reason": row[15],
             "extended_error": json.loads(row[16]) if row[16] else None,
             "language_resolution_status": json.loads(row[17]) if row[17] else None,
+            "current_phase": row[18] if len(row) > 18 else None,
+            "phase_detail": row[19] if len(row) > 19 else None,
         }
 
     def update_job(self, job_id: str, **kwargs) -> None:
@@ -2435,7 +2441,7 @@ class BackgroundJobsSqliteBackend:
         query = """SELECT job_id, operation_type, status, created_at, started_at, completed_at,
                           result, error, progress, username, is_admin, cancelled, repo_alias,
                           resolution_attempts, claude_actions, failure_reason, extended_error,
-                          language_resolution_status
+                          language_resolution_status, current_phase, phase_detail
                    FROM background_jobs"""
 
         conditions = []
@@ -2491,7 +2497,8 @@ class BackgroundJobsSqliteBackend:
         base_select = """SELECT job_id, operation_type, status, created_at, started_at,
                                 completed_at, result, error, progress, username, is_admin,
                                 cancelled, repo_alias, resolution_attempts, claude_actions,
-                                failure_reason, extended_error, language_resolution_status
+                                failure_reason, extended_error, language_resolution_status,
+                                current_phase, phase_detail
                          FROM background_jobs"""
 
         conditions: List[str] = []

@@ -1020,6 +1020,9 @@ class BackgroundJobManager:
             "failure_reason": job.failure_reason,
             "extended_error": job.extended_error,
             "language_resolution_status": job.language_resolution_status,
+            # Story #480: Real-time phase progress fields (Bug fix: persist to SQLite)
+            "current_phase": job.current_phase,
+            "phase_detail": job.phase_detail,
         }
 
     def _persist_job_to_sqlite(self, job_id: str, snapshot: Dict[str, Any]) -> None:
@@ -1047,6 +1050,8 @@ class BackgroundJobManager:
                     failure_reason=snapshot["failure_reason"],
                     extended_error=snapshot["extended_error"],
                     language_resolution_status=snapshot["language_resolution_status"],
+                    current_phase=snapshot.get("current_phase"),
+                    phase_detail=snapshot.get("phase_detail"),
                 )
             else:
                 self._sqlite_backend.save_job(
@@ -1068,6 +1073,8 @@ class BackgroundJobManager:
                     failure_reason=snapshot["failure_reason"],
                     extended_error=snapshot["extended_error"],
                     language_resolution_status=snapshot["language_resolution_status"],
+                    current_phase=snapshot.get("current_phase"),
+                    phase_detail=snapshot.get("phase_detail"),
                 )
         except Exception as e:
             logging.error(f"Failed to persist job {job_id} to SQLite: {e}")

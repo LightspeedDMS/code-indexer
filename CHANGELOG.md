@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.36
+
+### Bug Fixes
+- fix: monotonic progress guard prevents progress bar dips during clear+index phases
+- fix: progress, current_phase, phase_detail persisted to SQLite — completed jobs now show 100% instead of 0%
+- fix: SQLite migration adds current_phase/phase_detail columns to background_jobs table
+
 ## v9.5.35
 
 ### Features
