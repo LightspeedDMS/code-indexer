@@ -126,7 +126,7 @@ class ClusterHealthProvider:
         if self._leader_election is None:
             return "unknown"
         try:
-            return "leader" if self._leader_election.is_leader() else "follower"
+            return "leader" if self._leader_election.is_leader else "follower"
         except Exception as exc:
             logger.warning("leader_election_service.is_leader() raised: %s", exc)
             return "unknown"
@@ -138,13 +138,10 @@ class ClusterHealthProvider:
 
         start = time.time()
         try:
-            conn = self._pg_pool.getconn()
-            try:
-                cursor = conn.cursor()
-                cursor.execute("SELECT 1")
-                cursor.fetchone()
-            finally:
-                self._pg_pool.putconn(conn)
+            with self._pg_pool.connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT 1")
+                    cursor.fetchone()
 
             latency_ms = int((time.time() - start) * 1000)
             return {"status": "healthy", "latency_ms": latency_ms}
@@ -180,7 +177,7 @@ class ClusterHealthProvider:
             return {"status": "unavailable", "is_leader": None}
 
         try:
-            is_leader = self._leader_election.is_leader()
+            is_leader = self._leader_election.is_leader
             is_active = True
             try:
                 is_active = self._leader_election.is_active()

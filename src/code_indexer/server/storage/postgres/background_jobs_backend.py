@@ -23,6 +23,30 @@ from .connection_pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
 
+_ALLOWED_JOB_COLUMNS = frozenset(
+    {
+        "status",
+        "progress",
+        "error",
+        "result",
+        "completed_at",
+        "started_at",
+        "cancelled",
+        "repo_alias",
+        "resolution_attempts",
+        "claude_actions",
+        "failure_reason",
+        "extended_error",
+        "language_resolution_status",
+        "progress_info",
+        "metadata",
+        "executing_node",
+        "claimed_at",
+        "current_phase",
+        "phase_detail",
+    }
+)
+
 # Columns selected in every SELECT query (ordered — must match _row_to_dict)
 _SELECT_COLS = """
     job_id, operation_type, status, created_at, started_at, completed_at,
@@ -174,6 +198,8 @@ class BackgroundJobsPostgresBackend:
         params: List[Any] = []
 
         for key, value in kwargs.items():
+            if key not in _ALLOWED_JOB_COLUMNS:
+                raise ValueError(f"Column {key!r} is not allowed")
             updates.append(f"{key} = %s")
             if value is None:
                 params.append(None)
@@ -355,7 +381,7 @@ class BackgroundJobsPostgresBackend:
                 stats[row[0]] = row[1]
         return stats
 
-    def cleanup_orphaned_jobs_on_startup(self) -> int:
+    def cleanup_orphaned_jobs_on_startup(self, node_id: Optional[str] = None) -> int:
         """
         Mark running/pending jobs as failed on server startup.
 

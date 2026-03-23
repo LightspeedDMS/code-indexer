@@ -114,6 +114,17 @@ class MigrationRunner:
         content = migration_path.read_text(encoding="utf-8")
         return hashlib.md5(content.encode("utf-8")).hexdigest()
 
+    def close(self) -> None:
+        """Close the database connection."""
+        if self._conn and not self._conn.closed:
+            self._conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
     def ensure_migrations_table(self) -> None:
         """
         Create the schema_migrations tracking table if it does not exist.

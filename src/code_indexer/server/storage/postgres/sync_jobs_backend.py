@@ -23,6 +23,24 @@ from .connection_pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
 
+_ALLOWED_SYNC_COLUMNS = frozenset(
+    {
+        "status",
+        "progress",
+        "current_file",
+        "total_files",
+        "error",
+        "completed_at",
+        "started_at",
+        "cancelled",
+        "phases",
+        "phase_weights",
+        "progress_history",
+        "recovery_checkpoint",
+        "analytics_data",
+    }
+)
+
 # Columns selected in every SELECT query (ordered — must match _row_to_dict)
 _SELECT_COLS = """
     job_id, username, user_alias, job_type, status, created_at,
@@ -142,6 +160,8 @@ class SyncJobsPostgresBackend:
 
         for key, value in kwargs.items():
             if value is not None:
+                if key not in _ALLOWED_SYNC_COLUMNS:
+                    raise ValueError(f"Column {key!r} is not allowed")
                 updates.append(f"{key} = %s")
                 params.append(json.dumps(value) if key in _JSON_FIELDS else value)
 

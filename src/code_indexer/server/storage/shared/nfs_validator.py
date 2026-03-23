@@ -109,13 +109,17 @@ class NfsMountValidator:
             True if the path exists and is accessible, False otherwise.
         """
         import signal
+        import threading
 
         target = Path(path) if Path(path).is_absolute() else self._mount_point / path
 
         def _handler(signum: int, frame: object) -> None:  # noqa: ARG001
             raise TimeoutError(f"NFS path access timed out after {timeout}s: {target}")
 
-        has_sigalrm = hasattr(signal, "SIGALRM")
+        has_sigalrm = (
+            hasattr(signal, "SIGALRM")
+            and threading.current_thread() is threading.main_thread()
+        )
         if has_sigalrm and timeout > 0:
             old_handler = signal.signal(signal.SIGALRM, _handler)
             signal.alarm(max(1, int(timeout)))

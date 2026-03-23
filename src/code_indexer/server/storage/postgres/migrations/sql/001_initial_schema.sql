@@ -146,7 +146,11 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     extended_error              JSONB,
     language_resolution_status  JSONB,
     progress_info               TEXT,
-    metadata                    JSONB
+    metadata                    JSONB,
+    executing_node              TEXT,
+    claimed_at                  TIMESTAMPTZ,
+    current_phase               TEXT,
+    phase_detail                TEXT
 );
 
 -- SSH keys
@@ -375,11 +379,13 @@ CREATE TABLE IF NOT EXISTS cluster_nodes (
 
 CREATE TABLE IF NOT EXISTS upgrade_registry (
     id              SERIAL      PRIMARY KEY,
-    version         TEXT        NOT NULL,
-    applied_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    applied_by      TEXT,
-    notes           TEXT,
-    status          TEXT        NOT NULL DEFAULT 'completed'
+    node_id         TEXT        NOT NULL,
+    version_from    TEXT        NOT NULL,
+    version_to      TEXT        NOT NULL,
+    status          TEXT        NOT NULL DEFAULT 'upgrading',
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at    TIMESTAMPTZ,
+    error_message   TEXT
 );
 
 -- Indexes for performance

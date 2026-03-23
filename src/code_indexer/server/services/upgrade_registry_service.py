@@ -24,6 +24,7 @@ Only one row with status='upgrading' may exist at any time.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, List, Optional
 
@@ -74,6 +75,7 @@ class UpgradeRegistryService:
         """
         self._pool = pool
         self._node_id = node_id
+        self._table_lock = threading.Lock()
         self._table_ensured = False
 
     # ------------------------------------------------------------------

@@ -24,6 +24,7 @@ class _StubLeaderElection:
         self._is_leader = is_leader
         self._is_active = is_active
 
+    @property
     def is_leader(self) -> bool:
         return self._is_leader
 
@@ -37,6 +38,7 @@ class _StubLeaderElectionNoActive:
     def __init__(self, is_leader: bool = True):
         self._is_leader = is_leader
 
+    @property
     def is_leader(self) -> bool:
         return self._is_leader
 
@@ -62,6 +64,12 @@ class _StubCursor:
     def fetchone(self):
         return (1,)
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
 
 class _StubConn:
     def cursor(self):
@@ -69,23 +77,31 @@ class _StubConn:
 
 
 class _StubPgPool:
-    """Minimal synchronous PostgreSQL pool stub (psycopg2-style)."""
+    """Minimal synchronous PostgreSQL pool stub (psycopg v3 style)."""
 
     def __init__(self, should_fail: bool = False):
         self._should_fail = should_fail
 
-    def getconn(self):
-        if self._should_fail:
-            raise RuntimeError("connection refused")
-        return _StubConn()
+    class _ConnectionCtx:
+        def __init__(self, should_fail):
+            self._should_fail = should_fail
 
-    def putconn(self, conn):
-        pass
+        def __enter__(self):
+            if self._should_fail:
+                raise RuntimeError("connection refused")
+            return _StubConn()
+
+        def __exit__(self, *args):
+            pass
+
+    def connection(self):
+        return self._ConnectionCtx(self._should_fail)
 
 
 class _RaisingLeaderElection:
-    """Leader election that raises on every call."""
+    """Leader election that raises on every access."""
 
+    @property
     def is_leader(self) -> bool:
         raise RuntimeError("etcd unavailable")
 

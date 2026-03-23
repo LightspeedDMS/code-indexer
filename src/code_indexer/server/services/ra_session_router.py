@@ -14,6 +14,7 @@ and the cluster_nodes table for the owner node's HTTP URL.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ class RASessionRouter:
         """
         self._node_id = node_id
         self._pool = pool
+        self._column_lock = threading.Lock()
         self._column_ensured = False
 
     # ------------------------------------------------------------------

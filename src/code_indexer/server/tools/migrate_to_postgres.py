@@ -62,6 +62,8 @@ GROUPS_DB_TABLES_ORDERED: List[str] = [
     "audit_logs",
 ]
 
+_ALL_ALLOWED_TABLES = frozenset(MAIN_DB_TABLES_ORDERED + GROUPS_DB_TABLES_ORDERED)
+
 # ---------------------------------------------------------------------------
 # Columns that hold JSON strings in SQLite but should become JSON/JSONB in PG.
 # Keyed by table name -> set of column names.

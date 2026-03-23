@@ -132,7 +132,7 @@ class DistributedJobClaimer:
                 WHERE  status = 'pending'
                   AND  executing_node IS NULL
                   {type_filter}
-                ORDER BY submitted_at
+                ORDER BY created_at
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
@@ -143,6 +143,7 @@ class DistributedJobClaimer:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 row = cur.fetchone()
+            conn.commit()
 
         if row is None:
             return None
@@ -186,6 +187,7 @@ class DistributedJobClaimer:
                     (job_id, self._node_id),
                 )
                 released: bool = cur.rowcount > 0
+            conn.commit()
 
         if released:
             logger.info(
@@ -226,6 +228,7 @@ class DistributedJobClaimer:
                     (result_json, job_id, self._node_id),
                 )
                 completed: bool = cur.rowcount > 0
+            conn.commit()
 
         if completed:
             logger.debug("Node %s completed job %s", self._node_id, job_id)
@@ -259,6 +262,7 @@ class DistributedJobClaimer:
                     (error, job_id, self._node_id),
                 )
                 failed: bool = cur.rowcount > 0
+            conn.commit()
 
         if failed:
             logger.debug("Node %s failed job %s: %s", self._node_id, job_id, error)

@@ -176,6 +176,7 @@ class JobReconciliationService:
                     (active_nodes,),
                 )
                 rows = cur.fetchall()
+            conn.commit()
 
         for row in rows:
             logger.info(
@@ -209,6 +210,7 @@ class JobReconciliationService:
                     (self._max_execution_time,),
                 )
                 rows = cur.fetchall()
+            conn.commit()
 
         for row in rows:
             logger.warning(
