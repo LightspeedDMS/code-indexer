@@ -127,6 +127,7 @@ class UserManager:
         password_security_config=None,
         use_sqlite: bool = False,
         db_path: Optional[str] = None,
+        storage_backend: Optional[Any] = None,
     ):
         """
         Initialize user manager.
@@ -136,6 +137,9 @@ class UserManager:
             password_security_config: PasswordSecurityConfig for password validation settings
             use_sqlite: If True, use SQLite backend instead of JSON file (Story #702)
             db_path: Path to SQLite database file (required when use_sqlite=True)
+            storage_backend: Optional pre-created storage backend (e.g. from StorageFactory).
+                When provided, used directly instead of creating a new SQLite backend.
+                Takes precedence over use_sqlite/db_path when supplied.
         """
         self._use_sqlite = use_sqlite
         self._sqlite_backend: Optional[Any] = None
@@ -145,7 +149,11 @@ class UserManager:
             password_security_config
         )
 
-        if use_sqlite:
+        if storage_backend is not None:
+            # Injected backend (e.g. PostgreSQL from StorageFactory) — use directly.
+            self._sqlite_backend = storage_backend
+            self._use_sqlite = True
+        elif use_sqlite:
             if db_path is None:
                 raise ValueError("db_path is required when use_sqlite=True")
             from code_indexer.server.storage.sqlite_backends import (

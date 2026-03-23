@@ -64,7 +64,8 @@ def _gather_repo_metrics(repo_path) -> tuple:
         not a git repository or if git commands fail (graceful degradation).
     """
     from code_indexer.services.progress_subprocess_runner import gather_repo_metrics
-    return gather_repo_metrics(repo_path)
+
+    return gather_repo_metrics(repo_path)  # type: ignore[no-any-return]
 
 
 class GoldenRepoNotFoundError(GoldenRepoError):
@@ -126,6 +127,7 @@ class GoldenRepoManager:
         data_dir: str,
         resource_config: Optional["ServerResourceConfig"] = None,
         db_path: Optional[str] = None,
+        storage_backend: Optional[Any] = None,
     ):
         """
         Initialize golden repository manager.
@@ -168,11 +170,15 @@ class GoldenRepoManager:
         # Expose db_path for wiki cache and other consumers
         self.db_path = db_path
 
-        from code_indexer.server.storage.sqlite_backends import (
-            GoldenRepoMetadataSqliteBackend,
-        )
+        if storage_backend is not None:
+            self._sqlite_backend: Any = storage_backend
+            logger.info("GoldenRepoManager using injected storage backend")
+        else:
+            from code_indexer.server.storage.sqlite_backends import (
+                GoldenRepoMetadataSqliteBackend,
+            )
 
-        self._sqlite_backend: Any = GoldenRepoMetadataSqliteBackend(db_path)
+            self._sqlite_backend = GoldenRepoMetadataSqliteBackend(db_path)
         self._sqlite_backend.ensure_table_exists()
         self._load_metadata_from_sqlite()
 
@@ -1279,7 +1285,9 @@ class GoldenRepoManager:
         # Story #482 PATH A: Build ProgressPhaseAllocator for phase-aware progress reporting.
         # Phases: "semantic" (covers cidx index --fts), "temporal" (if enabled).
         # cidx init is fast (coarse markers only); no separate phase needed.
-        from code_indexer.services.progress_phase_allocator import ProgressPhaseAllocator
+        from code_indexer.services.progress_phase_allocator import (
+            ProgressPhaseAllocator,
+        )
         from code_indexer.services.progress_subprocess_runner import (
             gather_repo_metrics,
             run_with_popen_progress,
@@ -1326,7 +1334,7 @@ class GoldenRepoManager:
                 combined = "".join(_popen_stdout) + "".join(_popen_stderr)
                 if "No files found to index" in combined:
                     logging.warning(
-                        f"PATH A: Repository has no indexable files — acceptable for golden repo registration"
+                        "PATH A: Repository has no indexable files — acceptable for golden repo registration"
                     )
                     return
                 raise GitOperationError(str(e)) from e
@@ -1356,14 +1364,12 @@ class GoldenRepoManager:
                             f"Recoverable configuration conflict during init. "
                             f"Attempting to resolve: {combined_output}"
                         )
-                        if not self._attempt_init_conflict_resolution(clone_path, force_init):
-                            raise GitOperationError(
-                                f"Init failed: {combined_output}"
-                            )
+                        if not self._attempt_init_conflict_resolution(
+                            clone_path, force_init
+                        ):
+                            raise GitOperationError(f"Init failed: {combined_output}")
                     else:
-                        raise GitOperationError(
-                            f"cidx init failed: {combined_output}"
-                        )
+                        raise GitOperationError(f"cidx init failed: {combined_output}")
 
                 logging.info(f"cidx init completed for {clone_path}")
                 if progress_callback is not None:
@@ -1791,7 +1797,7 @@ class GoldenRepoManager:
         updated = self._sqlite_backend.update_temporal_options(alias, options)
         if updated and alias in self.golden_repos:
             self.golden_repos[alias].temporal_options = options
-        return updated
+        return updated  # type: ignore[no-any-return]
 
     def get_actual_repo_path(self, alias: str) -> str:
         """
@@ -2454,7 +2460,9 @@ class GoldenRepoManager:
 
         def background_worker(progress_callback=None) -> Dict[str, Any]:
             """Execute change_branch in a background thread (Story #482 PATH D)."""
-            return self.change_branch(alias, target_branch, progress_callback=progress_callback)
+            return self.change_branch(
+                alias, target_branch, progress_callback=progress_callback
+            )
 
         job_id = self.background_job_manager.submit_job(
             operation_type="change_branch",
@@ -2686,7 +2694,13 @@ class GoldenRepoManager:
 
                     elif index_type == "temporal":
                         # Story #480: Use Popen + line reader for real-time progress
-                        command = ["cidx", "index", "--index-commits", "--clear", "--progress-json"]
+                        command = [
+                            "cidx",
+                            "index",
+                            "--index-commits",
+                            "--clear",
+                            "--progress-json",
+                        ]
 
                         max_commits = temporal_options.get("max_commits")
                         if max_commits is not None:

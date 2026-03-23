@@ -23,14 +23,18 @@ class RepoCategoryService:
 
     MAX_PATTERN_LENGTH = 500
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str = "", storage_backend=None) -> None:
         """
         Initialize the service.
 
         Args:
             db_path: Path to SQLite database file.
+            storage_backend: Optional pre-created backend (e.g. from StorageFactory).
         """
-        self._backend = RepoCategorySqliteBackend(db_path)
+        if storage_backend is not None:
+            self._backend = storage_backend
+        else:
+            self._backend = RepoCategorySqliteBackend(db_path)
 
     def create_category(self, name: str, pattern: str) -> int:
         """
@@ -53,7 +57,7 @@ class RepoCategoryService:
         self._backend.shift_all_priorities()
 
         # Create new category at priority 1 (highest precedence)
-        return self._backend.create_category(name, pattern, 1)
+        return self._backend.create_category(name, pattern, 1)  # type: ignore[no-any-return]
 
     def update_category(self, category_id: int, name: str, pattern: str) -> None:
         """
@@ -90,7 +94,7 @@ class RepoCategoryService:
         Returns:
             Category dictionary if found, None otherwise.
         """
-        return self._backend.get_category(category_id)
+        return self._backend.get_category(category_id)  # type: ignore[no-any-return]
 
     def list_categories(self) -> List[Dict[str, Any]]:
         """
@@ -99,7 +103,7 @@ class RepoCategoryService:
         Returns:
             List of category dictionaries ordered by priority ASC.
         """
-        return self._backend.list_categories()
+        return self._backend.list_categories()  # type: ignore[no-any-return]
 
     def reorder_categories(self, ordered_ids: List[int]) -> None:
         """
@@ -116,7 +120,9 @@ class RepoCategoryService:
         current_ids = set(cat["id"] for cat in current)
         submitted_ids = set(ordered_ids)
         if current_ids != submitted_ids:
-            raise ValueError("Reorder list must contain exactly all existing category IDs")
+            raise ValueError(
+                "Reorder list must contain exactly all existing category IDs"
+            )
         self._backend.reorder_categories(ordered_ids)
 
     def auto_assign(self, alias: str) -> Optional[int]:
@@ -145,7 +151,7 @@ class RepoCategoryService:
                         f"Auto-assigned alias '{alias}' to category '{category['name']}' "
                         f"(id={category['id']}, priority={category['priority']})"
                     )
-                    return category["id"]
+                    return category["id"]  # type: ignore[no-any-return]
             except re.error as e:
                 # Pattern should have been validated on creation, but log if somehow invalid
                 logger.warning(
@@ -177,7 +183,9 @@ class RepoCategoryService:
         from ..storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
 
         # Get backend instance - assumes same db_path as category backend
-        repo_backend = GoldenRepoMetadataSqliteBackend(self._backend._conn_manager.db_path)
+        repo_backend = GoldenRepoMetadataSqliteBackend(
+            self._backend._conn_manager.db_path
+        )
 
         # Get all repos with category information
         repos = repo_backend.list_repos_with_categories()
@@ -203,7 +211,9 @@ class RepoCategoryService:
 
                 # Update if category changed
                 if new_category_id != current_category_id:
-                    repo_backend.update_category(alias, new_category_id, auto_assigned=True)
+                    repo_backend.update_category(
+                        alias, new_category_id, auto_assigned=True
+                    )
                     updated_count += 1
                     logger.info(
                         f"Re-evaluated '{alias}': {current_category_id} -> {new_category_id}"
@@ -234,10 +244,11 @@ class RepoCategoryService:
                 "misc-tool": {"category_name": None, "priority": None}
             }
         """
-        return self._backend.get_repo_category_map()
+        return self._backend.get_repo_category_map()  # type: ignore[no-any-return]
 
-
-    def update_repo_category(self, alias: str, category_id: Optional[int], auto_assigned: bool = False) -> None:
+    def update_repo_category(
+        self, alias: str, category_id: Optional[int], auto_assigned: bool = False
+    ) -> None:
         """
         Update a golden repository's category assignment (Story #183).
 
@@ -256,10 +267,14 @@ class RepoCategoryService:
         from ..storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
 
         # Get backend instance - assumes same db_path as category backend
-        repo_backend = GoldenRepoMetadataSqliteBackend(self._backend._conn_manager.db_path)
+        repo_backend = GoldenRepoMetadataSqliteBackend(
+            self._backend._conn_manager.db_path
+        )
 
         # Delegate to backend's update_category method
-        updated = repo_backend.update_category(alias, category_id, auto_assigned=auto_assigned)
+        updated = repo_backend.update_category(
+            alias, category_id, auto_assigned=auto_assigned
+        )
 
         if not updated:
             raise ValueError(f"Repository '{alias}' not found")

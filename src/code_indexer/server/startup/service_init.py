@@ -128,12 +128,58 @@ def initialize_services() -> Dict[str, Any]:
 
     schema = DatabaseSchema(str(db_path))
     schema.initialize_database()
+
+    # Epic #408: Cluster mode — determine storage backend
+    _storage_mode = "sqlite"
+    _backend_registry = None
+    data_dir = str(Path(server_data_dir) / "data")
+    db_path_str = str(db_path)
+    try:
+        import json as _json
+
+        _config_path = Path(server_data_dir) / "config.json"
+        if _config_path.exists():
+            with open(_config_path) as _cf:
+                _raw_config = _json.load(_cf)
+            _storage_mode = _raw_config.get("storage_mode", "sqlite")
+    except Exception:
+        pass  # Default to sqlite on any config read error
+
+    if _storage_mode == "postgres":
+        try:
+            _postgres_dsn = _raw_config.get("postgres_dsn", "")
+            if not _postgres_dsn:
+                raise ValueError("postgres_dsn required when storage_mode=postgres")
+            from code_indexer.server.storage.factory import StorageFactory
+
+            _backend_registry = StorageFactory.create_backends(
+                config=_raw_config,
+                data_dir=data_dir,
+            )
+            logger.info(
+                "Storage mode: PostgreSQL (cluster)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as _e:
+            logger.error(
+                f"Failed to initialize PostgreSQL backends: {_e}. Falling back to SQLite.",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            _storage_mode = "sqlite"
+            _backend_registry = None
+    else:
+        logger.info(
+            "Storage mode: SQLite (standalone)",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
     # Bug #83-2 Fix: Pass password_security_config to UserManager
     user_manager = UserManager(
         users_file_path=users_file_path,
         password_security_config=server_config.password_security,
         use_sqlite=True,
         db_path=str(db_path),
+        storage_backend=_backend_registry.users if _backend_registry else None,
     )
     refresh_token_manager = RefreshTokenManager(jwt_manager=jwt_manager)
 
@@ -179,13 +225,15 @@ def initialize_services() -> Dict[str, Any]:
     server_config = config_manager.apply_env_overrides(server_config)
 
     # Initialize managers with resource configuration
-    data_dir = str(Path(server_data_dir) / "data")
-    # Story #711: Use SQLite for golden repo metadata storage
-    db_path_str = str(db_path)
+    # (data_dir and db_path_str already computed above for storage mode detection)
+
     golden_repo_manager = GoldenRepoManager(
         data_dir=data_dir,
         resource_config=server_config.resource_config,
         db_path=db_path_str,
+        storage_backend=_backend_registry.golden_repo_metadata
+        if _backend_registry
+        else None,
     )
     # Story #311: Instantiate JobTracker before BackgroundJobManager (Epic #261 Story 1B)
     from code_indexer.server.services.job_tracker import JobTracker as _JobTracker
@@ -213,6 +261,9 @@ def initialize_services() -> Dict[str, Any]:
         background_jobs_config=server_config.background_jobs_config,
         job_tracker=job_tracker,
         data_retention_config=server_config.data_retention_config,
+        storage_backend=_backend_registry.background_jobs
+        if _backend_registry
+        else None,
     )
     # Inject BackgroundJobManager into GoldenRepoManager for async operations
     golden_repo_manager.background_job_manager = background_job_manager
@@ -266,7 +317,10 @@ def initialize_services() -> Dict[str, Any]:
     # Inject RepoCategoryService for auto-assignment (Story #181)
     from code_indexer.server.services.repo_category_service import RepoCategoryService
 
-    repo_category_service = RepoCategoryService(db_path_str)
+    repo_category_service = RepoCategoryService(
+        db_path_str,
+        storage_backend=_backend_registry.repo_category if _backend_registry else None,
+    )
 
     # Wire RepoCategoryService to REST API router (Story #182)
     set_category_service(repo_category_service)
@@ -324,6 +378,8 @@ def initialize_services() -> Dict[str, Any]:
         "db_path_str": db_path_str,
         "secret_key": secret_key,
         "repo_category_service": repo_category_service,
+        "storage_mode": _storage_mode,
+        "backend_registry": _backend_registry,
         "_server_hnsw_cache": _server_hnsw_cache,
         "_server_fts_cache": _server_fts_cache,
     }

@@ -79,7 +79,9 @@ class BackgroundJob:
     )
 
     # Story #480: Real-time phase progress fields
-    current_phase: Optional[str] = None  # e.g., "semantic", "temporal", "fts", "scip", "cow"
+    current_phase: Optional[str] = (
+        None  # e.g., "semantic", "temporal", "fts", "scip", "cow"
+    )
     phase_detail: Optional[str] = None  # e.g., "150/500 files indexed"
 
 
@@ -100,6 +102,7 @@ class BackgroundJobManager:
         background_jobs_config: Optional["BackgroundJobsConfig"] = None,
         job_tracker: Optional["JobTracker"] = None,
         data_retention_config: Optional["DataRetentionConfig"] = None,
+        storage_backend: Optional[Any] = None,
     ):
         """Initialize enhanced background job manager.
 
@@ -131,8 +134,12 @@ class BackgroundJobManager:
         self.db_path = db_path
         self._sqlite_backend: Optional["BackgroundJobsSqliteBackend"] = None
 
-        # Initialize SQLite backend if enabled
-        if self.use_sqlite and self.db_path:
+        # Initialize storage backend
+        if storage_backend is not None:
+            self._sqlite_backend = storage_backend
+            self.use_sqlite = True
+            logging.info("BackgroundJobManager using injected storage backend")
+        elif self.use_sqlite and self.db_path:
             from code_indexer.server.storage.sqlite_backends import (
                 BackgroundJobsSqliteBackend,
             )
