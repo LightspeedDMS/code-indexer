@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.5.33
+
+### Features (Epic #408 -- CIDX Server Clusterization, Junction 1)
+- feat: Protocol interfaces for all 14 storage backends (Story #410)
+- feat: Database migration system with numbered SQL files and 001_initial_schema.sql (Story #416)
+- feat: PostgreSQL backend for Users and Sessions with connection pool (Story #411)
+- feat: PostgreSQL backend for GlobalRepos and GoldenRepoMetadata (3-table) (Story #412)
+- feat: PostgreSQL backend for BackgroundJobs and SyncJobs (Story #413)
+- feat: PostgreSQL backend for 6 remaining backends (CI tokens, SSH keys, git credentials, etc.) (Story #414)
+- feat: PostgreSQL backend for Groups and AuditLog, merged from separate groups.db (Story #415)
+- feat: StorageFactory with BackendRegistry for config-driven SQLite vs PostgreSQL selection (Story #417)
+
+All new files, zero modifications to existing code. SQLite standalone mode unchanged.
+PostgreSQL backends only loaded when storage_mode="postgres" in config.json.
+
 ## v9.5.32
 
 ### Refactoring
