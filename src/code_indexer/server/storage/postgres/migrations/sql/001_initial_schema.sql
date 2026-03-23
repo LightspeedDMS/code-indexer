@@ -88,11 +88,11 @@ CREATE TABLE IF NOT EXISTS golden_repos_metadata (
     default_branch          TEXT        NOT NULL,
     clone_path              TEXT        NOT NULL,
     created_at              TIMESTAMPTZ NOT NULL,
-    enable_temporal         INTEGER     NOT NULL DEFAULT 0,
+    enable_temporal         BOOLEAN     NOT NULL DEFAULT FALSE,
     temporal_options        JSONB,
-    wiki_enabled            INTEGER     DEFAULT 0,
+    wiki_enabled            BOOLEAN     DEFAULT FALSE,
     category_id             INTEGER,
-    category_auto_assigned  INTEGER     DEFAULT 0
+    category_auto_assigned  BOOLEAN     DEFAULT FALSE
 );
 
 CREATE TABLE IF NOT EXISTS golden_repo_indexes (
@@ -137,8 +137,8 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     error                       TEXT,
     progress                    INTEGER     NOT NULL DEFAULT 0,
     username                    TEXT        NOT NULL,
-    is_admin                    INTEGER     NOT NULL DEFAULT 0,
-    cancelled                   INTEGER     NOT NULL DEFAULT 0,
+    is_admin                    BOOLEAN     NOT NULL DEFAULT FALSE,
+    cancelled                   BOOLEAN     NOT NULL DEFAULT FALSE,
     repo_alias                  TEXT,
     resolution_attempts         INTEGER     NOT NULL DEFAULT 0,
     claude_actions              JSONB,
@@ -271,7 +271,9 @@ CREATE TABLE IF NOT EXISTS dependency_map_tracking (
     next_run        TIMESTAMPTZ,
     status          TEXT        DEFAULT 'pending',
     commit_hashes   JSONB,
-    error_message   TEXT
+    error_message       TEXT,
+    refinement_cursor   INTEGER     DEFAULT 0,
+    refinement_next_run TIMESTAMPTZ
 );
 
 -- Wiki cache
@@ -284,6 +286,7 @@ CREATE TABLE IF NOT EXISTS wiki_cache (
     file_mtime      DOUBLE PRECISION NOT NULL,
     file_size       INTEGER     NOT NULL,
     rendered_at     TIMESTAMPTZ NOT NULL,
+    metadata        JSONB,
     PRIMARY KEY (repo_alias, article_path)
 );
 

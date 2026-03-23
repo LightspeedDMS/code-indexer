@@ -97,6 +97,40 @@ JSON_COLUMNS: Dict[str, set] = {
 # (kept as documentation; transformation is handled in _transform_row)
 
 
+# ---------------------------------------------------------------------------
+# Columns that store INTEGER 0/1 in SQLite but should be BOOLEAN in PG.
+# ---------------------------------------------------------------------------
+BOOLEAN_COLUMNS: Dict[str, set] = {
+    "global_repos": {"enable_temporal", "enable_scip", "wiki_enabled"},
+    "golden_repos_metadata": {
+        "enable_temporal",
+        "enable_scip",
+        "wiki_enabled",
+        "category_auto_assigned",
+    },
+    "ssh_keys": {"is_imported"},
+    "groups": {"is_default"},
+    "background_jobs": {"is_admin", "cancelled"},
+    "users": {"is_admin", "is_sso"},
+}
+
+# ---------------------------------------------------------------------------
+# Column renames: SQLite column name -> PG column name.
+# Used when the migration SQL uses a different name than the SQLite schema.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Columns that store Unix epoch floats in SQLite but need ISO-8601 for PG.
+# ---------------------------------------------------------------------------
+EPOCH_TIMESTAMP_COLUMNS: Dict[str, set] = {
+    "global_repos": {"next_refresh", "last_refresh"},
+}
+
+COLUMN_RENAMES: Dict[str, Dict[str, str]] = {
+    "wiki_cache": {"metadata_json": "metadata"},
+}
+
+
 class SqliteToPostgresMigrator:
     """
     Migrates all data from SQLite (cidx_server.db + groups.db) to PostgreSQL.
@@ -312,32 +346,53 @@ class SqliteToPostgresMigrator:
         Transform a SQLite row dict to a PostgreSQL-compatible dict.
 
         Conversions applied:
-        - JSON string columns -> parsed Python objects (psycopg v3 serialises
-          them to JSONB automatically).
+        - JSON string columns -> psycopg Json() wrapper for JSONB insertion.
         - Integer 0/1 stored in BOOLEAN columns -> Python bool.
-        - Timestamp strings left as-is (psycopg v3 accepts ISO-8601 strings
-          for TIMESTAMPTZ).
+        - Column renames (e.g. metadata_json -> metadata).
+        - Timestamp strings left as-is (psycopg v3 accepts ISO-8601 strings).
         - None values passed through unchanged.
-
-        Args:
-            table_name: Name of the table the row belongs to.
-            row: Row as a dict (column_name -> raw SQLite value).
-
-        Returns:
-            Transformed dict ready for insertion via psycopg v3.
         """
+        from psycopg.types.json import Json
+
         result: Dict[str, Any] = {}
         json_cols = JSON_COLUMNS.get(table_name, set())
+        bool_cols = BOOLEAN_COLUMNS.get(table_name, set())
+        renames = COLUMN_RENAMES.get(table_name, {})
 
         for col, value in row.items():
+            # Apply column rename if needed
+            dest_col = renames.get(col, col)
+
             if value is None:
-                result[col] = None
+                result[dest_col] = None
                 continue
 
             if col in json_cols:
-                result[col] = _parse_json_column(value)
+                parsed = _parse_json_column(value)
+                result[dest_col] = Json(parsed) if parsed is not None else None
+            elif col in bool_cols:
+                result[dest_col] = bool(value)
             else:
-                result[col] = value
+                result[dest_col] = value
+
+        # Convert epoch timestamps to ISO-8601
+        epoch_cols = EPOCH_TIMESTAMP_COLUMNS.get(table_name, set())
+        for col in epoch_cols:
+            dest = renames.get(col, col)
+            val = result.get(dest)
+            if val is not None:
+                # Epoch can be stored as int, float, or numeric string
+                try:
+                    epoch_val = float(val)
+                    # Only convert if it looks like an epoch (> year 2000 in seconds)
+                    if epoch_val > 946684800:
+                        from datetime import datetime, timezone
+
+                        result[dest] = datetime.fromtimestamp(
+                            epoch_val, tz=timezone.utc
+                        ).isoformat()
+                except (ValueError, TypeError, OSError):
+                    pass  # Not an epoch — leave as-is (already ISO string)
 
         return result
 
@@ -362,7 +417,32 @@ class SqliteToPostgresMigrator:
 
         pg_conn = self._get_pg_connection()
         try:
-            inserted = self._upsert_rows(pg_conn, table_name, rows)
+            # Try to disable FK triggers for this table (requires table owner)
+            fk_disabled = False
+            try:
+                pg_conn.execute(
+                    f"ALTER TABLE {table_name} DISABLE TRIGGER ALL"  # noqa: S608
+                )
+                fk_disabled = True
+            except Exception as exc:
+                logger.debug(
+                    "Could not disable triggers for %s (will skip FK errors per-row): %s",
+                    table_name,
+                    exc,
+                )
+                pg_conn.rollback()  # Reset after failed ALTER
+
+            inserted = self._upsert_rows(
+                pg_conn,
+                table_name,
+                rows,
+                skip_fk_errors=not fk_disabled,
+            )
+
+            if fk_disabled:
+                pg_conn.execute(
+                    f"ALTER TABLE {table_name} ENABLE TRIGGER ALL"  # noqa: S608
+                )
             pg_conn.commit()
         except Exception:
             pg_conn.rollback()
@@ -402,6 +482,7 @@ class SqliteToPostgresMigrator:
         pg_conn: Any,
         table_name: str,
         rows: List[Dict[str, Any]],
+        skip_fk_errors: bool = False,
     ) -> int:
         """
         Insert rows into a PostgreSQL table using ON CONFLICT DO NOTHING.
@@ -410,6 +491,8 @@ class SqliteToPostgresMigrator:
             pg_conn: Active psycopg v3 connection.
             table_name: Destination table name.
             rows: List of row dicts to insert.
+            skip_fk_errors: When True, catch FK violation errors per-row
+                using SAVEPOINTs and log a warning instead of failing.
 
         Returns:
             Total number of rows affected (inserted, not conflicting).
@@ -427,10 +510,35 @@ class SqliteToPostgresMigrator:
         )
 
         total_inserted = 0
+        skipped = 0
         with pg_conn.cursor() as cur:
             for row in rows:
-                cur.execute(sql, row)
-                total_inserted += cur.rowcount if cur.rowcount > 0 else 0
+                if skip_fk_errors:
+                    from psycopg.errors import ForeignKeyViolation
+
+                    try:
+                        cur.execute("SAVEPOINT row_sp")
+                        cur.execute(sql, row)
+                        cur.execute("RELEASE SAVEPOINT row_sp")
+                        total_inserted += cur.rowcount if cur.rowcount > 0 else 0
+                    except ForeignKeyViolation as exc:
+                        cur.execute("ROLLBACK TO SAVEPOINT row_sp")
+                        logger.debug(
+                            "Skipped row in '%s': %s",
+                            table_name,
+                            exc,
+                        )
+                        skipped += 1
+                else:
+                    cur.execute(sql, row)
+                    total_inserted += cur.rowcount if cur.rowcount > 0 else 0
+
+        if skipped > 0:
+            logger.warning(
+                "Skipped %d rows in '%s' due to FK constraint violations",
+                skipped,
+                table_name,
+            )
 
         return total_inserted
 
