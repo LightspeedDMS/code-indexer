@@ -325,6 +325,34 @@ Edit `~/.cidx-server/config.json` with the same `postgres_dsn` as the other node
 
 Each node must have a distinct `node_id`. Duplicate node IDs cause heartbeat conflicts in the `cluster_nodes` table (the table has a PRIMARY KEY on `node_id`).
 
+### Step 2b: Copy JWT Secret from an Existing Node
+
+All cluster nodes must share the same JWT signing secret so that authentication tokens issued by one node are accepted by all others. The secret is stored in `~/.cidx-server/.jwt_secret`.
+
+Copy the secret from any existing cluster node:
+
+```bash
+# On an existing node:
+cat ~/.cidx-server/.jwt_secret
+
+# On the new node, write the same value:
+echo 'the-secret-value-from-existing-node' > ~/.cidx-server/.jwt_secret
+chmod 600 ~/.cidx-server/.jwt_secret
+```
+
+If you skip this step, tokens created on other nodes will be rejected by the new node with "Authentication required" errors.
+
+### Step 2c: Open Firewall Port
+
+The CIDX server listens on port 8000. If the OS firewall is active (firewalld on Rocky Linux / RHEL), open the port:
+
+```bash
+sudo firewall-cmd --add-port=8000/tcp --permanent
+sudo firewall-cmd --reload
+```
+
+Without this, the load balancer health checks will fail and the node will not receive traffic.
+
 ### Step 3: Mount Shared Storage
 
 Mount the NFS volume containing golden repositories at the same path as the other nodes, for example `/home/cidx/.cidx-server/data/golden-repos`. The exact mount path depends on your infrastructure; it must match the `index_path` and `clone_path` values stored in the PostgreSQL `global_repos` and `golden_repos_metadata` tables.
