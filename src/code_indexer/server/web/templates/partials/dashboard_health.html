@@ -76,8 +76,8 @@
 
     <!-- Story #492: Node Metrics Carousel (AC4-AC8) -->
     <style>
-    /* Node metrics card spans full width of health grid */
-    .node-metrics-card { grid-column: 2 / -1; }
+    /* Override auto-fit grid to fixed 3-column layout when node metrics present */
+    .health-grid:has(.node-metrics-card) { grid-template-columns: 1fr 1fr 2fr; }
     /* Two-column layout inside each carousel slide */
     .nm-slide-content { display: flex; gap: 1rem; }
     .nm-metrics-col { flex: 1; min-width: 0; }
