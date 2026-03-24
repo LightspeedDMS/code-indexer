@@ -143,7 +143,7 @@ cd "$INSTALL_DIR"
 $PYTHON -m pip install -e . 2>&1 | tail -5
 
 # Install cluster-specific dependencies
-$PYTHON -m pip install "psycopg[binary]" psycopg-pool requests 2>&1 | tail -3
+$PYTHON -m pip install "psycopg[binary]" psycopg-pool requests numpy 2>&1 | tail -3
 
 # Verify critical imports
 $PYTHON -c "import code_indexer; print(f'code-indexer v{code_indexer.__version__} installed')"
