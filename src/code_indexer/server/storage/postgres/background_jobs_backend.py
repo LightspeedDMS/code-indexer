@@ -395,17 +395,29 @@ class BackgroundJobsPostgresBackend:
         error_message = "Job interrupted by server restart"
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE background_jobs
-                    SET status = 'failed',
-                        error = %s,
-                        completed_at = %s
-                    WHERE status IN ('running', 'pending')
-                      AND (%s IS NULL OR executing_node = %s)
-                    """,
-                    (error_message, interrupted_at, node_id, node_id),
-                )
+                if node_id is not None:
+                    cur.execute(
+                        """
+                        UPDATE background_jobs
+                        SET status = 'failed',
+                            error = %s,
+                            completed_at = %s
+                        WHERE status IN ('running', 'pending')
+                          AND executing_node = %s
+                        """,
+                        (error_message, interrupted_at, node_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE background_jobs
+                        SET status = 'failed',
+                            error = %s,
+                            completed_at = %s
+                        WHERE status IN ('running', 'pending')
+                        """,
+                        (error_message, interrupted_at),
+                    )
                 count: int = cur.rowcount
         if count > 0:
             logger.info("Cleaned up %d orphaned jobs on server startup", count)
