@@ -373,6 +373,18 @@ def dashboard_health_partial(request: Request):
     db_health_service = get_database_health_service()
     database_health = db_health_service.get_all_database_health_cached()
 
+    # Story #492: Read node metrics from DB for cluster carousel (AC3)
+    # Use the backend stored in app.state during startup (set by lifespan.py).
+    # In postgres/cluster mode this is NodeMetricsPostgresBackend; in standalone
+    # mode it is NodeMetricsSqliteBackend.  Both satisfy NodeMetricsBackend Protocol.
+    node_metrics = []
+    try:
+        _nm_backend = getattr(request.app.state, "node_metrics_backend", None)
+        if _nm_backend is not None:
+            node_metrics = _nm_backend.get_latest_per_node()
+    except Exception as e:
+        logger.debug(f"Could not read node_metrics from DB: {e}")
+
     return templates.TemplateResponse(
         "partials/dashboard_health.html",
         {
@@ -380,6 +392,7 @@ def dashboard_health_partial(request: Request):
             "health": health_data,
             "database_health": database_health,
             "server_version": cidx_version,
+            "node_metrics": node_metrics,
         },
     )
 
@@ -2587,7 +2600,7 @@ def save_temporal_options(
             status_code=400,
         )
 
-    options = {}
+    options: Dict[str, Any] = {}
 
     if max_commits and max_commits.strip():
         try:

@@ -391,6 +391,39 @@ class DatabaseSchema:
         )
     """
 
+    # Story #492: Cluster-Aware Dashboard - Node Metrics table
+    CREATE_NODE_METRICS_TABLE = """
+        CREATE TABLE IF NOT EXISTS node_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id TEXT NOT NULL,
+            node_ip TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            cpu_usage REAL NOT NULL DEFAULT 0.0,
+            memory_percent REAL NOT NULL DEFAULT 0.0,
+            memory_used_bytes INTEGER NOT NULL DEFAULT 0,
+            process_rss_mb REAL NOT NULL DEFAULT 0.0,
+            index_memory_mb REAL NOT NULL DEFAULT 0.0,
+            swap_used_mb REAL NOT NULL DEFAULT 0.0,
+            swap_total_mb REAL NOT NULL DEFAULT 0.0,
+            disk_read_kb_s REAL NOT NULL DEFAULT 0.0,
+            disk_write_kb_s REAL NOT NULL DEFAULT 0.0,
+            net_rx_kb_s REAL NOT NULL DEFAULT 0.0,
+            net_tx_kb_s REAL NOT NULL DEFAULT 0.0,
+            volumes_json TEXT NOT NULL DEFAULT '[]',
+            server_version TEXT NOT NULL DEFAULT ''
+        )
+    """
+
+    CREATE_IDX_NODE_METRICS_NODE_TIMESTAMP = """
+        CREATE INDEX IF NOT EXISTS idx_node_metrics_node_timestamp
+        ON node_metrics(node_id, timestamp DESC)
+    """
+
+    CREATE_IDX_NODE_METRICS_TIMESTAMP = """
+        CREATE INDEX IF NOT EXISTS idx_node_metrics_timestamp
+        ON node_metrics(timestamp)
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -469,6 +502,10 @@ class DatabaseSchema:
             conn.execute(self.CREATE_WIKI_SIDEBAR_CACHE_TABLE)
             # Story #386: Git Credential Management
             conn.execute(self.CREATE_USER_GIT_CREDENTIALS_TABLE)
+            # Story #492: Cluster-Aware Dashboard - Node Metrics
+            conn.execute(self.CREATE_NODE_METRICS_TABLE)
+            conn.execute(self.CREATE_IDX_NODE_METRICS_NODE_TIMESTAMP)
+            conn.execute(self.CREATE_IDX_NODE_METRICS_TIMESTAMP)
             # Story #269: Justified performance indexes (created on fresh databases)
             conn.execute(self.CREATE_IDX_BACKGROUND_JOBS_STATUS)
             conn.execute(self.CREATE_IDX_BACKGROUND_JOBS_STATUS_CREATED)
@@ -498,6 +535,8 @@ class DatabaseSchema:
             self._migrate_background_jobs_phase_fields(conn)
             # Story #386: Git Credential Management
             self._migrate_user_git_credentials(conn)
+            # Story #492: Cluster-Aware Dashboard - Node Metrics (migration for existing DBs)
+            self._migrate_node_metrics_table(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
@@ -541,6 +580,22 @@ class DatabaseSchema:
         conn.execute(self.CREATE_USER_GIT_CREDENTIALS_TABLE)
         conn.commit()
         logger.debug("Ensured user_git_credentials table exists")
+
+    def _migrate_node_metrics_table(self, conn: sqlite3.Connection) -> None:
+        """
+        Add node_metrics table and indexes if they don't exist (Story #492).
+
+        Idempotent: uses CREATE TABLE IF NOT EXISTS and CREATE INDEX IF NOT EXISTS
+        so safe to run on any existing database.
+
+        This migration ensures the cluster node metrics table is present for
+        both new installations and upgrades from older versions.
+        """
+        conn.execute(self.CREATE_NODE_METRICS_TABLE)
+        conn.execute(self.CREATE_IDX_NODE_METRICS_NODE_TIMESTAMP)
+        conn.execute(self.CREATE_IDX_NODE_METRICS_TIMESTAMP)
+        conn.commit()
+        logger.debug("Ensured node_metrics table and indexes exist")
 
     def _migrate_background_jobs_job_tracker(self, conn: sqlite3.Connection) -> None:
         """
@@ -657,16 +712,12 @@ class DatabaseSchema:
 
         # Story #284: next_refresh for back-propagating jitter scheduling
         if "next_refresh" not in existing_columns:
-            conn.execute(
-                "ALTER TABLE global_repos ADD COLUMN next_refresh TEXT"
-            )
+            conn.execute("ALTER TABLE global_repos ADD COLUMN next_refresh TEXT")
             migrations_applied.append("next_refresh")
 
         if migrations_applied:
             conn.commit()
-            logger.info(
-                f"Migrated global_repos schema: added {migrations_applied}"
-            )
+            logger.info(f"Migrated global_repos schema: added {migrations_applied}")
 
     def _migrate_research_sessions_schema(self, conn: sqlite3.Connection) -> None:
         """
@@ -793,7 +844,12 @@ class DatabaseSchema:
         Adds wiki_enabled column to golden_repos_metadata.
         Safe to run multiple times - only adds missing columns.
         """
-        existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(golden_repos_metadata)").fetchall()}
+        existing_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(golden_repos_metadata)"
+            ).fetchall()
+        }
         migrations_applied = []
         if "wiki_enabled" not in existing_columns:
             conn.execute(
@@ -802,7 +858,9 @@ class DatabaseSchema:
             migrations_applied.append("wiki_enabled")
         if migrations_applied:
             conn.commit()
-            logger.info(f"Wiki migration applied to golden_repos_metadata: {migrations_applied}")
+            logger.info(
+                f"Wiki migration applied to golden_repos_metadata: {migrations_applied}"
+            )
 
     def _migrate_wiki_cache_tables(self, conn: sqlite3.Connection) -> None:
         """Create wiki cache tables for existing databases (Story #283).
@@ -889,9 +947,7 @@ class DatabaseConnectionManager:
                 del self._connections[tid]
 
             if stale_ids:
-                logger.info(
-                    f"Cleaned up {len(stale_ids)} stale SQLite connections"
-                )
+                logger.info(f"Cleaned up {len(stale_ids)} stale SQLite connections")
 
     def get_connection(self) -> sqlite3.Connection:
         """

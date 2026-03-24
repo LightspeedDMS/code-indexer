@@ -41,7 +41,7 @@ def _init_db(tmp_path: Path) -> str:
 
 
 class TestBackendRegistryStructure:
-    """BackendRegistry must expose all 14 required fields."""
+    """BackendRegistry must expose all 15 required fields (including node_metrics)."""
 
     REQUIRED_FIELDS = {
         "global_repos",
@@ -58,21 +58,57 @@ class TestBackendRegistryStructure:
         "repo_category",
         "groups",
         "audit_log",
+        "node_metrics",
     }
 
     def test_backend_registry_has_all_required_fields(self) -> None:
-        """BackendRegistry dataclass must declare all 14 required fields."""
+        """BackendRegistry dataclass must declare all 15 required fields including node_metrics."""
         from code_indexer.server.storage.factory import BackendRegistry
 
         field_names = {f.name for f in dataclasses.fields(BackendRegistry)}
         missing = self.REQUIRED_FIELDS - field_names
         assert not missing, f"BackendRegistry is missing fields: {missing}"
 
+    def test_backend_registry_has_node_metrics_field(self) -> None:
+        """BackendRegistry must have a node_metrics field for cluster dashboard (Story #492)."""
+        from code_indexer.server.storage.factory import BackendRegistry
+
+        field_names = {f.name for f in dataclasses.fields(BackendRegistry)}
+        assert (
+            "node_metrics" in field_names
+        ), "BackendRegistry.node_metrics is required for cluster-aware dashboard"
+
     def test_backend_registry_is_dataclass(self) -> None:
         """BackendRegistry must be a dataclass."""
         from code_indexer.server.storage.factory import BackendRegistry
 
         assert dataclasses.is_dataclass(BackendRegistry)
+
+
+# ---------------------------------------------------------------------------
+# node_metrics backend in StorageFactory
+# ---------------------------------------------------------------------------
+
+
+class TestStorageFactoryNodeMetrics:
+    """StorageFactory must create NodeMetricsBackend in SQLite mode."""
+
+    def test_sqlite_mode_creates_node_metrics_backend(self, tmp_path: Path) -> None:
+        """StorageFactory SQLite mode must create NodeMetricsSqliteBackend satisfying NodeMetricsBackend Protocol."""
+        from code_indexer.server.storage.factory import StorageFactory
+        from code_indexer.server.storage.protocols import NodeMetricsBackend
+        from code_indexer.server.storage.sqlite_backends import NodeMetricsSqliteBackend
+
+        data_dir = _init_db(tmp_path)
+        registry = StorageFactory.create_backends(config={}, data_dir=data_dir)
+
+        assert registry.node_metrics is not None, "node_metrics must not be None"
+        assert isinstance(
+            registry.node_metrics, NodeMetricsSqliteBackend
+        ), f"Expected NodeMetricsSqliteBackend, got {type(registry.node_metrics)}"
+        assert isinstance(
+            registry.node_metrics, NodeMetricsBackend
+        ), "node_metrics must satisfy NodeMetricsBackend Protocol"
 
 
 # ---------------------------------------------------------------------------

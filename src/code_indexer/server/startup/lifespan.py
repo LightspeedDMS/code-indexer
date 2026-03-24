@@ -1398,6 +1398,69 @@ def make_lifespan(
                     extra={"correlation_id": get_correlation_id()},
                 )
 
+        # Story #492: Start NodeMetricsWriterService (always on, SQLite or postgres)
+        # When backend_registry is available (postgres/cluster mode), use its node_metrics
+        # backend so NodeMetricsPostgresBackend is used instead of SQLite.
+        _node_metrics_writer = None
+        try:
+            from code_indexer.server.services.node_metrics_writer_service import (
+                NodeMetricsWriterService,
+            )
+
+            _nm_node_id = None
+            try:
+                import json as _nm_json
+
+                _nm_cfg_path = Path.home() / ".cidx-server" / "config.json"
+                if _nm_cfg_path.exists():
+                    with open(_nm_cfg_path) as _nm_f:
+                        _nm_cfg = _nm_json.load(_nm_f)
+                        _nm_node_id = _nm_cfg.get("cluster", {}).get("node_id") or None
+            except Exception as e:
+                logger.debug(f"Could not read node_id from config.json: {e}")
+
+            # Use the backend_registry.node_metrics when running in postgres/cluster mode;
+            # fall back to creating a dedicated SQLite backend for standalone mode.
+            if backend_registry is not None:
+                _nm_backend = backend_registry.node_metrics
+                logger.info(
+                    "NodeMetricsWriterService: using backend_registry.node_metrics "
+                    f"(storage_mode={storage_mode})",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                from code_indexer.server.storage.sqlite_backends import (
+                    NodeMetricsSqliteBackend,
+                )
+
+                _nm_db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")
+                _nm_backend = NodeMetricsSqliteBackend(_nm_db_path)
+
+            _node_metrics_writer = NodeMetricsWriterService(
+                backend=_nm_backend,
+                node_id=_nm_node_id,
+            )
+            _node_metrics_writer.start()
+            app.state.node_metrics_writer = _node_metrics_writer
+            # Store backend in app.state so dashboard-health route can access it
+            # without re-creating it on every request.
+            app.state.node_metrics_backend = _nm_backend
+            logger.info(
+                f"NodeMetricsWriterService started (node_id={_node_metrics_writer.node_id})",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-032",
+                    f"Failed to start NodeMetricsWriterService: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            app.state.node_metrics_writer = None
+            app.state.node_metrics_backend = None
+
         yield  # Server is now running
 
         # Epic #408: Stop cluster services
@@ -1417,6 +1480,24 @@ def make_lifespan(
                 logger.warning(
                     f"Error stopping cluster service {svc_name}: {e}",
                     extra={"correlation_id": get_correlation_id()},
+                )
+
+        # Story #492: Stop NodeMetricsWriterService
+        if _node_metrics_writer is not None:
+            try:
+                _node_metrics_writer.stop()
+                logger.info(
+                    "NodeMetricsWriterService stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-033",
+                        f"Error stopping NodeMetricsWriterService: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
                 )
 
         # Shutdown: Stop global repos background services BEFORE other cleanup

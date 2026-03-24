@@ -3,6 +3,7 @@
 <div class="health-grid">
     {% if health %}
     <!-- Overall Status (Story #727 AC5: Display failure reasons) -->
+    <!-- Story #492 AC8: Show node count when cluster data available -->
     <article class="health-card overall-status">
         <header>
             <h3>Server Status</h3>
@@ -14,6 +15,11 @@
             <span class="status-indicator status-{{ health.status.value }}"></span>
             <span class="status-text">{{ health.status.value | capitalize }}</span>
         </div>
+        {% if node_metrics and node_metrics|length > 1 %}
+        <div class="cluster-node-count">
+            <small>{{ node_metrics|length }} nodes reporting</small>
+        </div>
+        {% endif %}
         {% if health.failure_reasons and health.failure_reasons|length > 0 %}
         <div class="failure-reasons">
             <ul class="failure-list">
@@ -67,6 +73,156 @@
             {% endif %}
         </div>
     </article>
+
+    <!-- Story #492: Node Metrics Carousel (AC4-AC8) -->
+    {% if node_metrics %}
+    <article class="health-card node-metrics-card" id="node-metrics-card">
+        <header>
+            <h3>Node Metrics{% if node_metrics|length > 1 %} <span class="node-metrics-node-label" id="nm-node-label"></span>{% endif %}</h3>
+        </header>
+        <div class="node-metrics-carousel" id="nm-carousel" data-node-count="{{ node_metrics|length }}">
+            {% for nm in node_metrics %}
+            {% set ts_str = nm.timestamp %}
+            <div class="nm-slide" id="nm-slide-{{ loop.index0 }}" data-node-id="{{ nm.node_id }}" data-timestamp="{{ ts_str }}" {% if loop.index0 != 0 %}style="display:none"{% endif %}>
+                <div class="nm-node-header">
+                    <span class="nm-node-id" title="{{ nm.node_ip }}">{{ nm.node_id }}</span>
+                    <span class="nm-stale-badge" id="nm-stale-{{ loop.index0 }}" style="display:none">stale</span>
+                </div>
+                <div class="system-metrics">
+                    <div class="metric">
+                        <span class="metric-label">CPU</span>
+                        <span class="metric-value">{{ "%.1f"|format(nm.cpu_usage) }}%</span>
+                        <div class="metric-bar">
+                            <div class="metric-fill {% if nm.cpu_usage > 80 %}high{% elif nm.cpu_usage > 60 %}medium{% endif %}"
+                                 style="width: {{ nm.cpu_usage }}%"></div>
+                        </div>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">Memory</span>
+                        <span class="metric-value">{{ "%.1f"|format(nm.memory_percent) }}%</span>
+                        <div class="metric-bar">
+                            <div class="metric-fill {% if nm.memory_percent > 80 %}high{% elif nm.memory_percent > 60 %}medium{% endif %}"
+                                 style="width: {{ nm.memory_percent }}%"></div>
+                        </div>
+                    </div>
+                    <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span class="metric-label" style="flex: 0 0 75px;">CIDX RSS</span>
+                        <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">{{ "%.1f"|format(nm.process_rss_mb) }} MB</span>
+                    </div>
+                    <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span class="metric-label" style="flex: 0 0 75px;">Index Mem</span>
+                        <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">{{ "%.1f"|format(nm.index_memory_mb) }} MB</span>
+                    </div>
+                    <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span class="metric-label" style="flex: 0 0 75px;">Swap</span>
+                        <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">{{ "%.1f"|format(nm.swap_used_mb) }} / {{ "%.1f"|format(nm.swap_total_mb) }} MB</span>
+                    </div>
+                    <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span class="metric-label" style="flex: 0 0 75px;">Disk (R/W)</span>
+                        <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">
+                            {{ "%.1f"|format(nm.disk_read_kb_s) }} / {{ "%.1f"|format(nm.disk_write_kb_s) }} KB/s
+                        </span>
+                    </div>
+                    <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span class="metric-label" style="flex: 0 0 75px;">Net (Rx/Tx)</span>
+                        <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">
+                            {{ "%.1f"|format(nm.net_rx_kb_s) }} / {{ "%.1f"|format(nm.net_tx_kb_s) }} KB/s
+                        </span>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% if node_metrics|length > 1 %}
+        <div class="nm-dots" id="nm-dots">
+            {% for nm in node_metrics %}
+            <span class="nm-dot {% if loop.index0 == 0 %}active{% endif %}"
+                  id="nm-dot-{{ loop.index0 }}"
+                  data-index="{{ loop.index0 }}"
+                  title="{{ nm.node_id }}"
+                  onclick="nmPinSlide({{ loop.index0 }})"></span>
+            {% endfor %}
+        </div>
+        {% endif %}
+        <footer>
+            <small id="nm-footer-ts">Last snapshot from DB</small>
+        </footer>
+    </article>
+
+    <script>
+    (function() {
+        var nodeCount = parseInt(document.getElementById('nm-carousel').dataset.nodeCount, 10);
+        if (nodeCount <= 1) return;
+
+        var current = 0;
+        var pinned = false;
+        var intervalId = null;
+        var STALE_MS = 30000;
+
+        function showSlide(idx) {
+            for (var i = 0; i < nodeCount; i++) {
+                var slide = document.getElementById('nm-slide-' + i);
+                var dot = document.getElementById('nm-dot-' + i);
+                if (slide) slide.style.display = (i === idx) ? '' : 'none';
+                if (dot) dot.classList.toggle('active', i === idx);
+            }
+            current = idx;
+            var label = document.getElementById('nm-node-label');
+            var slide = document.getElementById('nm-slide-' + idx);
+            if (label && slide) label.textContent = '(' + slide.dataset.nodeId + ')';
+            updateStaleMarkers();
+        }
+
+        function updateStaleMarkers() {
+            var now = Date.now();
+            for (var i = 0; i < nodeCount; i++) {
+                var slide = document.getElementById('nm-slide-' + i);
+                var badge = document.getElementById('nm-stale-' + i);
+                if (!slide || !badge) continue;
+                var ts = slide.dataset.timestamp;
+                if (!ts) { badge.style.display = 'none'; continue; }
+                try {
+                    var age = now - new Date(ts).getTime();
+                    badge.style.display = (age > STALE_MS) ? '' : 'none';
+                } catch(e) { badge.style.display = 'none'; }
+            }
+        }
+
+        window.nmPinSlide = function(idx) {
+            if (pinned && current === idx) {
+                pinned = false;
+                var dots = document.querySelectorAll('.nm-dot');
+                dots.forEach(function(d) { d.classList.remove('pinned'); });
+                startAuto();
+            } else {
+                pinned = true;
+                stopAuto();
+                showSlide(idx);
+                var dot = document.getElementById('nm-dot-' + idx);
+                document.querySelectorAll('.nm-dot').forEach(function(d) { d.classList.remove('pinned'); });
+                if (dot) dot.classList.add('pinned');
+            }
+        };
+
+        function advance() {
+            if (!pinned) showSlide((current + 1) % nodeCount);
+        }
+
+        function startAuto() {
+            if (intervalId) clearInterval(intervalId);
+            intervalId = setInterval(advance, 5000);
+        }
+
+        function stopAuto() {
+            if (intervalId) { clearInterval(intervalId); intervalId = null; }
+        }
+
+        showSlide(0);
+        startAuto();
+        setInterval(updateStaleMarkers, 5000);
+    })();
+    </script>
+    {% endif %}
 
     <!-- Storage Status (Story #712: All mounted volumes with scrolling) -->
     <article class="health-card volumes-card">

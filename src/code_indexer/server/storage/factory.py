@@ -37,6 +37,7 @@ if TYPE_CHECKING:
         GlobalReposBackend,
         GoldenRepoMetadataBackend,
         GroupsBackend,
+        NodeMetricsBackend,
         RepoCategoryBackend,
         SessionsBackend,
         SSHKeysBackend,
@@ -73,6 +74,7 @@ class BackendRegistry:
     repo_category: "RepoCategoryBackend"
     groups: "GroupsBackend"
     audit_log: "AuditLogBackend"
+    node_metrics: "NodeMetricsBackend"
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +136,7 @@ class StorageFactory:
             GitCredentialsSqliteBackend,
             GlobalReposSqliteBackend,
             GoldenRepoMetadataSqliteBackend,
+            NodeMetricsSqliteBackend,
             SessionsSqliteBackend,
             SSHKeysSqliteBackend,
             SyncJobsSqliteBackend,
@@ -166,6 +169,7 @@ class StorageFactory:
             repo_category=RepoCategorySqliteBackend(db_path),
             groups=GroupAccessManager(groups_db_path),
             audit_log=AuditLogService(groups_db_path),
+            node_metrics=NodeMetricsSqliteBackend(db_path),
         )
 
     # ------------------------------------------------------------------
@@ -231,6 +235,9 @@ class StorageFactory:
         from code_indexer.server.storage.postgres.audit_log_backend import (
             AuditLogPostgresBackend,
         )
+        from code_indexer.server.storage.postgres.node_metrics_backend import (
+            NodeMetricsPostgresBackend,
+        )
 
         dsn = config["postgres_dsn"]
         pool = ConnectionPool(dsn)
@@ -252,4 +259,5 @@ class StorageFactory:
             repo_category=RepoCategoryPostgresBackend(pool),
             groups=GroupsPostgresBackend(pool),
             audit_log=AuditLogPostgresBackend(pool),
+            node_metrics=NodeMetricsPostgresBackend(pool),
         )
