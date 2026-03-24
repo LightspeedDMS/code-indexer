@@ -191,18 +191,23 @@ class NodeHeartbeatService:
 
     def _upsert_node(self, status: str) -> None:
         """Insert or update this node's row with the given status."""
+        import os
+
+        hostname = os.uname().nodename
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO cluster_nodes (node_id, status, last_heartbeat)
-                    VALUES (%s, %s, NOW())
+                    INSERT INTO cluster_nodes (node_id, hostname, status, last_heartbeat)
+                    VALUES (%s, %s, %s, NOW())
                     ON CONFLICT (node_id) DO UPDATE
                         SET status         = EXCLUDED.status,
+                            hostname       = EXCLUDED.hostname,
                             last_heartbeat = NOW()
                     """,
-                    (self._node_id, status),
+                    (self._node_id, hostname, status),
                 )
+            conn.commit()
 
     def _heartbeat_loop(self) -> None:
         """Background loop: update heartbeat every heartbeat_interval seconds."""
