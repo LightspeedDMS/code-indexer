@@ -23,18 +23,22 @@ class RepoCategoryService:
 
     MAX_PATTERN_LENGTH = 500
 
-    def __init__(self, db_path: str = "", storage_backend=None) -> None:
+    def __init__(
+        self, db_path: str = "", storage_backend=None, golden_repo_backend=None
+    ) -> None:
         """
         Initialize the service.
 
         Args:
             db_path: Path to SQLite database file.
             storage_backend: Optional pre-created backend (e.g. from StorageFactory).
+            golden_repo_backend: Optional golden repo metadata backend for cross-table queries.
         """
         if storage_backend is not None:
             self._backend = storage_backend
         else:
             self._backend = RepoCategorySqliteBackend(db_path)
+        self._golden_repo_backend = golden_repo_backend
 
     def create_category(self, name: str, pattern: str) -> int:
         """
@@ -180,15 +184,23 @@ class RepoCategoryService:
             - updated: Number of repos with changed category assignments
             - errors: List of error messages (if any)
         """
-        from ..storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
-
-        # Get backend instance - assumes same db_path as category backend
-        repo_backend = GoldenRepoMetadataSqliteBackend(
-            self._backend._conn_manager.db_path
-        )
-
         # Get all repos with category information
-        repos = repo_backend.list_repos_with_categories()
+        if self._golden_repo_backend is not None:
+            repos = self._golden_repo_backend.list_repos_with_categories()
+        else:
+            from ..storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
+
+            _db_path = getattr(
+                getattr(self._backend, "_conn_manager", None), "db_path", ""
+            )
+            if not _db_path:
+                return {
+                    "evaluated": 0,
+                    "updated": 0,
+                    "errors": ["No database path available"],
+                }
+            repo_backend = GoldenRepoMetadataSqliteBackend(_db_path)
+            repos = repo_backend.list_repos_with_categories()
 
         updated_count = 0
         errors = []
@@ -264,14 +276,19 @@ class RepoCategoryService:
         Raises:
             Exception: If repo doesn't exist or category_id is invalid (foreign key violation).
         """
-        from ..storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
+        # Delegate to golden repo metadata backend's update_category method
+        if self._golden_repo_backend is not None:
+            repo_backend = self._golden_repo_backend
+        else:
+            from ..storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
 
-        # Get backend instance - assumes same db_path as category backend
-        repo_backend = GoldenRepoMetadataSqliteBackend(
-            self._backend._conn_manager.db_path
-        )
+            _db_path = getattr(
+                getattr(self._backend, "_conn_manager", None), "db_path", ""
+            )
+            if not _db_path:
+                raise RuntimeError("No database path available for category update")
+            repo_backend = GoldenRepoMetadataSqliteBackend(_db_path)
 
-        # Delegate to backend's update_category method
         updated = repo_backend.update_category(
             alias, category_id, auto_assigned=auto_assigned
         )

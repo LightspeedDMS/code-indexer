@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from .golden_repo_manager import GoldenRepoManager
 from .activated_repo_manager import ActivatedRepoManager
 
+logger = logging.getLogger(__name__)
+
 
 class RepositoryListingError(Exception):
     """Base exception for repository listing operations."""
@@ -215,7 +217,7 @@ class RepositoryListingManager:
         details["enable_temporal"] = enable_temporal
 
         if enable_temporal:
-            temporal_options = golden_repo.get("temporal_options", {})
+            temporal_options = golden_repo.get("temporal_options") or {}
             details["temporal_status"] = {
                 "enabled": True,
                 "diff_context": temporal_options.get("diff_context", 5),

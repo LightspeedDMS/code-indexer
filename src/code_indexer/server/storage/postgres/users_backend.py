@@ -127,7 +127,7 @@ class UsersPostgresBackend:
                     }
                 )
 
-        return result
+        return [sanitize_row(r) for r in result]
 
     def update_user(
         self,
@@ -499,13 +499,15 @@ class UsersPostgresBackend:
             (username,),
         ).fetchall()
         return [
-            {
-                "key_id": r[0],
-                "key_hash": r[1],
-                "key_prefix": r[2],
-                "name": r[3],
-                "created_at": r[4],
-            }
+            sanitize_row(
+                {
+                    "key_id": r[0],
+                    "key_hash": r[1],
+                    "key_prefix": r[2],
+                    "name": r[3],
+                    "created_at": r[4],
+                }
+            )
             for r in rows
         ]
 
@@ -521,14 +523,16 @@ class UsersPostgresBackend:
             (username,),
         ).fetchall()
         return [
-            {
-                "credential_id": r[0],
-                "client_id": r[1],
-                "client_secret_hash": r[2],
-                "client_id_prefix": r[3],
-                "name": r[4],
-                "created_at": r[5],
-                "last_used_at": r[6],
-            }
+            sanitize_row(
+                {
+                    "credential_id": r[0],
+                    "client_id": r[1],
+                    "client_secret_hash": r[2],
+                    "client_id_prefix": r[3],
+                    "name": r[4],
+                    "created_at": r[5],
+                    "last_used_at": r[6],
+                }
+            )
             for r in rows
         ]

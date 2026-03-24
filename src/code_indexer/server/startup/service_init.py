@@ -320,6 +320,9 @@ def initialize_services() -> Dict[str, Any]:
     repo_category_service = RepoCategoryService(
         db_path_str,
         storage_backend=_backend_registry.repo_category if _backend_registry else None,
+        golden_repo_backend=_backend_registry.golden_repo_metadata
+        if _backend_registry
+        else None,
     )
 
     # Wire RepoCategoryService to REST API router (Story #182)

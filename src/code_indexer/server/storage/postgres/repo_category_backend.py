@@ -14,6 +14,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from .pg_utils import sanitize_row
 
 logger = logging.getLogger(__name__)
 
@@ -68,14 +69,16 @@ class RepoCategoryPostgresBackend:
             )
             rows = cursor.fetchall()
         return [
-            {
-                "id": row[0],
-                "name": row[1],
-                "pattern": row[2],
-                "priority": row[3],
-                "created_at": row[4],
-                "updated_at": row[5],
-            }
+            sanitize_row(
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "pattern": row[2],
+                    "priority": row[3],
+                    "created_at": row[4],
+                    "updated_at": row[5],
+                }
+            )
             for row in rows
         ]
 
@@ -90,14 +93,16 @@ class RepoCategoryPostgresBackend:
             row = cursor.fetchone()
         if row is None:
             return None
-        return {
-            "id": row[0],
-            "name": row[1],
-            "pattern": row[2],
-            "priority": row[3],
-            "created_at": row[4],
-            "updated_at": row[5],
-        }
+        return sanitize_row(
+            {
+                "id": row[0],
+                "name": row[1],
+                "pattern": row[2],
+                "priority": row[3],
+                "created_at": row[4],
+                "updated_at": row[5],
+            }
+        )
 
     def update_category(self, category_id: int, name: str, pattern: str) -> None:
         """
@@ -155,6 +160,21 @@ class RepoCategoryPostgresBackend:
             row = cursor.fetchone()
         max_priority = row[0] if row is not None and row[0] is not None else 0
         return max_priority + 1
+
+    def list_golden_repos(self) -> list:
+        """Query golden_repos_metadata for category evaluation.
+
+        Used by RepoCategoryService.re_evaluate_all() and auto_assign_category()
+        instead of reaching into a separate SQLite backend.
+        """
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT alias, repo_url, default_branch FROM golden_repos_metadata"
+            ).fetchall()
+        return [
+            sanitize_row({"alias": r[0], "repo_url": r[1], "default_branch": r[2]})
+            for r in rows
+        ]
 
     def get_repo_category_map(self) -> Dict[str, Dict[str, Any]]:
         """
