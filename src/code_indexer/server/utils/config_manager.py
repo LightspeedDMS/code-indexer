@@ -794,6 +794,27 @@ class MCPSelfRegistrationConfig:
 
 
 @dataclass
+class OntapConfig:
+    """ONTAP FlexClone configuration for cluster mode (Epic #408)."""
+
+    endpoint: str = ""
+    svm_name: str = ""
+    parent_volume: str = ""
+    mount_point: str = "/mnt/fsx"
+    admin_user: str = "fsxadmin"
+    admin_password: str = ""
+    nfs_data_lif: str = ""
+    nfs_export: str = "/"
+
+
+@dataclass
+class ClusterConfig:
+    """Cluster node configuration (Epic #408)."""
+
+    node_id: str = ""
+
+
+@dataclass
 class ServerConfig:
     """
     Server configuration data structure.
@@ -872,6 +893,8 @@ class ServerConfig:
     # Epic #408 - Cluster mode configuration
     storage_mode: str = "sqlite"  # "sqlite" (standalone) or "postgres" (cluster)
     postgres_dsn: Optional[str] = None  # PostgreSQL connection string for cluster mode
+    ontap: Optional[OntapConfig] = None  # ONTAP FlexClone settings for cluster mode
+    cluster: Optional[ClusterConfig] = None  # Cluster node identity
 
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
@@ -1393,6 +1416,14 @@ class ServerConfigManager:
                 config_dict["data_retention_config"] = DataRetentionConfig(
                     **config_dict["data_retention_config"]
                 )
+
+            # Epic #408: Convert ontap dict to OntapConfig
+            if "ontap" in config_dict and isinstance(config_dict["ontap"], dict):
+                config_dict["ontap"] = OntapConfig(**config_dict["ontap"])
+
+            # Epic #408: Convert cluster dict to ClusterConfig
+            if "cluster" in config_dict and isinstance(config_dict["cluster"], dict):
+                config_dict["cluster"] = ClusterConfig(**config_dict["cluster"])
 
             # Remove obsolete reindexing_config field (deleted in previous commit)
             config_dict.pop("reindexing_config", None)
