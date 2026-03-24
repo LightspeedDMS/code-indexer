@@ -1362,7 +1362,7 @@ def make_lifespan(
                         connection_string=_pg_dsn,
                         node_id=_node_id,
                     )
-                    _leader_election.try_acquire_leadership()
+                    _leader_election.start_monitoring(check_interval=10)
                     _cluster_services.append(("leader_election", _leader_election))
 
                     # Node heartbeat
@@ -1403,7 +1403,9 @@ def make_lifespan(
         # Epic #408: Stop cluster services
         for svc_name, svc in reversed(_cluster_services):
             try:
-                if hasattr(svc, "stop"):
+                if hasattr(svc, "stop_monitoring"):
+                    svc.stop_monitoring()
+                elif hasattr(svc, "stop"):
                     svc.stop()
                 elif hasattr(svc, "release_leadership"):
                     svc.release_leadership()
