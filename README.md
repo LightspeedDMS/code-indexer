@@ -331,6 +331,20 @@ cidx-server start       # Start multi-user server
 - **User Management**: Create users, assign roles (admin/power_user/normal_user)
 - **Cache Monitoring**: Real-time cache statistics and performance metrics
 
+### Cluster Mode (Multi-Node Server)
+
+Run multiple CIDX Server nodes sharing a single PostgreSQL database for horizontal scaling and high availability. Cluster mode requires setting `storage_mode` to `"postgres"` in `~/.cidx-server/config.json`. All application functionality (REST API, MCP, Web UI) is identical in standalone and cluster modes; the storage backends swap transparently via Protocol interfaces.
+
+Key cluster features:
+- Leader election via PostgreSQL advisory lock ensures exactly one node runs schedulers at a time
+- Node heartbeat tracking with automatic failover detection (30-second threshold)
+- Distributed background job queue with orphaned job recovery
+- Per-node metrics carousel in the admin dashboard
+- SQLite-to-PostgreSQL data migration tool for converting existing installations
+
+For architecture details see [Cluster Architecture Guide](docs/cluster-architecture.md).
+For setup and operations see [Cluster Setup Guide](docs/cluster-setup.md).
+
 **Claude Delegation** (v8.5+):
 - **Protected Repository Analysis**: AI agents analyze code without exposing source to clients
 - **Delegation Functions**: Pre-defined AI workflows for code review, analysis, and transformation
@@ -458,6 +472,8 @@ For complete configuration reference including environment variables, daemon set
 
 ### Server Administration
 - [Auto-Update Guide](docs/auto-update.md) - Job-aware auto-update with graceful drain mode
+- [Cluster Architecture Guide](docs/cluster-architecture.md) - Multi-node cluster design, storage abstraction, leader election, and services
+- [Cluster Setup Guide](docs/cluster-setup.md) - Install and operate a CIDX Server cluster with PostgreSQL
 
 ### Advanced
 - [Architecture Guide](docs/architecture.md) - System design and storage architecture

@@ -467,6 +467,21 @@ Container-free vector storage using the local filesystem:
 
 For migration from v7.x Qdrant deployments, see [Migration Guide](migration-to-v8.md).
 
+## Cluster Mode Architecture (Epic #408)
+
+CIDX Server supports a cluster mode where multiple nodes share a PostgreSQL database. Cluster mode is enabled by setting `storage_mode: "postgres"` in `~/.cidx-server/config.json`.
+
+Key components:
+- Storage abstraction via Python Protocol interfaces (`src/code_indexer/server/storage/protocols.py`) with SQLite and PostgreSQL implementations selected by `StorageFactory`
+- Leader election via `pg_try_advisory_lock` ensures exactly one node runs scheduler services at a time (`src/code_indexer/server/services/leader_election_service.py`)
+- Node heartbeat tracking in the `cluster_nodes` PostgreSQL table (`src/code_indexer/server/services/node_heartbeat_service.py`)
+- Distributed job reconciliation that reclaims abandoned jobs from crashed nodes (`src/code_indexer/server/services/job_reconciliation_service.py`)
+- Per-node system metrics collection written to `node_metrics` PostgreSQL table (`src/code_indexer/server/services/node_metrics_writer_service.py`)
+- PostgreSQL schema managed by numbered migration files in `src/code_indexer/server/storage/postgres/migrations/sql/`
+
+For full details see [Cluster Architecture Guide](cluster-architecture.md).
+For setup and operations see [Cluster Setup Guide](cluster-setup.md).
+
 ## Self-Monitoring Architecture (v8.8.2+)
 
 CIDX Server includes automated self-monitoring using Claude CLI for intelligent log analysis.
