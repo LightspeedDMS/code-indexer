@@ -1617,12 +1617,22 @@ def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
             activated_repos.append(filtered_repo)
 
-        # Get global repos from GlobalRegistry
+        # Get global repos - use backend_registry in cluster mode (Bug #494),
+        # fall back to SQLite GlobalRegistry in standalone mode.
         global_repos = []
+        golden_repos_dir = "<unknown>"
         try:
-            golden_repos_dir = _get_golden_repos_dir()
-            registry = get_server_global_registry(golden_repos_dir)
-            global_repos_data = registry.list_global_repos()
+            backend_registry = getattr(app_module.app.state, "backend_registry", None)
+            if backend_registry is not None:
+                # Cluster mode (postgres): read from authoritative PostgreSQL backend.
+                # list_repos() returns Dict[str, Dict] keyed by alias_name.
+                global_repos_dict = backend_registry.global_repos.list_repos()
+                global_repos_data = list(global_repos_dict.values())
+            else:
+                # Standalone mode (sqlite): read from local SQLite GlobalRegistry.
+                golden_repos_dir = _get_golden_repos_dir()
+                registry = get_server_global_registry(golden_repos_dir)
+                global_repos_data = registry.list_global_repos()
 
             # Normalize global repos schema to match activated repos
             for repo in global_repos_data:
