@@ -42,6 +42,111 @@ let _refreshInProgress = false;
 // Shared fetch options - used by refreshAll() and dropdown handlers in dashboard_stats.html
 var _fetchOpts = { credentials: 'same-origin' };
 
+// ---- Persistent carousel state (survives #health-section DOM replacements) ----
+// These variables live in the parent page scope and are never reset by partial refreshes.
+var _nmCurrent = 0;      // currently visible slide index
+var _nmPinned = false;   // true when user has clicked a dot to lock the slide
+var _nmAutoId = null;    // setInterval handle for auto-cycling
+var _nmStaleId = null;   // setInterval handle for stale-marker updates
+var _NM_CYCLE_MS = 5000; // auto-cycle interval
+var _NM_STALE_MS = 30000;// age threshold for "stale" badge
+
+// Called by dashboard_health.html partial after it is injected into the DOM.
+// Re-attaches event handlers and restores the current slide / pinned state
+// without resetting _nmCurrent or _nmPinned.
+window.nmRebindCarousel = function() {
+    var carousel = document.getElementById('nm-carousel');
+    if (!carousel) return; // node_metrics section not present
+
+    var nodeCount = parseInt(carousel.dataset.nodeCount, 10);
+    if (isNaN(nodeCount) || nodeCount < 1) return;
+
+    // Clamp current index in case node count changed between refreshes
+    if (_nmCurrent >= nodeCount) _nmCurrent = 0;
+
+    // Re-apply the correct visible slide (DOM was just replaced)
+    _nmShowSlide(_nmCurrent, nodeCount);
+
+    // Restore pinned dot styling if pinned
+    if (_nmPinned) {
+        var dot = document.getElementById('nm-dot-' + _nmCurrent);
+        document.querySelectorAll('.nm-dot').forEach(function(d) { d.classList.remove('pinned'); });
+        if (dot) dot.classList.add('pinned');
+    }
+
+    // Only start auto-cycling for multi-node carousels
+    if (nodeCount > 1 && !_nmPinned) {
+        _nmStartAuto(nodeCount);
+    }
+
+    // Restart stale marker updates (old interval was cleared with previous DOM)
+    if (_nmStaleId) clearInterval(_nmStaleId);
+    _nmStaleId = setInterval(function() { _nmUpdateStale(nodeCount); }, 5000);
+};
+
+function _nmShowSlide(idx, nodeCount) {
+    for (var i = 0; i < nodeCount; i++) {
+        var slide = document.getElementById('nm-slide-' + i);
+        var dot = document.getElementById('nm-dot-' + i);
+        if (slide) slide.style.display = (i === idx) ? '' : 'none';
+        if (dot) dot.classList.toggle('active', i === idx);
+    }
+    _nmCurrent = idx;
+    var label = document.getElementById('nm-node-label');
+    var activeSlide = document.getElementById('nm-slide-' + idx);
+    if (label && activeSlide) label.textContent = '(' + activeSlide.dataset.nodeId + ')';
+    _nmUpdateStale(nodeCount);
+}
+
+function _nmUpdateStale(nodeCount) {
+    var now = Date.now();
+    for (var i = 0; i < nodeCount; i++) {
+        var slide = document.getElementById('nm-slide-' + i);
+        var badge = document.getElementById('nm-stale-' + i);
+        if (!slide || !badge) continue;
+        var ts = slide.dataset.timestamp;
+        if (!ts) { badge.style.display = 'none'; continue; }
+        try {
+            var age = now - new Date(ts).getTime();
+            badge.style.display = (age > _NM_STALE_MS) ? '' : 'none';
+        } catch(e) { badge.style.display = 'none'; }
+    }
+}
+
+function _nmStartAuto(nodeCount) {
+    if (_nmAutoId) clearInterval(_nmAutoId);
+    _nmAutoId = setInterval(function() {
+        if (!_nmPinned) _nmShowSlide((_nmCurrent + 1) % nodeCount, nodeCount);
+    }, _NM_CYCLE_MS);
+}
+
+function _nmStopAuto() {
+    if (_nmAutoId) { clearInterval(_nmAutoId); _nmAutoId = null; }
+}
+
+// Global pin handler called by dot onclick in dashboard_health.html partial
+window.nmPinSlide = function(idx) {
+    var carousel = document.getElementById('nm-carousel');
+    if (!carousel) return;
+    var nodeCount = parseInt(carousel.dataset.nodeCount, 10);
+
+    if (_nmPinned && _nmCurrent === idx) {
+        // Toggle off: unpin and resume auto-cycling
+        _nmPinned = false;
+        document.querySelectorAll('.nm-dot').forEach(function(d) { d.classList.remove('pinned'); });
+        _nmStartAuto(nodeCount);
+    } else {
+        // Pin this slide
+        _nmPinned = true;
+        _nmStopAuto();
+        _nmShowSlide(idx, nodeCount);
+        document.querySelectorAll('.nm-dot').forEach(function(d) { d.classList.remove('pinned'); });
+        var dot = document.getElementById('nm-dot-' + idx);
+        if (dot) dot.classList.add('pinned');
+    }
+};
+// ---- End persistent carousel state ----
+
 // Shared response handler - used by refreshAll() and dropdown handlers in dashboard_stats.html
 function applyResponse(response, targetSelector) {
     if (response.status === 401) {
@@ -55,7 +160,15 @@ function applyResponse(response, targetSelector) {
     if (response.ok) {
         return response.text().then(function(html) {
             var el = document.querySelector(targetSelector);
-            if (el) el.innerHTML = html;
+            if (el) {
+                el.innerHTML = html;
+                // After health section refresh, rebind carousel with persistent state
+                if (targetSelector === '#health-section') {
+                    if (typeof window.nmRebindCarousel === 'function') {
+                        window.nmRebindCarousel();
+                    }
+                }
+            }
         });
     }
     return Promise.resolve();

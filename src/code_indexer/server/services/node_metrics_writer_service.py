@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 _THREAD_JOIN_GRACE_SECONDS = 5
 _DEFAULT_RETENTION_SECONDS = 3600
-_DEFAULT_WRITE_INTERVAL = 10
+_DEFAULT_WRITE_INTERVAL = 5
 
 
 def _get_local_ip() -> str:

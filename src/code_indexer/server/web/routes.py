@@ -377,11 +377,20 @@ def dashboard_health_partial(request: Request):
     # Use the backend stored in app.state during startup (set by lifespan.py).
     # In postgres/cluster mode this is NodeMetricsPostgresBackend; in standalone
     # mode it is NodeMetricsSqliteBackend.  Both satisfy NodeMetricsBackend Protocol.
+    import json as _json
+
     node_metrics = []
     try:
         _nm_backend = getattr(request.app.state, "node_metrics_backend", None)
         if _nm_backend is not None:
-            node_metrics = _nm_backend.get_latest_per_node()
+            raw_metrics = _nm_backend.get_latest_per_node()
+            # BUG 3 fix: pre-parse volumes_json so the template can iterate nm.volumes
+            for row in raw_metrics:
+                try:
+                    row["volumes"] = _json.loads(row.get("volumes_json") or "[]")
+                except (ValueError, TypeError):
+                    row["volumes"] = []
+            node_metrics = raw_metrics
     except Exception as e:
         logger.debug(f"Could not read node_metrics from DB: {e}")
 

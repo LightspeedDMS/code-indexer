@@ -130,6 +130,30 @@
                         </span>
                     </div>
                 </div>
+                {% if nm.volumes %}
+                {% set volumes = nm.volumes %}
+                {% if volumes %}
+                <div class="nm-volumes">
+                    <div class="nm-volumes-header">Disk Storage</div>
+                    {% for vol in volumes %}
+                    <div class="volume-entry">
+                        <div class="volume-header">
+                            <span class="volume-mount" title="{{ vol.device | default('') }}">{{ vol.mount_point }}</span>
+                            <span class="volume-fstype">{{ vol.fstype | default('') }}</span>
+                        </div>
+                        <div class="volume-bar">
+                            <div class="volume-bar-fill {% if vol.used_percent > 90 %}critical{% elif vol.used_percent > 75 %}warning{% endif %}"
+                                 style="width: {{ vol.used_percent }}%"></div>
+                        </div>
+                        <div class="volume-stats">
+                            <span class="volume-used">{{ "%.1f"|format(vol.used_gb) }} GB used ({{ "%.0f"|format(vol.used_percent) }}%)</span>
+                            <span class="volume-free">{{ "%.1f"|format(vol.free_gb) }} GB free</span>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                {% endif %}
             </div>
             {% endfor %}
         </div>
@@ -150,81 +174,18 @@
     </article>
 
     <script>
-    (function() {
-        var nodeCount = parseInt(document.getElementById('nm-carousel').dataset.nodeCount, 10);
-        if (nodeCount <= 1) return;
-
-        var current = 0;
-        var pinned = false;
-        var intervalId = null;
-        var STALE_MS = 30000;
-
-        function showSlide(idx) {
-            for (var i = 0; i < nodeCount; i++) {
-                var slide = document.getElementById('nm-slide-' + i);
-                var dot = document.getElementById('nm-dot-' + i);
-                if (slide) slide.style.display = (i === idx) ? '' : 'none';
-                if (dot) dot.classList.toggle('active', i === idx);
-            }
-            current = idx;
-            var label = document.getElementById('nm-node-label');
-            var slide = document.getElementById('nm-slide-' + idx);
-            if (label && slide) label.textContent = '(' + slide.dataset.nodeId + ')';
-            updateStaleMarkers();
-        }
-
-        function updateStaleMarkers() {
-            var now = Date.now();
-            for (var i = 0; i < nodeCount; i++) {
-                var slide = document.getElementById('nm-slide-' + i);
-                var badge = document.getElementById('nm-stale-' + i);
-                if (!slide || !badge) continue;
-                var ts = slide.dataset.timestamp;
-                if (!ts) { badge.style.display = 'none'; continue; }
-                try {
-                    var age = now - new Date(ts).getTime();
-                    badge.style.display = (age > STALE_MS) ? '' : 'none';
-                } catch(e) { badge.style.display = 'none'; }
-            }
-        }
-
-        window.nmPinSlide = function(idx) {
-            if (pinned && current === idx) {
-                pinned = false;
-                var dots = document.querySelectorAll('.nm-dot');
-                dots.forEach(function(d) { d.classList.remove('pinned'); });
-                startAuto();
-            } else {
-                pinned = true;
-                stopAuto();
-                showSlide(idx);
-                var dot = document.getElementById('nm-dot-' + idx);
-                document.querySelectorAll('.nm-dot').forEach(function(d) { d.classList.remove('pinned'); });
-                if (dot) dot.classList.add('pinned');
-            }
-        };
-
-        function advance() {
-            if (!pinned) showSlide((current + 1) % nodeCount);
-        }
-
-        function startAuto() {
-            if (intervalId) clearInterval(intervalId);
-            intervalId = setInterval(advance, 5000);
-        }
-
-        function stopAuto() {
-            if (intervalId) { clearInterval(intervalId); intervalId = null; }
-        }
-
-        showSlide(0);
-        startAuto();
-        setInterval(updateStaleMarkers, 5000);
-    })();
+    // Signal the parent page to rebind carousel DOM after this partial is injected.
+    // The parent page owns persistent state (current slide index, pinned flag, auto-cycle
+    // interval) so they survive the 2s DOM replacement of #health-section.
+    if (typeof window.nmRebindCarousel === 'function') {
+        window.nmRebindCarousel();
+    }
     </script>
     {% endif %}
 
     <!-- Storage Status (Story #712: All mounted volumes with scrolling) -->
+    <!-- Hidden when node_metrics available (carousel replaces these cards) -->
+    {% if not node_metrics %}
     <article class="health-card volumes-card">
         <header>
             <h3>Disk Storage</h3>
@@ -321,6 +282,7 @@
         </div>
         {% endif %}
     </article>
+    {% endif %}
     {% else %}
     <article class="health-card">
         <header>
