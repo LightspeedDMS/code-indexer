@@ -1330,19 +1330,28 @@ def make_lifespan(
                 )
 
                 _pg_dsn = ""
+                _configured_node_id = ""
                 try:
                     import json as _json
 
                     _cfg_path = Path.home() / ".cidx-server" / "config.json"
                     if _cfg_path.exists():
                         with open(_cfg_path) as _f:
-                            _pg_dsn = _json.load(_f).get("postgres_dsn", "")
+                            _cfg_data = _json.load(_f)
+                            _pg_dsn = _cfg_data.get("postgres_dsn", "")
+                            _configured_node_id = _cfg_data.get("cluster", {}).get(
+                                "node_id", ""
+                            )
                 except Exception:
                     pass
 
                 if _pg_dsn:
                     _cluster_pool = ConnectionPool(_pg_dsn)
-                    _node_id = f"{os.uname().nodename}-cidx"
+                    _node_id = (
+                        _configured_node_id
+                        if _configured_node_id
+                        else f"{os.uname().nodename}-cidx"
+                    )
 
                     # Leader election
                     from code_indexer.server.services.leader_election_service import (
