@@ -162,7 +162,15 @@ def _collect_volume_info() -> List[Dict[str, Any]]:
             try:
                 usage = psutil.disk_usage(part.mountpoint)
                 volumes.append(
-                    {"mount_point": part.mountpoint, "used_percent": usage.percent}
+                    {
+                        "mount_point": part.mountpoint,
+                        "device": part.device,
+                        "fstype": part.fstype,
+                        "total_gb": round(usage.total / (1024**3), 1),
+                        "used_gb": round(usage.used / (1024**3), 1),
+                        "free_gb": round(usage.free / (1024**3), 1),
+                        "used_percent": usage.percent,
+                    }
                 )
             except Exception as exc:
                 logger.debug(
