@@ -24,6 +24,8 @@ def make_lifespan(
     jwt_manager: Any,
     dependencies: Any,
     register_langfuse_golden_repos: Callable,
+    storage_mode: str = "sqlite",
+    backend_registry: Any = None,
 ):
     """
     Factory that returns a lifespan context manager bound to the given service instances.
@@ -1319,7 +1321,92 @@ def make_lifespan(
                 extra={"correlation_id": get_correlation_id()},
             )
 
+        # Epic #408: Start cluster services when in postgres mode
+        _cluster_services = []
+        if storage_mode == "postgres" and backend_registry is not None:
+            try:
+                from code_indexer.server.storage.postgres.connection_pool import (
+                    ConnectionPool,
+                )
+
+                _pg_dsn = ""
+                try:
+                    import json as _json
+
+                    _cfg_path = Path.home() / ".cidx-server" / "config.json"
+                    if _cfg_path.exists():
+                        with open(_cfg_path) as _f:
+                            _pg_dsn = _json.load(_f).get("postgres_dsn", "")
+                except Exception:
+                    pass
+
+                if _pg_dsn:
+                    _cluster_pool = ConnectionPool(_pg_dsn)
+                    _node_id = f"{os.uname().nodename}-cidx"
+
+                    # Leader election
+                    from code_indexer.server.services.leader_election_service import (
+                        LeaderElectionService,
+                    )
+
+                    _leader_election = LeaderElectionService(
+                        connection_string=_pg_dsn,
+                        node_id=_node_id,
+                    )
+                    _leader_election.try_acquire_leadership()
+                    _cluster_services.append(("leader_election", _leader_election))
+
+                    # Node heartbeat
+                    from code_indexer.server.services.node_heartbeat_service import (
+                        NodeHeartbeatService,
+                    )
+
+                    _heartbeat = NodeHeartbeatService(
+                        pool=_cluster_pool, node_id=_node_id
+                    )
+                    _heartbeat.start()
+                    _cluster_services.append(("heartbeat", _heartbeat))
+
+                    # Job reconciliation
+                    from code_indexer.server.services.job_reconciliation_service import (
+                        JobReconciliationService,
+                    )
+
+                    _reconciliation = JobReconciliationService(
+                        pool=_cluster_pool, heartbeat_service=_heartbeat
+                    )
+                    _reconciliation.start()
+                    _cluster_services.append(("reconciliation", _reconciliation))
+
+                    logger.info(
+                        f"Cluster services started: node_id={_node_id}, "
+                        f"is_leader={_leader_election.is_leader}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Failed to start cluster services: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
         yield  # Server is now running
+
+        # Epic #408: Stop cluster services
+        for svc_name, svc in reversed(_cluster_services):
+            try:
+                if hasattr(svc, "stop"):
+                    svc.stop()
+                elif hasattr(svc, "release_leadership"):
+                    svc.release_leadership()
+                logger.info(
+                    f"Cluster service stopped: {svc_name}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Error stopping cluster service {svc_name}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
 
         # Shutdown: Stop global repos background services BEFORE other cleanup
         logger.info(
