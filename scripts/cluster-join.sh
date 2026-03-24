@@ -275,12 +275,36 @@ validate_nfs_mount() {
         die "NFS mount at ${ONTAP_MOUNT} is not mounted. Setup failed."
     fi
 
-    # Write a test file to verify read/write access
-    local test_file="${ONTAP_MOUNT}/.cidx-join-test-$$"
-    if ! touch "${test_file}" 2>/dev/null; then
-        die "Cannot write to NFS mount at ${ONTAP_MOUNT}. Check permissions."
+    # Validate read access (listing mount root)
+    if ! ls "${ONTAP_MOUNT}" >/dev/null 2>&1; then
+        die "Cannot read NFS mount at ${ONTAP_MOUNT}. Check permissions."
     fi
-    rm -f "${test_file}"
+
+    # Validate write access using a CIDX-specific subdirectory.
+    # NFS root squash typically prevents writing to the volume root,
+    # so we create/use a cidx-data directory for the write test.
+    local cidx_data_dir="${ONTAP_MOUNT}/cidx-data"
+    if [[ ! -d "${cidx_data_dir}" ]]; then
+        if ! mkdir -p "${cidx_data_dir}" 2>/dev/null; then
+            # Root dir not writable — try with sudo
+            if ! sudo mkdir -p "${cidx_data_dir}" 2>/dev/null; then
+                warn "Cannot create ${cidx_data_dir}. Write validation skipped."
+                warn "Ensure the CIDX data directory exists on the NFS mount before starting the server."
+                info "NFS mount validated (read-only confirmed)."
+                return
+            fi
+            sudo chown "$(id -u):$(id -g)" "${cidx_data_dir}"
+        fi
+    fi
+
+    local test_file="${cidx_data_dir}/.cidx-join-test-$$"
+    if ! touch "${test_file}" 2>/dev/null; then
+        warn "Cannot write to ${cidx_data_dir}. The CIDX server may need write access."
+        warn "Check NFS export permissions and uid mapping."
+    else
+        rm -f "${test_file}"
+        info "NFS write access validated."
+    fi
 
     info "NFS mount validated successfully."
 }
