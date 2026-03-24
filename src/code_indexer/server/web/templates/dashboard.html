@@ -43,45 +43,44 @@ let _refreshInProgress = false;
 var _fetchOpts = { credentials: 'same-origin' };
 
 // ---- Persistent carousel state (survives #health-section DOM replacements) ----
-// These variables live in the parent page scope and are never reset by partial refreshes.
-var _nmCurrent = 0;      // currently visible slide index
-var _nmPinned = false;   // true when user has clicked a dot to lock the slide
-var _nmAutoId = null;    // setInterval handle for auto-cycling
-var _nmStaleId = null;   // setInterval handle for stale-marker updates
-var _NM_CYCLE_MS = 5000; // auto-cycle interval
-var _NM_STALE_MS = 30000;// age threshold for "stale" badge
+// Timestamp-based cycling: the 2s DOM refresh drives advancement instead of setInterval.
+var _nmCurrent = 0;          // currently visible slide index
+var _nmPinned = false;       // true when user clicked a dot to lock the slide
+var _nmLastAdvance = 0;      // Date.now() when we last auto-advanced
+var _NM_CYCLE_MS = 5000;     // auto-cycle interval (5 seconds)
+var _NM_STALE_MS = 30000;    // age threshold for "stale" badge
 
-// Called by dashboard_health.html partial after it is injected into the DOM.
-// Re-attaches event handlers and restores the current slide / pinned state
-// without resetting _nmCurrent or _nmPinned.
+// Called after dashboard_health.html partial is injected into the DOM (every 2s).
+// Checks if 5s elapsed since last advance and moves to next slide if so.
 window.nmRebindCarousel = function() {
     var carousel = document.getElementById('nm-carousel');
-    if (!carousel) return; // node_metrics section not present
+    if (!carousel) return;
 
     var nodeCount = parseInt(carousel.dataset.nodeCount, 10);
     if (isNaN(nodeCount) || nodeCount < 1) return;
 
-    // Clamp current index in case node count changed between refreshes
+    // Clamp current index in case node count changed
     if (_nmCurrent >= nodeCount) _nmCurrent = 0;
 
-    // Re-apply the correct visible slide (DOM was just replaced)
+    // Auto-advance: if not pinned, >1 node, and enough time elapsed
+    if (nodeCount > 1 && !_nmPinned) {
+        var now = Date.now();
+        if (_nmLastAdvance === 0) _nmLastAdvance = now; // first call
+        if (now - _nmLastAdvance >= _NM_CYCLE_MS) {
+            _nmCurrent = (_nmCurrent + 1) % nodeCount;
+            _nmLastAdvance = now;
+        }
+    }
+
+    // Show the current slide and update dots/stale markers
     _nmShowSlide(_nmCurrent, nodeCount);
 
-    // Restore pinned dot styling if pinned
+    // Restore pinned dot styling
     if (_nmPinned) {
         var dot = document.getElementById('nm-dot-' + _nmCurrent);
         document.querySelectorAll('.nm-dot').forEach(function(d) { d.classList.remove('pinned'); });
         if (dot) dot.classList.add('pinned');
     }
-
-    // Only start auto-cycling for multi-node carousels
-    if (nodeCount > 1 && !_nmPinned) {
-        _nmStartAuto(nodeCount);
-    }
-
-    // Restart stale marker updates (old interval was cleared with previous DOM)
-    if (_nmStaleId) clearInterval(_nmStaleId);
-    _nmStaleId = setInterval(function() { _nmUpdateStale(nodeCount); }, 5000);
 };
 
 function _nmShowSlide(idx, nodeCount) {
@@ -95,38 +94,21 @@ function _nmShowSlide(idx, nodeCount) {
     var label = document.getElementById('nm-node-label');
     var activeSlide = document.getElementById('nm-slide-' + idx);
     if (label && activeSlide) label.textContent = '(' + activeSlide.dataset.nodeId + ')';
-    _nmUpdateStale(nodeCount);
-}
-
-function _nmUpdateStale(nodeCount) {
+    // Update stale markers
     var now = Date.now();
-    for (var i = 0; i < nodeCount; i++) {
-        var slide = document.getElementById('nm-slide-' + i);
-        var badge = document.getElementById('nm-stale-' + i);
-        if (!slide || !badge) continue;
-        var ts = slide.dataset.timestamp;
+    for (var j = 0; j < nodeCount; j++) {
+        var s = document.getElementById('nm-slide-' + j);
+        var badge = document.getElementById('nm-stale-' + j);
+        if (!s || !badge) continue;
+        var ts = s.dataset.timestamp;
         if (!ts) { badge.style.display = 'none'; continue; }
         try {
-            var age = now - new Date(ts).getTime();
-            badge.style.display = (age > _NM_STALE_MS) ? '' : 'none';
+            badge.style.display = (now - new Date(ts).getTime() > _NM_STALE_MS) ? '' : 'none';
         } catch(e) { badge.style.display = 'none'; }
     }
 }
 
-function _nmStartAuto(nodeCount) {
-    // Only start if not already running - prevents 2s DOM refresh from resetting
-    // the 5s cycle before it can fire (would never advance if always restarted)
-    if (_nmAutoId) return;
-    _nmAutoId = setInterval(function() {
-        if (!_nmPinned) _nmShowSlide((_nmCurrent + 1) % nodeCount, nodeCount);
-    }, _NM_CYCLE_MS);
-}
-
-function _nmStopAuto() {
-    if (_nmAutoId) { clearInterval(_nmAutoId); _nmAutoId = null; }
-}
-
-// Global pin handler called by dot onclick in dashboard_health.html partial
+// Global pin handler called by dot onclick
 window.nmPinSlide = function(idx) {
     var carousel = document.getElementById('nm-carousel');
     if (!carousel) return;
@@ -135,12 +117,11 @@ window.nmPinSlide = function(idx) {
     if (_nmPinned && _nmCurrent === idx) {
         // Toggle off: unpin and resume auto-cycling
         _nmPinned = false;
+        _nmLastAdvance = Date.now(); // reset timer so it doesn't immediately advance
         document.querySelectorAll('.nm-dot').forEach(function(d) { d.classList.remove('pinned'); });
-        _nmStartAuto(nodeCount);
     } else {
         // Pin this slide
         _nmPinned = true;
-        _nmStopAuto();
         _nmShowSlide(idx, nodeCount);
         document.querySelectorAll('.nm-dot').forEach(function(d) { d.classList.remove('pinned'); });
         var dot = document.getElementById('nm-dot-' + idx);
