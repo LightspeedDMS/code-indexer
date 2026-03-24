@@ -394,6 +394,12 @@ def dashboard_health_partial(request: Request):
     except Exception as e:
         logger.debug(f"Could not read node_metrics from DB: {e}")
 
+    # Story #492: Determine scheduler leader for Server Status card
+    scheduler_node_id = None
+    _leader_svc = getattr(request.app.state, "leader_election", None)
+    if _leader_svc is not None and _leader_svc.is_leader:
+        scheduler_node_id = _leader_svc._node_id
+
     return templates.TemplateResponse(
         "partials/dashboard_health.html",
         {
@@ -402,6 +408,7 @@ def dashboard_health_partial(request: Request):
             "database_health": database_health,
             "server_version": cidx_version,
             "node_metrics": node_metrics,
+            "scheduler_node_id": scheduler_node_id,
         },
     )
 

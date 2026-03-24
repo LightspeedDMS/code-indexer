@@ -1387,6 +1387,7 @@ def make_lifespan(
                     _reconciliation.start()
                     _cluster_services.append(("reconciliation", _reconciliation))
 
+                    app.state.leader_election = _leader_election
                     logger.info(
                         f"Cluster services started: node_id={_node_id}, "
                         f"is_leader={_leader_election.is_leader}",

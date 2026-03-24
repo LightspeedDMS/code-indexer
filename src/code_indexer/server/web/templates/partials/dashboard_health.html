@@ -18,6 +18,9 @@
         {% if node_metrics and node_metrics|length > 1 %}
         <div class="cluster-node-count">
             <small>{{ node_metrics|length }} nodes reporting</small>
+            {% if scheduler_node_id %}
+            <br><small>Scheduler: {{ scheduler_node_id }}</small>
+            {% endif %}
         </div>
         {% endif %}
         {% if health.failure_reasons and health.failure_reasons|length > 0 %}

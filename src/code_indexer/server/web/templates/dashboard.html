@@ -47,7 +47,7 @@ var _fetchOpts = { credentials: 'same-origin' };
 var _nmCurrent = 0;          // currently visible slide index
 var _nmPinned = false;       // true when user clicked a dot to lock the slide
 var _nmLastAdvance = 0;      // Date.now() when we last auto-advanced
-var _NM_CYCLE_MS = 5000;     // auto-cycle interval (5 seconds)
+var _NM_CYCLE_MS = 10000;    // auto-cycle interval (10 seconds)
 var _NM_STALE_MS = 30000;    // age threshold for "stale" badge
 
 // Called after dashboard_health.html partial is injected into the DOM (every 2s).
