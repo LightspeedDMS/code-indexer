@@ -395,10 +395,24 @@ def dashboard_health_partial(request: Request):
         logger.debug(f"Could not read node_metrics from DB: {e}")
 
     # Story #492: Determine scheduler leader for Server Status card
+    # Query cluster_nodes for the node with role='scheduler' so it works
+    # regardless of which node serves the request.
     scheduler_node_id = None
-    _leader_svc = getattr(request.app.state, "leader_election", None)
-    if _leader_svc is not None and _leader_svc.is_leader:
-        scheduler_node_id = _leader_svc._node_id
+    try:
+        _nm_backend = getattr(request.app.state, "node_metrics_backend", None)
+        if _nm_backend is not None and hasattr(_nm_backend, "_pool"):
+            with _nm_backend._pool.connection() as _sched_conn:
+                with _sched_conn.cursor() as _sched_cur:
+                    _sched_cur.execute(
+                        "SELECT node_id FROM cluster_nodes "
+                        "WHERE role = 'scheduler' AND status = 'online' "
+                        "ORDER BY last_heartbeat DESC LIMIT 1"
+                    )
+                    _sched_row = _sched_cur.fetchone()
+                    if _sched_row:
+                        scheduler_node_id = _sched_row[0]
+    except Exception as exc:
+        logger.debug("Could not query scheduler from cluster_nodes: %s", exc)
 
     return templates.TemplateResponse(
         "partials/dashboard_health.html",

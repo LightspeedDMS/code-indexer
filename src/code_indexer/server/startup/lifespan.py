@@ -1373,6 +1373,7 @@ def make_lifespan(
                     _heartbeat = NodeHeartbeatService(
                         pool=_cluster_pool, node_id=_node_id
                     )
+                    _heartbeat.set_leader_election(_leader_election)
                     _heartbeat.start()
                     _cluster_services.append(("heartbeat", _heartbeat))
 

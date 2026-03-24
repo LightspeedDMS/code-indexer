@@ -163,20 +163,28 @@ class NodeHeartbeatService:
                 rows = cur.fetchall()
         return [row[0] for row in rows]
 
+    def set_leader_election(self, leader_election: Any) -> None:
+        """Set leader election service reference for role updates."""
+        self._leader_election = leader_election
+
     def update_heartbeat(self) -> None:
         """
         Perform a single heartbeat update (exposed for testing).
         """
+        role = "worker"
+        if hasattr(self, "_leader_election") and self._leader_election is not None:
+            role = "scheduler" if self._leader_election.is_leader else "worker"
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE cluster_nodes
                     SET    last_heartbeat = NOW(),
-                           status        = 'online'
+                           status        = 'online',
+                           role          = %s
                     WHERE  node_id = %s
                     """,
-                    (self._node_id,),
+                    (role, self._node_id),
                 )
 
     # ------------------------------------------------------------------
