@@ -75,6 +75,21 @@
     </article>
 
     <!-- Story #492: Node Metrics Carousel (AC4-AC8) -->
+    <style>
+    /* Node metrics card spans full width of health grid */
+    .node-metrics-card { grid-column: 2 / -1; }
+    /* Two-column layout inside each carousel slide */
+    .nm-slide-content { display: flex; gap: 1rem; }
+    .nm-metrics-col { flex: 1; min-width: 0; }
+    .nm-volumes-col { flex: 1; min-width: 0; }
+    /* Dot navigation indicators */
+    .nm-dots { display: flex; justify-content: center; gap: 6px; padding: 8px 0; }
+    .nm-dot { width: 10px; height: 10px; border-radius: 50%; background: #555; cursor: pointer; transition: background 0.2s; display: inline-block; }
+    .nm-dot.active { background: #4CAF50; }
+    .nm-dot.pinned { box-shadow: 0 0 0 2px #fff; }
+    /* Stale badge */
+    .nm-stale-badge { font-size: 0.7em; background: #c44; color: #fff; border-radius: 3px; padding: 1px 4px; margin-left: 4px; }
+    </style>
     {% if node_metrics %}
     <article class="health-card node-metrics-card" id="node-metrics-card">
         <header>
@@ -84,76 +99,79 @@
             {% for nm in node_metrics %}
             {% set ts_str = nm.timestamp %}
             <div class="nm-slide" id="nm-slide-{{ loop.index0 }}" data-node-id="{{ nm.node_id }}" data-timestamp="{{ ts_str }}" {% if loop.index0 != 0 %}style="display:none"{% endif %}>
-                <div class="nm-node-header">
-                    <span class="nm-node-id" title="{{ nm.node_ip }}">{{ nm.node_id }}</span>
-                    <span class="nm-stale-badge" id="nm-stale-{{ loop.index0 }}" style="display:none">stale</span>
+                <span class="nm-stale-badge" id="nm-stale-{{ loop.index0 }}" style="display:none">stale</span>
+                <div class="nm-slide-content">
+                    <div class="nm-metrics-col">
+                        <div class="system-metrics">
+                            <div class="metric">
+                                <span class="metric-label">CPU</span>
+                                <span class="metric-value">{{ "%.1f"|format(nm.cpu_usage) }}%</span>
+                                <div class="metric-bar">
+                                    <div class="metric-fill {% if nm.cpu_usage > 80 %}high{% elif nm.cpu_usage > 60 %}medium{% endif %}"
+                                         style="width: {{ nm.cpu_usage }}%"></div>
+                                </div>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Memory</span>
+                                <span class="metric-value">{{ "%.1f"|format(nm.memory_percent) }}%</span>
+                                <div class="metric-bar">
+                                    <div class="metric-fill {% if nm.memory_percent > 80 %}high{% elif nm.memory_percent > 60 %}medium{% endif %}"
+                                         style="width: {{ nm.memory_percent }}%"></div>
+                                </div>
+                            </div>
+                            <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                                <span class="metric-label" style="flex: 0 0 75px;">CIDX RSS</span>
+                                <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">{{ "%.1f"|format(nm.process_rss_mb) }} MB</span>
+                            </div>
+                            <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                                <span class="metric-label" style="flex: 0 0 75px;">Index Mem</span>
+                                <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">{{ "%.1f"|format(nm.index_memory_mb) }} MB</span>
+                            </div>
+                            <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                                <span class="metric-label" style="flex: 0 0 75px;">Swap</span>
+                                <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">{{ "%.1f"|format(nm.swap_used_mb) }} / {{ "%.1f"|format(nm.swap_total_mb) }} MB</span>
+                            </div>
+                            <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                                <span class="metric-label" style="flex: 0 0 75px;">Disk (R/W)</span>
+                                <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">
+                                    {{ "%.1f"|format(nm.disk_read_kb_s) }} / {{ "%.1f"|format(nm.disk_write_kb_s) }} KB/s
+                                </span>
+                            </div>
+                            <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                                <span class="metric-label" style="flex: 0 0 75px;">Net (Rx/Tx)</span>
+                                <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">
+                                    {{ "%.1f"|format(nm.net_rx_kb_s) }} / {{ "%.1f"|format(nm.net_tx_kb_s) }} KB/s
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                    {% if nm.volumes %}
+                    {% set volumes = nm.volumes %}
+                    {% if volumes %}
+                    <div class="nm-volumes-col">
+                        <div class="nm-volumes">
+                            <div class="nm-volumes-header">Disk Storage</div>
+                            {% for vol in volumes %}
+                            <div class="volume-entry">
+                                <div class="volume-header">
+                                    <span class="volume-mount" title="{{ vol.device | default('') }}">{{ vol.mount_point }}</span>
+                                    <span class="volume-fstype">{{ vol.fstype | default('') }}</span>
+                                </div>
+                                <div class="volume-bar">
+                                    <div class="volume-bar-fill {% if vol.used_percent > 90 %}critical{% elif vol.used_percent > 75 %}warning{% endif %}"
+                                         style="width: {{ vol.used_percent }}%"></div>
+                                </div>
+                                <div class="volume-stats">
+                                    <span class="volume-used">{{ "%.1f"|format(vol.used_gb) }} GB used ({{ "%.0f"|format(vol.used_percent) }}%)</span>
+                                    <span class="volume-free">{{ "%.1f"|format(vol.free_gb) }} GB free</span>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    {% endif %}
+                    {% endif %}
                 </div>
-                <div class="system-metrics">
-                    <div class="metric">
-                        <span class="metric-label">CPU</span>
-                        <span class="metric-value">{{ "%.1f"|format(nm.cpu_usage) }}%</span>
-                        <div class="metric-bar">
-                            <div class="metric-fill {% if nm.cpu_usage > 80 %}high{% elif nm.cpu_usage > 60 %}medium{% endif %}"
-                                 style="width: {{ nm.cpu_usage }}%"></div>
-                        </div>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">Memory</span>
-                        <span class="metric-value">{{ "%.1f"|format(nm.memory_percent) }}%</span>
-                        <div class="metric-bar">
-                            <div class="metric-fill {% if nm.memory_percent > 80 %}high{% elif nm.memory_percent > 60 %}medium{% endif %}"
-                                 style="width: {{ nm.memory_percent }}%"></div>
-                        </div>
-                    </div>
-                    <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
-                        <span class="metric-label" style="flex: 0 0 75px;">CIDX RSS</span>
-                        <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">{{ "%.1f"|format(nm.process_rss_mb) }} MB</span>
-                    </div>
-                    <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
-                        <span class="metric-label" style="flex: 0 0 75px;">Index Mem</span>
-                        <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">{{ "%.1f"|format(nm.index_memory_mb) }} MB</span>
-                    </div>
-                    <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
-                        <span class="metric-label" style="flex: 0 0 75px;">Swap</span>
-                        <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">{{ "%.1f"|format(nm.swap_used_mb) }} / {{ "%.1f"|format(nm.swap_total_mb) }} MB</span>
-                    </div>
-                    <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
-                        <span class="metric-label" style="flex: 0 0 75px;">Disk (R/W)</span>
-                        <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">
-                            {{ "%.1f"|format(nm.disk_read_kb_s) }} / {{ "%.1f"|format(nm.disk_write_kb_s) }} KB/s
-                        </span>
-                    </div>
-                    <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
-                        <span class="metric-label" style="flex: 0 0 75px;">Net (Rx/Tx)</span>
-                        <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">
-                            {{ "%.1f"|format(nm.net_rx_kb_s) }} / {{ "%.1f"|format(nm.net_tx_kb_s) }} KB/s
-                        </span>
-                    </div>
-                </div>
-                {% if nm.volumes %}
-                {% set volumes = nm.volumes %}
-                {% if volumes %}
-                <div class="nm-volumes">
-                    <div class="nm-volumes-header">Disk Storage</div>
-                    {% for vol in volumes %}
-                    <div class="volume-entry">
-                        <div class="volume-header">
-                            <span class="volume-mount" title="{{ vol.device | default('') }}">{{ vol.mount_point }}</span>
-                            <span class="volume-fstype">{{ vol.fstype | default('') }}</span>
-                        </div>
-                        <div class="volume-bar">
-                            <div class="volume-bar-fill {% if vol.used_percent > 90 %}critical{% elif vol.used_percent > 75 %}warning{% endif %}"
-                                 style="width: {{ vol.used_percent }}%"></div>
-                        </div>
-                        <div class="volume-stats">
-                            <span class="volume-used">{{ "%.1f"|format(vol.used_gb) }} GB used ({{ "%.0f"|format(vol.used_percent) }}%)</span>
-                            <span class="volume-free">{{ "%.1f"|format(vol.free_gb) }} GB free</span>
-                        </div>
-                    </div>
-                    {% endfor %}
-                </div>
-                {% endif %}
-                {% endif %}
             </div>
             {% endfor %}
         </div>

@@ -114,7 +114,9 @@ function _nmUpdateStale(nodeCount) {
 }
 
 function _nmStartAuto(nodeCount) {
-    if (_nmAutoId) clearInterval(_nmAutoId);
+    // Only start if not already running - prevents 2s DOM refresh from resetting
+    // the 5s cycle before it can fire (would never advance if always restarted)
+    if (_nmAutoId) return;
     _nmAutoId = setInterval(function() {
         if (!_nmPinned) _nmShowSlide((_nmCurrent + 1) % nodeCount, nodeCount);
     }, _NM_CYCLE_MS);
