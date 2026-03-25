@@ -81,6 +81,8 @@ def make_lifespan(
 
             # Set app state for web routes to access
             app.state.log_db_path = log_db_path
+            # Store handler reference so LogsBackend can be injected later (Story #500 AC4)
+            app.state.sqlite_log_handler = sqlite_handler
 
             logger.info(
                 f"SQLite log handler initialized: {log_db_path} (level: {startup_config.log_level})",
@@ -1326,6 +1328,18 @@ def make_lifespan(
         # MCP handlers use app.state.backend_registry unconditionally.
         app.state.backend_registry = backend_registry
 
+        # Story #500 AC4: Inject LogsBackend into SQLiteLogHandler for delegated writes.
+        # The handler was created earlier (before backend_registry existed); now that
+        # backend_registry is available, wire it in so emit() routes through the backend.
+        if backend_registry is not None and hasattr(backend_registry, "logs"):
+            app.state.logs_backend = backend_registry.logs
+            if hasattr(app.state, "sqlite_log_handler"):
+                app.state.sqlite_log_handler.set_logs_backend(backend_registry.logs)
+                logger.info(
+                    "Story #500 AC4: LogsBackend injected into SQLiteLogHandler",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
         # Epic #408: Start cluster services when in postgres mode
         _cluster_services = []
         if storage_mode == "postgres" and backend_registry is not None:
@@ -1357,6 +1371,15 @@ def make_lifespan(
                         if _configured_node_id
                         else f"{os.uname().nodename}-cidx"
                     )
+
+                    # Story #501 AC3: Tag log records with the cluster node ID so
+                    # the admin UI can aggregate and filter logs per node.
+                    if hasattr(app.state, "sqlite_log_handler"):
+                        app.state.sqlite_log_handler.set_node_id(_node_id)
+                        logger.info(
+                            f"Story #501 AC3: node_id={_node_id!r} injected into SQLiteLogHandler",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
 
                     # Leader election
                     from code_indexer.server.services.leader_election_service import (

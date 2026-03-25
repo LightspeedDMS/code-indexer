@@ -58,8 +58,41 @@ class SQLiteLogHandler(logging.Handler):
         super().__init__()
         self.db_path = Path(db_path)
 
+        # Optional LogsBackend for delegated writes (Story #500 AC4).
+        # When set, emit() delegates to this backend instead of writing directly.
+        self._logs_backend: Optional[Any] = None
+
+        # Optional cluster node identifier (Story #501 AC3).
+        # When set, log records are tagged with this node_id so the admin UI
+        # can aggregate and filter logs per node in cluster deployments.
+        self._node_id: Optional[str] = None
+
         # Create database and schema on initialization
         self._init_database()
+
+    def set_logs_backend(self, backend: Any) -> None:
+        """Inject LogsBackend for delegated writes (Story #500 AC4).
+
+        After injection, emit() routes through the backend instead of writing
+        directly to the local SQLite file.  The direct-SQLite path remains
+        intact when no backend is set, preserving backwards compatibility.
+
+        Args:
+            backend: A LogsBackend-conforming object (SQLite or PostgreSQL).
+        """
+        self._logs_backend = backend
+
+    def set_node_id(self, node_id: str) -> None:
+        """Set the cluster node identifier for log record tagging (Story #501 AC3).
+
+        After this is called, all log records emitted by this handler will
+        include the given node_id so the admin UI can aggregate and filter
+        logs by cluster node.
+
+        Args:
+            node_id: Unique identifier for this cluster node (e.g. "node-1").
+        """
+        self._node_id = node_id
 
     def _init_database(self) -> None:
         """Create database file, logs table, and indexes if they don't exist."""
@@ -97,7 +130,9 @@ class SQLiteLogHandler(logging.Handler):
             )
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_source ON logs(source)")
 
-        DatabaseConnectionManager.get_instance(str(self.db_path)).execute_atomic(_do_init)
+        DatabaseConnectionManager.get_instance(str(self.db_path)).execute_atomic(
+            _do_init
+        )
 
     def _get_connection(self) -> sqlite3.Connection:
         """
@@ -107,7 +142,10 @@ class SQLiteLogHandler(logging.Handler):
         handles thread-local caching, stale connection cleanup, and
         proper connection lifecycle management.
         """
-        return DatabaseConnectionManager.get_instance(str(self.db_path)).get_connection()
+        conn: sqlite3.Connection = DatabaseConnectionManager.get_instance(
+            str(self.db_path)
+        ).get_connection()
+        return conn
 
     def emit(self, record: logging.LogRecord) -> None:
         """
@@ -181,28 +219,44 @@ class SQLiteLogHandler(logging.Handler):
             if extra_data:
                 extra_data_json = json.dumps(extra_data)
 
-            # Insert log record into database (thread-safe, transaction-isolated)
-            def _do_insert(conn: sqlite3.Connection) -> None:
-                conn.execute(
-                    """
+            if self._logs_backend is not None:
+                # Delegated path (Story #500 AC4): route through injected LogsBackend.
+                # Supports both SQLite and PostgreSQL backends transparently.
+                # node_id is injected by set_node_id() in cluster mode (Story #501 AC3).
+                self._logs_backend.insert_log(
+                    timestamp=timestamp,
+                    level=level,
+                    source=source,
+                    message=message,
+                    correlation_id=correlation_id,
+                    user_id=user_id,
+                    request_path=request_path,
+                    extra_data=extra_data_json,
+                    node_id=self._node_id,
+                )
+            else:
+                # Direct-SQLite path (backwards compatible, no backend injected).
+                def _do_insert(conn: sqlite3.Connection) -> None:
+                    conn.execute(
+                        """
                     INSERT INTO logs (timestamp, level, source, message, correlation_id, user_id, request_path, extra_data)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (
-                        timestamp,
-                        level,
-                        source,
-                        message,
-                        correlation_id,
-                        user_id,
-                        request_path,
-                        extra_data_json,
-                    ),
-                )
+                        (
+                            timestamp,
+                            level,
+                            source,
+                            message,
+                            correlation_id,
+                            user_id,
+                            request_path,
+                            extra_data_json,
+                        ),
+                    )
 
-            DatabaseConnectionManager.get_instance(
-                str(self.db_path)
-            ).execute_atomic(_do_insert)
+                DatabaseConnectionManager.get_instance(
+                    str(self.db_path)
+                ).execute_atomic(_do_insert)
 
         except Exception:
             # Don't let logging failures crash the application

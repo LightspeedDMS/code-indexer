@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Dict
 
 if TYPE_CHECKING:
     from code_indexer.server.storage.protocols import (
+        ApiMetricsBackend,
         AuditLogBackend,
         BackgroundJobsBackend,
         CITokensBackend,
@@ -77,6 +78,7 @@ class BackendRegistry:
     audit_log: "AuditLogBackend"
     node_metrics: "NodeMetricsBackend"
     logs: "LogsBackend"
+    api_metrics: "ApiMetricsBackend"
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +133,7 @@ class StorageFactory:
     def _create_sqlite_backends(data_dir: str) -> BackendRegistry:
         """Instantiate all SQLite backends exactly as done today in service_init."""
         from code_indexer.server.storage.sqlite_backends import (
+            ApiMetricsSqliteBackend,
             BackgroundJobsSqliteBackend,
             CITokensSqliteBackend,
             DependencyMapTrackingBackend as DependencyMapTrackingBackend_,
@@ -174,6 +177,9 @@ class StorageFactory:
             audit_log=AuditLogService(groups_db_path),
             node_metrics=NodeMetricsSqliteBackend(db_path),
             logs=LogsSqliteBackend(db_path=str(Path(data_dir).parent / "logs.db")),
+            api_metrics=ApiMetricsSqliteBackend(
+                db_path=str(Path(data_dir) / "api_metrics.db")
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -242,17 +248,15 @@ class StorageFactory:
         from code_indexer.server.storage.postgres.node_metrics_backend import (
             NodeMetricsPostgresBackend,
         )
-        from code_indexer.server.storage.sqlite_backends import LogsSqliteBackend
-        from pathlib import Path as _Path
-        import os as _os
+        from code_indexer.server.storage.postgres.logs_backend import (
+            LogsPostgresBackend,
+        )
+        from code_indexer.server.storage.postgres.api_metrics_backend import (
+            ApiMetricsPostgresBackend,
+        )
 
         dsn = config["postgres_dsn"]
         pool = ConnectionPool(dsn)
-
-        # Logs use SQLite fallback (dedicated logs.db) even in Postgres mode.
-        # postgres_dsn path is used to derive a data directory for logs.db.
-        _default_logs_db = str(_Path(_os.path.expanduser("~/.cidx-server")) / "logs.db")
-        _logs_db_path = config.get("logs_db_path", _default_logs_db)
 
         return BackendRegistry(
             global_repos=GlobalReposPostgresBackend(pool),
@@ -272,5 +276,6 @@ class StorageFactory:
             groups=GroupsPostgresBackend(pool),
             audit_log=AuditLogPostgresBackend(pool),
             node_metrics=NodeMetricsPostgresBackend(pool),
-            logs=LogsSqliteBackend(db_path=_logs_db_path),
+            logs=LogsPostgresBackend(pool),
+            api_metrics=ApiMetricsPostgresBackend(pool),
         )

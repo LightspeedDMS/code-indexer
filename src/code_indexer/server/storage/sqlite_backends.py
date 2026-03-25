@@ -3177,3 +3177,193 @@ class LogsSqliteBackend:
     def close(self) -> None:
         """No-op: connections are managed by DatabaseConnectionManager."""
         pass
+
+
+class ApiMetricsSqliteBackend:
+    """
+    SQLite backend for API metrics storage (Story #502).
+
+    Stores rolling-window API call timestamps so the dashboard can report
+    semantic_searches, other_index_searches, regex_searches, and other_api_calls
+    within any time window.
+
+    Uses a dedicated api_metrics.db file (separate from the main cidx_server.db)
+    to isolate high-volume metric writes from other server state.
+
+    Includes a node_id column for cluster support — each node tags its own
+    metrics so per-node filtering is possible.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        """
+        Initialize the backend and create the api_metrics table if it does not exist.
+
+        Args:
+            db_path: Path to SQLite database file
+                     (e.g. ~/.cidx-server/data/api_metrics.db).
+        """
+        import os
+
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+        self._db_path = db_path
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
+
+        # Enable WAL mode outside any transaction (PRAGMA cannot run inside BEGIN).
+        conn = self._conn_manager.get_connection()
+        conn.execute("PRAGMA journal_mode=WAL")
+
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        """Create the api_metrics table and indexes if they do not already exist."""
+
+        def operation(conn: Any) -> None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS api_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    metric_type TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    node_id TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_api_metrics_type_timestamp
+                ON api_metrics(metric_type, timestamp)
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_api_metrics_node_id ON api_metrics(node_id)"
+            )
+            # Migrate existing databases: add node_id column if missing
+            cursor = conn.execute("PRAGMA table_info(api_metrics)")
+            columns = {row[1] for row in cursor.fetchall()}
+            if "node_id" not in columns:
+                conn.execute("ALTER TABLE api_metrics ADD COLUMN node_id TEXT")
+
+        self._conn_manager.execute_atomic(operation)
+
+    def insert_metric(
+        self,
+        metric_type: str,
+        timestamp: Optional[str] = None,
+        node_id: Optional[str] = None,
+    ) -> None:
+        """Insert a single metric record.
+
+        Args:
+            metric_type: Category ('semantic', 'other_index', 'regex', 'other_api').
+            timestamp: ISO 8601 timestamp. Uses current UTC time when None.
+            node_id: Optional cluster node identifier (NULL in standalone).
+        """
+        from datetime import datetime, timezone
+
+        now = (
+            timestamp
+            if timestamp is not None
+            else datetime.now(timezone.utc).isoformat()
+        )
+
+        def operation(conn: Any) -> None:
+            conn.execute(
+                "INSERT INTO api_metrics (metric_type, timestamp, node_id) VALUES (?, ?, ?)",
+                (metric_type, now, node_id),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def get_metrics(
+        self,
+        window_seconds: int = 3600,
+        node_id: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """Return metric counts within the rolling window.
+
+        Args:
+            window_seconds: Time window in seconds (default 3600 = 1 hour).
+            node_id: When provided, filter to metrics from this node only.
+                     When None, aggregate across all nodes.
+
+        Returns:
+            Dict with keys: semantic_searches, other_index_searches,
+            regex_searches, other_api_calls.
+        """
+        from datetime import datetime, timezone, timedelta
+
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+        ).isoformat()
+
+        conn = self._conn_manager.get_connection()
+        if node_id is not None:
+            rows = conn.execute(
+                """
+                SELECT metric_type, COUNT(*) as count
+                FROM api_metrics
+                WHERE timestamp >= ? AND node_id = ?
+                GROUP BY metric_type
+                """,
+                (cutoff, node_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT metric_type, COUNT(*) as count
+                FROM api_metrics
+                WHERE timestamp >= ?
+                GROUP BY metric_type
+                """,
+                (cutoff,),
+            ).fetchall()
+
+        counts = {row[0]: row[1] for row in rows}
+        return {
+            "semantic_searches": counts.get("semantic", 0),
+            "other_index_searches": counts.get("other_index", 0),
+            "regex_searches": counts.get("regex", 0),
+            "other_api_calls": counts.get("other_api", 0),
+        }
+
+    def cleanup_old(self, max_age_seconds: int = 86400) -> int:
+        """Delete metric records older than max_age_seconds.
+
+        Args:
+            max_age_seconds: Records older than this many seconds are deleted
+                             (default 86400 = 24 hours).
+
+        Returns:
+            Number of rows deleted.
+        """
+        from datetime import datetime, timezone, timedelta
+
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+        ).isoformat()
+
+        def operation(conn: Any) -> int:
+            cursor = conn.execute(
+                "DELETE FROM api_metrics WHERE timestamp < ?",
+                (cutoff,),
+            )
+            return int(cursor.rowcount)
+
+        deleted: int = self._conn_manager.execute_atomic(operation)
+        if deleted:
+            logger.debug(
+                "ApiMetricsSqliteBackend: cleaned up %d old metric records", deleted
+            )
+        return deleted
+
+    def reset(self) -> None:
+        """Delete all metric records (used for testing / manual resets)."""
+
+        def operation(conn: Any) -> None:
+            conn.execute("DELETE FROM api_metrics")
+
+        self._conn_manager.execute_atomic(operation)
+
+    def close(self) -> None:
+        """No-op: connections are managed by DatabaseConnectionManager."""
+        pass

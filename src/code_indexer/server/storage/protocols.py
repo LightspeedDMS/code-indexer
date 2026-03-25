@@ -773,3 +773,72 @@ class LogsBackend(Protocol):
     def close(self) -> None:
         """Close the backend and release any held resources."""
         ...
+
+
+# ---------------------------------------------------------------------------
+# ApiMetricsBackend (Story #502: ApiMetricsBackend Protocol and SQLite Wrapper)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class ApiMetricsBackend(Protocol):
+    """Protocol for API metrics storage (Story #502).
+
+    Supports both SQLite (standalone) and PostgreSQL (cluster) backends.
+    Tracks rolling-window API call counts per category, optionally filtered
+    by cluster node identifier.
+    """
+
+    def insert_metric(
+        self,
+        metric_type: str,
+        timestamp: Optional[str] = None,
+        node_id: Optional[str] = None,
+    ) -> None:
+        """Insert a single metric record.
+
+        Args:
+            metric_type: Category of API call ('semantic', 'other_index',
+                         'regex', 'other_api').
+            timestamp: ISO 8601 timestamp string. Uses current UTC time when None.
+            node_id: Optional cluster node identifier (NULL in standalone).
+        """
+        ...
+
+    def get_metrics(
+        self,
+        window_seconds: int = 3600,
+        node_id: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """Return metric counts within the rolling window.
+
+        Args:
+            window_seconds: Time window in seconds (default 3600 = 1 hour).
+            node_id: When provided, filter to metrics from this node only.
+                     When None, aggregate across all nodes.
+
+        Returns:
+            Dict with keys: semantic_searches, other_index_searches,
+            regex_searches, other_api_calls — each mapped to an integer count.
+        """
+        ...
+
+    def cleanup_old(self, max_age_seconds: int = 86400) -> int:
+        """Delete metric records older than max_age_seconds.
+
+        Args:
+            max_age_seconds: Records older than this many seconds are deleted
+                             (default 86400 = 24 hours).
+
+        Returns:
+            Number of rows deleted.
+        """
+        ...
+
+    def reset(self) -> None:
+        """Delete all metric records (used for testing / manual resets)."""
+        ...
+
+    def close(self) -> None:
+        """Close the backend and release any held resources."""
+        ...

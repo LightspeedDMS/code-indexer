@@ -8172,16 +8172,18 @@ def logs_page(
     level: Optional[str] = None,
     logger: Optional[str] = None,
     search: Optional[str] = None,
+    node_id: Optional[str] = None,
     page: int = 1,
 ):
     """
-    Logs page - view and filter system logs (Story #664 AC1).
+    Logs page - view and filter system logs (Story #664 AC1, Story #501 AC4).
 
     Args:
         request: FastAPI request object
         level: Filter by log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
         logger: Filter by logger name
         search: Search by message text
+        node_id: Filter by cluster node ID (Story #501 AC4)
         page: Page number for pagination
     """
     session = _require_admin_session(request)
@@ -8191,31 +8193,50 @@ def logs_page(
     # Generate CSRF token for forms
     csrf_token = generate_csrf_token()
 
-    # Get log database path from app state
-    log_db_path = request.app.state.log_db_path
-
-    # Create LogAggregatorService instance
-    from ..services.log_aggregator_service import LogAggregatorService
-
-    service = LogAggregatorService(log_db_path)
-
-    # Parse level parameter
-    levels = None
-    if level:
-        levels = [level]
-
-    # Query logs with pagination
-    result = service.query(
-        page=page,
-        page_size=50,
-        sort_order="desc",
-        search=search,
-        levels=levels,
+    # Story #501 AC4: use LogsBackend when available (cluster/postgres mode)
+    logs_backend = getattr(request.app.state, "logs_backend", None)
+    # is_cluster_mode is True when the backend is PostgreSQL (node_id column visible)
+    is_cluster_mode = (
+        logs_backend is not None and "Postgres" in type(logs_backend).__name__
     )
 
-    # Convert to template format
-    logs = result["logs"]
-    pagination = result["pagination"]
+    if logs_backend is not None and is_cluster_mode:
+        # Cluster mode: use LogsBackend.query_logs() for cross-node aggregation
+        import math
+
+        page_size = 50
+        offset = (page - 1) * page_size
+        log_list, total = logs_backend.query_logs(
+            level=level or None,
+            source=logger or None,
+            node_id=node_id or None,
+            limit=page_size,
+            offset=offset,
+        )
+        total_pages = math.ceil(total / page_size) if total > 0 else 0
+        logs = log_list
+        pagination = {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+        }
+    else:
+        # Standalone mode: use LogAggregatorService (SQLite, supports text search)
+        log_db_path = request.app.state.log_db_path
+        from ..services.log_aggregator_service import LogAggregatorService
+
+        service = LogAggregatorService(log_db_path)
+        levels = [level] if level else None
+        result = service.query(
+            page=page,
+            page_size=50,
+            sort_order="desc",
+            search=search,
+            levels=levels,
+        )
+        logs = result["logs"]
+        pagination = result["pagination"]
 
     # Render template
     response = templates.TemplateResponse(
@@ -8230,6 +8251,8 @@ def logs_page(
             "level": level,
             "logger": logger,
             "search": search,
+            "node_id": node_id,
+            "is_cluster_mode": is_cluster_mode,
             "page": page,
             "total_count": pagination["total"],
             "total_pages": pagination["total_pages"],
@@ -8246,16 +8269,18 @@ def logs_list_partial(
     level: Optional[str] = None,
     logger: Optional[str] = None,
     search: Optional[str] = None,
+    node_id: Optional[str] = None,
     page: int = 1,
 ):
     """
-    Partial endpoint for logs list - used by HTMX for dynamic updates (Story #664 AC2).
+    Partial endpoint for logs list - used by HTMX for dynamic updates (Story #664 AC2, Story #501 AC4).
 
     Args:
         request: FastAPI request object
         level: Filter by log level
         logger: Filter by logger name
         search: Search by message text
+        node_id: Filter by cluster node ID (Story #501 AC4)
         page: Page number for pagination
     """
     session = _require_admin_session(request)
@@ -8267,31 +8292,50 @@ def logs_list_partial(
     if not csrf_token:
         csrf_token = generate_csrf_token()
 
-    # Get log database path from app state
-    log_db_path = request.app.state.log_db_path
-
-    # Create LogAggregatorService instance
-    from ..services.log_aggregator_service import LogAggregatorService
-
-    service = LogAggregatorService(log_db_path)
-
-    # Parse level parameter
-    levels = None
-    if level:
-        levels = [level]
-
-    # Query logs with pagination
-    result = service.query(
-        page=page,
-        page_size=50,
-        sort_order="desc",
-        search=search,
-        levels=levels,
+    # Story #501 AC4: use LogsBackend when available (cluster/postgres mode)
+    logs_backend = getattr(request.app.state, "logs_backend", None)
+    # is_cluster_mode is True when the backend is PostgreSQL (node_id column visible)
+    is_cluster_mode = (
+        logs_backend is not None and "Postgres" in type(logs_backend).__name__
     )
 
-    # Convert to template format
-    logs = result["logs"]
-    pagination = result["pagination"]
+    if logs_backend is not None and is_cluster_mode:
+        # Cluster mode: use LogsBackend.query_logs() for cross-node aggregation
+        import math
+
+        page_size = 50
+        offset = (page - 1) * page_size
+        log_list, total = logs_backend.query_logs(
+            level=level or None,
+            source=logger or None,
+            node_id=node_id or None,
+            limit=page_size,
+            offset=offset,
+        )
+        total_pages = math.ceil(total / page_size) if total > 0 else 0
+        logs = log_list
+        pagination = {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+        }
+    else:
+        # Standalone mode: use LogAggregatorService (SQLite, supports text search)
+        log_db_path = request.app.state.log_db_path
+        from ..services.log_aggregator_service import LogAggregatorService
+
+        service = LogAggregatorService(log_db_path)
+        levels = [level] if level else None
+        result = service.query(
+            page=page,
+            page_size=50,
+            sort_order="desc",
+            search=search,
+            levels=levels,
+        )
+        logs = result["logs"]
+        pagination = result["pagination"]
 
     # Render partial template
     response = templates.TemplateResponse(
@@ -8303,6 +8347,8 @@ def logs_list_partial(
             "level": level,
             "logger": logger,
             "search": search,
+            "node_id": node_id,
+            "is_cluster_mode": is_cluster_mode,
             "page": page,
             "total_count": pagination["total"],
             "total_pages": pagination["total_pages"],
