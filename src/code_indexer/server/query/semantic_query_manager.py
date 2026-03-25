@@ -433,20 +433,14 @@ class SemanticQueryManager:
         # Get user's activated repositories
         user_repos = self.activated_repo_manager.list_activated_repositories(username)
 
-        # ALSO get global repos from GlobalRegistry
+        # ALSO get global repos from BackendRegistry (cluster-aware, database-backed)
         global_repos_list = []
         try:
-            from code_indexer.server.utils.registry_factory import (
-                get_server_global_registry,
-            )
+            from code_indexer.server import app as app_module
 
-            # Get golden repos dir from activated_repo_manager's data_dir
-            data_dir = Path(self.activated_repo_manager.activated_repos_dir).parent
-            golden_repos_dir = data_dir / "golden-repos"
-
-            if golden_repos_dir.exists():
-                registry = get_server_global_registry(str(golden_repos_dir))
-                global_repos = registry.list_global_repos()
+            backend_registry = getattr(app_module.app.state, "backend_registry", None)
+            if backend_registry:
+                global_repos = list(backend_registry.global_repos.list_repos().values())
 
                 # Format global repos to match user_repos structure
                 for global_repo in global_repos:
@@ -1014,10 +1008,10 @@ class SemanticQueryManager:
                 if search_mode == "fts":
                     if file_extensions is not None:
                         fts_results = [
-                            r for r in fts_results
-                            if Path(r.file_path).suffix.lower() in [
-                                ext.lower() for ext in file_extensions
-                            ]
+                            r
+                            for r in fts_results
+                            if Path(r.file_path).suffix.lower()
+                            in [ext.lower() for ext in file_extensions]
                         ]
                     return fts_results
 

@@ -2954,3 +2954,226 @@ class NodeMetricsSqliteBackend:
     def close(self) -> None:
         """Close database connections."""
         self._conn_manager.close_all()
+
+
+class LogsSqliteBackend:
+    """
+    SQLite backend for operational log storage (Story #500).
+
+    Stores log records written by SQLiteLogHandler (and cluster nodes) so
+    the admin UI and REST API can query them with filtering and pagination.
+
+    Uses a dedicated logs.db file (separate from the main cidx_server.db)
+    to isolate high-volume log writes from other server state.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        """
+        Initialize the backend and create the logs table if it does not exist.
+
+        Args:
+            db_path: Path to SQLite database file (e.g. ~/.cidx-server/logs.db).
+        """
+        import os
+
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        """Create the logs table and indexes if they do not already exist."""
+
+        def operation(conn: Any) -> None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    source TEXT,
+                    message TEXT,
+                    correlation_id TEXT,
+                    user_id TEXT,
+                    request_path TEXT,
+                    extra_data TEXT,
+                    node_id TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp)"
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_logs_correlation_id ON logs(correlation_id)"
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_node_id ON logs(node_id)")
+            # Migrate existing databases: add node_id column if missing
+            cursor = conn.execute("PRAGMA table_info(logs)")
+            columns = {row[1] for row in cursor.fetchall()}
+            if "node_id" not in columns:
+                conn.execute("ALTER TABLE logs ADD COLUMN node_id TEXT")
+
+        self._conn_manager.execute_atomic(operation)
+
+    def insert_log(
+        self,
+        timestamp: str,
+        level: str,
+        source: Optional[str] = None,
+        message: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        request_path: Optional[str] = None,
+        extra_data: Optional[str] = None,
+        node_id: Optional[str] = None,
+    ) -> None:
+        """Insert a single log record.
+
+        Args:
+            timestamp: ISO 8601 timestamp string.
+            level: Log level name (DEBUG, INFO, WARNING, ERROR, CRITICAL).
+            source: Logger name / source identifier.
+            message: Formatted log message text.
+            correlation_id: Optional request correlation ID.
+            user_id: Optional user identifier.
+            request_path: Optional HTTP request path.
+            extra_data: Optional JSON-serialised extra fields.
+            node_id: Optional cluster node identifier (NULL in standalone).
+        """
+
+        def operation(conn: Any) -> None:
+            conn.execute(
+                """
+                INSERT INTO logs
+                    (timestamp, level, source, message, correlation_id,
+                     user_id, request_path, extra_data, node_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    timestamp,
+                    level,
+                    source,
+                    message,
+                    correlation_id,
+                    user_id,
+                    request_path,
+                    extra_data,
+                    node_id,
+                ),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def _build_query_conditions(
+        self,
+        level: Optional[str],
+        source: Optional[str],
+        correlation_id: Optional[str],
+        date_from: Optional[str],
+        date_to: Optional[str],
+        node_id: Optional[str],
+    ) -> Tuple[str, List[Any]]:
+        """Build WHERE clause and params list for log queries."""
+        conditions: List[str] = []
+        params: List[Any] = []
+        if level is not None:
+            conditions.append("level = ?")
+            params.append(level)
+        if source is not None:
+            conditions.append("source = ?")
+            params.append(source)
+        if correlation_id is not None:
+            conditions.append("correlation_id = ?")
+            params.append(correlation_id)
+        if date_from is not None:
+            conditions.append("timestamp >= ?")
+            params.append(date_from)
+        if date_to is not None:
+            conditions.append("timestamp <= ?")
+            params.append(date_to)
+        if node_id is not None:
+            conditions.append("node_id = ?")
+            params.append(node_id)
+        where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        return where_clause, params
+
+    def _row_to_log_dict(self, row: tuple) -> Dict[str, Any]:
+        """Convert a database row tuple to a log record dict."""
+        return {
+            "id": row[0],
+            "timestamp": row[1],
+            "level": row[2],
+            "source": row[3],
+            "message": row[4],
+            "correlation_id": row[5],
+            "user_id": row[6],
+            "request_path": row[7],
+            "extra_data": row[8],
+            "node_id": row[9],
+            "created_at": row[10],
+        }
+
+    def query_logs(
+        self,
+        level: Optional[str] = None,
+        source: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        node_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """Query log records with optional filtering and pagination.
+
+        Returns:
+            Tuple of (list_of_log_dicts, total_count) where total_count reflects
+            the full match count before pagination is applied.
+        """
+        where_clause, params = self._build_query_conditions(
+            level, source, correlation_id, date_from, date_to, node_id
+        )
+        conn = self._conn_manager.get_connection()
+        total_count: int = conn.execute(
+            f"SELECT COUNT(*) FROM logs {where_clause}", params
+        ).fetchone()[0]
+        rows = conn.execute(
+            f"""
+            SELECT id, timestamp, level, source, message, correlation_id,
+                   user_id, request_path, extra_data, node_id, created_at
+            FROM logs {where_clause}
+            ORDER BY timestamp DESC
+            LIMIT ? OFFSET ?
+            """,
+            params + [limit, offset],
+        ).fetchall()
+        return [self._row_to_log_dict(row) for row in rows], total_count
+
+    def cleanup_old_logs(self, days_to_keep: int) -> int:
+        """Delete log records older than days_to_keep days.
+
+        Args:
+            days_to_keep: Records with timestamp older than this many days are deleted.
+
+        Returns:
+            Number of rows deleted.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days_to_keep)).isoformat()
+
+        def operation(conn: Any) -> int:
+            cursor = conn.execute(
+                "DELETE FROM logs WHERE timestamp < ?",
+                (cutoff,),
+            )
+            return int(cursor.rowcount)
+
+        deleted: int = self._conn_manager.execute_atomic(operation)
+        if deleted:
+            logger.debug("Cleaned up %d old log records", deleted)
+        return deleted
+
+    def close(self) -> None:
+        """No-op: connections are managed by DatabaseConnectionManager."""
+        pass

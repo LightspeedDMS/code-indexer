@@ -26,11 +26,20 @@ logger = logging.getLogger(__name__)
 
 
 def _get_golden_repos_dir() -> str:
-    """Get golden repos directory from environment or default."""
-    golden_repos_dir = os.environ.get("CIDX_GOLDEN_REPOS_DIR")
-    if not golden_repos_dir:
-        golden_repos_dir = str(Path.home() / ".cidx-server" / "data" / "golden-repos")
-    return golden_repos_dir
+    """Get golden repos directory from app.state configuration."""
+    from typing import Optional, cast
+    from ..app import app as app_module
+
+    golden_repos_dir: Optional[str] = cast(
+        Optional[str], getattr(app_module.state, "golden_repos_dir", None)
+    )
+    if golden_repos_dir:
+        return golden_repos_dir
+
+    raise RuntimeError(
+        "golden_repos_dir not configured in app.state. "
+        "Server must set app.state.golden_repos_dir during startup."
+    )
 
 
 # Language detection for search results
@@ -181,7 +190,9 @@ class SemanticSearchService:
                     must_not.append({"key": "language", "match": {"value": ext}})
             else:
                 # Treat as raw extension/value (direct pass-through)
-                must_not.append({"key": "language", "match": {"value": exclude_language}})
+                must_not.append(
+                    {"key": "language", "match": {"value": exclude_language}}
+                )
 
         if exclude_path:
             from code_indexer.services.path_filter_builder import PathFilterBuilder
@@ -402,15 +413,19 @@ class SemanticSearchService:
         Raises:
             FileNotFoundError: If repository not found in global repositories
         """
-        from ..utils.registry_factory import get_server_global_registry
         from code_indexer.global_repos.alias_manager import AliasManager
+        from .. import app as app_module
 
-        # Get golden_repos_dir from helper function
+        # Get golden_repos_dir from app.state
         golden_repos_dir = _get_golden_repos_dir()
 
-        # Look up global repo in GlobalRegistry to verify it exists
-        registry = get_server_global_registry(golden_repos_dir)
-        global_repos = registry.list_global_repos()
+        # Look up global repo via BackendRegistry
+        backend_registry = getattr(app_module.app.state, "backend_registry", None)
+        if backend_registry:
+            repos_dict = backend_registry.global_repos.list_repos()
+            global_repos = list(repos_dict.values())
+        else:
+            global_repos = []
 
         # Find the matching global repo by alias_name
         repo_entry = next(

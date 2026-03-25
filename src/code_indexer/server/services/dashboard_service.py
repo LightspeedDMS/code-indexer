@@ -650,19 +650,14 @@ class DashboardService:
         """
         # Get index_dir based on whether this is a global repo or activated repo
         if username == "_global":
-            # Global repos use GlobalRegistry to get index_path
-            import os
-            from code_indexer.server.utils.registry_factory import (
-                get_server_global_registry,
-            )
+            # Global repos use BackendRegistry via app.state to get index_path
+            from code_indexer.server import app as app_module
 
-            server_data_dir = os.environ.get(
-                "CIDX_SERVER_DATA_DIR",
-                os.path.expanduser("~/.cidx-server"),
-            )
-            golden_repos_dir = f"{server_data_dir}/data/golden-repos"
-            registry = get_server_global_registry(golden_repos_dir)
-            repo_info = registry.get_global_repo(repo_alias)
+            backend_registry = getattr(app_module.app.state, "backend_registry", None)
+            if not backend_registry:
+                raise RuntimeError("BackendRegistry not initialized on app.state")
+            repos_dict = backend_registry.global_repos.list_repos()
+            repo_info = repos_dict.get(repo_alias)
 
             if not repo_info:
                 raise FileNotFoundError(f"Repository not found: {repo_alias}")

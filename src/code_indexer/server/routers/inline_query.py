@@ -111,40 +111,23 @@ def register_query_routes(
                     current_user.username
                 )
 
-                # ALSO get global repos from GlobalRegistry (same pattern as semantic search)
+                # ALSO get global repos from BackendRegistry (works in standalone and cluster mode)
                 global_repos_list = []
                 try:
-                    from pathlib import Path as PathLib
-                    from code_indexer.global_repos.global_registry import GlobalRegistry
-
-                    data_dir = PathLib(
-                        activated_repo_manager.activated_repos_dir
-                    ).parent
-                    golden_repos_dir = data_dir / "golden-repos"
-                    # Compute db_path for SQLite storage (Story #702)
-                    sqlite_db_path = data_dir / "cidx_server.db"
-
-                    if golden_repos_dir.exists():
-                        registry = GlobalRegistry(
-                            str(golden_repos_dir),
-                            use_sqlite=True,
-                            db_path=str(sqlite_db_path),
-                        )
-                        global_repos = registry.list_global_repos()
-
-                        for global_repo in global_repos:
+                    backend_registry = getattr(app.state, "backend_registry", None)
+                    if backend_registry:
+                        repos_dict = backend_registry.global_repos.list_repos()
+                        for alias_name, repo_data in repos_dict.items():
                             global_repos_list.append(
                                 {
-                                    "user_alias": global_repo["alias_name"],
+                                    "user_alias": repo_data["alias_name"],
                                     "username": "global",
                                     "is_global": True,
-                                    "repo_url": global_repo.get("repo_url", ""),
+                                    "repo_url": repo_data.get("repo_url", ""),
                                 }
                             )
                 except Exception as e:
-                    import logging
-
-                    logging.warning(f"Failed to load global repos for FTS/hybrid: {e}")
+                    logger.warning(f"Failed to load global repos for FTS/hybrid: {e}")
 
                 # Merge user repos and global repos
                 activated_repos = activated_repos + global_repos_list
@@ -174,13 +157,25 @@ def register_query_routes(
                 for repo in activated_repos:
                     # Construct path - different for global vs user repos
                     if repo.get("is_global"):
-                        # Global repos: golden-repos/alias (strip -global suffix from alias_name)
-                        data_dir = PathLib(
-                            activated_repo_manager.activated_repos_dir
-                        ).parent
-                        # Strip -global suffix to get actual directory name
-                        repo_dir_name = repo["user_alias"].removesuffix("-global")
-                        repo_path = data_dir / "golden-repos" / repo_dir_name
+                        # Global repos: use AliasManager to resolve versioned snapshot path
+                        from code_indexer.global_repos.alias_manager import AliasManager
+
+                        golden_repos_dir = getattr(app.state, "golden_repos_dir", None)
+                        if not golden_repos_dir:
+                            logger.warning(
+                                f"golden_repos_dir not configured, skipping global repo {repo['user_alias']}"
+                            )
+                            continue
+                        alias_manager = AliasManager(
+                            str(PathLib(golden_repos_dir) / "aliases")
+                        )
+                        resolved_path = alias_manager.read_alias(repo["user_alias"])
+                        if not resolved_path:
+                            logger.warning(
+                                f"Failed to resolve alias path for {repo['user_alias']}, skipping"
+                            )
+                            continue
+                        repo_path = PathLib(resolved_path)
                     else:
                         # User repos: activated-repos/username/alias
                         repo_path = (
@@ -188,6 +183,8 @@ def register_query_routes(
                             / current_user.username
                             / repo["user_alias"]
                         )
+                    if repo_path is None:
+                        continue
                     fts_index_dir = repo_path / ".code-indexer" / "tantivy_index"
                     if fts_index_dir.exists():
                         fts_available = True

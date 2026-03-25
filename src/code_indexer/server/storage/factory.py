@@ -37,6 +37,7 @@ if TYPE_CHECKING:
         GlobalReposBackend,
         GoldenRepoMetadataBackend,
         GroupsBackend,
+        LogsBackend,
         NodeMetricsBackend,
         RepoCategoryBackend,
         SessionsBackend,
@@ -75,6 +76,7 @@ class BackendRegistry:
     groups: "GroupsBackend"
     audit_log: "AuditLogBackend"
     node_metrics: "NodeMetricsBackend"
+    logs: "LogsBackend"
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +138,7 @@ class StorageFactory:
             GitCredentialsSqliteBackend,
             GlobalReposSqliteBackend,
             GoldenRepoMetadataSqliteBackend,
+            LogsSqliteBackend,
             NodeMetricsSqliteBackend,
             SessionsSqliteBackend,
             SSHKeysSqliteBackend,
@@ -170,6 +173,7 @@ class StorageFactory:
             groups=GroupAccessManager(groups_db_path),
             audit_log=AuditLogService(groups_db_path),
             node_metrics=NodeMetricsSqliteBackend(db_path),
+            logs=LogsSqliteBackend(db_path=str(Path(data_dir).parent / "logs.db")),
         )
 
     # ------------------------------------------------------------------
@@ -238,9 +242,17 @@ class StorageFactory:
         from code_indexer.server.storage.postgres.node_metrics_backend import (
             NodeMetricsPostgresBackend,
         )
+        from code_indexer.server.storage.sqlite_backends import LogsSqliteBackend
+        from pathlib import Path as _Path
+        import os as _os
 
         dsn = config["postgres_dsn"]
         pool = ConnectionPool(dsn)
+
+        # Logs use SQLite fallback (dedicated logs.db) even in Postgres mode.
+        # postgres_dsn path is used to derive a data directory for logs.db.
+        _default_logs_db = str(_Path(_os.path.expanduser("~/.cidx-server")) / "logs.db")
+        _logs_db_path = config.get("logs_db_path", _default_logs_db)
 
         return BackendRegistry(
             global_repos=GlobalReposPostgresBackend(pool),
@@ -260,4 +272,5 @@ class StorageFactory:
             groups=GroupsPostgresBackend(pool),
             audit_log=AuditLogPostgresBackend(pool),
             node_metrics=NodeMetricsPostgresBackend(pool),
+            logs=LogsSqliteBackend(db_path=_logs_db_path),
         )

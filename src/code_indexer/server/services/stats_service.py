@@ -29,11 +29,20 @@ logger = logging.getLogger(__name__)
 
 
 def _get_golden_repos_dir() -> str:
-    """Get golden repos directory from environment or default."""
-    golden_repos_dir = os.environ.get("CIDX_GOLDEN_REPOS_DIR")
-    if not golden_repos_dir:
-        golden_repos_dir = str(Path.home() / ".cidx-server" / "data" / "golden-repos")
-    return golden_repos_dir
+    """Get golden repos directory from app.state configuration."""
+    from typing import Optional, cast
+    from ..app import app as app_module
+
+    golden_repos_dir: Optional[str] = cast(
+        Optional[str], getattr(app_module.state, "golden_repos_dir", None)
+    )
+    if golden_repos_dir:
+        return golden_repos_dir
+
+    raise RuntimeError(
+        "golden_repos_dir not configured in app.state. "
+        "Server must set app.state.golden_repos_dir during startup."
+    )
 
 
 # File extension to language mapping
@@ -531,17 +540,21 @@ class RepositoryStatsService:
             FileNotFoundError: If repository not found
         """
         try:
-            # Story #46: Use GlobalRegistry for correct alias_name lookup
-            from ..utils.registry_factory import get_server_global_registry
+            # Use BackendRegistry for correct alias_name lookup
             from code_indexer.global_repos.alias_manager import AliasManager
             from pathlib import Path
+            from .. import app as app_module
 
             # Get golden repos directory
             golden_repos_dir = _get_golden_repos_dir()
 
-            # Use GlobalRegistry to find repo by alias_name
-            registry = get_server_global_registry(golden_repos_dir)
-            global_repos = registry.list_global_repos()
+            # Use BackendRegistry to find repo by alias_name
+            backend_registry = getattr(app_module.app.state, "backend_registry", None)
+            if backend_registry:
+                repos_dict = backend_registry.global_repos.list_repos()
+                global_repos = list(repos_dict.values())
+            else:
+                global_repos = []
 
             repo_entry = next(
                 (r for r in global_repos if r.get("alias_name") == repo_id), None

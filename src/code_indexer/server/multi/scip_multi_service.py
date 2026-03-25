@@ -518,20 +518,17 @@ class SCIPMultiService:
         Raises:
             FileNotFoundError: If repository not found in global repositories
         """
-        from ..utils.registry_factory import get_server_global_registry
+        from code_indexer.server import app as app_module
         from code_indexer.global_repos.alias_manager import AliasManager
 
         # Get golden_repos_dir from server configuration
         golden_repos_dir = _get_golden_repos_dir()
 
-        # Look up global repo in GlobalRegistry to verify it exists
-        registry = get_server_global_registry(golden_repos_dir)
-        global_repos = registry.list_global_repos()
-
-        # Find the matching global repo by alias_name
-        repo_entry = next(
-            (r for r in global_repos if r.get("alias_name") == repo_id), None
-        )
+        # Look up global repo in BackendRegistry to verify it exists
+        backend_registry = getattr(app_module.app.state, "backend_registry", None)
+        if not backend_registry:
+            raise RuntimeError("backend_registry not initialized on app.state")
+        repo_entry = backend_registry.global_repos.get_repo(repo_id)
 
         if not repo_entry:
             raise FileNotFoundError(

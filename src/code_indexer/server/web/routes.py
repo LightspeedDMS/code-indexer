@@ -2038,7 +2038,7 @@ def _batch_create_repos(
     }
 
 
-def _get_golden_repos_list():
+def _get_golden_repos_list(backend_registry=None):
     """Get list of all golden repositories with global alias, version, and index info."""
     try:
         import os
@@ -2055,20 +2055,10 @@ def _get_golden_repos_list():
         golden_repos_dir = Path(server_data_dir) / "data" / "golden-repos"
 
         # Get global registry to check global activation status
-        try:
-            from code_indexer.server.utils.registry_factory import (
-                get_server_global_registry,
-            )
-
-            registry = get_server_global_registry(str(golden_repos_dir))
-            global_repos = {r["repo_name"]: r for r in registry.list_global_repos()}
-        except Exception as e:
-            logger.warning(
-                format_error_log(
-                    "SCIP-GENERAL-044", f"Could not load global registry: {e}"
-                ),
-                extra={"correlation_id": get_correlation_id()},
-            )
+        if backend_registry is not None:
+            repos_dict = backend_registry.global_repos.list_repos()
+            global_repos = {v["repo_name"]: v for v in repos_dict.values()}
+        else:
             global_repos = {}
 
         # Get alias info for version and target path
@@ -2255,7 +2245,8 @@ def _create_golden_repos_page_response(
 ) -> HTMLResponse:
     """Create golden repos page response with all necessary context."""
     csrf_token = generate_csrf_token()
-    repos = _get_golden_repos_list()
+    backend_registry = getattr(request.app.state, "backend_registry", None)
+    repos = _get_golden_repos_list(backend_registry)
     users = _get_users_list()
 
     # Get categories for dropdown (Story #183)
@@ -2935,7 +2926,8 @@ def golden_repos_list_partial(request: Request):
     if not csrf_token:
         # Fallback: generate new token if cookie missing/invalid
         csrf_token = generate_csrf_token()
-    repos = _get_golden_repos_list()
+    backend_registry = getattr(request.app.state, "backend_registry", None)
+    repos = _get_golden_repos_list(backend_registry)
 
     # Get categories for dropdown (Story #183)
     try:
@@ -3736,50 +3728,36 @@ def _add_to_query_history(
         _query_history[session_username] = history[:MAX_QUERY_HISTORY]
 
 
-def _get_all_activated_repos_for_query() -> list:
+def _get_all_activated_repos_for_query(backend_registry=None) -> list:
     """
     Get all activated repositories for query dropdown.
 
     Returns list of repos with user_alias, username, and is_global flag.
     Includes both user-activated repos and globally activated repos.
     """
-    import os
-    from pathlib import Path
-
     repos = []
 
     # Add globally activated repos first
-    try:
-        server_data_dir = os.environ.get(
-            "CIDX_SERVER_DATA_DIR",
-            os.path.expanduser("~/.cidx-server"),
-        )
-        golden_repos_dir = Path(server_data_dir) / "data" / "golden-repos"
-
-        from code_indexer.server.utils.registry_factory import (
-            get_server_global_registry,
-        )
-
-        registry = get_server_global_registry(str(golden_repos_dir))
-        global_repos = registry.list_global_repos()
-
-        for global_repo in global_repos:
-            repos.append(
-                {
-                    "user_alias": global_repo["alias_name"],
-                    "username": "global",
-                    "is_global": True,
-                    "repo_name": global_repo.get("repo_name", ""),
-                    "path": global_repo.get("index_path"),
-                }
+    if backend_registry is not None:
+        try:
+            repos_dict = backend_registry.global_repos.list_repos()
+            for global_repo in repos_dict.values():
+                repos.append(
+                    {
+                        "user_alias": global_repo["alias_name"],
+                        "username": "global",
+                        "is_global": True,
+                        "repo_name": global_repo.get("repo_name", ""),
+                        "path": global_repo.get("index_path"),
+                    }
+                )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "STORE-GENERAL-030", f"Could not load global repos for query: {e}"
+                ),
+                extra={"correlation_id": get_correlation_id()},
             )
-    except Exception as e:
-        logger.warning(
-            format_error_log(
-                "STORE-GENERAL-030", f"Could not load global repos for query: {e}"
-            ),
-            extra={"correlation_id": get_correlation_id()},
-        )
 
     # Add user-activated repos
     user_repos = _get_all_activated_repos()
@@ -3816,7 +3794,8 @@ def _create_query_page_response(
 ) -> HTMLResponse:
     """Create query page response with all necessary context."""
     csrf_token = generate_csrf_token()
-    repositories = _get_all_activated_repos_for_query()
+    backend_registry = getattr(request.app.state, "backend_registry", None)
+    repositories = _get_all_activated_repos_for_query(backend_registry)
     query_history = _get_session_query_history(session.username)
 
     response = templates.TemplateResponse(
@@ -3984,6 +3963,8 @@ def query_submit(
     query_executed = True
     error_message = None
 
+    backend_registry = getattr(request.app.state, "backend_registry", None)
+
     try:
         # Handle SCIP query mode
         if search_mode == "scip":
@@ -3995,7 +3976,7 @@ def query_submit(
             user_alias = repo_parts[0] if repo_parts else repository
 
             # Get the repository from all available repos
-            all_repos = _get_all_activated_repos_for_query()
+            all_repos = _get_all_activated_repos_for_query(backend_registry)
             target_repo = None
             for repo in all_repos:
                 if repo.get("user_alias") == user_alias:
@@ -4008,23 +3989,16 @@ def query_submit(
                 # Determine repository path
                 repo_path = target_repo.get("path")
 
-                # For global repos, resolve path from GlobalRegistry
-                if not repo_path and target_repo.get("is_global"):
+                # For global repos, resolve path from BackendRegistry
+                if (
+                    not repo_path
+                    and target_repo.get("is_global")
+                    and backend_registry is not None
+                ):
                     try:
-                        import os
-                        from code_indexer.server.utils.registry_factory import (
-                            get_server_global_registry,
+                        global_repo_meta = backend_registry.global_repos.get_repo(
+                            user_alias
                         )
-
-                        server_data_dir = os.environ.get(
-                            "CIDX_SERVER_DATA_DIR",
-                            os.path.expanduser("~/.cidx-server"),
-                        )
-                        golden_repos_dir = (
-                            Path(server_data_dir) / "data" / "golden-repos"
-                        )
-                        registry = get_server_global_registry(str(golden_repos_dir))
-                        global_repo_meta = registry.get_global_repo(user_alias)
                         if global_repo_meta:
                             repo_path = global_repo_meta.get("index_path")
                     except Exception as e:
@@ -4032,8 +4006,8 @@ def query_submit(
                             format_error_log(
                                 "STORE-GENERAL-031",
                                 f"Failed to resolve global repo path for '{user_alias}': {e}",
-                                extra={"correlation_id": get_correlation_id()},
-                            )
+                            ),
+                            extra={"correlation_id": get_correlation_id()},
                         )
 
                 if not repo_path:
@@ -4211,7 +4185,7 @@ def query_submit(
                 user_alias = repo_parts[0] if repo_parts else repository
 
             # Get the repository from all available repos (including global)
-            all_repos = _get_all_activated_repos_for_query()
+            all_repos = _get_all_activated_repos_for_query(backend_registry)
             target_repo = None
             for repo in all_repos:
                 if repo.get("user_alias") == user_alias:
@@ -4405,6 +4379,7 @@ def _execute_scip_query(
     scip_exact: bool,
     limit: int,
     min_score: str,
+    backend_registry=None,
 ) -> tuple[list, Optional[str]]:
     """
     Execute SCIP query for repository. Supports all 7 SCIP query types.
@@ -4417,21 +4392,10 @@ def _execute_scip_query(
     results: List[Dict[str, Any]] = []
     repo_path = target_repo.get("path")
 
-    # For global repos, resolve path from GlobalRegistry
-    if not repo_path and target_repo.get("is_global"):
+    # For global repos, resolve path from BackendRegistry
+    if not repo_path and target_repo.get("is_global") and backend_registry is not None:
         try:
-            from code_indexer.server.utils.registry_factory import (
-                get_server_global_registry,
-            )
-            import os
-
-            server_data_dir = os.environ.get(
-                "CIDX_SERVER_DATA_DIR",
-                os.path.expanduser("~/.cidx-server"),
-            )
-            golden_repos_dir = Path(server_data_dir) / "data" / "golden-repos"
-            registry = get_server_global_registry(str(golden_repos_dir))
-            global_repo_meta = registry.get_global_repo(user_alias)
+            global_repo_meta = backend_registry.global_repos.get_repo(user_alias)
             if global_repo_meta:
                 repo_path = global_repo_meta.get("index_path")
         except Exception as e:
@@ -4664,6 +4628,7 @@ def query_results_partial_post(
     results = []
     query_executed = True
     error_message = None
+    backend_registry = getattr(request.app.state, "backend_registry", None)
 
     try:
         query_manager = _get_semantic_query_manager()
@@ -4676,7 +4641,7 @@ def query_results_partial_post(
             user_alias = repo_parts[0] if repo_parts else repository
 
             # Get the repository owner from activated repos
-            all_repos = _get_all_activated_repos_for_query()
+            all_repos = _get_all_activated_repos_for_query(backend_registry)
             target_repo = None
             for repo in all_repos:
                 if repo.get("user_alias") == user_alias:
@@ -4695,6 +4660,7 @@ def query_results_partial_post(
                     scip_exact,
                     limit,
                     min_score,
+                    backend_registry,
                 )
                 results.extend(scip_results)
                 if scip_error:
