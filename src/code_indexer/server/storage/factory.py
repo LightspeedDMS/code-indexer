@@ -34,6 +34,7 @@ if TYPE_CHECKING:
         CITokensBackend,
         DependencyMapTrackingBackend,
         DescriptionRefreshTrackingBackend,
+        DiagnosticsBackend,
         GitCredentialsBackend,
         GlobalReposBackend,
         GoldenRepoMetadataBackend,
@@ -46,10 +47,12 @@ if TYPE_CHECKING:
         RepoCategoryBackend,
         ResearchSessionsBackend,
         SCIPAuditBackend,
+        SelfMonitoringBackend,
         SessionsBackend,
         SSHKeysBackend,
         SyncJobsBackend,
         UsersBackend,
+        WikiCacheBackend,
     )
 
 
@@ -89,6 +92,9 @@ class BackendRegistry:
     scip_audit: "SCIPAuditBackend"
     refresh_tokens: "RefreshTokenBackend"
     research_sessions: "ResearchSessionsBackend"
+    wiki_cache: "WikiCacheBackend"
+    self_monitoring: "SelfMonitoringBackend"
+    diagnostics: "DiagnosticsBackend"
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +154,7 @@ class StorageFactory:
             CITokensSqliteBackend,
             DependencyMapTrackingBackend as DependencyMapTrackingBackend_,
             DescriptionRefreshTrackingBackend as DescriptionRefreshTrackingBackend_,
+            DiagnosticsSqliteBackend,
             GitCredentialsSqliteBackend,
             GlobalReposSqliteBackend,
             GoldenRepoMetadataSqliteBackend,
@@ -158,10 +165,12 @@ class StorageFactory:
             RefreshTokenSqliteBackend,
             ResearchSessionsSqliteBackend,
             SCIPAuditSqliteBackend,
+            SelfMonitoringSqliteBackend,
             SessionsSqliteBackend,
             SSHKeysSqliteBackend,
             SyncJobsSqliteBackend,
             UsersSqliteBackend,
+            WikiCacheSqliteBackend,
         )
         from code_indexer.server.storage.repo_category_backend import (
             RepoCategorySqliteBackend,
@@ -206,6 +215,9 @@ class StorageFactory:
                 db_path=str(Path(data_dir).parent / "refresh_tokens.db")
             ),
             research_sessions=ResearchSessionsSqliteBackend(db_path),
+            wiki_cache=WikiCacheSqliteBackend(db_path),
+            self_monitoring=SelfMonitoringSqliteBackend(db_path),
+            diagnostics=DiagnosticsSqliteBackend(db_path),
         )
 
     # ------------------------------------------------------------------
@@ -295,6 +307,15 @@ class StorageFactory:
         from code_indexer.server.storage.postgres.research_sessions_backend import (
             ResearchSessionsPostgresBackend,
         )
+        from code_indexer.server.storage.postgres.wiki_cache_backend import (
+            WikiCachePostgresBackend,
+        )
+        from code_indexer.server.storage.postgres.self_monitoring_backend import (
+            SelfMonitoringPostgresBackend,
+        )
+        from code_indexer.server.storage.postgres.diagnostics_backend import (
+            DiagnosticsPostgresBackend,
+        )
 
         dsn = config["postgres_dsn"]
         pool = ConnectionPool(dsn)
@@ -324,4 +345,7 @@ class StorageFactory:
             scip_audit=SCIPAuditPostgresBackend(pool),
             refresh_tokens=RefreshTokenPostgresBackend(pool),
             research_sessions=ResearchSessionsPostgresBackend(pool),
+            wiki_cache=WikiCachePostgresBackend(pool),
+            self_monitoring=SelfMonitoringPostgresBackend(pool),
+            diagnostics=DiagnosticsPostgresBackend(pool),
         )
