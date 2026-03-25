@@ -52,7 +52,7 @@ _SELECT_COLS = """
     job_id, operation_type, status, created_at, started_at, completed_at,
     result, error, progress, username, is_admin, cancelled, repo_alias,
     resolution_attempts, claude_actions, failure_reason, extended_error,
-    language_resolution_status
+    language_resolution_status, progress_info, metadata
 """
 
 
@@ -100,6 +100,8 @@ class BackgroundJobsPostgresBackend:
             "failure_reason": row[15],
             "extended_error": json.loads(row[16]) if row[16] else None,
             "language_resolution_status": json.loads(row[17]) if row[17] else None,
+            "progress_info": row[18] if len(row) > 18 else None,
+            "metadata": json.loads(row[19]) if len(row) > 19 and row[19] else None,
         }
 
     # ------------------------------------------------------------------
@@ -126,6 +128,8 @@ class BackgroundJobsPostgresBackend:
         failure_reason: Optional[str] = None,
         extended_error: Optional[Dict[str, Any]] = None,
         language_resolution_status: Optional[Dict[str, Dict[str, Any]]] = None,
+        progress_info: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Insert a new background job row."""
         with self._pool.connection() as conn:
@@ -136,12 +140,14 @@ class BackgroundJobsPostgresBackend:
                         job_id, operation_type, status, created_at, started_at,
                         completed_at, result, error, progress, username, is_admin,
                         cancelled, repo_alias, resolution_attempts, claude_actions,
-                        failure_reason, extended_error, language_resolution_status
+                        failure_reason, extended_error, language_resolution_status,
+                        progress_info, metadata
                     ) VALUES (
                         %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s,
-                        %s, %s, %s
+                        %s, %s, %s,
+                        %s, %s
                     )
                     """,
                     (
@@ -169,6 +175,8 @@ class BackgroundJobsPostgresBackend:
                         json.dumps(language_resolution_status)
                         if language_resolution_status is not None
                         else None,
+                        progress_info,
+                        json.dumps(metadata) if metadata is not None else None,
                     ),
                 )
         logger.debug("Saved background job: %s", job_id)

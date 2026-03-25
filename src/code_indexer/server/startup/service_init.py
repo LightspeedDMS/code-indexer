@@ -104,15 +104,8 @@ def initialize_services() -> Dict[str, Any]:
     config_service = get_config_service()
     server_config = config_service.get_config()
 
-    # Initialize authentication managers with persistent JWT secret
-    jwt_secret_manager = JWTSecretManager()
-    secret_key = jwt_secret_manager.get_or_create_secret()
-    # Bug #83-1 Fix: Use config.jwt_expiration_minutes instead of hardcoded 10
-    jwt_manager = JWTManager(
-        secret_key=secret_key,
-        token_expiration_minutes=server_config.jwt_expiration_minutes,
-        algorithm="HS256",
-    )
+    # Story #528: JWT secret manager init moved after storage mode detection below,
+    # so it can use PostgreSQL for cluster-wide JWT secret sharing.
 
     # Initialize UserManager with server data directory support
     server_data_dir = os.environ.get(
@@ -134,6 +127,7 @@ def initialize_services() -> Dict[str, Any]:
     _backend_registry = None
     data_dir = str(Path(server_data_dir) / "data")
     db_path_str = str(db_path)
+    _raw_config: dict = {}
     try:
         import json as _json
 
@@ -178,6 +172,21 @@ def initialize_services() -> Dict[str, Any]:
             "Storage mode: SQLite (standalone)",
             extra={"correlation_id": get_correlation_id()},
         )
+
+    # Story #528: Initialize JWT secret with PG DSN for cluster-wide sharing.
+    # In PG mode, JWT secret is stored in shared cluster_secrets table so
+    # all nodes sign/verify tokens with the same key.
+    _pg_dsn_for_jwt = (
+        _raw_config.get("postgres_dsn") if _storage_mode == "postgres" else None
+    )
+    jwt_secret_manager = JWTSecretManager(pg_dsn=_pg_dsn_for_jwt)
+    secret_key = jwt_secret_manager.get_or_create_secret()
+    # Bug #83-1 Fix: Use config.jwt_expiration_minutes instead of hardcoded 10
+    jwt_manager = JWTManager(
+        secret_key=secret_key,
+        token_expiration_minutes=server_config.jwt_expiration_minutes,
+        algorithm="HS256",
+    )
 
     # Bug #83-2 Fix: Pass password_security_config to UserManager
     user_manager = UserManager(
@@ -257,7 +266,12 @@ def initialize_services() -> Dict[str, Any]:
     # Story #311: Instantiate JobTracker before BackgroundJobManager (Epic #261 Story 1B)
     from code_indexer.server.services.job_tracker import JobTracker as _JobTracker
 
-    job_tracker = _JobTracker(db_path_str)
+    job_tracker = _JobTracker(
+        db_path_str,
+        storage_backend=_backend_registry.background_jobs
+        if _backend_registry
+        else None,
+    )
     job_tracker.cleanup_orphaned_jobs_on_startup()
 
     # Story #313: Inject job_tracker into ClaudeCliManager singleton

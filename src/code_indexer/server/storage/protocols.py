@@ -197,6 +197,8 @@ class BackgroundJobsBackend(Protocol):
         failure_reason: Optional[str] = None,
         extended_error: Optional[Dict[str, Any]] = None,
         language_resolution_status: Optional[Dict[str, Dict[str, Any]]] = None,
+        progress_info: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None: ...
 
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]: ...

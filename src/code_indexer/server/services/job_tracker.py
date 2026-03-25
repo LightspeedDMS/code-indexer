@@ -47,9 +47,7 @@ class TrackedJob:
     progress: int = 0
     progress_info: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
-    created_at: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     error: Optional[str] = None
@@ -193,10 +191,35 @@ _SELECT_COLUMNS = (
     "result, error, progress, username, repo_alias, progress_info, metadata"
 )
 
+# Upper bound for backend list_jobs when enumerating candidates for bulk deletion.
+_CLEANUP_JOB_FETCH_LIMIT = 10000
+
 
 # ---------------------------------------------------------------------------
 # JobTracker class
 # ---------------------------------------------------------------------------
+
+
+def _dict_to_tracked_job(d: Dict[str, Any]) -> TrackedJob:
+    """
+    Convert a backend dict (from BackgroundJobsBackend.get_job / list_jobs)
+    to a TrackedJob.  Extra keys (is_admin, cancelled, etc.) are ignored.
+    """
+    return TrackedJob(
+        job_id=d["job_id"],
+        operation_type=d["operation_type"],
+        status=d["status"],
+        username=d["username"],
+        repo_alias=d.get("repo_alias"),
+        progress=d.get("progress") or 0,
+        progress_info=d.get("progress_info"),
+        metadata=d.get("metadata"),
+        created_at=_iso_to_dt(d.get("created_at")) or datetime.now(timezone.utc),
+        started_at=_iso_to_dt(d.get("started_at")),
+        completed_at=_iso_to_dt(d.get("completed_at")),
+        error=d.get("error"),
+        result=d.get("result"),
+    )
 
 
 class JobTracker:
@@ -209,16 +232,27 @@ class JobTracker:
     Uses the EXISTING background_jobs table (no new tables).
     New columns progress_info and metadata are added by the schema migration
     _migrate_background_jobs_job_tracker() in DatabaseSchema.
+
+    Story #521: Accepts an optional storage_backend (BackgroundJobsBackend protocol).
+    When provided, all DB persistence is delegated to the backend instead of
+    direct DatabaseConnectionManager access.
     """
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, storage_backend=None) -> None:
         """
         Initialise tracker.
 
         Args:
             db_path: Path to the SQLite database file containing background_jobs.
+            storage_backend: Optional BackgroundJobsBackend instance.  When
+                provided, all DB operations are delegated to this backend
+                instead of direct SQLite access.
         """
-        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
+        self._backend = storage_backend
+        if storage_backend is None:
+            self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
+        else:
+            self._conn_manager = None  # type: ignore[assignment]
         self._active_jobs: Dict[str, TrackedJob] = {}
         self._lock = threading.Lock()
 
@@ -295,9 +329,7 @@ class JobTracker:
         with self._lock:
             job = self._active_jobs.get(job_id)
             if job is None:
-                logger.warning(
-                    f"JobTracker.update_status: job {job_id} not in memory"
-                )
+                logger.warning(f"JobTracker.update_status: job {job_id} not in memory")
                 return
 
             if status is not None:
@@ -330,7 +362,9 @@ class JobTracker:
 
         self._upsert_job(snapshot)
 
-    def complete_job(self, job_id: str, result: Optional[Dict[str, Any]] = None) -> None:
+    def complete_job(
+        self, job_id: str, result: Optional[Dict[str, Any]] = None
+    ) -> None:
         """
         Mark job as completed.
 
@@ -420,13 +454,13 @@ class JobTracker:
         time_filter: str = "24h",
     ) -> List[Dict[str, Any]]:
         """
-        Merge active in-memory jobs + recent historical jobs from SQLite.
+        Merge active in-memory jobs + recent historical jobs from the store.
 
         Active jobs are always included regardless of the time filter.
         Historical jobs are filtered by created_at within the time window.
 
         Args:
-            limit: Maximum number of historical records from SQLite.
+            limit: Maximum number of historical records from the store.
             time_filter: "1h", "24h", "7d", "30d", or "all".
 
         Returns:
@@ -439,13 +473,26 @@ class JobTracker:
         seen_ids = {j.job_id for j in active_snapshot}
         result = [_tracked_job_to_dict(j) for j in active_snapshot]
 
-        # Compute cutoff
+        # Compute cutoff ISO string
         cutoff_iso: Optional[str] = None
         if time_filter != "all":
             delta_map = {"1h": 1, "24h": 24, "7d": 168, "30d": 720}
             hours = delta_map.get(time_filter, 24)
             cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
             cutoff_iso = cutoff.isoformat()
+
+        if self._backend is not None:
+            # Fetch from backend and filter client-side by cutoff
+            historical = self._backend.list_jobs(limit=limit)
+            for job_dict in historical:
+                if job_dict["job_id"] in seen_ids:
+                    continue
+                if cutoff_iso and (job_dict.get("created_at") or "") < cutoff_iso:
+                    continue
+                seen_ids.add(job_dict["job_id"])
+                result.append(job_dict)
+            result.sort(key=_status_priority_sort_key)
+            return result
 
         # Query SQLite for historical jobs
         conn = self._conn_manager.get_connection()
@@ -492,6 +539,17 @@ class JobTracker:
         Returns:
             List of job dicts (most-recently-created first).
         """
+        if self._backend is not None:
+            rows: List[Dict[str, Any]] = self._backend.list_jobs(
+                operation_type=operation_type,
+                status=status,
+                limit=limit,
+            )
+            # Apply repo_alias filter client-side (list_jobs has no repo_alias param)
+            if repo_alias is not None:
+                rows = [r for r in rows if r.get("repo_alias") == repo_alias]
+            return rows
+
         where_parts: List[str] = []
         params: List[Any] = []
 
@@ -514,7 +572,9 @@ class JobTracker:
 
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(sql, params)
-        return [_tracked_job_to_dict(_row_to_tracked_job(row)) for row in cursor.fetchall()]
+        return [
+            _tracked_job_to_dict(_row_to_tracked_job(row)) for row in cursor.fetchall()
+        ]
 
     def check_operation_conflict(
         self,
@@ -547,15 +607,24 @@ class JobTracker:
 
     def cleanup_orphaned_jobs_on_startup(self) -> int:
         """
-        Mark stale running/pending jobs in SQLite as failed.
+        Mark stale running/pending jobs as failed.
 
         Called once on server startup to handle jobs that were in-flight when
         the server last restarted.  In-memory dict is empty at startup, so
-        any job in running/pending state in SQLite is orphaned.
+        any job in running/pending state in the store is orphaned.
 
         Returns:
             Number of orphaned jobs marked as failed.
         """
+        if self._backend is not None:
+            count: int = int(self._backend.cleanup_orphaned_jobs_on_startup())
+            if count:
+                logger.info(
+                    f"JobTracker.cleanup_orphaned_jobs_on_startup: "
+                    f"marked {count} orphaned job(s) as failed"
+                )
+            return count
+
         now_iso = datetime.now(timezone.utc).isoformat()
         orphan_error = "orphaned - server restarted"
 
@@ -573,47 +642,16 @@ class JobTracker:
                 )
             return len(orphaned_ids)
 
-        count: int = self._conn_manager.execute_atomic(operation)
-        if count:
+        sqlite_count: int = int(self._conn_manager.execute_atomic(operation))
+        if sqlite_count:
             logger.info(
                 f"JobTracker.cleanup_orphaned_jobs_on_startup: "
-                f"marked {count} orphaned job(s) as failed"
+                f"marked {sqlite_count} orphaned job(s) as failed"
             )
-        return count
+        return sqlite_count
 
-    def cleanup_old_jobs(
-        self, operation_type: str, max_age_hours: int = 24
-    ) -> int:
-        """
-        Remove completed jobs of the given operation_type older than max_age_hours.
-
-        Deletes from SQLite background_jobs table (completed/failed/cancelled status).
-        Also removes matching entries from _active_jobs dict if present.
-
-        Args:
-            operation_type: Only jobs of this operation type are considered.
-            max_age_hours: Jobs with completed_at older than this are deleted.
-
-        Returns:
-            Number of jobs deleted from SQLite.
-        """
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
-        cutoff_iso = cutoff.isoformat()
-
-        def operation(conn) -> int:
-            cursor = conn.execute(
-                """DELETE FROM background_jobs
-                   WHERE operation_type = ?
-                   AND status IN ('completed', 'failed', 'cancelled')
-                   AND completed_at IS NOT NULL
-                   AND completed_at < ?""",
-                (operation_type, cutoff_iso),
-            )
-            return cursor.rowcount
-
-        count: int = self._conn_manager.execute_atomic(operation)
-
-        # Also evict matching entries from the in-memory dict (edge case guard).
+    def _evict_stale_from_memory(self, operation_type: str, cutoff: datetime) -> None:
+        """Remove stale completed/failed/cancelled jobs from in-memory dict."""
         with self._lock:
             stale_ids = [
                 jid
@@ -626,26 +664,77 @@ class JobTracker:
             for jid in stale_ids:
                 del self._active_jobs[jid]
 
-        if count > 0:
+    def cleanup_old_jobs(self, operation_type: str, max_age_hours: int = 24) -> int:
+        """
+        Remove completed jobs of the given operation_type older than max_age_hours.
+
+        Deletes from the persistence store (completed/failed/cancelled status).
+        Also removes matching entries from _active_jobs dict if present.
+
+        Args:
+            operation_type: Only jobs of this operation type are considered.
+            max_age_hours: Jobs with completed_at older than this are deleted.
+
+        Returns:
+            Number of jobs deleted.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+        cutoff_iso = cutoff.isoformat()
+
+        if self._backend is not None:
+            # Backend cleanup_old_jobs has no operation_type filter, so we
+            # enumerate candidates per terminal status and delete individually.
+            count = 0
+            for terminal_status in ("completed", "failed", "cancelled"):
+                candidates = self._backend.list_jobs(
+                    operation_type=operation_type,
+                    status=terminal_status,
+                    limit=_CLEANUP_JOB_FETCH_LIMIT,
+                )
+                for job_dict in candidates:
+                    completed_at_str = job_dict.get("completed_at")
+                    if completed_at_str and completed_at_str < cutoff_iso:
+                        self._backend.delete_job(job_dict["job_id"])
+                        count += 1
+
+            self._evict_stale_from_memory(operation_type, cutoff)
+            if count > 0:
+                logger.info(
+                    f"JobTracker.cleanup_old_jobs: removed {count} old "
+                    f"'{operation_type}' job(s) older than {max_age_hours}h"
+                )
+            return count
+
+        def operation(conn) -> int:
+            cursor = conn.execute(
+                """DELETE FROM background_jobs
+                   WHERE operation_type = ?
+                   AND status IN ('completed', 'failed', 'cancelled')
+                   AND completed_at IS NOT NULL
+                   AND completed_at < ?""",
+                (operation_type, cutoff_iso),
+            )
+            return cursor.rowcount  # type: ignore[no-any-return]
+
+        sqlite_count: int = int(self._conn_manager.execute_atomic(operation))  # type: ignore[arg-type]
+        self._evict_stale_from_memory(operation_type, cutoff)
+
+        if sqlite_count > 0:
             logger.info(
-                f"JobTracker.cleanup_old_jobs: removed {count} old "
+                f"JobTracker.cleanup_old_jobs: removed {sqlite_count} old "
                 f"'{operation_type}' job(s) older than {max_age_hours}h"
             )
-        return count
+        return sqlite_count
 
     def get_active_job_count(self) -> int:
         """Return the number of in-memory jobs with status 'running'."""
         with self._lock:
-            return sum(
-                1 for j in self._active_jobs.values() if j.status == "running"
-            )
+            return sum(1 for j in self._active_jobs.values() if j.status == "running")
 
     def get_pending_job_count(self) -> int:
         """Return the number of in-memory jobs with status 'pending'."""
         with self._lock:
-            return sum(
-                1 for j in self._active_jobs.values() if j.status == "pending"
-            )
+            return sum(1 for j in self._active_jobs.values() if j.status == "pending")
 
     # ------------------------------------------------------------------
     # Private SQLite helpers
@@ -653,6 +742,23 @@ class JobTracker:
 
     def _insert_job(self, job: TrackedJob) -> None:
         """Insert a new job row into background_jobs."""
+        if self._backend is not None:
+            self._backend.save_job(
+                job_id=job.job_id,
+                operation_type=job.operation_type,
+                status=job.status,
+                created_at=_dt_to_iso(job.created_at) or "",
+                username=job.username,
+                progress=job.progress,
+                started_at=_dt_to_iso(job.started_at),
+                completed_at=_dt_to_iso(job.completed_at),
+                result=job.result,
+                error=job.error,
+                repo_alias=job.repo_alias,
+                progress_info=job.progress_info,
+                metadata=job.metadata,
+            )
+            return
 
         def operation(conn) -> None:
             conn.execute(
@@ -683,6 +789,19 @@ class JobTracker:
 
     def _upsert_job(self, job: TrackedJob) -> None:
         """Update an existing job row in background_jobs (by job_id)."""
+        if self._backend is not None:
+            self._backend.update_job(
+                job.job_id,
+                status=job.status,
+                started_at=_dt_to_iso(job.started_at),
+                completed_at=_dt_to_iso(job.completed_at),
+                result=job.result,
+                error=job.error,
+                progress=job.progress,
+                progress_info=job.progress_info,
+                metadata=job.metadata,
+            )
+            return
 
         def operation(conn) -> None:
             conn.execute(
@@ -712,7 +831,13 @@ class JobTracker:
         self._conn_manager.execute_atomic(operation)
 
     def _load_job_from_sqlite(self, job_id: str) -> Optional[TrackedJob]:
-        """Load a single job from SQLite by job_id."""
+        """Load a single job from SQLite (or backend) by job_id."""
+        if self._backend is not None:
+            d = self._backend.get_job(job_id)
+            if d is None:
+                return None
+            return _dict_to_tracked_job(d)
+
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             f"SELECT {_SELECT_COLUMNS} FROM background_jobs WHERE job_id = ?",
@@ -778,9 +903,9 @@ class TrackedOperation:
         exc_type: Optional[type],
         exc_val: Optional[BaseException],
         exc_tb: Any,
-    ) -> bool:
+    ) -> None:
         if exc_type is not None:
             self.tracker.fail_job(self.job_id, error=str(exc_val))
-            return False  # Do not suppress exception
+            return  # Do not suppress exception
         self.tracker.complete_job(self.job_id)
-        return False
+        return  # implicit None — do not suppress exceptions
